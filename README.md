@@ -42,6 +42,10 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --owner Alice --out wr_rf_tc
 python -m dreg_verify.cli --excel 核心文件.xlsx \
     --neg-signals d_logic_bt_lp_reserve --neg-mode invert --neg-file separate
 
+# 导出"给人看"的测试用例表格（Excel 打开 .csv / 浏览器打开 .html）
+python -m dreg_verify.cli --excel 核心文件.xlsx --owner "Yao Wang" --report 用例表.csv
+python -m dreg_verify.cli --excel 核心文件.xlsx --neg-all --out wr_rf_tc.sv --report 用例表.html
+
 # 列出可生成信号清单（不生成）
 python -m dreg_verify.cli --excel 核心文件.xlsx --list
 
@@ -68,6 +72,7 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 | `--force-signals` / `--rfwrite-signals` | 手动指定 RO/RW（修正名称/类型判定） |
 | `--no-wire-fallback` | 关闭 wire 兜底：非 RW 寄存器且查不到的输入不再默认 force，而是标 UNKNOWN |
 | `--diagnose` | 覆盖诊断：类型列原文分布 + 输入归类(RF_WRITE/force-RO/force-级联/force-wire/UNKNOWN)覆盖率 |
+| `--report 路径.csv\|.html` | 导出给人看的测试用例表格（每信号汇总 + 每条用例明细：驱动值/期望/负向）。可与 `--out` 并用 |
 
 **输入驱动模型**（沿用旧 for_test 规则）：输入是 **RW 寄存器**（在 total_memory_map/regmap 有地址）→ `` `RF_WRITE ``；
 其余都是 **wire** → `force`（按信号名），包括 RO 管脚、**级联中间信号**（某输入其实是另一个 logic 的输出，

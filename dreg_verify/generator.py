@@ -153,6 +153,69 @@ def render(result, header_info=None):
     return W.render_file(result["blocks"], header_info=header_info)
 
 
+def report(wb, opts):
+    """
+    生成"给人看"的测试用例清单（结构化），CLI 负责写成 CSV/HTML。
+    返回 {"summary":[每信号一行], "detail":[每条用例一行]}。
+    """
+    resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
+                          rfwrite_overrides=opts.rfwrite_overrides,
+                          default_kind=opts.default_kind,
+                          wire_fallback=opts.wire_fallback)
+    sigs = select_signals(wb, opts)
+    summary, detail = [], []
+    for sig in sigs:
+        try:
+            node = E.parse(sig.expr)
+        except E.ExprError as ex:
+            summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+                            "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
+                            "n_tests": 0, "n_neg": 0, "control": "", "data": "",
+                            "unresolved": "", "error": "表达式解析失败: %s" % ex})
+            continue
+        bindings = resolver.resolve_signal_inputs(sig)
+        used = E.collect_vars(node)
+        try:
+            vecs, meta = V.generate_vectors(node, bindings, sig.out_width,
+                                            mode=opts.mode, max_tests=opts.max_tests,
+                                            exhaustive=opts.exhaustive)
+        except E.ExprError as ex:
+            summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+                            "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
+                            "n_tests": 0, "n_neg": 0, "control": "", "data": "",
+                            "unresolved": "", "error": "向量生成失败: %s" % ex})
+            continue
+        if _neg_enabled_for(sig, opts):
+            vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
+                                   fixed_value=opts.neg_value)
+        unresolved_bases = set()
+        for vec in vecs:
+            forces, writes, unres = W.compute_drives(vec, bindings, used)
+            for (ltr, base, note) in unres:
+                unresolved_bases.add(base or ltr)
+            force_str = "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces)
+            write_str = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
+            detail.append({
+                "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+                "type": sig.suffix, "expr": sig.expr,
+                "test": "T%d%s" % (vec.index, "_NEG" if vec.is_negative else ""),
+                "neg": "是" if vec.is_negative else "",
+                "expected": W.fmt_bin(vec.asserted_value, vec.exp_width),
+                "correct": W.fmt_bin(vec.exp_value, vec.exp_width) if vec.is_negative else "",
+                "force": force_str, "rfwrite": write_str,
+                "note": (vec.note if vec.is_negative else
+                         ("; ".join("%s:%s" % (b or l, n) for (l, b, n) in unres) if unres else "")),
+            })
+        summary.append({
+            "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+            "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
+            "n_tests": len(vecs), "n_neg": sum(1 for v in vecs if v.is_negative),
+            "control": ",".join(meta.get("control", [])), "data": ",".join(meta.get("data", [])),
+            "unresolved": ";".join(sorted(unresolved_bases)), "error": "",
+        })
+    return {"summary": summary, "detail": detail}
+
+
 def diagnose(wb, opts=None):
     """
     覆盖诊断：在真表上实测"我们到底把哪些输入解析成了 force(RO)/RF_WRITE(RW)/未知"，

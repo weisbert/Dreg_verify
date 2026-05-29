@@ -41,30 +41,28 @@ def fmt_bin(value, width):
     return "%d'b%s" % (width, format(value & E.mask(width), "0%db" % width))
 
 
-# ───────────────────────────── 驱动行 ─────────────────────────────
-def _build_drive_lines(vec, bindings, used_vars):
+# ───────────────────────────── 驱动计算（结构化，.sv 与人读报告共用） ─────────────────────────────
+def compute_drives(vec, bindings, used_vars):
     """
-    根据向量为本 tc 生成驱动语句行 + 诊断。
-    返回 (lines:list[str], unresolved:list[str])
+    把一个测试向量解析为结构化驱动信息（不渲染 SV 文本）。
+    返回 (forces, writes, unresolved):
+      forces: [{wire, hex, width, base, src}]                  —— 逐个 force
+      writes: [{addr, hex, fields:[{base,lsb,hex}]}]           —— 同地址合并的 RF_WRITE
+      unresolved: [(letter, base, note)]
+    同名输入(同一物理信号占多个变量)只驱动一次。
     """
-    lines = []
-    unresolved = []
-
-    # 分 RO / RW；RW 按地址聚合合并。同名输入(同一物理信号占多个变量)只驱动一次。
+    forces, writes, unresolved = [], [], []
     ro = []
-    rw_by_addr = {}   # addr -> list[(binding, fieldval)]
-    seen_ro = set()   # wire 名去重
-    seen_rw = set()   # (addr, base, lsb) 去重
+    rw_by_addr = {}
+    seen_ro, seen_rw = set(), set()
     for ltr in used_vars:
         b = bindings.get(ltr)
         if b is None:
-            unresolved.append("变量 %s 无绑定" % ltr)
+            unresolved.append((ltr, "", "变量无绑定"))
             continue
         val = vec.assignments.get(ltr, 0)
         if not b.resolved:
-            unresolved.append("%s(%s): %s" % (ltr, b.base, b.note or "未解析"))
-            lines.append("%s// TODO 未解析输入 %s=%s（%s），请核对名称/类型/地址"
-                         % (INDENT, ltr, b.base, b.note or b.kind))
+            unresolved.append((ltr, b.base, b.note or "未解析"))
             continue
         if b.kind == "RO":
             if b.wire in seen_ro:
@@ -78,37 +76,58 @@ def _build_drive_lines(vec, bindings, used_vars):
             seen_rw.add(key)
             rw_by_addr.setdefault(b.address, []).append((b, val))
 
-    # RO：逐个 force（force 字面量按 wire 位宽自适应，>16bit 不截断）
     for b, val in ro:
         hw = max(DATA_WIDTH_HEX, b.width)
         src = {"tmm": "RO", "regmap": "RO", "logic": "级联wire", "wire": "wire"}.get(b.found_in, "RO")
-        lines.append("%sforce `%s.%s = %s;   // %s (%s, 位宽%d)"
-                     % (INDENT, ENV, b.wire, fmt_hex(val, hw), b.base, src, b.width))
-        lines.append('%s`uvm_report_info("%s", "drive %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_COMP, b.wire, fmt_hex(val, hw)))
+        forces.append({"wire": b.wire, "hex": fmt_hex(val, hw),
+                       "width": b.width, "base": b.base, "src": src})
 
-    # RW：同地址合并
     for addr in sorted(rw_by_addr.keys()):
         regval = 0
-        members = rw_by_addr[addr]
-        desc = []
-        for b, val in members:
+        fields = []
+        for b, val in rw_by_addr[addr]:
             lsb = b.reg_lsb or 0
             # ⭐先按字段位宽裁剪字段值，再左移——否则溢出位会侵入同地址相邻字段
-            if b.reg_msb is not None and b.reg_lsb is not None:
-                fw = b.reg_msb - b.reg_lsb + 1
-            else:
-                fw = 16
+            fw = (b.reg_msb - b.reg_lsb + 1) if (b.reg_msb is not None and b.reg_lsb is not None) else 16
             fval = val & E.mask(fw)
             regval |= (fval << lsb)
-            desc.append("%s<<%d=%s" % (b.base, lsb, fmt_hex(fval)))
+            fields.append({"base": b.base, "lsb": lsb, "hex": fmt_hex(fval)})
         regval &= E.mask(16)
-        lines.append("%s`%s(%s, %s);   // %s"
-                     % (INDENT, RF_WRITE, fmt_addr(addr), fmt_hex(regval), ", ".join(desc)))
-        lines.append('%s`uvm_report_info("%s", "RF_WRITE %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_COMP, fmt_addr(addr), fmt_hex(regval)))
+        writes.append({"addr": fmt_addr(addr), "hex": fmt_hex(regval), "fields": fields})
 
-    return lines, unresolved
+    return forces, writes, unresolved
+
+
+# ───────────────────────────── 驱动行 ─────────────────────────────
+def _build_drive_lines(vec, bindings, used_vars):
+    """
+    根据向量为本 tc 生成驱动语句行 + 诊断。
+    返回 (lines:list[str], unresolved:list[str])
+    """
+    lines = []
+    forces, writes, unresolved = compute_drives(vec, bindings, used_vars)
+
+    for (ltr, base, note) in unresolved:
+        lines.append("%s// TODO 未解析输入 %s=%s（%s），请核对名称/类型/地址"
+                     % (INDENT, ltr, base, note))
+
+    # RO：逐个 force（force 字面量按 wire 位宽自适应，>16bit 不截断）
+    for f in forces:
+        lines.append("%sforce `%s.%s = %s;   // %s (%s, 位宽%d)"
+                     % (INDENT, ENV, f["wire"], f["hex"], f["base"], f["src"], f["width"]))
+        lines.append('%s`uvm_report_info("%s", "drive %s = %s", UVM_LOW);'
+                     % (INDENT, UVM_COMP, f["wire"], f["hex"]))
+
+    # RW：同地址合并成一条 RF_WRITE
+    for w in writes:
+        desc = ", ".join("%s<<%d=%s" % (fl["base"], fl["lsb"], fl["hex"]) for fl in w["fields"])
+        lines.append("%s`%s(%s, %s);   // %s"
+                     % (INDENT, RF_WRITE, w["addr"], w["hex"], desc))
+        lines.append('%s`uvm_report_info("%s", "RF_WRITE %s = %s", UVM_LOW);'
+                     % (INDENT, UVM_COMP, w["addr"], w["hex"]))
+
+    unresolved_strs = ["%s(%s): %s" % (l, b, n) for (l, b, n) in unresolved]
+    return lines, unresolved_strs
 
 
 def _s(v):

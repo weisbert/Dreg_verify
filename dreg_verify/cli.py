@@ -44,7 +44,10 @@ def build_argparser():
         prog="dreg_verify",
         description="从 Dreg 核心 Excel 的 logic 真值表达式生成 wr_rf_tc.sv 验证文件。")
     p.add_argument("--excel", required=True, help="核心 Excel (.xlsx) 路径")
-    p.add_argument("--out", default="wr_rf_tc.sv", help="输出 .sv 路径 (默认 wr_rf_tc.sv)")
+    p.add_argument("--out", default=None, help="输出 .sv 路径 (默认 wr_rf_tc.sv；只想出报告时不传它)")
+    p.add_argument("--report", default=None,
+                   help="导出'给人看'的测试用例表格(按扩展名: .csv 用 Excel 打开 / .html 网页)。"
+                        "可与 --out 同时用(同时出 .sv 和报告)；只传 --report 则只出报告")
     p.add_argument("--list", action="store_true", help="只列出可生成信号清单，不生成")
     p.add_argument("--diagnose", action="store_true",
                    help="覆盖诊断: 实测各输入被解析成 force(RO)/RF_WRITE(RW)/未知, "
@@ -151,6 +154,78 @@ def cmd_diagnose(wb, opts):
         print("\n✅ 无 UNKNOWN：所有被引用输入都已归类为 force 或 RF_WRITE。")
 
 
+SUMMARY_COLS = [("R", "R/序号"), ("signal", "信号(K)"), ("owner", "owner"), ("type", "类型"),
+                ("top", "top_output"), ("n_tests", "用例数"), ("n_neg", "负向数"),
+                ("control", "控制位"), ("data", "数据位"), ("expr", "表达式"),
+                ("unresolved", "未解析输入"), ("error", "错误")]
+DETAIL_COLS = [("R", "R"), ("signal", "信号(K)"), ("owner", "owner"), ("type", "类型"),
+               ("test", "用例"), ("neg", "负向"), ("expected", "断言期望值"),
+               ("correct", "正确值(负向时)"), ("force", "force 驱动"),
+               ("rfwrite", "RF_WRITE 驱动"), ("expr", "表达式"), ("note", "备注")]
+
+
+def write_report(path, rep, excel):
+    base, ext = os.path.splitext(path)
+    if ext.lower() in (".html", ".htm"):
+        _write_report_html(path, rep, excel)
+        return [path]
+    # CSV：明细写到给定路径，汇总写到 *_summary.csv
+    import csv
+    detail_path = path if ext.lower() == ".csv" else base + ".csv"
+    summary_path = base + "_summary.csv"
+    with open(summary_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([h for _k, h in SUMMARY_COLS])
+        for r in rep["summary"]:
+            w.writerow([r.get(k, "") for k, _h in SUMMARY_COLS])
+    with open(detail_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([h for _k, h in DETAIL_COLS])
+        for r in rep["detail"]:
+            w.writerow([r.get(k, "") for k, _h in DETAIL_COLS])
+    return [detail_path, summary_path]
+
+
+def _write_report_html(path, rep, excel):
+    import html
+
+    def table(rows, cols):
+        if not rows:
+            return "<p>（无数据）</p>"
+        th = "".join("<th>%s</th>" % html.escape(h) for _k, h in cols)
+        trs = []
+        for r in rows:
+            tds = "".join("<td>%s</td>" % html.escape(str(r.get(k, ""))) for k, _h in cols)
+            cls = ' class="neg"' if r.get("neg") == "是" else (' class="err"' if r.get("error") else "")
+            trs.append("<tr%s>%s</tr>" % (cls, tds))
+        return "<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (th, "".join(trs))
+
+    n_sig = len(rep["summary"])
+    n_tc = len(rep["detail"])
+    n_neg = sum(1 for r in rep["detail"] if r.get("neg") == "是")
+    doc = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<title>Dreg 测试用例报告</title><style>
+body{{font-family:"Segoe UI",Microsoft YaHei,sans-serif;margin:24px;color:#222}}
+h1{{font-size:20px}} h2{{font-size:16px;margin-top:28px}}
+table{{border-collapse:collapse;width:100%;font-size:12px;margin-top:8px}}
+th,td{{border:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:top}}
+th{{background:#f0f3f7;position:sticky;top:0}}
+tr:nth-child(even){{background:#fafbfc}}
+tr.neg{{background:#fff3f3}} tr.err{{background:#ffe9e9}}
+.sum{{color:#555;margin:6px 0 0}} code{{background:#f5f5f5;padding:0 3px}}
+</style></head><body>
+<h1>Dreg 测试用例报告</h1>
+<p class="sum">源 Excel: <code>{excel}</code>　信号 {n_sig} 个　用例 {n_tc} 条（其中负向 {n_neg} 条）</p>
+<p class="sum">负向用例(红底)=故意填错期望值, 预期应 FAIL, 用于自检 checker。</p>
+<h2>① 每信号汇总</h2>{tbl_sum}
+<h2>② 每条用例明细</h2>{tbl_det}
+</body></html>""".format(
+        excel=html.escape(os.path.basename(excel)), n_sig=n_sig, n_tc=n_tc, n_neg=n_neg,
+        tbl_sum=table(rep["summary"], SUMMARY_COLS), tbl_det=table(rep["detail"], DETAIL_COLS))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(doc)
+
+
 def main(argv=None):
     args = build_argparser().parse_args(argv)
     if not os.path.isfile(args.excel):
@@ -188,15 +263,28 @@ def main(argv=None):
         cmd_diagnose(wb, opts)
         return 0
 
+    # 给人看的报告（可与 .sv 生成并存；只传 --report 不传 --out 则只出报告）
+    if args.report:
+        rep = generator.report(wb, opts)
+        written = write_report(args.report, rep, args.excel)
+        print("测试用例报告已写出: %s" % "  ".join(written))
+        print("  信号 %d 个，用例 %d 条（负向 %d 条）"
+              % (len(rep["summary"]), len(rep["detail"]),
+                 sum(1 for r in rep["detail"] if r.get("neg") == "是")))
+        if args.out is None:
+            return 0   # 只要报告
+
+    out = args.out or "wr_rf_tc.sv"
+
     # 负向用例单独出文件：分两次生成
     if args.neg_file == "separate" and (opts.neg_all or opts.neg_signals):
         # 正常文件：不含负向
         pos_opts = _copy_opts(opts, neg_all=False, neg_signals=None)
         pos_res = generator.build(wb, pos_opts)
-        _write(args.out, generator.render(pos_res, _header(args.excel, pos_opts, "正常用例")))
-        _report(pos_res, args.out)
+        _write(out, generator.render(pos_res, _header(args.excel, pos_opts, "正常用例")))
+        _report(pos_res, out)
         # 负向文件：只含被选信号、仅负向
-        neg_path = _neg_path(args.out)
+        neg_path = _neg_path(out)
         neg_res = generator.build(wb, _copy_opts(opts, neg_which=opts.neg_which))
         neg_only = _filter_negative_only(neg_res)
         _write(neg_path, generator.render(neg_only, _header(args.excel, opts, "负向(异常)用例")))
@@ -205,8 +293,8 @@ def main(argv=None):
 
     res = generator.build(wb, opts)
     text = generator.render(res, _header(args.excel, opts, "正常+负向(inline)"))
-    _write(args.out, text)
-    _report(res, args.out)
+    _write(out, text)
+    _report(res, out)
     return 0
 
 
