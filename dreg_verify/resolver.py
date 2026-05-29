@@ -99,8 +99,8 @@ class Resolver:
         rm, rm_amb = self._match_regmap(base)
         amb_note = tmm_amb or rm_amb
 
-        # 地址 / 位段：优先 tmm（有数字地址）
-        address = tmm.address if tmm else None
+        # 地址 / 位段：优先 tmm（hex 地址），regmap H 列(十进制)兜底
+        address = tmm.address if tmm else (rm.address if rm else None)
         reg_lsb = tmm.bit_lsb if tmm else (rm.bit_lsb if rm else None)
         reg_msb = tmm.bit_msb if tmm else (rm.bit_msb if rm else None)
         reg_name = (tmm.reg_name if tmm and tmm.reg_name else

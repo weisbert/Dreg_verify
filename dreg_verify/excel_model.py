@@ -44,7 +44,8 @@ class LogicSignal:
 
 
 class RegmapEntry:
-    def __init__(self, signal, reg_name, reg_type, default, bit_lsb, bit_msb, owner):
+    def __init__(self, signal, reg_name, reg_type, default, bit_lsb, bit_msb, owner,
+                 address=None):
         self.signal = signal
         self.reg_name = reg_name
         self.reg_type = reg_type        # 原文（可能 RW/RO/R/W）
@@ -52,6 +53,7 @@ class RegmapEntry:
         self.bit_lsb = bit_lsb
         self.bit_msb = bit_msb
         self.owner = owner
+        self.address = address          # regmap H 列地址（'d13'→13），tmm 缺失时的兜底
 
 
 class TmmField:
@@ -104,7 +106,8 @@ def strip_to_logic(name):
 
 
 def parse_hex_addr(text):
-    """'h1'/'h2D'/'0x2D'/'2D'/十进制 → int；无法解析返回 None。"""
+    """地址解析。本 Excel 约定：tmm 用 'h' 前缀(hex，如 hD=13)，regmap 用 'd' 前缀(十进制，如 d13=13)。
+    'h1'/'h2D'/'0x2D'/'d13'/'2D' → int；无法解析返回 None。"""
     t = _s(text)
     if t == "":
         return None
@@ -112,10 +115,12 @@ def parse_hex_addr(text):
     try:
         if low.startswith("0x"):
             return int(low, 16)
-        if low.startswith("h"):
-            return int(low[1:], 16)
         if low.startswith("'h"):
             return int(low[2:], 16)
+        if low.startswith("h"):
+            return int(low[1:], 16)
+        if low.startswith("d") and low[1:].isdigit():
+            return int(low[1:], 10)        # 'd13' = 十进制 13（regmap 约定）
         # 纯数字：可能是十进制行号也可能是 hex；按 hex 解释更贴近寄存器地址语义
         if re.fullmatch(r"[0-9a-fA-F]+", t):
             return int(t, 16)
@@ -187,9 +192,11 @@ def read_regmap(ws, header_row=2):
     bit_cols = [openpyxl.utils.get_column_letter(c) for c in
                 range(column_index_from_string("J"), column_index_from_string("Y") + 1)]
     for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
-        signal = _s(_col(row, "G"))
-        if signal == "":
+        raw_signal = _s(_col(row, "G"))
+        if raw_signal == "":
             continue
+        # Signal_Name 带位宽如 int_n[8:0]，去掉 [msb:lsb] 后才能与 logic 输入基名匹配
+        signal, _w, _m, _l = _strip_width(raw_signal)
         occupied = []
         for offset, col in enumerate(bit_cols):
             val = _s(_col(row, col))
@@ -207,6 +214,7 @@ def read_regmap(ws, header_row=2):
             bit_lsb=bit_lsb,
             bit_msb=bit_msb,
             owner=_s(_col(row, "AE")),
+            address=parse_hex_addr(_col(row, "H")),   # regmap H 列 = 地址（'d13'）
         )
     return out
 
@@ -234,8 +242,9 @@ def read_tmm(ws):
         bit_msb, bit_lsb = parse_bitfield(b)
         field_addr = parse_hex_addr(f)
         if bit_msb is not None and field_addr is not None:
-            # 字段行
-            name = a
+            # 字段行。字段名(A列)带位宽标注如 int_n[8:0] / d_pfd_en_lnmode[1:0]，
+            # 去掉 [msb:lsb] 后才能与 logic 输入基名(已去位宽)匹配。
+            name, _w, _m, _l = _strip_width(a)
             pin = _s(_col(row, "D")).upper()
             dig = "Y" if pin in ("Y", "YES") else ("N" if pin in ("N", "NO") else None)
             raw_type = _s(_col(row, "H"))

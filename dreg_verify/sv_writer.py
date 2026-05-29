@@ -50,9 +50,11 @@ def _build_drive_lines(vec, bindings, used_vars):
     lines = []
     unresolved = []
 
-    # 分 RO / RW；RW 按地址聚合合并
+    # 分 RO / RW；RW 按地址聚合合并。同名输入(同一物理信号占多个变量)只驱动一次。
     ro = []
     rw_by_addr = {}   # addr -> list[(binding, fieldval)]
+    seen_ro = set()   # wire 名去重
+    seen_rw = set()   # (addr, base, lsb) 去重
     for ltr in used_vars:
         b = bindings.get(ltr)
         if b is None:
@@ -65,8 +67,15 @@ def _build_drive_lines(vec, bindings, used_vars):
                          % (INDENT, ltr, b.base, b.note or b.kind))
             continue
         if b.kind == "RO":
+            if b.wire in seen_ro:
+                continue
+            seen_ro.add(b.wire)
             ro.append((b, val))
         else:  # RW
+            key = (b.address, b.base.lower(), b.reg_lsb)
+            if key in seen_rw:
+                continue
+            seen_rw.add(key)
             rw_by_addr.setdefault(b.address, []).append((b, val))
 
     # RO：逐个 force（force 字面量按 wire 位宽自适应，>16bit 不截断）

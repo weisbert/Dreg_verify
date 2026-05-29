@@ -176,6 +176,71 @@ def test_no_wire_fallback_keeps_unknown():
     assert b.kind == "UNKNOWN" and not b.resolved
 
 
+# ── 追加: tmm/regmap 字段名带位宽([8:0])时去标注后匹配（真表里 int_n[8:0] 这类）──
+def test_tmm_regmap_strip_width_in_field_names():
+    from openpyxl.utils import column_index_from_string as ci
+    from dreg_verify.excel_model import read_tmm, read_regmap
+
+    twb = openpyxl.Workbook()
+    tws = twb.active
+
+    def sr(r, m):
+        for c, v in m.items():
+            tws.cell(row=r, column=ci(c), value=v)
+    sr(1, {"A": "INT_N", "B": "h2", "D": "RW"})                       # 寄存器定义行
+    sr(2, {"A": "int_n[8:0]", "B": "15:7", "C": "d45", "D": "N", "F": "h2", "H": "RW"})
+    fields = read_tmm(tws)
+    assert "int_n" in fields and "int_n[8:0]" not in fields
+    assert fields["int_n"].address == 0x2
+    assert fields["int_n"].bit_msb == 15 and fields["int_n"].bit_lsb == 7
+
+    rwb = openpyxl.Workbook()
+    rws = rwb.active
+
+    def sr2(r, m):
+        for c, v in m.items():
+            rws.cell(row=r, column=ci(c), value=v)
+    sr2(2, {"G": "Signal_Name", "F": "Reg Type", "H": "Address"})     # 表头 row2
+    sr2(3, {"G": "int_n[8:0]", "F": "RW", "H": "d2"})                 # d2 = 十进制 2
+    reg = read_regmap(rws)
+    assert "int_n" in reg and reg["int_n"].address == 2 and reg["int_n"].reg_type == "RW"
+
+
+def test_real_pll_field_resolves_to_rfwrite():
+    # 复现真表：logic 输入基名 int_n，tmm 字段名 int_n[8:0]（h2, 15:7）→ 应解析为 RW/RF_WRITE
+    from openpyxl.utils import column_index_from_string as ci
+    from dreg_verify.excel_model import read_tmm
+    twb = openpyxl.Workbook()
+    tws = twb.active
+
+    def sr(r, m):
+        for c, v in m.items():
+            tws.cell(row=r, column=ci(c), value=v)
+    sr(1, {"A": "PFD", "B": "hD", "D": "RW"})
+    sr(2, {"A": "d_pfd_en_lnmode[1:0]", "B": "15:14", "D": "N", "F": "hD", "H": "RW"})
+    wb = DregWorkbook(logic=[], regmap={}, tmm=read_tmm(tws), sheet_names=[])
+    b = Resolver(wb).resolve("A", {"base": "d_pfd_en_lnmode", "width": 2, "raw": "x"})
+    assert b.kind == "RW" and b.address == 0xD and b.reg_lsb == 14 and b.resolved
+
+
+# ── 追加: 同名输入(同一物理信号占多个变量)共享取值，RF_WRITE 不重复 ──
+def test_same_base_inputs_share_value():
+    from dreg_verify.excel_model import TmmField
+    tmm = {"d_pfd": TmmField("d_pfd", 15, 14, 0xD, "RW", "N", "PFD")}
+    s = _logic("d_pfd", 2, "A?B:B",
+               {"A": {"raw": "d_pfd", "base": "d_pfd", "width": 2, "msb": None, "lsb": None},
+                "B": {"raw": "d_pfd", "base": "d_pfd", "width": 2, "msb": None, "lsb": None}},
+               "1", suffix="to_mux")
+    wb = DregWorkbook(logic=[s], regmap={}, tmm=tmm, sheet_names=[])
+    res = Resolver(wb)
+    bindings = res.resolve_signal_inputs(s)
+    vecs, _ = V.generate_vectors(E.parse(s.expr), bindings, 2, mode="max")
+    for v in vecs:                                  # 同一物理信号 → A、B 必同值
+        assert v.assignments["A"] == v.assignments["B"]
+    lines, _ = W._build_drive_lines(vecs[0], bindings, ["A", "B"])
+    assert "\n".join(lines).count("`RF_WRITE(10'h00D") == 1   # 同字段只写一次，不重复
+
+
 # ── #8 重复次数取自变量值时不被声明位宽截断 ──
 def test_repeat_count_not_truncated():
     # A 声明 1 位但取值 2 → {2{B}} = 2'b11 = 3

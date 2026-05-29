@@ -78,36 +78,68 @@ def generate_vectors(node, bindings, out_width, mode="min", max_tests=256,
     widths = {ltr: b.width for ltr, b in bindings.items()}
     env_for_class = E.Env(widths)
     control, data = E.classify_vars(node, env_for_class)
-    # 仅保留实际有绑定的变量（表达式可能引用未在 inputs 的字母 → 异常，过滤+记录）
     all_used = E.collect_vars(node)
     missing = [v for v in all_used if v not in widths]
+    used = [v for v in all_used if v in widths]
     control = [v for v in control if v in widths]
-    data = [v for v in data if v in widths]
 
-    total_bits = sum(widths[v] for v in all_used if v in widths)
+    # ── 同名输入分组：同一物理信号占多个表达式变量(如 A、B 同为 d_pfd_en_lnmode)→共享取值 ──
+    base_of = {}
+    for ltr in used:
+        base = getattr(bindings.get(ltr), "base", None)
+        base_of[ltr] = base.lower() if base else ltr.lower()
+    groups = {}                       # base -> [letters]（按发现顺序）
+    for ltr in used:
+        groups.setdefault(base_of[ltr], []).append(ltr)
+    reps, rep_is_control, rep_width = [], {}, {}
+    for base, letters in groups.items():
+        rep = letters[0]
+        reps.append(rep)
+        rep_is_control[rep] = any(l in control for l in letters)
+        rep_width[rep] = max(widths[l] for l in letters)
+    reps.sort(key=used.index)
+    control_reps = [r for r in reps if rep_is_control[r]]
+    data_reps = [r for r in reps if not rep_is_control[r]]
+
+    def expand(rep_assign):
+        """把每个 base 代表字母的取值展开到同组所有字母(各按自身位宽 mask)。"""
+        full = {}
+        for base, letters in groups.items():
+            val = rep_assign.get(letters[0], 0)
+            for l in letters:
+                full[l] = val & E.mask(widths[l])
+        for v in used:
+            full.setdefault(v, 0)
+        return full
+
+    total_bits = sum(rep_width[r] for r in reps)
     meta = {
-        "control": list(control), "data": list(data),
+        "control": list(control_reps), "data": list(data_reps),
         "missing_vars": missing, "total_bits": total_bits,
         "truncated": False, "dropped": 0, "exhaustive": False,
     }
 
     vectors = []
 
-    if exhaustive and total_bits <= exhaustive_bit_cap and all_used:
+    if exhaustive and total_bits <= exhaustive_bit_cap and reps:
         meta["exhaustive"] = True
-        combos = _exhaustive_assignments(all_used, widths)
-        for idx, assign in enumerate(combos):
+        combos = _exhaustive_assignments(reps, rep_width)
+        for idx, rep_assign in enumerate(combos):
             if idx >= max_tests:
                 meta["truncated"] = True
                 meta["dropped"] = len(combos) - max_tests
                 break
+            assign = expand(rep_assign)
             v, w = E.evaluate(node, E.Env(widths, assign), out_width)
             vectors.append(TestVector(idx, assign, v, w))
+        vectors = _dedup(vectors)
+        for i, vv in enumerate(vectors):
+            vv.index = i
         return vectors, meta
 
-    # 控制位全组合
-    if control:
-        control_value_lists = [_control_levels(widths[v]) for v in control]
+    # 控制位（按 base 代表）全组合
+    if control_reps:
+        control_value_lists = [_control_levels(rep_width[r]) for r in control_reps]
         control_combos = list(itertools.product(*control_value_lists))
     else:
         control_combos = [()]
@@ -116,21 +148,19 @@ def generate_vectors(node, bindings, out_width, mode="min", max_tests=256,
     if mode == "max":
         themes = ["all0", "all1", "comp", "walk", "distinct"]
     else:  # min
-        themes = ["distinct"] if control else ["all0", "distinct"]
+        themes = ["distinct"] if control_reps else ["all0", "distinct"]
 
     idx = 0
     for combo in control_combos:
-        ctrl_assign = {v: combo[i] for i, v in enumerate(control)}
+        rep_ctrl = {r: combo[i] for i, r in enumerate(control_reps)}
         for theme in themes:
             if idx >= max_tests:
                 meta["truncated"] = True
                 break
-            assign = dict(ctrl_assign)
-            for j, v in enumerate(data):
-                assign[v] = _pattern(theme, widths[v], j)
-            # 表达式可能也直接引用控制位作数据，已在 ctrl_assign；缺的兜 0
-            for v in all_used:
-                assign.setdefault(v, 0)
+            rep_assign = dict(rep_ctrl)
+            for j, r in enumerate(data_reps):
+                rep_assign[r] = _pattern(theme, rep_width[r], j)
+            assign = expand(rep_assign)
             val, w = E.evaluate(node, E.Env(widths, assign), out_width)
             vectors.append(TestVector(idx, assign, val, w))
             idx += 1
