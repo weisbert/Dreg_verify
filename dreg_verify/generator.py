@@ -66,6 +66,11 @@ def _name_matches(sig, names):
     return bool(cand & names)
 
 
+def is_top_output(val):
+    """logic N 列 top_output：=1 才是 RTL 可见、要验证的输出；=0 是内部信号(探不到)。"""
+    return str(val).strip() in ("1", "1.0", "True", "true")
+
+
 def select_signals(wb, opts):
     """按 owner / 名称 / 正则 / top_output / 类型 过滤 logic 信号；支持排除。"""
     import re
@@ -85,7 +90,7 @@ def select_signals(wb, opts):
             continue
         if exrx and (exrx.search(sig.out_name) or exrx.search(sig.out_base)):
             continue
-        if opts.top_output_only and str(sig.top_output).strip() not in ("1", "1.0", "True", "true"):
+        if opts.top_output_only and not is_top_output(sig.top_output):
             continue
         if opts.types is not None and sig.suffix.lower() not in opts.types:
             continue

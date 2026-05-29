@@ -60,7 +60,11 @@ def build_argparser():
     g.add_argument("--exclude", help="排除这些信号(逗号分隔，K 全名或去位宽基名)")
     g.add_argument("--exclude-regex", help="按正则排除信号(如 'pll_n|_to_dsm' 排掉 datapath 中间信号)")
     g.add_argument("--type", help="按 type/suffix(M 列)筛选，如 to_mux,ls")
-    g.add_argument("--top-output-only", action="store_true", help="只取 top_output=1 的信号")
+    g.add_argument("--include-internal", action="store_true",
+                   help="连 top_output=0 的内部信号也生成（默认只生成 top_output=1 的可验证输出；"
+                        "内部信号在 RTL/ENV_RF 层探不到，会导致 elaboration 层级查找失败）")
+    g.add_argument("--top-output-only", action="store_true",
+                   help="（已是默认行为，保留兼容）只取 top_output=1")
 
     g2 = p.add_argument_group("测试向量")
     g2.add_argument("--mode", choices=["min", "max"], default="min",
@@ -240,7 +244,7 @@ def main(argv=None):
         exclude=_split(args.exclude),
         exclude_regex=args.exclude_regex,
         types=_split(args.type),
-        top_output_only=args.top_output_only,
+        top_output_only=not args.include_internal,   # 默认只生成 top_output=1（可验证输出）
         mode=args.mode,
         max_tests=args.max_tests,
         exhaustive=args.exhaustive,

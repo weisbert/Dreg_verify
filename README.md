@@ -62,7 +62,8 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 |------|------|
 | `--owner A,B` | 按 owner 筛选（logic P 列） |
 | `--signals N1,N2` | 按信号名筛选（K 全名或去位宽基名） |
-| `--regex RE` / `--type to_mux,ls` / `--top-output-only` | 其它筛选 |
+| `--regex RE` / `--type to_mux,ls` | 其它筛选 |
+| `--include-internal` | **默认只生成 top_output=1（RTL 可见、要验证的输出）**；加此项才连 top_output=0 内部信号一起生成（内部信号在 ENV_RF 层探不到，会导致 elaboration 失败） |
 | `--exclude N1,N2` / `--exclude-regex RE` | 排除信号（如 `--exclude-regex "pll_n|_to_dsm"` 排掉探不到的 datapath 中间信号） |
 | `--mode min\|max` | 向量密度：min=控制全组合×1 数据特征；max=多数据模式 |
 | `--exhaustive` | 总输入位很少时做真·全穷举 |

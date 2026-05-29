@@ -135,28 +135,42 @@ def test_owner_filter_with_spaces():
 
 
 # ── 追加: 级联中间信号 + wire 兜底（对应真表诊断里的 pll_n*/*_mux_out 等）──
-def _logic(out_name, out_width, expr, inputs, aid, owner="C", suffix="ls"):
+def _logic(out_name, out_width, expr, inputs, aid, owner="C", suffix="ls", top_output=1):
     return LogicSignal(row=1, out_name=out_name, out_width=out_width, expr=expr,
-                       suffix=suffix, top_output=0, notes="", owner=owner,
+                       suffix=suffix, top_output=top_output, notes="", owner=owner,
                        assert_id=aid, inputs=inputs)
 
 
 def test_chained_and_wire_fallback():
-    # plln1 是一个 32bit logic 输出；plln2 把 plln1 当输入(级联中间信号)
+    # plln1 是一个 top_output 的 32bit logic 输出；plln2 把 plln1 当输入(级联，可见 wire)
     s1 = _logic("d_plln1[31:0]", 32, "A",
                 {"A": {"raw": "int_n_to_logic[31:0]", "base": "int_n", "width": 32,
-                       "msb": 31, "lsb": 0}}, "60")
+                       "msb": 31, "lsb": 0}}, "60", top_output=1)
     s2 = _logic("d_plln2[31:0]", 32, "A",
                 {"A": {"raw": "d_plln1", "base": "d_plln1", "width": 1,
-                       "msb": None, "lsb": None}}, "61", suffix="to_mux")
+                       "msb": None, "lsb": None}}, "61", suffix="to_mux", top_output=1)
     wb = DregWorkbook(logic=[s1, s2], regmap={}, tmm={}, sheet_names=[])
     res = Resolver(wb)
     # s1.A=int_n 表里查无 → wire 兜底 force
     b1 = res.resolve_signal_inputs(s1)["A"]
     assert b1.kind == "RO" and b1.found_in == "wire" and b1.resolved
-    # s2.A=d_plln1 是 logic 输出 → 级联，宽度取真实 32
+    # s2.A=d_plln1 是 top_output 输出 → 级联可 force，宽度取真实 32
     b2 = res.resolve_signal_inputs(s2)["A"]
     assert b2.kind == "RO" and b2.found_in == "logic" and b2.width == 32
+
+
+def test_chained_to_internal_flagged():
+    # 输入是内部信号(top_output=0) → 探不到，应标 UNKNOWN/logic-internal 而非 force
+    s1 = _logic("pll_n1[31:0]", 32, "A",
+                {"A": {"raw": "int_n", "base": "int_n", "width": 32, "msb": 31, "lsb": 0}},
+                "1", top_output=0)                       # 内部信号
+    s2 = _logic("pll_n2[31:0]", 32, "A",
+                {"A": {"raw": "pll_n1", "base": "pll_n1", "width": 1, "msb": None, "lsb": None}},
+                "2", top_output=1)
+    wb = DregWorkbook(logic=[s1, s2], regmap={}, tmm={}, sheet_names=[])
+    b = Resolver(wb).resolve_signal_inputs(s2)["A"]
+    assert b.kind == "UNKNOWN" and b.found_in == "logic-internal" and not b.resolved
+    assert "内部信号" in b.note
 
 
 def test_force_literal_width_adaptive():

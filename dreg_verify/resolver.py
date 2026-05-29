@@ -61,10 +61,11 @@ class Resolver:
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}
-        # logic 输出名(去位宽,小写) → 位宽：用于识别"输入其实是另一个 logic 的输出"(级联中间信号)
+        # logic 输出名(去位宽,小写) → (位宽, 是否 top_output)：识别"输入其实是另一个 logic 输出"(级联)
         self._logic_outputs = {}
         for s in wb.logic:
-            self._logic_outputs.setdefault(s.out_base.lower(), s.out_width)
+            is_top = str(s.top_output).strip() in ("1", "1.0", "True", "true")
+            self._logic_outputs.setdefault(s.out_base.lower(), (s.out_width, is_top))
 
     # ───────────── 名称匹配（多策略，歧义不静默猜） ─────────────
     def _match(self, base, table_lower, tag):
@@ -127,13 +128,21 @@ class Resolver:
         # 但"歧义匹配"不走兜底：它很可能是某个寄存器，应交人工，而非当 wire 强行 force。
         clean_rw = (kind == "RW" and address is not None)
         if not clean_rw and not overridden and not amb_note:
-            chained_w = self._logic_outputs.get(low)
-            if chained_w is not None:
-                # 输入其实是另一个 logic 的输出（级联中间信号）→ force 该 wire，宽度取其真实位宽
-                kind = "RO"
+            chained = self._logic_outputs.get(low)
+            if chained is not None:
+                chained_w, chained_top = chained
                 width = max(width, chained_w)
-                found_in = "logic"
-                note = "级联：输入是另一个 logic 输出 %r（%dbit），按中间 wire 直接 force" % (base, width)
+                if chained_top:
+                    # 输入是另一个 top_output logic 输出（可见 wire）→ 直接 force
+                    kind = "RO"
+                    found_in = "logic"
+                    note = "级联：输入是另一个 top_output 输出 %r（%dbit），按中间 wire force" % (base, width)
+                else:
+                    # 输入是内部信号(top_output=0)：RTL/ENV_RF 层探不到，force 会层级查找失败
+                    kind = "UNKNOWN"
+                    found_in = "logic-internal"
+                    note = ("⚠ 输入 %r 是内部信号(top_output=0)，RTL/ENV_RF 层探不到，无法 force；"
+                            "该输出需改为驱动其底层寄存器(cone 展开)或一并排除" % base)
             elif found_in is None and self.wire_fallback and kind != "RW":
                 # tmm/regmap 都查不到 → 视作普通 wire（顶层管脚/中间信号）→ force 信号名
                 kind = "RO"
