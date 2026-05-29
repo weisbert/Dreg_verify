@@ -18,7 +18,8 @@ class GenOptions:
                  neg_which="first", neg_value=None,
                  force_overrides=None, rfwrite_overrides=None, default_kind=None,
                  top_output_only=False, types=None, wire_fallback=True,
-                 exclude=None, exclude_regex=None, comments=False, include_risky=False):
+                 exclude=None, exclude_regex=None, comments=False, include_risky=False,
+                 vector_overrides=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -40,6 +41,9 @@ class GenOptions:
         self.wire_fallback = wire_fallback
         self.comments = comments
         self.include_risky = include_risky
+        # {out_name(小写): [TestVector,...]} —— GUI 手工定制/编辑的测试项。某信号有 override 时
+        # 用它替代自动向量生成，并跳过自动负向追加与 risky 跳过(用户已显式定制即视为有意为之)。
+        self.vector_overrides = vector_overrides or None
 
 
 def _norm_set(x):
@@ -135,9 +139,13 @@ def build(wb, opts):
             continue
         bindings = resolver.resolve_signal_inputs(sig)
 
+        override = (opts.vector_overrides.get(sig.out_name.lower())
+                    if opts.vector_overrides else None)
+
         # 默认跳过含"不可驱动输入"的信号：wire兜底(表里查无,force 不存在的 net→CUVUNF) 或 未解析。
         # 这与 VBA 行为一致(它直接跳过这类信号)。--include-risky 可强制生成。
-        if not opts.include_risky:
+        # 但用户已显式定制(override)的信号尊重其选择，不跳过(可能正是为了验那类信号而手造的)。
+        if override is None and not opts.include_risky:
             risky = []
             for ltr in E.collect_vars(node):
                 b = bindings.get(ltr)
@@ -151,19 +159,34 @@ def build(wb, opts):
                 skipped.append((sig.out_name, sig.assert_id, risky))
                 continue
 
-        try:
-            vecs, meta = V.generate_vectors(
-                node, bindings, sig.out_width,
-                mode=opts.mode, max_tests=opts.max_tests, exhaustive=opts.exhaustive)
-        except E.ExprError as ex:
-            errors.append((sig.out_name, sig.assert_id, "向量生成失败: %s" % ex))
-            continue
-
-        if _neg_enabled_for(sig, opts):
-            vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
-                                   fixed_value=opts.neg_value)
-            for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
+        if override is not None:
+            # 用户在 GUI 定制的测试项：照单全收(内联负向已编码在向量内)。
+            # 若该信号又在 neg_signals/neg_all 里(左侧表勾了负向)，对其中的正向行再补一组
+            # 自动负向——否则用户的负向勾选会被静默忽略。
+            vecs = list(override)
+            if _neg_enabled_for(sig, opts):
+                base_pos = [v for v in vecs if not v.is_negative]
+                if base_pos:
+                    appended = V.add_negatives(base_pos, mode=opts.neg_mode,
+                                               which=opts.neg_which, fixed_value=opts.neg_value)
+                    vecs = vecs + appended[len(base_pos):]
+            for i, v in enumerate(vecs):
                 v.index = i
+            meta = {"control": [], "data": [], "truncated": False}
+        else:
+            try:
+                vecs, meta = V.generate_vectors(
+                    node, bindings, sig.out_width,
+                    mode=opts.mode, max_tests=opts.max_tests, exhaustive=opts.exhaustive)
+            except E.ExprError as ex:
+                errors.append((sig.out_name, sig.assert_id, "向量生成失败: %s" % ex))
+                continue
+
+            if _neg_enabled_for(sig, opts):
+                vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
+                                       fixed_value=opts.neg_value)
+                for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
+                    v.index = i
 
         lines, stats = W.render_signal_block(sig, bindings, vecs, meta, comments=opts.comments)
         blocks.append((lines, stats))
@@ -224,17 +247,28 @@ def analyze_signal(resolver, sig):
     return {"status": status, "inputs": rows, "out_net": out_net, "error": ""}
 
 
+def _fmt_cell(val, width):
+    """报告真值表单元格取值显示：1 位→0/1；多位→0xN（与 GUI 编辑器一致）。"""
+    if width and width <= 1:
+        return str(val & 1)
+    return "0x%X" % val
+
+
 def report(wb, opts):
     """
     生成"给人看"的测试用例清单（结构化），CLI 负责写成 CSV/HTML。
-    返回 {"summary":[每信号一行], "detail":[每条用例一行]}。
+    返回 {
+      "summary": [每信号一行],
+      "detail":  [每条用例一行]（每行带 T编号/_NEG/期望/force/...，便于 Ctrl+F），
+      "tables":  [每信号一个纵向真值表]（输入带位宽做行、各测试做列，供 HTML ② 段）,
+    }
     """
     resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
                           wire_fallback=opts.wire_fallback)
     sigs = select_signals(wb, opts)
-    summary, detail = [], []
+    summary, detail, tables = [], [], []
     for sig in sigs:
         try:
             node = E.parse(sig.expr)
@@ -246,19 +280,32 @@ def report(wb, opts):
             continue
         bindings = resolver.resolve_signal_inputs(sig)
         used = E.collect_vars(node)
-        try:
-            vecs, meta = V.generate_vectors(node, bindings, sig.out_width,
-                                            mode=opts.mode, max_tests=opts.max_tests,
-                                            exhaustive=opts.exhaustive)
-        except E.ExprError as ex:
-            summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
-                            "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
-                            "n_tests": 0, "n_neg": 0, "control": "", "data": "",
-                            "unresolved": "", "error": "向量生成失败: %s" % ex})
-            continue
-        if _neg_enabled_for(sig, opts):
-            vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
-                                   fixed_value=opts.neg_value)
+        # 与 build() 对齐：有 GUI 定制 override 就用 override，报告才不会与产出的 .sv 不符。
+        override = (opts.vector_overrides.get(sig.out_name.lower())
+                    if opts.vector_overrides else None)
+        if override is not None:
+            vecs = list(override)
+            for i, v in enumerate(vecs):
+                v.index = i
+            meta = {"control": [], "data": []}
+        else:
+            try:
+                vecs, meta = V.generate_vectors(node, bindings, sig.out_width,
+                                                mode=opts.mode, max_tests=opts.max_tests,
+                                                exhaustive=opts.exhaustive)
+            except E.ExprError as ex:
+                summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+                                "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
+                                "n_tests": 0, "n_neg": 0, "control": "", "data": "",
+                                "unresolved": "", "error": "向量生成失败: %s" % ex})
+                continue
+            if _neg_enabled_for(sig, opts):
+                vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
+                                       fixed_value=opts.neg_value)
+        groups = V.input_groups(node, bindings)
+        table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+                 "type": sig.suffix, "expr": sig.expr,
+                 "inputs": [{"label": g["label"]} for g in groups], "tests": []}
         unresolved_bases = set()
         for vec in vecs:
             forces, writes, unres = W.compute_drives(vec, bindings, used)
@@ -266,6 +313,15 @@ def report(wb, opts):
                 unresolved_bases.add(base or ltr)
             force_str = "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces)
             write_str = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
+            bv = V.vector_to_base_values(vec, groups)
+            table["tests"].append({
+                "name": "T%d%s" % (vec.index, "_NEG" if vec.is_negative else ""),
+                "neg": vec.is_negative,
+                "values": [_fmt_cell(bv.get(g["base"].lower(), 0), g["width"]) for g in groups],
+                "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
+                "correct": _fmt_cell(vec.exp_value, vec.exp_width),
+                "force": force_str, "rfwrite": write_str,
+            })
             detail.append({
                 "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                 "type": sig.suffix, "expr": sig.expr,
@@ -277,6 +333,9 @@ def report(wb, opts):
                 "note": (vec.note if vec.is_negative else
                          ("; ".join("%s:%s" % (b or l, n) for (l, b, n) in unres) if unres else "")),
             })
+        out_w = sig.out_width or 1
+        table["exp_label"] = "期望(out)%s" % ("[%d:0]" % (out_w - 1) if out_w > 1 else "")
+        tables.append(table)
         summary.append({
             "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
             "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
@@ -284,7 +343,7 @@ def report(wb, opts):
             "control": ",".join(meta.get("control", [])), "data": ",".join(meta.get("data", [])),
             "unresolved": ";".join(sorted(unresolved_bases)), "error": "",
         })
-    return {"summary": summary, "detail": detail}
+    return {"summary": summary, "detail": detail, "tables": tables}
 
 
 def diagnose(wb, opts=None):

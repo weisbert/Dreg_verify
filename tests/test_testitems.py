@@ -1,0 +1,402 @@
+# -*- coding: utf-8 -*-
+"""测试项编辑能力的回归测试：
+  · vectors.input_groups / vector_to_base_values / make_vector_from_base_values
+  · generator.build 的 vector_overrides 回流(GUI 编辑 → .sv)
+  · GUI 编辑流程冒烟(无 PySide6 则跳过)
+"""
+
+import os
+import sys
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")   # GUI 测试用离屏后端
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dreg_verify import excel_model, generator     # noqa: E402
+from dreg_verify import expr as E                   # noqa: E402
+from dreg_verify import vectors as V                # noqa: E402
+from dreg_verify import resolver as R               # noqa: E402
+import fixtures                                      # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def wb(tmp_path_factory):
+    path = tmp_path_factory.mktemp("xl") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    return excel_model.load_workbook(str(path))
+
+
+def _reserve(wb):
+    sig = next(s for s in wb.logic if s.out_name == "d_logic_bt_lp_reserve")
+    node = E.parse(sig.expr)               # (A?C:B)&(~J)
+    bindings = R.Resolver(wb).resolve_signal_inputs(sig)
+    groups = V.input_groups(node, bindings)
+    return sig, node, bindings, groups
+
+
+# ───────────── input_groups ─────────────
+def test_input_groups_order_and_roles(wb):
+    sig, node, bindings, groups = _reserve(wb)
+    bases = [g["base"] for g in groups]
+    # collect_vars 发现顺序 = A,C,B,J（三元先 cond 再 then/els，再门控位）
+    assert bases == ["d_bt_lp_linelocal_mode_ctrl", "d_bt_lp_bt_mode_sel_local",
+                     "d_bt_lp_bt_mode_sel", "d_bt_lp_iddq"]
+    gd = {g["base"]: g for g in groups}
+    assert gd["d_bt_lp_linelocal_mode_ctrl"]["is_control"]   # 三元条件 A
+    assert gd["d_bt_lp_iddq"]["is_control"]                  # 门控位 J
+    assert not gd["d_bt_lp_bt_mode_sel"]["is_control"]       # 分支数据 B
+    assert all(g["width"] == 1 for g in groups)
+
+
+def test_input_groups_label_keeps_width(wb):
+    """显示用 label 保留位宽 [msb:lsb]，但 base(查表 key)仍不带位宽。"""
+    sig = next(s for s in wb.logic if s.out_name == "d_logic_bt_lp_lna_agc[2:0]")
+    node = E.parse(sig.expr)
+    bindings = R.Resolver(wb).resolve_signal_inputs(sig)
+    by_base = {g["base"]: g for g in V.input_groups(node, bindings)}
+    assert by_base["d_bt_lp_lna_agc_local"]["label"] == "d_bt_lp_lna_agc_local[2:0]"
+    assert by_base["d_bt_lp_lna_agc_line"]["label"] == "d_bt_lp_lna_agc_line[2:0]"
+    assert by_base["d_bt_lp_lna_line_sel"]["label"] == "d_bt_lp_lna_line_sel"   # 1bit 无切片
+    assert by_base["d_bt_lp_lna_agc_local"]["base"] == "d_bt_lp_lna_agc_local"  # base 仍纯净
+
+
+def test_input_groups_shared_base(wb):
+    """同一物理信号占多个字母时只占一列（直通信号 d_en_refbuf 只有 A）。"""
+    sig = next(s for s in wb.logic if s.out_name == "d_en_refbuf")
+    node = E.parse(sig.expr)
+    bindings = R.Resolver(wb).resolve_signal_inputs(sig)
+    groups = V.input_groups(node, bindings)
+    assert [g["base"] for g in groups] == ["d_bt_lp_en_refbuf_cfg"]
+    assert groups[0]["letters"] == ["A"]
+
+
+# ───────────── make_vector_from_base_values ─────────────
+def test_make_vector_expected_autocompute(wb):
+    sig, node, bindings, groups = _reserve(wb)
+    # A=1(选 C),C=1,B=0,J=0 → (1?1:0)&(~0)=1
+    bv = {"d_bt_lp_linelocal_mode_ctrl": 1, "d_bt_lp_bt_mode_sel_local": 1,
+          "d_bt_lp_bt_mode_sel": 0, "d_bt_lp_iddq": 0}
+    vec = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
+    assert vec.exp_value == 1 and not vec.is_negative
+    assert vec.assignments["A"] == 1 and vec.assignments["C"] == 1
+    assert vec.assignments["B"] == 0 and vec.assignments["J"] == 0
+    # 门控 J=1 → 拉 0
+    bv2 = dict(bv); bv2["d_bt_lp_iddq"] = 1
+    assert V.make_vector_from_base_values(node, bindings, groups, bv2, sig.out_width).exp_value == 0
+
+
+def test_make_vector_override_marks_negative(wb):
+    sig, node, bindings, groups = _reserve(wb)
+    bv = {"d_bt_lp_linelocal_mode_ctrl": 1, "d_bt_lp_bt_mode_sel_local": 1,
+          "d_bt_lp_bt_mode_sel": 0, "d_bt_lp_iddq": 0}   # 正确期望=1
+    neg = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width,
+                                         expected_override=0)
+    assert neg.is_negative and neg.neg_value == 0 and neg.exp_value == 1
+    assert neg.asserted_value == 0
+    # 手填的期望与算出值相同 → 不算负向
+    ok = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width,
+                                        expected_override=1)
+    assert not ok.is_negative
+
+
+def test_vector_to_base_values_roundtrip(wb):
+    sig, node, bindings, groups = _reserve(wb)
+    vecs, _meta = V.generate_vectors(node, bindings, sig.out_width)
+    for vec in vecs:
+        bv = V.vector_to_base_values(vec, groups)
+        rt = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
+        assert rt.exp_value == vec.exp_value          # 往返不改期望
+        assert rt.assignments == vec.assignments       # 字母展开一致
+
+
+def test_base_value_clamped_to_width(wb):
+    """编辑值超过输入位宽时按位宽裁剪，不溢出。"""
+    sig = next(s for s in wb.logic if s.out_name == "d_logic_bt_lp_lna_agc[2:0]")
+    node = E.parse(sig.expr)                # A?C:B, B/C 为 3bit
+    bindings = R.Resolver(wb).resolve_signal_inputs(sig)
+    groups = V.input_groups(node, bindings)
+    gd = {g["base"]: g for g in groups}
+    assert gd["d_bt_lp_lna_agc_local"]["width"] == 3
+    bv = {"d_bt_lp_lna_line_sel": 1, "d_bt_lp_lna_agc_local": 0xFF,
+          "d_bt_lp_lna_agc_line": 0}
+    vec = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
+    # 0xFF 裁到 3bit=7；A=1 选 C → 期望=7
+    assert vec.exp_value == 7
+
+
+# ───────────── generator.build vector_overrides ─────────────
+def test_vector_overrides_replaces_auto(wb):
+    sig, node, bindings, groups = _reserve(wb)
+    bv = {"d_bt_lp_linelocal_mode_ctrl": 1, "d_bt_lp_bt_mode_sel_local": 1,
+          "d_bt_lp_bt_mode_sel": 0, "d_bt_lp_iddq": 0}
+    custom = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
+    opts = generator.GenOptions(signals=["d_logic_bt_lp_reserve"], top_output_only=False,
+                                vector_overrides={"d_logic_bt_lp_reserve": [custom]})
+    res = generator.build(wb, opts)
+    assert res["summary"]["n_generated"] == 1
+    assert res["summary"]["n_vectors"] == 1           # 只有我们这一条，不是自动那批
+    text = "\n".join(res["blocks"][0][0])
+    assert "==1'b1" in text                            # 期望 1
+    assert "`RF_WRITE(10'h2D,16'h3);" in text          # A,C 同地址 0x2D 合并→bit0|bit1=0x3
+    assert "force `ENV_RF.d_bt_lp_iddq=16'h0;" in text  # J(RO)→force
+
+
+def test_vector_overrides_negative_to_sv(wb):
+    sig, node, bindings, groups = _reserve(wb)
+    bv = {"d_bt_lp_linelocal_mode_ctrl": 1, "d_bt_lp_bt_mode_sel_local": 1,
+          "d_bt_lp_bt_mode_sel": 0, "d_bt_lp_iddq": 0}
+    neg = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width,
+                                         expected_override=0)
+    opts = generator.GenOptions(signals=["d_logic_bt_lp_reserve"], top_output_only=False,
+                                vector_overrides={"d_logic_bt_lp_reserve": [neg]})
+    res = generator.build(wb, opts)
+    text = "\n".join(res["blocks"][0][0])
+    assert "==1'b0" in text                            # 断言用故意填错的 0（正确应为 1）
+    assert res["blocks"][0][1]["n_negative"] == 1
+
+
+def test_overrides_only_affect_named_signal(wb):
+    """有 override 的信号用 override；其它信号仍走自动生成。"""
+    sig, node, bindings, groups = _reserve(wb)
+    bv = {"d_bt_lp_linelocal_mode_ctrl": 0, "d_bt_lp_bt_mode_sel_local": 0,
+          "d_bt_lp_bt_mode_sel": 0, "d_bt_lp_iddq": 0}
+    custom = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
+    opts = generator.GenOptions(top_output_only=False,
+                                vector_overrides={"d_logic_bt_lp_reserve": [custom]})
+    res = generator.build(wb, opts)
+    by_name = {st["out_name"]: (lines, st) for lines, st in res["blocks"]}
+    assert by_name["d_logic_bt_lp_reserve"][1]["n_vectors"] == 1        # override
+    assert by_name["d_logic_bt_lp_lna_agc[2:0]"][1]["n_vectors"] > 1     # 自动
+
+
+# ───────────── 审查修复回归 ─────────────
+def test_unequal_width_same_base_roundtrip():
+    """#5: 同一 base 跨不等宽字母时，往返不丢高位（取最宽字母作代表）。"""
+    from dreg_verify.resolver import InputBinding
+    A = InputBinding("A", "sig", "sig", 2, "RO", None, None, None, "sig", "wire")
+    B = InputBinding("B", "sig", "sig", 4, "RO", None, None, None, "sig", "wire")
+    bindings = {"A": A, "B": B}
+    node = E.parse("A|B")
+    groups = V.input_groups(node, bindings)
+    assert len(groups) == 1
+    assert groups[0]["rep"] == "B" and groups[0]["width"] == 4   # 最宽字母作代表
+    vecs, _ = V.generate_vectors(node, bindings, 4)
+    for vec in vecs:
+        bv = V.vector_to_base_values(vec, groups)
+        rt = V.make_vector_from_base_values(node, bindings, groups, bv, 4)
+        assert rt.exp_value == vec.exp_value, "往返丢位: %r" % vec.assignments
+
+
+def test_empty_override_means_zero_tests(wb):
+    """#1: 空 override 列表 = 该信号零用例，而非回退自动生成。"""
+    opts = generator.GenOptions(signals=["d_logic_bt_lp_reserve"], top_output_only=False,
+                                vector_overrides={"d_logic_bt_lp_reserve": []})
+    res = generator.build(wb, opts)
+    assert res["summary"]["n_generated"] == 1
+    assert res["summary"]["n_vectors"] == 0
+
+
+def test_negative_sv_has_neg_suffix(wb):
+    """#4: 负向断言 id 带 _NEG 后缀，可与正向区分。"""
+    sig, node, bindings, groups = _reserve(wb)
+    bv = {"d_bt_lp_linelocal_mode_ctrl": 1, "d_bt_lp_bt_mode_sel_local": 1,
+          "d_bt_lp_bt_mode_sel": 0, "d_bt_lp_iddq": 0}
+    neg = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width,
+                                         expected_override=0)
+    res = generator.build(wb, generator.GenOptions(
+        signals=["d_logic_bt_lp_reserve"], top_output_only=False,
+        vector_overrides={"d_logic_bt_lp_reserve": [neg]}))
+    text = "\n".join(res["blocks"][0][0])
+    assert "assert_106_T0_NEG:" in text
+
+
+def test_override_plus_left_neg_appends_auto(wb):
+    """#3: 既 override 又在 neg 列表里的信号，正向行仍会补自动负向(不被静默丢)。"""
+    sig, node, bindings, groups = _reserve(wb)
+    bv = {"d_bt_lp_linelocal_mode_ctrl": 1, "d_bt_lp_bt_mode_sel_local": 1,
+          "d_bt_lp_bt_mode_sel": 0, "d_bt_lp_iddq": 0}
+    pos = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)  # 正向
+    res = generator.build(wb, generator.GenOptions(
+        signals=["d_logic_bt_lp_reserve"], top_output_only=False,
+        neg_all=True, neg_which="first",
+        vector_overrides={"d_logic_bt_lp_reserve": [pos]}))
+    st = res["blocks"][0][1]
+    assert st["n_vectors"] == 2          # 1 正向 + 1 追加的自动负向
+    assert st["n_negative"] == 1
+
+
+def test_report_tables_structure(wb):
+    """report() 返回 tables（每信号真值表）：输入做行、各测试做列，负向列有 _NEG。"""
+    rep = generator.report(wb, generator.GenOptions(
+        signals=["d_logic_bt_lp_reserve"], top_output_only=False,
+        neg_all=True, neg_which="first"))
+    assert "tables" in rep
+    t = next(x for x in rep["tables"] if x["signal"] == "d_logic_bt_lp_reserve")
+    assert t["inputs"] and t["tests"]
+    names = [tc["name"] for tc in t["tests"]]
+    assert any(n.endswith("_NEG") for n in names)              # 含负向列
+    assert all(len(tc["values"]) == len(t["inputs"]) for tc in t["tests"])  # 每列值数 = 输入数
+    neg_tc = next(tc for tc in t["tests"] if tc["neg"])
+    assert neg_tc["expected"] != neg_tc["correct"]             # 负向期望 != 正确值
+
+
+def test_report_tables_bitwidth_label(wb):
+    """真值表的输入/输出行标签保留位宽。"""
+    rep = generator.report(wb, generator.GenOptions(
+        signals=["d_logic_bt_lp_lna_agc"], top_output_only=False))
+    t = next(x for x in rep["tables"] if x["signal"] == "d_logic_bt_lp_lna_agc[2:0]")
+    labels = [i["label"] for i in t["inputs"]]
+    assert "d_bt_lp_lna_agc_local[2:0]" in labels
+    assert t["exp_label"] == "期望(out)[2:0]"
+
+
+def test_report_honors_overrides(wb):
+    """#8: report() 也用 override，与 .sv 一致。"""
+    sig, node, bindings, groups = _reserve(wb)
+    bv = {"d_bt_lp_linelocal_mode_ctrl": 0, "d_bt_lp_bt_mode_sel_local": 0,
+          "d_bt_lp_bt_mode_sel": 0, "d_bt_lp_iddq": 0}
+    custom = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
+    rep = generator.report(wb, generator.GenOptions(
+        signals=["d_logic_bt_lp_reserve"], top_output_only=False,
+        vector_overrides={"d_logic_bt_lp_reserve": [custom]}))
+    row = next(r for r in rep["summary"] if r["signal"] == "d_logic_bt_lp_reserve")
+    assert row["n_tests"] == 1           # override 那一条，不是自动那批
+
+
+def test_no_overrides_unchanged(wb):
+    """不传 vector_overrides 时行为与以前完全一致（默认 None）。"""
+    a = generator.build(wb, generator.GenOptions(signals=["d_logic_bt_lp_reserve"],
+                                                 top_output_only=False))
+    b = generator.build(wb, generator.GenOptions(signals=["d_logic_bt_lp_reserve"],
+                                                 top_output_only=False, vector_overrides=None))
+    assert a["summary"]["n_vectors"] == b["summary"]["n_vectors"]
+    assert generator.render(a) == generator.render(b)
+
+
+# ───────────── GUI 冒烟（无 PySide6 跳过） ─────────────
+@pytest.fixture(scope="module")
+def qapp():
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+def test_gui_testitem_edit_flow(qapp, wb, tmp_path_factory):
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("g") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path))
+    w.on_load()
+    assert len(w.signals) == 3
+    sig = next(s for s in w.signals if s.out_name == "d_logic_bt_lp_reserve")
+    w._load_test_items(sig)
+    assert w._ti_sig is sig and len(w._ti_rows) >= 1
+    n0 = len(w._ti_rows)
+
+    # 纵向布局：行=输入/期望/负向，列=测试。编辑 T0(列0)第一个输入(行0)的单元格
+    w.ti_table.item(0, 0).setText("0x1")
+    assert "d_logic_bt_lp_reserve" in w._customized
+
+    # 加一列(测试)
+    w.on_ti_add()
+    assert len(w._ti_rows) == n0 + 1
+
+    # 编辑过的测试项经 vector_overrides 进入 build
+    ov = w._vector_overrides()
+    assert ov and "d_logic_bt_lp_reserve" in ov
+    assert len(ov["d_logic_bt_lp_reserve"]) == len(w._ti_rows)
+    res = generator.build(w.wb, w._opts(["d_logic_bt_lp_reserve"], None))
+    assert res["summary"]["n_vectors"] == len(w._ti_rows)
+
+    # 重新生成 → 丢弃自定义
+    w.on_ti_regen()
+    assert "d_logic_bt_lp_reserve" not in w._customized
+
+
+def _reserve_window(tmp_path_factory, sub):
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp(sub) / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path)); w.on_load()
+    sig = next(s for s in w.signals if s.out_name == "d_logic_bt_lp_reserve")
+    return gui, w, sig
+
+
+def test_gui_add_negative_appends_not_modifies(qapp, wb, tmp_path_factory):
+    """加负向 = 追加专门的负向测试，原有正向测试一条不改(#2 语义)。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "g2")
+    w._load_test_items(sig)
+    n_pos = len(w._ti_rows)
+    pos_snapshot = [(dict(rd["base_values"]), rd["expected"]) for rd in w._ti_rows]
+    w.neg_which.setCurrentText("all")
+    w.on_ti_add_neg()
+    pos = [rd for rd in w._ti_rows if rd.get("kind") != "neg"]
+    neg = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
+    assert len(pos) == n_pos and len(neg) == n_pos      # 正向数不变，等量追加负向
+    # 正向测试完全没被改：期望仍 = 正确值
+    assert [(dict(rd["base_values"]), rd["expected"]) for rd in pos] == pos_snapshot
+    assert all(rd["expected"] == rd["correct"] for rd in pos)
+    # 负向测试：期望 != 正确值，输入复制自某条正向
+    assert all(rd["is_negative"] and rd["expected"] != rd["correct"] for rd in neg)
+    # 删负向 → 只剩正向
+    w.on_ti_del_neg()
+    assert all(rd.get("kind") != "neg" for rd in w._ti_rows) and len(w._ti_rows) == n_pos
+
+
+def test_gui_left_neg_adds_negatives(qapp, wb, tmp_path_factory):
+    """左侧'负向'勾选 → 给该信号追加负向测试(正向保留)；取消 → 撤销定制。"""
+    from PySide6 import QtCore
+    gui, w, sig = _reserve_window(tmp_path_factory, "g5")
+    row = next(r for r in range(w.table.rowCount())
+               if w._sig_of_row(r).out_name == "d_logic_bt_lp_reserve")
+    w.neg_which.setCurrentText("all")
+    w.on_row_focus(row, gui.COL_K, -1, -1)
+    n_pos = len(w._ti_rows)
+    w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    pos = [rd for rd in w._ti_rows if rd.get("kind") != "neg"]
+    neg = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
+    assert len(pos) == n_pos and len(neg) == n_pos       # all：每条正向各一负向
+    # 取消 → 该信号定制被整体撤销(纯自动，不留 override)
+    w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Unchecked)
+    assert "d_logic_bt_lp_reserve" not in w._customized
+    # first 模式：只追加 1 条负向
+    w.neg_which.setCurrentText("first")
+    w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    assert sum(1 for rd in w._ti_rows if rd.get("kind") == "neg") == 1
+
+
+def test_gui_all_signals_negative(qapp, wb, tmp_path_factory):
+    """'全部加负向' → 所有可见信号都拿到负向测试(满足 R 全部负向)。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "g6")
+    w.neg_which.setCurrentText("all")
+    w.on_all_signals_neg(True)
+    ov = w._vector_overrides()
+    assert ov is not None
+    # 每个有 override 的信号都至少含一条负向
+    assert all(any(v.is_negative for v in vs) for vs in ov.values() if vs)
+    assert len(ov) == len(w.signals)            # 3 个信号都加了
+    # 列头 _NEG 检查(打开 reserve)
+    w._load_test_items(sig)
+    neg_cols = [i for i, rd in enumerate(w._ti_rows) if rd["is_negative"]]
+    assert neg_cols and w.ti_table.horizontalHeaderItem(neg_cols[0]).text().endswith("_NEG")
+    # 清除负向 → 撤销全部定制(恢复默认，不残留 override 绕过 risky-skip)
+    w.on_all_signals_neg(False)
+    assert not w._customized
+
+
+def test_gui_positive_only_strips_negatives(qapp, wb, tmp_path_factory):
+    """#2: positive_only 把自定义负向向量从正向文件剔除。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "g4")
+    w._load_test_items(sig)
+    w.neg_which.setCurrentText("all")
+    w.on_ti_add_neg()
+    name = "d_logic_bt_lp_reserve"
+    ov_all = w._vector_overrides()
+    ov_pos = w._vector_overrides(positive_only=True)
+    n_neg = sum(1 for v in ov_all[name] if v.is_negative)
+    assert n_neg >= 1
+    assert all(not v.is_negative for v in ov_pos[name])
+    assert len(ov_pos[name]) == len(ov_all[name]) - n_neg

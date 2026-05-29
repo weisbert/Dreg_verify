@@ -158,7 +158,10 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False):
             n_neg += 1
         lines.append("#1ps;")
         exp = fmt_bin(vec.asserted_value, vec.exp_width)
-        aid_str = "%s_T%d" % (aid, vec.index)        # e.g. 8_T0
+        # 负向(故意填错期望)的断言 id 加 _NEG，便于在仿真日志里和正向用例区分(与 report() 一致)
+        aid_str = "%s_T%d%s" % (aid, vec.index, "_NEG" if vec.is_negative else "")   # e.g. 8_T0 / 8_T1_NEG
+        if comments and vec.is_negative:
+            lines.append("// NEG: 故意填错期望值，此断言预期应 FAIL(用于自检 checker 能抓错)")
         lines.append("assert_%s:" % aid_str)
         lines.append("")
         msg = ('$sformatf("%s","%s","%s",%s, %s)'

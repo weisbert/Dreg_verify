@@ -241,3 +241,102 @@ def add_negatives(vectors, mode="invert", which="first", fixed_value=None):
     for vec in targets:
         out.append(make_negative(vec, mode=mode, fixed_value=fixed_value))
     return out
+
+
+# ───────────────────────────── 测试项编辑辅助（GUI 逐输入表格用） ─────────────────────────────
+# 一条测试项的本质 = 各物理输入取值 → 表达式自动求出期望值。下面三个函数支撑 GUI 把测试项
+# 展示成"每个物理输入一列、可逐格编辑"的表格，并能从编辑值反向构造 TestVector 回流到生成。
+def input_groups(node, bindings):
+    """把表达式引用到的输入按"物理信号(base)"分组——同一物理信号占多个表达式字母(如 A、B
+    同为某寄存器位)时共享一列取值。返回有序 list，每项:
+        {'base': 显示名(原大小写), 'letters': [字母...], 'rep': 代表字母,
+         'width': 该组最大位宽, 'is_control': 是否控制位, 'kind': 'RO'/'RW'/...}
+    顺序 = 各 base 在 collect_vars 里首次出现的顺序。
+    """
+    widths = {ltr: b.width for ltr, b in bindings.items()}
+    used = [v for v in E.collect_vars(node) if v in widths]
+    try:
+        control, _data = E.classify_vars(node, E.Env(widths))
+    except E.ExprError:
+        control = []
+    control_set = set(control)
+    base_of = {}
+    for ltr in used:
+        b = bindings.get(ltr)
+        base_of[ltr] = (b.base.lower() if b and b.base else ltr.lower())
+    order, members = [], {}
+    for ltr in used:
+        bk = base_of[ltr]
+        if bk not in members:
+            members[bk] = []
+            order.append(bk)
+        members[bk].append(ltr)
+    groups = []
+    for bk in order:
+        letters = members[bk]
+        # 代表字母取组内"最宽"的——generate_vectors 把共享值按各字母位宽写回，窄字母会被截位；
+        # 读最宽字母才能拿到完整值(否则同 base 不等宽切片时往返丢高位)。
+        rep = max(letters, key=lambda l: widths.get(l, 1))
+        b = bindings.get(rep)
+        base = (b.base if b and b.base else rep)
+        width = max(widths[l] for l in letters)
+        groups.append({
+            "base": base,                          # 查表/取值用的纯基名(不带位宽，勿改)
+            "label": base + _slice_str(b, width),  # 显示用(带 [msb:lsb] 位宽，供 GUI/CSV)
+            "letters": list(letters),
+            "rep": rep,
+            "width": width,
+            "is_control": any(l in control_set for l in letters),
+            "kind": getattr(b, "kind", "?"),
+        })
+    return groups
+
+
+def _slice_str(binding, width):
+    """重建位宽切片显示串：优先用 logic 单元格里的 [msb:lsb]，否则按位宽给 [width-1:0]，标量为空。"""
+    msb = getattr(binding, "slice_msb", None)
+    lsb = getattr(binding, "slice_lsb", None)
+    if msb is not None and lsb is not None:
+        return "[%d:%d]" % (msb, lsb)
+    if width and width > 1:
+        return "[%d:0]" % (width - 1)
+    return ""
+
+
+def _expand_base_values(groups, base_values, widths):
+    """{base_lower:int} → {字母:int}（每字母按自身位宽 mask）。未给的输入按 0。"""
+    assign = {}
+    for g in groups:
+        bk = g["base"].lower()
+        val = base_values.get(bk, 0)
+        for l in g["letters"]:
+            assign[l] = val & E.mask(widths.get(l, 1))
+    return assign
+
+
+def vector_to_base_values(vec, groups):
+    """把一个 TestVector(字母→值) 转成 {base_lower:int}，供 GUI 显示成逐输入一列。"""
+    out = {}
+    for g in groups:
+        out[g["base"].lower()] = vec.assignments.get(g["rep"], 0)
+    return out
+
+
+def make_vector_from_base_values(node, bindings, groups, base_values, out_width,
+                                 index=0, expected_override=None):
+    """从 GUI 编辑的 {base_lower:int} 构造一个 TestVector。
+    期望值由表达式自动重算(永远自洽)；若给了 expected_override 且与算出值不同 →
+    标负向(故意填错，复用负向机制：asserted_value 取 neg_value)。
+    """
+    widths = {ltr: b.width for ltr, b in bindings.items()}
+    assign = _expand_base_values(groups, base_values, widths)
+    for v in E.collect_vars(node):
+        assign.setdefault(v, 0)
+    exp_value, exp_width = E.evaluate(node, E.Env(widths, assign), out_width)
+    if expected_override is not None:
+        wrong = expected_override & E.mask(exp_width)
+        if wrong != exp_value:
+            return TestVector(index, assign, exp_value, exp_width,
+                              is_negative=True, neg_value=wrong, neg_mode="value",
+                              note="手工指定期望值(与表达式计算值不同)，预期断言应 FAIL，用于负向自检")
+    return TestVector(index, assign, exp_value, exp_width)

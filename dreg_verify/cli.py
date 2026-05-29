@@ -204,16 +204,57 @@ def write_report(path, rep, excel):
 def _write_report_html(path, rep, excel):
     import html
 
+    def esc(x):
+        return html.escape(str(x))
+
     def table(rows, cols):
         if not rows:
             return "<p>（无数据）</p>"
-        th = "".join("<th>%s</th>" % html.escape(h) for _k, h in cols)
+        th = "".join("<th>%s</th>" % esc(h) for _k, h in cols)
         trs = []
         for r in rows:
-            tds = "".join("<td>%s</td>" % html.escape(str(r.get(k, ""))) for k, _h in cols)
+            tds = "".join("<td>%s</td>" % esc(r.get(k, "")) for k, _h in cols)
             cls = ' class="neg"' if r.get("neg") == "是" else (' class="err"' if r.get("error") else "")
             trs.append("<tr%s>%s</tr>" % (cls, tds))
         return "<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (th, "".join(trs))
+
+    def truth_tables(tabs):
+        """② 每信号纵向真值表：输入(带位宽)做行、各测试做列；负向列标红 + _NEG。"""
+        if not tabs:
+            return "<p>（无数据）</p>"
+        out = []
+        for t in tabs:
+            tests = t["tests"]
+            # 列头：信号\测试 + 各 T；负向列加 class
+            hdr = ['<th class="rowhdr">信号\\测试</th>']
+            for tc in tests:
+                hdr.append('<th class="%s">%s</th>' % ("negh" if tc["neg"] else "", esc(tc["name"])))
+            body = []
+            for ri, inp in enumerate(t["inputs"]):       # 每个输入一行
+                cells = ['<th class="rowhdr">%s</th>' % esc(inp["label"])]
+                for tc in tests:
+                    cells.append('<td class="%s">%s</td>'
+                                 % ("neg" if tc["neg"] else "", esc(tc["values"][ri])))
+                body.append("<tr>%s</tr>" % "".join(cells))
+            # 期望行（负向单元格红，hover 显示正确值）
+            exp_cells = ['<th class="rowhdr">%s</th>' % esc(t.get("exp_label", "期望(out)"))]
+            for tc in tests:
+                title = ' title="正确应为 %s"' % esc(tc["correct"]) if tc["neg"] else ""
+                exp_cells.append('<td class="%s"%s>%s</td>'
+                                 % ("neg" if tc["neg"] else "", title, esc(tc["expected"])))
+            body.append('<tr class="exprow">%s</tr>' % "".join(exp_cells))
+            # force / RF_WRITE 两行（驱动）
+            for label, key in (("force", "force"), ("RF_WRITE", "rfwrite")):
+                cells = ['<th class="rowhdr">%s</th>' % label]
+                for tc in tests:
+                    cells.append('<td class="drv %s">%s</td>'
+                                 % ("neg" if tc["neg"] else "", esc(tc.get(key, ""))))
+                body.append("<tr>%s</tr>" % "".join(cells))
+            out.append('<h3>R%s　<code>%s</code>　<span class="ex">%s</span></h3>'
+                       '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
+                       % (esc(t["R"]), esc(t["signal"]), esc(t["expr"]),
+                          "".join(hdr), "".join(body)))
+        return "\n".join(out)
 
     n_sig = len(rep["summary"])
     n_tc = len(rep["detail"])
@@ -221,22 +262,30 @@ def _write_report_html(path, rep, excel):
     doc = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <title>Dreg 测试用例报告</title><style>
 body{{font-family:"Segoe UI",Microsoft YaHei,sans-serif;margin:24px;color:#222}}
-h1{{font-size:20px}} h2{{font-size:16px;margin-top:28px}}
-table{{border-collapse:collapse;width:100%;font-size:12px;margin-top:8px}}
+h1{{font-size:20px}} h2{{font-size:16px;margin-top:28px}} h3{{font-size:13px;margin:20px 0 0}}
+table{{border-collapse:collapse;font-size:12px;margin-top:8px}}
+table.full,table.sum{{width:100%}}
 th,td{{border:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:top}}
-th{{background:#f0f3f7;position:sticky;top:0}}
+th{{background:#f0f3f7}} thead th{{position:sticky;top:0}}
 tr:nth-child(even){{background:#fafbfc}}
 tr.neg{{background:#fff3f3}} tr.err{{background:#ffe9e9}}
-.sum{{color:#555;margin:6px 0 0}} code{{background:#f5f5f5;padding:0 3px}}
+.tt td,.tt th{{text-align:center}} .tt th.rowhdr{{text-align:left;background:#eef1f5}}
+.tt td.neg,.tt th.negh{{background:#ffe3e3;color:#a40000}}
+.tt tr.exprow th,.tt tr.exprow td{{font-weight:600;border-top:2px solid #999}}
+.tt td.drv{{font-family:Consolas,monospace;font-size:11px;text-align:left;color:#555}}
+.ex{{color:#888}} .sum{{color:#555;margin:6px 0 0}} code{{background:#f5f5f5;padding:0 3px}}
 </style></head><body>
 <h1>Dreg 测试用例报告</h1>
 <p class="sum">源 Excel: <code>{excel}</code>　信号 {n_sig} 个　用例 {n_tc} 条（其中负向 {n_neg} 条）</p>
-<p class="sum">负向用例(红底)=故意填错期望值, 预期应 FAIL, 用于自检 checker。</p>
+<p class="sum">负向用例(红/_NEG)=故意填错期望值, 预期应 FAIL, 用于自检 checker。</p>
 <h2>① 每信号汇总</h2>{tbl_sum}
-<h2>② 每条用例明细</h2>{tbl_det}
+<h2>② 每信号真值表（输入做行 / 各测试做列）</h2>{tbl_tt}
+<h2>③ 每条用例明细</h2>{tbl_det}
 </body></html>""".format(
-        excel=html.escape(os.path.basename(excel)), n_sig=n_sig, n_tc=n_tc, n_neg=n_neg,
-        tbl_sum=table(rep["summary"], SUMMARY_COLS), tbl_det=table(rep["detail"], DETAIL_COLS))
+        excel=esc(os.path.basename(excel)), n_sig=n_sig, n_tc=n_tc, n_neg=n_neg,
+        tbl_sum=table(rep["summary"], SUMMARY_COLS).replace("<table>", '<table class="sum">', 1),
+        tbl_tt=truth_tables(rep.get("tables", [])),
+        tbl_det=table(rep["detail"], DETAIL_COLS).replace("<table>", '<table class="full">', 1))
     with open(path, "w", encoding="utf-8") as f:
         f.write(doc)
 
