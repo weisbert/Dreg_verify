@@ -18,7 +18,7 @@ class GenOptions:
                  neg_which="first", neg_value=None,
                  force_overrides=None, rfwrite_overrides=None, default_kind=None,
                  top_output_only=False, types=None, wire_fallback=True,
-                 exclude=None, exclude_regex=None, comments=False):
+                 exclude=None, exclude_regex=None, comments=False, include_risky=False):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -39,6 +39,7 @@ class GenOptions:
         self.types = _norm_set(types)
         self.wire_fallback = wire_fallback
         self.comments = comments
+        self.include_risky = include_risky
 
 
 def _norm_set(x):
@@ -121,6 +122,7 @@ def build(wb, opts):
     selected = select_signals(wb, opts)
     blocks = []
     errors = []
+    skipped = []        # 含不可驱动输入(wire兜底/未解析)的信号，默认跳过(与 VBA 一致)
     n_total_vectors = 0
     n_total_neg = 0
     n_unresolved_signals = 0
@@ -132,6 +134,23 @@ def build(wb, opts):
             errors.append((sig.out_name, sig.assert_id, "表达式解析失败: %s" % ex))
             continue
         bindings = resolver.resolve_signal_inputs(sig)
+
+        # 默认跳过含"不可驱动输入"的信号：wire兜底(表里查无,force 不存在的 net→CUVUNF) 或 未解析。
+        # 这与 VBA 行为一致(它直接跳过这类信号)。--include-risky 可强制生成。
+        if not opts.include_risky:
+            risky = []
+            for ltr in E.collect_vars(node):
+                b = bindings.get(ltr)
+                if b is None:
+                    continue
+                if not b.resolved:
+                    risky.append((ltr, b.base, "未解析"))
+                elif b.found_in == "wire":
+                    risky.append((ltr, b.base, "wire兜底(表里查无,非可驱动 net)"))
+            if risky:
+                skipped.append((sig.out_name, sig.assert_id, risky))
+                continue
+
         try:
             vecs, meta = V.generate_vectors(
                 node, bindings, sig.out_width,
@@ -157,6 +176,7 @@ def build(wb, opts):
         "n_logic_rows": len(wb.logic),
         "n_selected": len(selected),
         "n_generated": len(blocks),
+        "n_skipped": len(skipped),
         "n_vectors": n_total_vectors,
         "n_negative": n_total_neg,
         "n_parse_errors": len(errors),
@@ -164,7 +184,8 @@ def build(wb, opts):
         "tmm_fields": len(wb.tmm),
         "regmap_signals": len(wb.regmap),
     }
-    return {"blocks": blocks, "selected": selected, "errors": errors, "summary": summary}
+    return {"blocks": blocks, "selected": selected, "errors": errors,
+            "skipped": skipped, "summary": summary}
 
 
 def render(result, header_info=None, comments=False):

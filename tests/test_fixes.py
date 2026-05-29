@@ -212,6 +212,31 @@ def test_exclude_signals_and_regex():
     assert [s.out_name for s in sel2] == ["d_logic_bt_lp_reserve"]
 
 
+def test_skip_risky_signal_by_default():
+    # 输入 close_ready_flag 不在 tmm/regmap/logic → wire兜底(非可驱动 net)→ 默认跳过(对齐 VBA)
+    s = _logic("d_logic_x", 1, "A",
+               {"A": {"raw": "close_ready_flag", "base": "close_ready_flag", "width": 1,
+                      "msb": None, "lsb": None}}, "130")
+    wb = DregWorkbook(logic=[s], regmap={}, tmm={}, sheet_names=[])
+    res = G.build(wb, G.GenOptions(top_output_only=False))
+    assert res["summary"]["n_generated"] == 0
+    assert res["summary"]["n_skipped"] == 1
+    assert res["skipped"][0][0] == "d_logic_x"
+    # --include-risky 强制生成(force by name，可能 elaboration 失败，但用户显式要求)
+    res2 = G.build(wb, G.GenOptions(top_output_only=False, include_risky=True))
+    assert res2["summary"]["n_generated"] == 1
+
+
+def test_clean_signal_not_skipped():
+    from dreg_verify.excel_model import TmmField
+    tmm = {"d_en": TmmField("d_en", 0, 0, 0x10, "RW", "N", "R")}
+    s = _logic("d_logic_y", 1, "A",
+               {"A": {"raw": "d_en", "base": "d_en", "width": 1, "msb": None, "lsb": None}}, "5")
+    wb = DregWorkbook(logic=[s], regmap={}, tmm=tmm, sheet_names=[])
+    res = G.build(wb, G.GenOptions(top_output_only=False))
+    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+
+
 def test_no_wire_fallback_keeps_unknown():
     s1 = _logic("d_x", 1, "A",
                 {"A": {"raw": "foo", "base": "foo", "width": 1, "msb": None, "lsb": None}}, "1")

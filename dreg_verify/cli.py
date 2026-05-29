@@ -94,6 +94,9 @@ def build_argparser():
                     help="类型判不出时的兜底(默认保持未解析并报告)")
     g4.add_argument("--no-wire-fallback", action="store_true",
                     help="关闭 wire 兜底：非 RW 寄存器且查不到的输入不再默认 force，而是标 UNKNOWN 交人工")
+    g4.add_argument("--include-risky", action="store_true",
+                    help="强制生成含'不可驱动输入'(wire兜底/未解析)的信号（默认跳过，因为 force 不存在的 net "
+                         "会导致 elaboration CUVUNF 失败；与 VBA 一致默认跳过这类信号）")
     return p
 
 
@@ -260,6 +263,7 @@ def main(argv=None):
         default_kind=args.default_kind,
         wire_fallback=not args.no_wire_fallback,
         comments=args.comments,
+        include_risky=args.include_risky,
     )
 
     print("装载 Excel: %s ..." % args.excel)
@@ -347,16 +351,22 @@ def _write(path, text):
 def _report(res, out):
     s = res["summary"]
     print("已写出: %s" % out)
-    print("  选中信号: %d / logic总行 %d；生成块: %d；向量: %d（负向 %d）"
+    print("  选中信号: %d / logic总行 %d；生成块: %d；跳过: %d；向量: %d（负向 %d）"
           % (s["n_selected"], s["n_logic_rows"], s["n_generated"],
-             s["n_vectors"], s["n_negative"]))
+             s.get("n_skipped", 0), s["n_vectors"], s["n_negative"]))
     if s["n_parse_errors"]:
         print("  ⚠ 表达式解析失败 %d 个:" % s["n_parse_errors"])
         for name, aid, msg in res["errors"]:
             print("    - [R=%s] %s: %s" % (aid, name, msg))
-    if s["n_unresolved_signals"]:
-        print("  ⚠ %d 个信号含未解析输入（见 .sv 末尾汇总；可用 --force-signals/--rfwrite-signals 修正）"
-              % s["n_unresolved_signals"])
+    if s.get("n_skipped"):
+        print("  ↷ 跳过 %d 个含'不可驱动输入'的信号（force 不存在的 net 会 elaboration 失败；VBA 也跳过这类）:"
+              % s["n_skipped"])
+        for name, aid, risky in res.get("skipped", [])[:30]:
+            rs = ", ".join("%s=%s(%s)" % (l, b, why) for (l, b, why) in risky)
+            print("    - [R=%s] %s ← %s" % (aid, name, rs))
+        if len(res.get("skipped", [])) > 30:
+            print("    ...(共 %d 个)" % len(res["skipped"]))
+        print("    如确认这些 net 可驱动，用 --include-risky 强制生成，或 --force-signals/--rfwrite-signals 指定。")
 
 
 if __name__ == "__main__":

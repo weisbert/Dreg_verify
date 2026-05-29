@@ -318,10 +318,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview.setPlainText("\n".join(lines[:600])
                                   + ("\n... (预览截断，共 %d 行)" % len(lines) if len(lines) > 600 else ""))
         s = res["summary"]
-        msg = "预览: 选中 %d，向量 %d（负向 %d）" % (s["n_generated"], s["n_vectors"], s["n_negative"])
-        if s["n_unresolved_signals"]:
-            msg += "；⚠ %d 个信号含未解析输入" % s["n_unresolved_signals"]
+        msg = "预览: 生成 %d，向量 %d（负向 %d）" % (s["n_generated"], s["n_vectors"], s["n_negative"])
+        if s.get("n_skipped"):
+            msg += "；↷ 跳过 %d 个(含不可驱动输入，会 elaboration 失败)" % s["n_skipped"]
         self.status.showMessage(msg)
+        if s.get("n_skipped") and res.get("skipped"):
+            tip = "\n\n// ↷ 跳过 %d 个含不可驱动输入(wire兜底/未解析)的信号:" % s["n_skipped"]
+            for name, aid, risky in res["skipped"][:30]:
+                tip += "\n//   %s ← %s" % (name, ", ".join("%s=%s" % (l, b) for l, b, _ in risky))
+            self.preview.appendPlainText(tip)
 
     def on_generate(self):
         if not self.wb:
@@ -344,11 +349,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._write(npath, generator.render({"blocks": negblocks, "selected": [],
                                                  "errors": [], "summary": negres["summary"]}, comments=cm))
             extra = "；负向→%s" % os.path.basename(npath)
+            nsk = pos["summary"].get("n_skipped", 0)
         else:
             res = generator.build(self.wb, self._opts(sel, neg))
             self._write(path, generator.render(res, comments=cm))
             extra = ""
-        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s" % (path, extra))
+            nsk = res["summary"].get("n_skipped", 0)
+        skipmsg = ("\n\n↷ 跳过了 %d 个含不可驱动输入的信号(默认跳过以保证可 elaborate)；"
+                   "如需强制生成用 CLI --include-risky。" % nsk) if nsk else ""
+        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s%s" % (path, extra, skipmsg))
         self.status.showMessage("已生成：%s%s" % (path, extra))
 
     def _write(self, path, text):

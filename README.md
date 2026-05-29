@@ -73,6 +73,7 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 | `--neg-file inline\|separate` | 负向放同文件还是单独 `*_neg.sv` |
 | `--force-signals` / `--rfwrite-signals` | 手动指定 RO/RW（修正名称/类型判定） |
 | `--no-wire-fallback` | 关闭 wire 兜底：非 RW 寄存器且查不到的输入不再默认 force，而是标 UNKNOWN |
+| `--include-risky` | 强制生成含'不可驱动输入'(wire兜底/未解析)的信号。**默认跳过**这类信号（force 不存在的 net 会让 elaboration 失败；与 VBA 一致跳过） |
 | `--diagnose` | 覆盖诊断：类型列原文分布 + 输入归类(RF_WRITE/force-RO/force-级联/force-wire/UNKNOWN)覆盖率 |
 | `--comments` | 在 .sv 加少量导航注释（默认零注释，对齐真实模板） |
 | `--report 路径.csv\|.html` | 导出给人看的测试用例表格（每信号汇总 + 每条用例明细：驱动值/期望/负向）。可与 `--out` 并用 |
