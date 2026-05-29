@@ -34,11 +34,25 @@ import os
 import re
 import sys
 
+# Windows 控制台常是 GBK，打印中文/emoji 会崩；统一改 UTF-8（文件输出本就 UTF-8，不受影响）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
 try:
     import openpyxl
-    from openpyxl.utils import get_column_letter
+    from openpyxl.utils import get_column_letter, column_index_from_string
 except ImportError:
     sys.exit("缺少 openpyxl，请先运行:  pip install openpyxl")
+
+# 让 --expr-forms 能用生成器自带的表达式求值器做"解析覆盖"自检
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from dreg_verify import expr as _expr
+except Exception:   # noqa: BLE001  （缺包时 --expr-forms 退化为仅做形态归并，不做解析校验）
+    _expr = None
 
 # 关键 sheet 排在最前，其余按原顺序跟在后面
 PRIORITY_SHEETS = ["logic", "regmap", "NamingRule", "for_test", "main",
@@ -250,6 +264,130 @@ def safe_name(s):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", s)
 
 
+# ───────────────────────────── 表达式形态覆盖报告 ─────────────────────────────
+def _struct_form(expr_text):
+    """把表达式抽象成"结构形态"：变量→V, 常量→K, 其余算子/括号保留。
+    用于把 A?C:B 与 X?Y:Z 归并到同一形态 V?V:V。无求值器时用简易正则降级。"""
+    if _expr is not None:
+        try:
+            toks = _expr.tokenize(expr_text)
+            out = []
+            for t in toks:
+                if t.kind == "EOF":
+                    break
+                if t.kind == "ID":
+                    out.append("V")
+                elif t.kind in ("BASED", "DEC"):
+                    out.append("K")
+                else:
+                    out.append(t.text)
+            return "".join(out)
+        except Exception:  # noqa: BLE001
+            pass
+    s = re.sub(r"\d+'[sSbBoOdDhH][0-9a-fA-FxXzZ_\?]+", "K", expr_text)
+    s = re.sub(r"[A-Za-z_]\w*", "V", s)
+    return re.sub(r"\s+", "", s)
+
+
+def expr_forms_report(ws, header_row=2):
+    """扫描 logic 页 L 列，按"原始表达式"和"结构形态"两级归并，并用求值器逐条试解析。"""
+    L = column_index_from_string("L")
+    K = column_index_from_string("K")
+    R = column_index_from_string("R")
+    by_expr = {}          # 原始表达式 -> {count, examples:[(R,K)]}
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        l = cell_str(row[L - 1] if L - 1 < len(row) else None, 0, no_trunc=True).strip() \
+            if (L - 1 < len(row) and row[L - 1] is not None) else ""
+        k = cell_str(row[K - 1] if K - 1 < len(row) else None, 0, no_trunc=True).strip() \
+            if (K - 1 < len(row) and row[K - 1] is not None) else ""
+        if l == "" or k == "":
+            continue
+        rno = cell_str(row[R - 1] if R - 1 < len(row) else None, 0)
+        e = by_expr.setdefault(l, {"count": 0, "examples": []})
+        e["count"] += 1
+        if len(e["examples"]) < 4:
+            e["examples"].append((rno, k))
+
+    # 按结构形态归并
+    by_form = {}
+    parse_fail = []
+    for expr_text, info in by_expr.items():
+        form = _struct_form(expr_text)
+        f = by_form.setdefault(form, {"count": 0, "exprs": []})
+        f["count"] += info["count"]
+        f["exprs"].append(expr_text)
+        # 解析校验（用占位宽度，纯语法/结构层面）
+        if _expr is not None:
+            try:
+                node = _expr.parse(expr_text)
+                widths = {v: 1 for v in _expr.collect_vars(node)}
+                _expr.classify_vars(node, _expr.Env(widths))
+            except Exception as ex:  # noqa: BLE001
+                parse_fail.append((expr_text, str(ex), info["examples"]))
+
+    out = []
+    out.append("=" * 70)
+    out.append("==== 表达式形态覆盖报告 (logic.L 列) ====")
+    out.append("不同表达式: %d 种；不同结构形态: %d 种；求值器可用: %s"
+               % (len(by_expr), len(by_form), "是" if _expr else "否(仅形态归并)"))
+    if _expr is not None:
+        out.append("解析失败: %d 种 %s"
+                   % (len(parse_fail), "✅ 全部可解析" if not parse_fail else "⚠ 见下"))
+    out.append("")
+    out.append("--- 按结构形态归并 (形态 | 出现次数 | 实例表达式) ---")
+    for form, f in sorted(by_form.items(), key=lambda kv: -kv[1]["count"]):
+        uniq = list(dict.fromkeys(f["exprs"]))
+        out.append("  [%3d次] %s" % (f["count"], form))
+        for e in uniq[:6]:
+            out.append("           例: %s" % e)
+        if len(uniq) > 6:
+            out.append("           ...(+%d 个同形态表达式)" % (len(uniq) - 6))
+
+    out.append("")
+    out.append("--- 全部不同表达式 (按出现次数) ---")
+    for expr_text, info in sorted(by_expr.items(), key=lambda kv: -kv[1]["count"]):
+        status = ""
+        if _expr is not None:
+            status = " [解析失败]" if any(expr_text == pf[0] for pf in parse_fail) else " [OK]"
+        ex = ", ".join("R%s:%s" % (r, k) for r, k in info["examples"])
+        out.append("  [%3d次]%s %s   ← %s" % (info["count"], status, expr_text, ex))
+
+    if parse_fail:
+        out.append("")
+        out.append("--- ⚠ 求值器无法解析的表达式 (需扩展 dreg_verify/expr.py) ---")
+        for expr_text, err, examples in parse_fail:
+            ex = ", ".join("R%s:%s" % (r, k) for r, k in examples)
+            out.append("  表达式: %s" % expr_text)
+            out.append("    错误: %s" % err)
+            out.append("    出现于: %s" % ex)
+    return out, len(by_expr), len(parse_fail)
+
+
+def run_expr_forms(args):
+    wb = openpyxl.load_workbook(args.excel, data_only=True, read_only=True)
+    ws = None
+    for s in wb.sheetnames:
+        if s.lower() == "logic":
+            ws = wb[s]
+            break
+    if ws is None:
+        wb.close()
+        sys.exit("找不到 'logic' 页；现有页：%s" % wb.sheetnames)
+    lines, n_expr, n_fail = expr_forms_report(ws, header_row=2)
+    wb.close()
+    base = os.path.splitext(args.excel)[0]
+    out_path = args.out if args.out else base + "_exprforms.txt"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("已导出表达式形态报告: %s" % out_path)
+    print("不同表达式 %d 种；求值器解析失败 %d 种。" % (n_expr, n_fail))
+    if n_fail:
+        print("⚠ 有未覆盖形态——把报告里 [解析失败] 那几条发我，我扩展求值器。")
+    else:
+        print("✅ 全部表达式均可被求值器解析（覆盖完整）。" if _expr
+              else "（未装 dreg_verify，仅做了形态归并，未做解析校验。）")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("excel", help="Excel 文件路径 (.xlsx)")
@@ -265,12 +403,19 @@ def main():
                     help="逗号分隔关键词; 跨整页只导出任意单元格含关键词的行")
     ap.add_argument("--find-max", type=int, default=100,
                     help="--find 时每页最多输出多少匹配行 (默认 100)")
+    ap.add_argument("--expr-forms", action="store_true",
+                    help="只生成表达式形态覆盖报告: 枚举 logic.L 所有不同表达式/结构形态, "
+                         "并用 dreg_verify 求值器逐条试解析(OK/FAIL), 闭合覆盖风险")
     args = ap.parse_args()
 
     if not os.path.isfile(args.excel):
         sys.exit("找不到文件: %s" % args.excel)
     if not args.excel.lower().endswith(".xlsx"):
         sys.exit("只支持 .xlsx，请先在 Excel 里另存为 .xlsx")
+
+    if args.expr_forms:
+        run_expr_forms(args)
+        return
 
     wb = openpyxl.load_workbook(args.excel, data_only=True, read_only=True)
     all_sheets = wb.sheetnames

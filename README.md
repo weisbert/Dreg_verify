@@ -1,13 +1,27 @@
 # Dreg_verify
 
-基于核心 Excel 自动生成 Dreg 逻辑信号验证文件（`wr_rf_tc.sv`）的工具，带 PyQt GUI 做筛选 / 预览 / 导出。
+从 Dreg 核心 Excel 的 `logic` 页真值表达式**重新推导**、自动生成 Dreg 逻辑信号验证文件
+`wr_rf_tc.sv`（UVM / SystemVerilog）的工具。自带 Excel 结构导出与表达式形态覆盖自检。
 
-> 🚧 开发中。目前已完成 Excel 结构导出工具 `inspect_excel.py`；生成器与 GUI 待实现。
+> MVP 已可用：CLI 生成器 + 表达式求值器 + 端到端测试。GUI（PySide6 筛选/预览/导出）为后续。
+
+## 工作原理
+
+不依赖旧 VB 生成的 `for_test` 页，而是：
+
+1. **读 Excel**（`logic` / `regmap` / `total_memory_map` 三页）
+2. **解析命名与地址**：输入名去 `_to_logic` → 在 `total_memory_map` 按字段名查地址(F)、位段(B)、
+   RO/RW 类型；判 force（RO 管脚/只读）还是 `RF_WRITE`（RW 寄存器）
+3. **求值表达式**：严格按 Verilog 两遍位宽语义实现三元 `?:` / 拼接 `{}` / 重复 `{n{}}` /
+   按位 `~&|^` / 归约 / 比较 / 移位 / 位常量
+4. **生成测试向量**：控制位（三元条件 + 门控位）全组合 × 数据总线确定性特征值；
+   期望输出 = 在每个向量上对表达式求值
+5. **渲染 .sv**：每信号一块，每 test 先 `force` / `RF_WRITE`（同地址 RW 字段合并成一条），
+   `#1ps` 后 `assert_<R>_T<n>: assert(...)` 配 `uvm_report_info/error`
 
 ## 环境
 
-- Python 3.13（Windows）
-- 依赖见 `requirements.txt`
+- Python 3.13（Windows）；依赖见 `requirements.txt`
 
 ```powershell
 python -m venv .venv
@@ -15,29 +29,92 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 工具
-
-### `inspect_excel.py`
-
-读取核心 Excel，把各 sheet 的列结构 / 表头 / 样本行 / 列取值枚举导出成文本，方便审阅与分析。
+## 生成 wr_rf_tc.sv（核心）
 
 ```powershell
-# 推荐：精简模式，输出最短，表达式列完整不截断，隐去人名
-python inspect_excel.py "核心文件.xlsx" --compact --mask-owners --rows 10 `
-    --sheets logic,regmap,NamingRule,for_test
+# 生成全部信号
+python -m dreg_verify.cli --excel 核心文件.xlsx --out wr_rf_tc.sv
 
-# 还嫌长 → 每个 sheet 单独存文件，可分批发送
-python inspect_excel.py "核心文件.xlsx" --compact --mask-owners --split
+# 按 owner 筛选
+python -m dreg_verify.cli --excel 核心文件.xlsx --owner Alice --out wr_rf_tc.sv
 
-# 信号名保结构脱敏（保留下划线/位宽/表达式原文）
-python inspect_excel.py "核心文件.xlsx" --anon-signals --mask-owners
+# 给某些信号加负向(异常)用例：故意填错期望值，自检 checker 能否抓错
+python -m dreg_verify.cli --excel 核心文件.xlsx \
+    --neg-signals d_logic_bt_lp_reserve --neg-mode invert --neg-file separate
+
+# 列出可生成信号清单（不生成）
+python -m dreg_verify.cli --excel 核心文件.xlsx --list
 ```
 
-常用开关：`--compact` 精简、`--split` 分页、`--mask-owners` 隐去人名、
-`--anon-signals` 信号名保结构脱敏、`--rows N` 样本行数、`--sheets a,b` 只导指定页。
+常用参数：
 
-输出写到 Excel 同目录的 `<名字>_inspect.txt`。
+| 参数 | 说明 |
+|------|------|
+| `--owner A,B` | 按 owner 筛选（logic P 列） |
+| `--signals N1,N2` | 按信号名筛选（K 全名或去位宽基名） |
+| `--regex RE` / `--type to_mux,ls` / `--top-output-only` | 其它筛选 |
+| `--mode min\|max` | 向量密度：min=控制全组合×1 数据特征；max=多数据模式 |
+| `--exhaustive` | 总输入位很少时做真·全穷举 |
+| `--neg-signals` / `--neg-all` | 选哪些信号加负向用例 |
+| `--neg-mode invert\|inc\|value` `--neg-value 0xN` | 造错方式 |
+| `--neg-which first\|all` | 每信号造 1 个还是每向量都造 |
+| `--neg-file inline\|separate` | 负向放同文件还是单独 `*_neg.sv` |
+| `--force-signals` / `--rfwrite-signals` | 手动指定 RO/RW（修正名称/类型判定） |
+
+## 图形界面（PySide6）
+
+```powershell
+python -m dreg_verify.gui
+```
+
+加载 Excel → 信号表（按 owner / type / 名字 筛选，多选 + 全选/清空）→ 勾"负向"列给信号加异常用例
+→ "预览选中"看 .sv 片段 → "生成 .sv …"导出。后端与 CLI 同一套逻辑。
+
+## 表达式形态覆盖自检（强烈建议先跑）
+
+由于生成器完全从 `logic.L` 表达式重推，先确认求值器能解析真表里**所有**表达式形态：
+
+```powershell
+python inspect_excel.py 核心文件.xlsx --expr-forms
+```
+
+会导出 `<名字>_exprforms.txt`：枚举所有不同表达式、按结构形态归并、并用求值器逐条试解析
+（`[OK]` / `[解析失败]`）。若有 `[解析失败]`，把那几条发给维护者扩展 `dreg_verify/expr.py` 即可。
+
+## Excel 结构导出（`inspect_excel.py`）
+
+把各 sheet 的列结构 / 表头 / 样本 / 取值枚举导出成文本，便于审阅。
+
+```powershell
+python inspect_excel.py 核心文件.xlsx --compact --mask-owners --rows 10 `
+    --sheets logic,regmap,total_memory_map
+```
+
+## 测试
+
+```powershell
+python -m pytest -q
+```
+
+涵盖：表达式求值器（含 Verilog 位宽陷阱）、端到端（合成 Excel → 校验 RF_WRITE 合并值等）。
+
+## 目录
+
+```
+dreg_verify/        生成器后端（CLI 与未来 GUI 共用）
+  expr.py           表达式词法/解析/两遍位宽求值/变量角色分类
+  excel_model.py    读 logic/regmap/total_memory_map
+  resolver.py       命名→RO/RW + 地址 + 位段（多策略匹配，失败清晰标注）
+  vectors.py        测试向量生成 + 负向用例
+  sv_writer.py      渲染 .sv（含同地址 RW 合并、负向标记）
+  generator.py      编排 + 筛选
+  cli.py            命令行入口
+  gui.py            PySide6 图形界面（筛选/多选/预览/导出）
+inspect_excel.py    Excel 结构导出 + 表达式形态覆盖报告(--expr-forms)
+tests/              单元 + 端到端测试（含合成 Excel 夹具）
+```
 
 ## 注意
 
-- 真实 Excel（`*.xlsx`）、导出文本（`*_inspect.txt`）、生成的 `wr_rf_tc.sv` 都已在 `.gitignore` 中排除，**不会**被提交。
+- 真实 Excel（`*.xlsx`）、导出文本、生成的 `wr_rf_tc.sv` 均已在 `.gitignore` 中排除，**不会**提交。
+- `.sv` 顶部的 `ENV_RF` / `RF_WRITE` / `uvm_*` 为脚手架宏；消息模板集中在 `sv_writer.py` 常量，可按需调整。
