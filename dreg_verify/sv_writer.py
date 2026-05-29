@@ -113,17 +113,18 @@ def _build_drive_lines(vec, bindings, used_vars):
     for (ltr, base, note) in unresolved:
         lines.append("// TODO: unresolved input %s=%s -- check name/type/addr" % (ltr, base))
 
-    # RO -> force wire（force 字面量按 wire 位宽自适应，>16bit 不截断）
-    for f in forces:
-        lines.append("force `%s.%s=%s;" % (ENV, f["wire"], f["hex"]))
-        lines.append('%s("%s",$sformatf("%s","%s", %s),UVM_LOW);'
-                     % (UVM_INFO, DRIVE_ID, DRIVE_WIRE_MSG, f["wire"], f["hex"]))
-
+    # 顺序对齐真实 for_test：先所有 `RF_WRITE(按地址排序)，再所有 force。
     # RW -> 同地址合并成一条 `RF_WRITE
     for w in writes:
         lines.append("`%s(%s,%s);" % (RF_WRITE, w["addr"], w["hex"]))
         lines.append('%s("%s",$sformatf("%s",%s, %s),UVM_LOW);'
                      % (UVM_INFO, DRIVE_ID, DRIVE_REG_MSG, w["addr"], w["hex"]))
+
+    # RO -> force wire（force 字面量按 wire 位宽自适应，>16bit 不截断）
+    for f in forces:
+        lines.append("force `%s.%s=%s;" % (ENV, f["wire"], f["hex"]))
+        lines.append('%s("%s",$sformatf("%s","%s", %s),UVM_LOW);'
+                     % (UVM_INFO, DRIVE_ID, DRIVE_WIRE_MSG, f["wire"], f["hex"]))
 
     unresolved_strs = ["%s=%s" % (l, b) for (l, b, n) in unresolved]   # ASCII only(中文诊断走 CLI)
     return lines, unresolved_strs

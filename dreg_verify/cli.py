@@ -97,6 +97,10 @@ def build_argparser():
     g4.add_argument("--include-risky", action="store_true",
                     help="强制生成含'不可驱动输入'(wire兜底/未解析)的信号（默认跳过，因为 force 不存在的 net "
                          "会导致 elaboration CUVUNF 失败；与 VBA 一致默认跳过这类信号）")
+    g4.add_argument("--match-fortest", action="store_true",
+                    help="复刻 for_test 覆盖面: = --include-internal + --include-risky, 不跳过任何信号"
+                         "(含 top_output=0 内部信号、含 close_ready_flag 等不可驱动 wire 的信号)。"
+                         "用于和 for_test 逐信号对照；产物可能 CUVUNF 跑不起来(预期内)。")
     return p
 
 
@@ -241,6 +245,12 @@ def main(argv=None):
     args = build_argparser().parse_args(argv)
     if not os.path.isfile(args.excel):
         sys.exit("找不到 Excel: %s" % args.excel)
+
+    # --match-fortest: 复刻 for_test 覆盖面——不跳过任何信号(含内部 top_output=0 与含不可驱动
+    # wire输入的)，与 VBA for_test 一样照单全收。注意产物可能 CUVUNF 跑不起来(预期内)。
+    if args.match_fortest:
+        args.include_internal = True
+        args.include_risky = True
 
     opts = generator.GenOptions(
         owners=_split(args.owner),
