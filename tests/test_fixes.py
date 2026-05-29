@@ -42,8 +42,8 @@ def test_rule4_field_width_clamp():
     lines, unresolved = W._build_drive_lines(vec, {"A": foo, "B": bar}, ["A", "B"])
     text = "\n".join(lines)
     assert not unresolved
-    assert "16'h0003" in text          # foo 截为 bit0=1, bar=bit1 → 0x3
-    assert "16'h0007" not in text      # 不应是 0x7（溢出污染）
+    assert "16'h3" in text             # foo 截为 bit0=1, bar=bit1 → 0x3
+    assert "16'h7" not in text         # 不应是 0x7（溢出污染）
 
 
 # ── #4 截断/去重统计自洽：向量数 + 去重数 + 丢弃数 == 计划组合数 ──
@@ -266,7 +266,7 @@ def test_same_base_inputs_share_value():
     for v in vecs:                                  # 同一物理信号 → A、B 必同值
         assert v.assignments["A"] == v.assignments["B"]
     lines, _ = W._build_drive_lines(vecs[0], bindings, ["A", "B"])
-    assert "\n".join(lines).count("`RF_WRITE(10'h00D") == 1   # 同字段只写一次，不重复
+    assert "\n".join(lines).count("`RF_WRITE(10'hD,") == 1   # 同字段只写一次，不重复
 
 
 # ── #8 重复次数取自变量值时不被声明位宽截断 ──

@@ -71,15 +71,15 @@ def test_rule4_merge_rf_write(wb):
     lines, unresolved = W._build_drive_lines(vec, bindings, used)
     text = "\n".join(lines)
     assert not unresolved
-    assert "`RF_WRITE(10'h02D, 16'h0003)" in text       # 记忆: T2 → 16'h3
-    assert "`RF_WRITE(10'h02C, 16'h0000)" in text        # bt_mode_sel=0 在 0x2C
-    assert "force `ENV_RF.d_bt_lp_iddq = 16'h0000" in text  # J=iddq RO → force
+    assert "`RF_WRITE(10'h2D,16'h3)" in text             # 记忆: T2 → 16'h3
+    assert "`RF_WRITE(10'h2C,16'h0)" in text             # bt_mode_sel=0 在 0x2C
+    assert "force `ENV_RF.d_bt_lp_iddq=16'h0;" in text   # J=iddq RO → force
 
     # A=0,C=1 → 0x2 ；A=0,C=0 → 0x0
-    for c, expect in [(1, "16'h0002"), (0, "16'h0000")]:
+    for c, expect in [(1, "16'h2"), (0, "16'h0")]:
         v = V.TestVector(0, {"A": 0, "B": 0, "C": c, "J": 0}, 0, 1)
         ls, _ = W._build_drive_lines(v, bindings, used)
-        assert "`RF_WRITE(10'h02D, %s)" % expect in "\n".join(ls)
+        assert "`RF_WRITE(10'h2D,%s)" % expect in "\n".join(ls)
 
 
 # ───────────── 期望值求值正确 + 标签 ─────────────
@@ -89,8 +89,8 @@ def test_full_build_reserve(wb):
     assert res["summary"]["n_generated"] == 1
     assert res["summary"]["n_unresolved_signals"] == 0
     text = generator.render(res)
-    assert "106_T0" in text
-    assert "`ENV_RF.d_logic_bt_lp_reserve ==" in text
+    assert "assert_106_T0:" in text
+    assert "`ENV_RF.d_logic_bt_lp_reserve==" in text
 
 
 def test_lna_agc_mux_3bit(wb):
@@ -98,12 +98,12 @@ def test_lna_agc_mux_3bit(wb):
     res = generator.build(wb, opts)
     assert res["summary"]["n_generated"] == 1
     text = generator.render(res)
-    assert "108_T0" in text
+    assert "assert_108_T0:" in text
     # 输出 3 位 → 期望值用 3'bxxx
-    assert "`ENV_RF.d_logic_bt_lp_lna_agc[2:0] == 3'b" in text
+    assert "`ENV_RF.d_logic_bt_lp_lna_agc[2:0]==3'b" in text
     # lna_agc_line 是 RO(DIG PIN Y) → force；lna_agc_local 是 RW → RF_WRITE
     assert "force `ENV_RF.d_bt_lp_lna_agc_line" in text
-    assert "`RF_WRITE(10'h032" in text
+    assert "`RF_WRITE(10'h32," in text
 
 
 def test_ls_passthrough_name(wb):
@@ -111,8 +111,8 @@ def test_ls_passthrough_name(wb):
     res = generator.build(wb, opts)
     text = generator.render(res)
     # ls 信号输出名无 d_logic_ 前缀，原样
-    assert "`ENV_RF.d_en_refbuf ==" in text
-    assert "50_T0" in text
+    assert "`ENV_RF.d_en_refbuf==" in text
+    assert "assert_50_T0:" in text
 
 
 # ───────────── owner 筛选 ─────────────
@@ -133,8 +133,8 @@ def test_negative_cases(wb):
     res = generator.build(wb, opts)
     assert res["summary"]["n_negative"] == 1
     text = generator.render(res)
-    assert "_NEG" in text
-    assert "故意填错" in text
+    # 负向用例顺序编号(无 _NEG 后缀，对齐真实 VBA)；功能 1 条 + 负向 1 条 → 2 个断言标号
+    assert text.count("assert (`ENV_RF.d_logic_bt_lp_reserve==") >= 2
 
 
 # ───────────── UVM 宏正确性（uvm_info 是宏，uvm_report_info 是函数不能加反引号）─────────────

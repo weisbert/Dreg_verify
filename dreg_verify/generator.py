@@ -142,6 +142,8 @@ def build(wb, opts):
         if _neg_enabled_for(sig, opts):
             vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
                                    fixed_value=opts.neg_value)
+            for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
+                v.index = i
 
         lines, stats = W.render_signal_block(sig, bindings, vecs, meta)
         blocks.append((lines, stats))

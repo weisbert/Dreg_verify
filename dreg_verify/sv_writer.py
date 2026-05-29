@@ -18,28 +18,28 @@ UVM 消息字符串集中在下方常量，按需调整以贴合你们的脚手�
 
 from . import expr as E
 
-# ───────────────────────────── 可调脚手架常量 ─────────────────────────────
-ENV = "ENV_RF"          # 寄存器环境宏前缀（`ENV_RF.xxx）
-RF_WRITE = "RF_WRITE"   # 寄存器写宏名
-INDENT = "  "
-ADDR_WIDTH_HEX = 10     # RF_WRITE 地址用 10'h
-DATA_WIDTH_HEX = 16     # 数据/force 用 16'h
-# 对齐 for_test 模板：用函数式 uvm_report_info/uvm_report_error(不带反引号)，消息走 $sformatf
-UVM_INFO = "uvm_report_info"     # 函数：uvm_report_info(id, msg, verbosity)
-UVM_ERROR = "uvm_report_error"   # 函数：uvm_report_error(id, msg, verbosity)
-UVM_MSG_ID = "write assert rf_test"   # 消息 id 字段（for_test 用此串）
+# ── Scaffolding constants (tweak to match your environment). Generated .sv is ASCII-only. ──
+ENV = "ENV_RF"          # register env macro prefix: `ENV_RF.xxx
+RF_WRITE = "RF_WRITE"   # register-write macro name
+BODY_INDENT = "    "    # indent inside assert begin/end blocks (4 spaces)
+ADDR_WIDTH_HEX = 10     # RF_WRITE address width: 10'h
+DATA_WIDTH_HEX = 16     # data / force width: 16'h
+UVM_INFO = "uvm_report_info"     # function: uvm_report_info(id, msg, verbosity)
+UVM_ERROR = "uvm_report_error"   # function: uvm_report_error(id, msg, verbosity)
+DRIVE_ID = "rf_test"                  # uvm id for input-drive messages
+ASSERT_ID = "write assert rf_test"    # uvm id for assert messages
+DRIVE_WIRE_MSG = "input wire name:%s, wire data:%0h"
+DRIVE_REG_MSG = "input reg addr:%0h, reg data:%0h"
+ASSERT_MSG = "assert_%s: %s, sim out:0x%0h, you set:0x%0h"
 
 
-# ───────────────────────────── 值格式化 ─────────────────────────────
+# ───────────────────────────── 值格式化（最小位数、大写，不补零） ─────────────────────────────
 def fmt_hex(value, hex_width=DATA_WIDTH_HEX):
-    bits = (hex_width)
-    hexdigits = (bits + 3) // 4
-    return "%d'h%0*X" % (bits, hexdigits, value & E.mask(bits))
+    return "%d'h%X" % (hex_width, value & E.mask(hex_width))
 
 
 def fmt_addr(addr):
-    hexdigits = (ADDR_WIDTH_HEX + 3) // 4
-    return "%d'h%0*X" % (ADDR_WIDTH_HEX, hexdigits, addr & E.mask(ADDR_WIDTH_HEX))
+    return "%d'h%X" % (ADDR_WIDTH_HEX, addr & E.mask(ADDR_WIDTH_HEX))
 
 
 def fmt_bin(value, width):
@@ -105,35 +105,28 @@ def compute_drives(vec, bindings, used_vars):
     return forces, writes, unresolved
 
 
-# ───────────────────────────── 驱动行 ─────────────────────────────
+# ───────────────────────────── 驱动行（朴素格式，对齐真实 VBA 输出，纯 ASCII） ─────────────────────────────
 def _build_drive_lines(vec, bindings, used_vars):
-    """
-    根据向量为本 tc 生成驱动语句行 + 诊断。
-    返回 (lines:list[str], unresolved:list[str])
-    """
+    """返回 (lines, unresolved_strs)。lines 为顶格的 force/`RF_WRITE/uvm_report_info 语句。"""
     lines = []
     forces, writes, unresolved = compute_drives(vec, bindings, used_vars)
 
     for (ltr, base, note) in unresolved:
-        lines.append("%s// TODO 未解析输入 %s=%s（%s），请核对名称/类型/地址"
-                     % (INDENT, ltr, base, note))
+        lines.append("// TODO: unresolved input %s=%s -- check name/type/addr" % (ltr, base))
 
-    # RO：逐个 force（force 字面量按 wire 位宽自适应，>16bit 不截断）
+    # RO -> force wire（force 字面量按 wire 位宽自适应，>16bit 不截断）
     for f in forces:
-        lines.append("%sforce `%s.%s = %s;   // %s (%s, 位宽%d)"
-                     % (INDENT, ENV, f["wire"], f["hex"], f["base"], f["src"], f["width"]))
-        lines.append('%s%s("%s", "drive %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_INFO, UVM_MSG_ID, f["wire"], f["hex"]))
+        lines.append("force `%s.%s=%s;" % (ENV, f["wire"], f["hex"]))
+        lines.append('%s("%s",$sformatf("%s","%s", %s),UVM_LOW);'
+                     % (UVM_INFO, DRIVE_ID, DRIVE_WIRE_MSG, f["wire"], f["hex"]))
 
-    # RW：同地址合并成一条 RF_WRITE
+    # RW -> 同地址合并成一条 `RF_WRITE
     for w in writes:
-        desc = ", ".join("%s<<%d=%s" % (fl["base"], fl["lsb"], fl["hex"]) for fl in w["fields"])
-        lines.append("%s`%s(%s, %s);   // %s"
-                     % (INDENT, RF_WRITE, w["addr"], w["hex"], desc))
-        lines.append('%s%s("%s", "RF_WRITE %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_INFO, UVM_MSG_ID, w["addr"], w["hex"]))
+        lines.append("`%s(%s,%s);" % (RF_WRITE, w["addr"], w["hex"]))
+        lines.append('%s("%s",$sformatf("%s",%s, %s),UVM_LOW);'
+                     % (UVM_INFO, DRIVE_ID, DRIVE_REG_MSG, w["addr"], w["hex"]))
 
-    unresolved_strs = ["%s(%s): %s" % (l, b, n) for (l, b, n) in unresolved]
+    unresolved_strs = ["%s=%s" % (l, b) for (l, b, n) in unresolved]   # ASCII only(中文诊断走 CLI)
     return lines, unresolved_strs
 
 
@@ -149,52 +142,34 @@ def render_signal_block(sig, bindings, vectors, meta):
     lines = []
     used_vars = E.collect_vars(E.parse(sig.expr))
     aid = sig.assert_id or "X"
+    lhs = "`%s.%s" % (ENV, sig.out_name)
 
-    lines.append("// " + "─" * 70)
-    lines.append("// 信号 %s   (assert_id=%s, owner=%s, type=%s, top_output=%s, Excel行=%s)"
-                 % (sig.out_name, aid, sig.owner, sig.suffix, sig.top_output, sig.row))
-    lines.append("//   表达式: %s" % sig.expr)
-    in_desc = ", ".join("%s=%s[%d]%s" % (
-        ltr, bindings[ltr].base, bindings[ltr].width,
-        "" if bindings[ltr].resolved else "(?未解析)")
-        for ltr in used_vars if ltr in bindings)
-    lines.append("//   输入: %s" % in_desc)
-    extra = ""
-    if meta.get("truncated"):
-        extra += "  ⚠已截断(丢弃%d个计划组合)" % meta["dropped"]
-    if meta.get("deduped"):
-        extra += "  (去重%d)" % meta["deduped"]
-    lines.append("//   控制位=%s  数据位=%s  向量数=%d%s"
-                 % (meta.get("control"), meta.get("data"), len(vectors), extra))
-    if meta.get("missing_vars"):
-        lines.append("//   ⚠ 表达式引用但 logic 行无对应输入列: %s" % meta["missing_vars"])
+    # 单行 ASCII 注释标信号名（朴素；如需零注释可删此行）
+    lines.append("// %s" % sig.out_name)
 
     block_unresolved = set()
     n_neg = 0
     for vec in vectors:
-        tag = "T%d%s" % (vec.index, "_NEG" if vec.is_negative else "")
-        lines.append("%s// --- %s ---%s" % (INDENT, tag,
-                     "  " + vec.note if vec.is_negative else ""))
         drive, unresolved = _build_drive_lines(vec, bindings, used_vars)
         lines.extend(drive)
         for u in unresolved:
             block_unresolved.add(u)
         if vec.is_negative:
             n_neg += 1
-        lines.append("%s#1ps;" % INDENT)
+        lines.append("#1ps;")
         exp = fmt_bin(vec.asserted_value, vec.exp_width)
-        aid_str = "%s_%s" % (aid, tag)              # 如 160_T0 / 160_T0_NEG
-        lhs = "`%s.%s" % (ENV, sig.out_name)
-        msg = ('$sformatf("assert_%%s: %%s, sim out:0x%%0h, you set:0x%%0h", '
-               '"%s", "%s", %s, %s)' % (aid_str, sig.out_name, lhs, exp))
-        # 对齐 for_test：assert(cond) begin uvm_report_info(..) end else begin uvm_report_error(..) end
-        lines.append("%sassert (%s == %s) begin" % (INDENT, lhs, exp))
-        lines.append('%s%s%s("%s", %s, UVM_LOW);' % (INDENT, INDENT, UVM_INFO, UVM_MSG_ID, msg))
-        lines.append("%send" % INDENT)
-        lines.append("%selse begin" % INDENT)
-        lines.append('%s%s%s("%s", %s, UVM_LOW);' % (INDENT, INDENT, UVM_ERROR, UVM_MSG_ID, msg))
-        lines.append("%send" % INDENT)
-    lines.append("")
+        aid_str = "%s_T%d" % (aid, vec.index)        # e.g. 8_T0
+        lines.append("assert_%s:" % aid_str)
+        lines.append("")
+        msg = ('$sformatf("%s","%s","%s",%s, %s)'
+               % (ASSERT_MSG, aid_str, sig.out_name, lhs, exp))
+        lines.append("assert (%s==%s)begin" % (lhs, exp))
+        lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_INFO, ASSERT_ID, msg))
+        lines.append("end")
+        lines.append("else begin")
+        lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_ERROR, ASSERT_ID, msg))
+        lines.append("end")
+        lines.append("")
 
     stats = {
         "out_name": sig.out_name, "assert_id": aid, "owner": sig.owner,
@@ -212,27 +187,14 @@ def render_file(blocks, header_info=None):
     header_info: dict 放到文件头注释
     返回完整文本。
     """
-    out = []
-    out.append("// " + "=" * 70)
-    out.append("// wr_rf_tc.sv — 由 Dreg_verify 自动生成，请勿手改（改 Excel/参数后重生成）")
-    if header_info:
-        for k, v in header_info.items():
-            out.append("// %s: %s" % (k, v))
-    out.append("// 说明: 以下为过程语句体，置入对应 UVM sequence/test 的 task 内执行。")
-    out.append("//   ENV_RF / RF_WRITE / uvm_* 为固定脚手架宏。")
-    out.append("// " + "=" * 70)
-    out.append("")
+    out = ["// auto-generated by Dreg_verify -- do not edit", ""]
     total_unresolved = []
     for lines, stats in blocks:
         out.extend(lines)
         if stats["unresolved"]:
             total_unresolved.append((stats["out_name"], stats["unresolved"]))
     if total_unresolved:
-        out.append("// " + "=" * 70)
-        out.append("// ⚠ 未解析输入汇总（需人工核对名称/类型/地址，或用 --force-signals/--rfwrite-signals）:")
+        out.append("// unresolved inputs (check name/type/addr or use --force-signals/--rfwrite-signals):")
         for name, us in total_unresolved:
-            out.append("//   %s:" % name)
-            for u in us:
-                out.append("//     - %s" % u)
-        out.append("// " + "=" * 70)
+            out.append("//   %s: %s" % (name, "; ".join(us)))
     return "\n".join(out) + "\n"
