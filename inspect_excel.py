@@ -441,7 +441,44 @@ def _header_map_line(ws, args, header_row=2):
     return "--- 列映射(第%d行表头) --- %s" % (header_row, " | ".join(parts))
 
 
-def _dump_matching_rows(out, ws, sn, keywords, args):
+def _formula_rows(wbf, sheet_name, cap=20000):
+    """从 data_only=False 的工作簿读某页公式, 返回 {行号: row tuple}; wbf 为 None→None。"""
+    if wbf is None:
+        return None
+    try:
+        wsf = wbf[sheet_name]
+    except KeyError:
+        return None
+    d = {}
+    for ri, row in enumerate(wsf.iter_rows(min_row=1, max_row=min(wsf.max_row or 0, cap),
+                                           values_only=True), start=1):
+        d[ri] = row
+    return d
+
+
+def _formula_suffix(ri, c, fdict, args, no_trunc=False):
+    """该格若是公式(data_only=False 读到以 = 开头)→ 返回 ' {公式原文}', 否则 ''。
+    专为诊断 #VALUE! 这类公式错误: 缓存值显示 #VALUE!, 公式揭示它到底在算什么/引用了谁。"""
+    if fdict is None:
+        return ""
+    frow = fdict.get(ri)
+    fv = frow[c] if (frow is not None and c < len(frow)) else None
+    if isinstance(fv, str) and fv.startswith("="):
+        return " {%s}" % cell_str(fv, args.maxlen, no_trunc)
+    return ""
+
+
+def _render_cell(letter, raw, ri, c, fdict, args, no_trunc=False):
+    """渲染 '字母=值{公式}'; 值空且无公式→返回 None(跳过)。
+    注意: 纯公式格在 data_only=True 下缓存值可能为 None, 但只要有公式仍应输出。"""
+    suf = _formula_suffix(ri, c, fdict, args, no_trunc)
+    empty = raw is None or (isinstance(raw, str) and raw.strip() == "")
+    if empty and not suf:
+        return None
+    return "%s=%s%s" % (letter, cell_str(raw, args.maxlen, no_trunc), suf)
+
+
+def _dump_matching_rows(out, ws, sn, keywords, args, fdict=None):
     """普通页(regmap/tmm/mux/…)：抠出任意单元格含关键词的行(含目标信号及其各输入)。"""
     out.append("")
     out.append("=" * 70)
@@ -459,10 +496,9 @@ def _dump_matching_rows(out, ws, sn, keywords, args):
         if _row_contains(row, keywords):
             cells = []
             for c in range(len(row)):
-                raw = row[c]
-                if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-                    continue
-                cells.append("%s=%s" % (get_column_letter(c + 1), cell_str(raw, args.maxlen)))
+                cell = _render_cell(get_column_letter(c + 1), row[c], ri, c, fdict, args)
+                if cell is not None:
+                    cells.append(cell)
             out.append("[row %d] %s" % (ri, " | ".join(cells)))
             matched += 1
             if matched >= args.find_max:
@@ -471,7 +507,7 @@ def _dump_matching_rows(out, ws, sn, keywords, args):
     out.append("(本页命中 %d 行)" % matched)
 
 
-def _dump_fortest_blocks(out, ws, sn, keywords, args):
+def _dump_fortest_blocks(out, ws, sn, keywords, args, fdict=None):
     """块状页(for_test / *_tc)：A 列=输出名，每个输出一个行块；T0..T63 横向铺在右侧。
     用 A 列(去位宽基名)变化界定块边界；A 命中目标关键词的块整块 dump(含横向所有列)。"""
     out.append("")
@@ -510,16 +546,15 @@ def _dump_fortest_blocks(out, ws, sn, keywords, args):
             ri2, row2 = rows[k]
             cells = []
             for c in range(len(row2)):
-                raw = row2[c]
-                if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-                    continue
-                cells.append("%s=%s" % (get_column_letter(c + 1), cell_str(raw, args.maxlen)))
+                cell = _render_cell(get_column_letter(c + 1), row2[c], ri2, c, fdict, args)
+                if cell is not None:
+                    cells.append(cell)
             if cells:
                 out.append("[row %d] %s" % (ri2, " | ".join(cells)))
         dumped += 1
     if dumped == 0:
         out.append("⚠ 未找到 A 列等于目标信号的块；退化为'含关键词的行':")
-        _dump_matching_rows(out, ws, sn, keywords, args)
+        _dump_matching_rows(out, ws, sn, keywords, args, fdict)
     else:
         out.append("(共 dump %d 个块)" % dumped)
 
@@ -531,6 +566,14 @@ def _is_block_sheet(sheet_name):
 
 def run_signal(args):
     wb = openpyxl.load_workbook(args.excel, data_only=True, read_only=True)
+    # 第二遍按 data_only=False 读"公式"——诊断 #VALUE! 等公式错误必须看到公式本身。
+    wbf = None
+    if not args.no_formulas:
+        try:
+            wbf = openpyxl.load_workbook(args.excel, data_only=False, read_only=True)
+        except Exception as ex:   # noqa: BLE001
+            print("⚠ 读取公式失败(退化为只读缓存值): %s" % ex)
+            wbf = None
     all_sheets = wb.sheetnames
     targets = [t.strip() for t in args.signal.split(",") if t.strip()]
     base_kw = {_strip_sig(t) for t in targets} | {t.lower() for t in targets}
@@ -541,6 +584,8 @@ def run_signal(args):
     out.append("文件: %s" % os.path.basename(args.excel))
     out.append("目标信号/关键词: %s" % targets)
     out.append("全部 sheet (%d): %s" % (len(all_sheets), all_sheets))
+    out.append("公式同时导出: %s (公式格后附 {=...}; 用于查 #VALUE! 等)"
+               % ("是" if wbf is not None else "否"))
 
     # ── Pass 1：logic 页定位目标行，收集其输入名做 1 级展开(抓 testmode 等) ──
     logic_name = next((s for s in all_sheets if s.lower() == "logic"), None)
@@ -548,6 +593,7 @@ def run_signal(args):
     logic_hits = []
     if logic_name:
         ws = wb[logic_name]
+        flogic = _formula_rows(wbf, logic_name)
         header = None
         for ri, row in enumerate(ws.iter_rows(min_row=1, values_only=True), start=1):
             if ri == 2:
@@ -572,12 +618,15 @@ def run_signal(args):
             out.append("[logic row %d]" % ri)
             for c in range(len(row)):
                 raw = row[c]
-                if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-                    continue
                 letter = get_column_letter(c + 1)
-                hname = cell_str(header[c] if header and c < len(header) else None, 30)
                 no_trunc = letter in ("L", "M")
-                out.append("    %-3s [%s]: %s" % (letter, hname, cell_str(raw, args.maxlen, no_trunc)))
+                suf = _formula_suffix(ri, c, flogic, args, no_trunc)
+                empty = raw is None or (isinstance(raw, str) and raw.strip() == "")
+                if empty and not suf:
+                    continue
+                hname = cell_str(header[c] if header and c < len(header) else None, 30)
+                out.append("    %-3s [%s]: %s%s"
+                           % (letter, hname, cell_str(raw, args.maxlen, no_trunc), suf))
         out.append("")
         out.append("展开后的关键词集合(目标 + 其 logic 输入, 用于在其它页定位 testmode 等):")
         out.append("  %s" % sorted(expanded))
@@ -592,12 +641,15 @@ def run_signal(args):
         if logic_name and sn == logic_name:
             continue
         ws = wb[sn]
+        fdict = _formula_rows(wbf, sn)
         if _is_block_sheet(sn):
-            _dump_fortest_blocks(out, ws, sn, expanded, args)
+            _dump_fortest_blocks(out, ws, sn, expanded, args, fdict)
         else:
-            _dump_matching_rows(out, ws, sn, expanded, args)
+            _dump_matching_rows(out, ws, sn, expanded, args, fdict)
 
     wb.close()
+    if wbf is not None:
+        wbf.close()
     out_path = args.out if args.out else os.path.splitext(args.excel)[0] + "_signal.txt"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
@@ -634,6 +686,9 @@ def main():
                          "设 0 则只抠目标信号本身。")
     ap.add_argument("--block-tail", type=int, default=120,
                     help="--signal 抠 for_test 类整块时, 块头后最多带多少行(默认 120)。")
+    ap.add_argument("--no-formulas", action="store_true",
+                    help="--signal 默认会再读一遍公式(data_only=False), 在公式格后附 {=原文}, "
+                         "专为查 #VALUE! 等公式错误。加此开关则只读缓存值(快, 但看不到公式)。")
     args = ap.parse_args()
 
     if not os.path.isfile(args.excel):
