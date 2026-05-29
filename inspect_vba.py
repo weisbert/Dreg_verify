@@ -42,20 +42,28 @@ def extract_with_oletools(path):
     try:
         from oletools.olevba import VBA_Parser
     except Exception:  # noqa: BLE001
+        return None                       # 未装 oletools → 触发纯 Python 兜底
+    vp = None
+    try:
+        vp = VBA_Parser(path)
+        if not vp.detect_vba_macros():
+            return {}                     # 解析成功但确无宏
+        mods = {}
+        for (_fname, _spath, vba_filename, vba_code) in vp.extract_macros():
+            name = vba_filename or ("module_%d" % len(mods))
+            if name in mods:              # 同名追加
+                name = "%s_%d" % (name, len(mods))
+            mods[name] = vba_code or ""
+        return mods
+    except Exception as ex:               # noqa: BLE001  oletools 解析失败 → 回退兜底
+        print("(oletools 解析出错：%s；改用纯 Python 兜底)" % ex)
         return None
-    vp = VBA_Parser(path)
-    if not vp.detect_vba_macros():
-        vp.close()
-        return {}
-    mods = {}
-    for (_fname, _spath, vba_filename, vba_code) in vp.extract_macros():
-        name = vba_filename or ("module_%d" % len(mods))
-        # 同名追加
-        if name in mods:
-            name = "%s_%d" % (name, len(mods))
-        mods[name] = vba_code or ""
-    vp.close()
-    return mods
+    finally:
+        if vp is not None:
+            try:
+                vp.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ───────────────────────────── 抽取：纯 Python 兜底 ─────────────────────────────
@@ -67,6 +75,9 @@ def _parse_ole_streams(data):
     """解析 OLE2 复合文档(MS-CFB)，返回 {流名: bytes}。"""
     if data[:8] != b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
         raise ValueError("不是 OLE2 复合文档")
+    if len(data) < 512:
+        raise ValueError("OLE2 头部不足 512 字节（文件损坏或过短）")
+    major = struct.unpack_from("<H", data, 26)[0]   # 主版本：v3 时 Stream Size 高 32 位须忽略
     sector_size = 1 << struct.unpack_from("<H", data, 30)[0]
     mini_sector_size = 1 << struct.unpack_from("<H", data, 32)[0]
     num_fat = struct.unpack_from("<I", data, 44)[0]
@@ -84,7 +95,7 @@ def _parse_ole_streams(data):
     # DIFAT → FAT 扇区号列表
     difat = list(struct.unpack_from("<109I", data, 76))
     sid, cnt = first_difat, 0
-    while sid not in (ENDOFCHAIN, FREESECT) and cnt < num_difat and sect_off(sid) < len(data):
+    while sid not in (ENDOFCHAIN, FREESECT) and cnt < num_difat and sect_off(sid) + sector_size <= len(data):
         vals = struct.unpack_from("<%dI" % per, data, sect_off(sid))
         difat.extend(vals[:-1])
         sid = vals[-1]
@@ -118,13 +129,16 @@ def _parse_ole_streams(data):
         name = ent[:max(0, nlen - 2)].decode("utf-16-le", "replace")
         start = struct.unpack_from("<I", ent, 116)[0]
         size = struct.unpack_from("<Q", ent, 120)[0]
+        if major == 3:                       # v3 须忽略高 32 位（旧写入器可能遗留脏值）
+            size &= 0xFFFFFFFF
         entries.append({"name": name, "type": otype, "start": start, "size": size})
 
     roots = [e for e in entries if e["type"] == 5]
     mini_stream = read_chain(roots[0]["start"])[:roots[0]["size"]] if roots else b""
 
     minifat, msid, cnt = [], first_minifat, 0
-    while msid not in (ENDOFCHAIN, FREESECT) and cnt < num_minifat and msid < len(fat):
+    while (msid not in (ENDOFCHAIN, FREESECT) and cnt < num_minifat
+           and msid < len(fat) and sect_off(msid) + sector_size <= len(data)):
         minifat.extend(struct.unpack_from("<%dI" % per, data, sect_off(msid)))
         msid = fat[msid]
         cnt += 1
@@ -159,6 +173,8 @@ def _ovba_decompress(data, start):
     while i + 1 < n:
         header = struct.unpack_from("<H", data, i)[0]
         i += 2
+        if ((header >> 12) & 0x7) != 0b011:      # CompressedChunkSignature 必须为 0b011
+            raise ValueError("bad CompressedChunkSignature")
         chunk_size = (header & 0x0FFF) + 3       # 含 2 字节头
         flag = (header >> 15) & 1
         chunk_end = min(i + chunk_size - 2, n)
@@ -176,8 +192,8 @@ def _ovba_decompress(data, start):
                 if not (flagbyte >> bit) & 1:    # 字面量
                     out.append(data[i])
                     i += 1
-                else:                            # CopyToken
-                    if i + 1 >= chunk_end + 1 or i + 2 > n:
+                else:                            # CopyToken（2 字节，必须完整落在本 chunk 内）
+                    if i + 2 > chunk_end:
                         i = chunk_end
                         break
                     token = struct.unpack_from("<H", data, i)[0]
@@ -196,8 +212,34 @@ def _ovba_decompress(data, start):
     return bytes(out)
 
 
+def _codepage_to_encoding(cp):
+    import codecs
+    name = {65001: "utf-8", 1200: "utf-16-le"}.get(cp, "cp%d" % cp)
+    try:
+        codecs.lookup(name)
+        return name
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _detect_codepage(streams):
+    """从 dir 流读 PROJECTCODEPAGE(Id=0x0003, Size=2, CodePage UInt16)，返回 Python 编码名。"""
+    dir_raw = next((v for k, v in streams.items() if k.lower() == "dir"), None)
+    if not dir_raw:
+        return None
+    for pos in (m.start() for m in re.finditer(b"\x01", dir_raw)):
+        try:
+            d = _ovba_decompress(dir_raw, pos)
+        except Exception:  # noqa: BLE001
+            continue
+        idx = d.find(b"\x03\x00\x02\x00\x00\x00")     # PROJECTCODEPAGE 记录前缀
+        if idx >= 0 and idx + 8 <= len(d):
+            return _codepage_to_encoding(struct.unpack_from("<H", d, idx + 6)[0])
+    return None
+
+
 def extract_pure_python(path):
-    """无 oletools 时的兜底：解 zip → vbaProject.bin → OLE2 流 → 扫描 0x01 解压模块源码。"""
+    """无 oletools 时的兜底：解 zip → vbaProject.bin → OLE2 流 → 扫 0x01 解压模块源码。"""
     if not zipfile.is_zipfile(path):
         raise SystemExit("纯 Python 兜底仅支持 .xlsm/.xlsb(zip 容器)。.xls 请装 oletools。")
     with zipfile.ZipFile(path) as z:
@@ -205,26 +247,47 @@ def extract_pure_python(path):
         if not binname:
             return {}
         vba_bin = z.read(binname)
-    streams = _parse_ole_streams(vba_bin)
+    try:
+        streams = _parse_ole_streams(vba_bin)
+    except (ValueError, struct.error, IndexError) as ex:
+        raise SystemExit("vbaProject.bin 解析失败（可能损坏或为加密工程）：%s；建议 pip install oletools 后重试。" % ex)
+
+    codepage = _detect_codepage(streams)
+    encodings = [e for e in (codepage, "utf-8", "cp936", "latin-1") if e]
+    print("(纯 Python 兜底：源码代码页=%s；中文解码可能不完美，需精确请 pip install oletools)"
+          % (codepage or "未检出, 试 utf-8/cp936"))
+
+    def _decode(b):
+        for enc in encodings:
+            try:
+                return b.decode(enc)
+            except Exception:  # noqa: BLE001
+                continue
+        return b.decode("latin-1", "replace")
+
     mods = {}
     for sname, content in streams.items():
         if sname.lower() in ("dir", "_vba_project", "project", "projectwm"):
             continue
-        # 模块源码是压缩的，前面有 PerformanceCache；扫描每个 0x01 试解压，命中含 Attribute VB_ 的即源码
+        # 扫描所有 0x01 试解压；要求结果以 'Attribute VB_' 开头；多候选取解压最长者(最可能是完整源码)
+        best = None
         for pos in (m.start() for m in re.finditer(b"\x01", content)):
             try:
                 text = _ovba_decompress(content, pos)
             except Exception:  # noqa: BLE001
                 continue
-            if b"Attribute VB_" in text[:512] or b"Attribute VB_Name" in text:
-                try:
-                    src = text.decode("latin-1")
-                except Exception:  # noqa: BLE001
-                    continue
-                m = re.search(r'Attribute VB_Name = "([^"]+)"', src)
-                name = m.group(1) if m else sname
-                mods[name] = src
-                break
+            if text.lstrip()[:13] != b"Attribute VB_":
+                continue
+            if best is None or len(text) > len(best):
+                best = text
+        if best is None:
+            continue
+        src = _decode(best)
+        m = re.search(r'Attribute VB_Name = "([^"]+)"', src)
+        name = m.group(1) if m else sname
+        if name in mods:
+            name = "%s_%d" % (name, len(mods))
+        mods[name] = src
     return mods
 
 
@@ -264,13 +327,15 @@ def do_find(mods, keywords, context):
                 out.append("%s %5d | %s" % (mark, j + 1, lines[j]))
             out.append("  ----")
         total += len(hits)
-    out.insert(0, "关键词定位：共命中 %d 行（跨 %d 个模块）" % (total, sum(1 for _ in out if _.startswith("==== 模块"))))
-    return "\n".join(out)
+    nmods = sum(1 for ln in out if ln.startswith("==== 模块"))
+    out.insert(0, "关键词定位：共命中 %d 行（跨 %d 个模块）" % (total, nmods))
+    return "\n".join(out), total
 
 
 def do_dump(mods, only):
     out = []
-    names = [n for n in sorted(mods) if (not only or n in only)]
+    norm = {o.strip().lower() for o in only} if only else None
+    names = [n for n in sorted(mods) if (not norm or n.strip().lower() in norm)]
     for name in names:
         out.append("=" * 70)
         out.append("==== 模块 %s （%d 字符）====" % (name, len(mods[name])))
@@ -309,11 +374,22 @@ def main():
 
     base = os.path.splitext(args.path)[0]
     if args.find:
-        text = do_find(mods, args.find, args.context)
+        text, total = do_find(mods, args.find, args.context)
+        if total == 0:
+            print("未命中任何关键词「%s」，未生成文件。可用 --list 查看模块名。" % args.find)
+            return
         out_path = args.out or (base + "_vba_find.txt")
     else:
-        only = set(s.strip() for s in args.modules.split(",")) if args.modules else None
+        only = set(s.strip() for s in args.modules.split(",") if s.strip()) if args.modules else None
+        if only:
+            have = {n.strip().lower() for n in mods}
+            missing = [o for o in only if o.strip().lower() not in have]
+            if missing:
+                print("⚠ 未找到模块: %s（可用: %s）" % (", ".join(missing), ", ".join(sorted(mods))))
         text = do_dump(mods, only)
+        if not text.strip():
+            print("没有匹配的模块可导出，未生成文件。")
+            return
         out_path = args.out or (base + "_vba.txt")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(text + "\n")
