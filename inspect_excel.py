@@ -84,11 +84,11 @@ def cell_str(value, maxlen=80, no_trunc=False):
     return s
 
 
-def read_rows(ws, max_row):
+def read_rows(ws, max_row, cap):
     """返回 [[v,v,...], ...]，按行；超出 cap 截断。"""
-    cap = min(max_row or 0, PROFILE_SCAN_CAP)
+    upto = min(max_row or 0, cap)
     rows = []
-    for r in ws.iter_rows(min_row=1, max_row=cap, values_only=True):
+    for r in ws.iter_rows(min_row=1, max_row=upto, values_only=True):
         rows.append(list(r))
     return rows
 
@@ -134,7 +134,8 @@ def render_row_line(rows, ri, max_col, sheet_name, args):
 def dump_sheet(out, ws, sheet_name, args):
     max_row = ws.max_row
     max_col = ws.max_column
-    rows = read_rows(ws, max_row)
+    cap = 20000 if args.find else PROFILE_SCAN_CAP
+    rows = read_rows(ws, max_row, cap)
     is_logic = sheet_name.lower() == "logic"
 
     out.append("=" * 70)
@@ -156,6 +157,23 @@ def dump_sheet(out, ws, sheet_name, args):
                            header[c] if c < len(header) else None, args)
         line.append("%s=%s" % (letter, cell_str(h, args.maxlen)))
     out.append(" | ".join(line))
+
+    # 关键词过滤模式：只打印"任意单元格含关键词"的行（跨整页）
+    if args.find:
+        keywords = [k.strip().lower() for k in args.find.split(",") if k.strip()]
+        out.append("--- 匹配行 (关键词: %s) ---" % keywords)
+        matched = 0
+        for ri in range(len(rows)):
+            rowtext = " ".join("" if v is None else str(v)
+                               for v in rows[ri]).lower()
+            if any(k in rowtext for k in keywords):
+                out.append(render_row_line(rows, ri, max_col, sheet_name, args))
+                matched += 1
+                if matched >= args.find_max:
+                    out.append("... (达到每页上限 %d, 截断)" % args.find_max)
+                    break
+        out.append("(本页匹配 %d 行)" % matched)
+        return
 
     # 前几行原文（非精简模式才输出，帮我判断表头是否跨多行）
     if not args.compact:
@@ -243,6 +261,10 @@ def main():
     ap.add_argument("--anon-signals", action="store_true")
     ap.add_argument("--mask-owners", action="store_true")
     ap.add_argument("--maxlen", type=int, default=80)
+    ap.add_argument("--find", default=None,
+                    help="逗号分隔关键词; 跨整页只导出任意单元格含关键词的行")
+    ap.add_argument("--find-max", type=int, default=100,
+                    help="--find 时每页最多输出多少匹配行 (默认 100)")
     args = ap.parse_args()
 
     if not os.path.isfile(args.excel):
