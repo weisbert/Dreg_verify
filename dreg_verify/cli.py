@@ -177,6 +177,16 @@ DETAIL_COLS = [("R", "R"), ("signal", "信号(K)"), ("owner", "owner"), ("type",
                ("test", "用例"), ("neg", "负向"), ("expected", "断言期望值"),
                ("correct", "正确值(负向时)"), ("force", "force 驱动"),
                ("rfwrite", "RF_WRITE 驱动"), ("expr", "表达式"), ("note", "备注")]
+VERIF_COLS = [("R", "R"), ("signal", "信号(K)"), ("owner", "owner"), ("type", "类型"),
+              ("top", "top_output"), ("status_label", "可验证性"),
+              ("detail", "风险输入 / 原因"), ("out_net", "断言输出 net")]
+# 可验证性状态 → 给人看的标签 + 颜色等级(用于 HTML 高亮/CSV 文字)
+VERIF_STATUS = {
+    "clean":         ("✅ 可验证", "ok"),
+    "wire-fallback": ("⚠ 存疑(按名 force，elaboration 最易 CUVUNF)", "warn"),
+    "unresolved":    ("✗ 不可验证(输入未解析)", "bad"),
+    "parse-err":     ("✗ 表达式解析失败", "bad"),
+}
 
 
 def write_report(path, rep, excel):
@@ -198,7 +208,19 @@ def write_report(path, rep, excel):
         w.writerow([h for _k, h in DETAIL_COLS])
         for r in rep["detail"]:
             w.writerow([r.get(k, "") for k, _h in DETAIL_COLS])
-    return [detail_path, summary_path]
+    written = [detail_path, summary_path]
+    verif = rep.get("verifiability")
+    if verif and verif.get("signals"):
+        verif_path = base + "_verifiability.csv"
+        with open(verif_path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            w.writerow([h for _k, h in VERIF_COLS])
+            for r in verif["signals"]:
+                lbl = VERIF_STATUS.get(r.get("status", ""), (r.get("status", ""), ""))[0]
+                row = dict(r, status_label=lbl)
+                w.writerow([row.get(k, "") for k, _h in VERIF_COLS])
+        written.append(verif_path)
+    return written
 
 
 _REPORT_CSS = """
@@ -233,6 +255,10 @@ tr.neg{background:#fff3f3} tr.err{background:#ffe9e9}
 .tt td.drv{font-family:Consolas,monospace;font-size:11px;text-align:left;color:#555}
 .ttblock{margin-bottom:6px} .ex{color:#888} code{background:#f5f5f5;padding:0 3px}
 .empty{color:#999;padding:20px}
+.vstat{font-weight:600;white-space:nowrap}
+.vstat.ok{color:#1a7f37} .vstat.warn{color:#b26a00} .vstat.bad{color:#c00}
+.vsum{margin:10px 0;font-size:13px} .vsum b{margin-right:14px}
+tr.vrow.warn{background:#fff8ec} tr.vrow.bad{background:#ffecec}
 """
 
 _REPORT_JS = """
@@ -335,6 +361,37 @@ def _write_report_html(path, rep, excel):
                           "".join(hdr), "".join(body)))
         return "\n".join(out)
 
+    def verif_table(verif):
+        """④ 可验证性：逐信号健康度 + 风险输入说明（取代旧 GUI'覆盖诊断'按钮的整页 dump）。"""
+        if not verif or not verif.get("signals"):
+            return '<p class="empty">（无数据）</p>'
+        c = verif["counts"]
+        head = ('<p class="vsum">'
+                '<b class="vstat ok">✅ 可验证 %d</b>'
+                '<b class="vstat warn">⚠ 存疑(按名 force) %d</b>'
+                '<b class="vstat bad">✗ 不可验证 %d</b>'
+                '<b class="vstat bad">✗ 表达式错误 %d</b></p>'
+                '<p class="ex">⚠/✗ 的信号最可能在 elaboration 阶段 CUVUNF 失败：'
+                '"存疑"=表里查无、按信号名直接 force；"不可验证"=输入未能解析到 force/RF_WRITE。</p>'
+                % (c.get("clean", 0), c.get("wire-fallback", 0),
+                   c.get("unresolved", 0), c.get("parse-err", 0)))
+        th = "".join("<th>%s</th>" % esc(h) for _k, h in VERIF_COLS)
+        trs = []
+        for r in verif["signals"]:
+            lbl, lvl = VERIF_STATUS.get(r.get("status", ""), (r.get("status", ""), ""))
+            text = "%s %s %s" % (r.get("signal", ""), r.get("owner", ""), r.get("detail", ""))
+            cells = []
+            for k, _h in VERIF_COLS:
+                if k == "status_label":
+                    cells.append('<td><span class="vstat %s">%s</span></td>' % (lvl, esc(lbl)))
+                else:
+                    cells.append("<td>%s</td>" % esc(r.get(k, "")))
+            trs.append('<tr class="filt vrow %s"%s>%s</tr>'
+                       % (lvl, attr(r.get("signal", ""), r.get("owner", ""), False, text),
+                          "".join(cells)))
+        return head + ('<table class="full"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
+                       % (th, "".join(trs)))
+
     owners = sorted({(r.get("owner") or "") for r in rep["summary"] if r.get("owner")})
     owner_opts = '<option value="">全部 owner</option>' + "".join(
         '<option value="%s">%s</option>' % (esc(o), esc(o)) for o in owners)
@@ -358,17 +415,20 @@ def _write_report_html(path, rep, excel):
         '<button class="tabbtn active" data-tab="sum">① 汇总</button>'
         '<button class="tabbtn" data-tab="tt">② 真值表</button>'
         '<button class="tabbtn" data-tab="det">③ 明细</button>'
+        '<button class="tabbtn" data-tab="ver">④ 可验证性</button>'
         '</div></header>'
         '<main>'
         '<section id="sum" class="tab active">%s</section>'
         '<section id="tt" class="tab">%s</section>'
         '<section id="det" class="tab">%s</section>'
+        '<section id="ver" class="tab">%s</section>'
         '</main>'
     ) % (
         esc(os.path.basename(excel)), n_sig, n_tc, n_neg, owner_opts,
         flat_table(rep["summary"], SUMMARY_COLS, "srow", "sum", "sum"),
         truth_tables(rep.get("tables", [])),
         flat_table(rep["detail"], DETAIL_COLS, "drow", "full", "det"),
+        verif_table(rep.get("verifiability")),
     )
     doc = ('<!doctype html><html lang="zh"><head><meta charset="utf-8">'
            '<title>Dreg 测试用例报告</title><style>' + _REPORT_CSS + '</style></head><body>'
@@ -432,6 +492,11 @@ def main(argv=None):
         print("  信号 %d 个，用例 %d 条（负向 %d 条）"
               % (len(rep["summary"]), len(rep["detail"]),
                  sum(1 for r in rep["detail"] if r.get("neg") == "是")))
+        vc = rep.get("verifiability", {}).get("counts", {})
+        if vc:
+            print("  可验证性：可验证 %d / 存疑(按名force) %d / 不可验证 %d / 表达式错误 %d"
+                  % (vc.get("clean", 0), vc.get("wire-fallback", 0),
+                     vc.get("unresolved", 0), vc.get("parse-err", 0)))
         if args.out is None:
             return 0   # 只要报告
 

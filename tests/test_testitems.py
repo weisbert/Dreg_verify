@@ -344,8 +344,7 @@ def test_gui_neg_rebuild_keeps_name_and_wrong(qapp, wb, tmp_path_factory):
     """重建负向时保留用户对负向列的改名与手填错值(审查#2/#3)。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "g9")
     w._load_test_items(sig)
-    w.neg_which.setCurrentText("first")
-    w.on_ti_add_neg()                                  # 追加一条负向
+    w.on_ti_add_neg()                                  # 每条正向各追加一条负向
     neg_col = next(i for i, rd in enumerate(w._ti_rows) if rd.get("kind") == "neg")
     # 改名 + 手填错值
     ok, _ = w._ti_set_test_name(neg_col, "my_special_neg")
@@ -439,7 +438,6 @@ def test_gui_add_negative_appends_not_modifies(qapp, wb, tmp_path_factory):
     w._load_test_items(sig)
     n_pos = len(w._ti_rows)
     pos_snapshot = [(dict(rd["base_values"]), rd["expected"]) for rd in w._ti_rows]
-    w.neg_which.setCurrentText("all")
     w.on_ti_add_neg()
     pos = [rd for rd in w._ti_rows if rd.get("kind") != "neg"]
     neg = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
@@ -460,26 +458,20 @@ def test_gui_left_neg_adds_negatives(qapp, wb, tmp_path_factory):
     gui, w, sig = _reserve_window(tmp_path_factory, "g5")
     row = next(r for r in range(w.table.rowCount())
                if w._sig_of_row(r).out_name == "d_logic_bt_lp_reserve")
-    w.neg_which.setCurrentText("all")
     w.on_row_focus(row, gui.COL_K, -1, -1)
     n_pos = len(w._ti_rows)
     w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)
     pos = [rd for rd in w._ti_rows if rd.get("kind") != "neg"]
     neg = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
-    assert len(pos) == n_pos and len(neg) == n_pos       # all：每条正向各一负向
+    assert len(pos) == n_pos and len(neg) == n_pos       # 每条正向各一负向
     # 取消 → 该信号定制被整体撤销(纯自动，不留 override)
     w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Unchecked)
     assert "d_logic_bt_lp_reserve" not in w._customized
-    # first 模式：只追加 1 条负向
-    w.neg_which.setCurrentText("first")
-    w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)
-    assert sum(1 for rd in w._ti_rows if rd.get("kind") == "neg") == 1
 
 
 def test_gui_all_signals_negative(qapp, wb, tmp_path_factory):
     """'全部加负向' → 所有可见信号都拿到负向测试(满足 R 全部负向)。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "g6")
-    w.neg_which.setCurrentText("all")
     w.on_all_signals_neg(True)
     ov = w._vector_overrides()
     assert ov is not None
@@ -499,7 +491,6 @@ def test_gui_positive_only_strips_negatives(qapp, wb, tmp_path_factory):
     """#2: positive_only 把自定义负向向量从正向文件剔除。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "g4")
     w._load_test_items(sig)
-    w.neg_which.setCurrentText("all")
     w.on_ti_add_neg()
     name = "d_logic_bt_lp_reserve"
     ov_all = w._vector_overrides()
@@ -508,3 +499,134 @@ def test_gui_positive_only_strips_negatives(qapp, wb, tmp_path_factory):
     assert n_neg >= 1
     assert all(not v.is_negative for v in ov_pos[name])
     assert len(ov_pos[name]) == len(ov_all[name]) - n_neg
+
+
+# ───────────── 覆盖度（精简/全面/穷举 合一） ─────────────
+def test_gui_coverage_mapping(qapp, wb, tmp_path_factory):
+    """覆盖度下拉 → (mode, exhaustive)：精简=min, 全面=max, 穷举=max+exhaustive。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "cov1")
+    w.coverage.setCurrentText("精简"); assert w._coverage() == ("min", False)
+    w.coverage.setCurrentText("全面"); assert w._coverage() == ("max", False)
+    w.coverage.setCurrentText("穷举"); assert w._coverage() == ("max", True)
+
+
+def test_gui_coverage_live_update(qapp, wb, tmp_path_factory):
+    """切换覆盖度即时刷新'未自定义'信号的测试项；'全面'用例数 ≥ '精简'。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "cov2")
+    w.on_row_focus(next(r for r in range(w.table.rowCount())
+                        if w._sig_of_row(r).out_name == sig.out_name),
+                   gui.COL_K, -1, -1)
+    w.coverage.setCurrentText("精简"); n_min = len(w._ti_rows)
+    w.coverage.setCurrentText("全面"); n_max = len(w._ti_rows)
+    assert n_min >= 1 and n_max >= n_min          # 切换即时生效(无需重新点信号)
+
+
+def test_gui_coverage_keeps_customized(qapp, wb, tmp_path_factory):
+    """已自定义的信号：切换覆盖度不应被覆盖掉编辑。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "cov3")
+    w._load_test_items(sig)
+    w.ti_table.item(0, 0).setText("0x1")          # 触发自定义
+    assert sig.out_name.lower() in w._customized
+    rows_before = len(w._ti_rows)
+    w.coverage.setCurrentText("穷举")
+    assert sig.out_name.lower() in w._customized   # 仍是自定义
+    assert len(w._ti_rows) == rows_before          # 编辑没被重算冲掉
+
+
+def test_gui_max_tests_live_update(qapp, wb, tmp_path_factory):
+    """改'上限'spinbox 也即时重算当前非自定义信号(请求#1的另一半：max_tests 实时生效)。"""
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("cap") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    sig = next(s for s in w.signals if s.out_name == "d_logic_bt_lp_lna_agc[2:0]")
+    row = next(r for r in range(w.table.rowCount())
+               if w._sig_of_row(r).out_name == sig.out_name)
+    w.coverage.setCurrentText("穷举")            # 穷举下用例较多
+    w.on_row_focus(row, gui.COL_K, -1, -1)
+    n0 = len(w._ti_rows)
+    assert n0 > 2
+    w.max_tests.setValue(2)                      # 改上限 → valueChanged 即时重算
+    assert len(w._ti_rows) <= 2 and len(w._ti_rows) < n0
+
+
+def test_gui_coverage_live_update_neg_only(qapp, wb, tmp_path_factory):
+    """仅靠'负向'定制(无手改)的信号：切换覆盖度应重算正向并补回负向(审查#1修复)。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "covn")
+    row = next(r for r in range(w.table.rowCount())
+               if w._sig_of_row(r).out_name == sig.out_name)
+    w.coverage.setCurrentText("全面")
+    w.on_row_focus(row, gui.COL_K, -1, -1)
+    w.on_ti_add_neg()                            # 仅负向定制(进入 _neg_only)
+    assert sig.out_name.lower() in w._neg_only
+    n_pos_max = sum(1 for rd in w._ti_rows if rd.get("kind") != "neg")
+    # 切回精简：正向应按新覆盖度重算(更少)，且负向仍在(每条正向各一)
+    w.coverage.setCurrentText("精简")
+    pos = [rd for rd in w._ti_rows if rd.get("kind") != "neg"]
+    neg = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
+    assert len(pos) <= n_pos_max and len(neg) == len(pos) and len(neg) >= 1
+    assert sig.out_name.lower() in w._neg_only   # 仍是仅负向定制
+
+
+# ───────────── 导出范围：仅负向 / 仅正向 ─────────────
+def test_gui_export_negative_only(qapp, wb, tmp_path_factory):
+    """'仅负向'导出：override 只剩负向向量、无负向的信号被略过；build 出的全是负向。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "exp1")
+    w._load_test_items(sig)
+    w.on_ti_add_neg()
+    name = sig.out_name
+    ov_neg = w._vector_overrides(negative_only=True)
+    assert name.lower() in ov_neg
+    assert ov_neg[name.lower()] and all(v.is_negative for v in ov_neg[name.lower()])
+    # _negative_signal_names 从勾选里挑出含负向的
+    assert w._negative_signal_names([name]) == [name]
+    # build(仅负向) → 渲染出的向量全为负向
+    res = generator.build(w.wb, w._opts([name], negative_only=True))
+    s = res["summary"]
+    assert s["n_vectors"] > 0 and s["n_vectors"] == s["n_negative"]
+
+
+def test_gui_export_negative_only_signal_without_neg_skipped(qapp, wb, tmp_path_factory):
+    """没有负向的信号不会出现在'仅负向'范围里。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "exp2")
+    w._load_test_items(sig)                        # 只看，不加负向
+    w.ti_table.item(0, 0).setText("0x1")           # 自定义但无负向
+    assert w._vector_overrides(negative_only=True) is None
+    assert w._negative_signal_names([sig.out_name]) == []
+
+
+# ───────────── 可验证性报告（取代旧'覆盖诊断'按钮） ─────────────
+def test_report_verifiability_structure(wb):
+    """report() 返回 verifiability：counts 四类齐全，且与逐信号 status 计数一致。"""
+    from collections import Counter
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    v = rep["verifiability"]
+    assert set(v["counts"]) >= {"clean", "wire-fallback", "unresolved", "parse-err"}
+    assert sum(v["counts"].values()) == len(v["signals"]) == len(wb.logic)
+    assert all(s["status"] in v["counts"] for s in v["signals"])
+    c = Counter(s["status"] for s in v["signals"])
+    for k, n in c.items():
+        assert v["counts"][k] == n
+
+
+def test_html_report_has_verifiability_tab(wb, tmp_path):
+    """HTML 报告含第④'可验证性'标签页与对应行。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    html = path.read_text(encoding="utf-8")
+    assert "可验证性" in html and 'data-tab="ver"' in html
+    assert 'id="ver"' in html and "vrow" in html
+
+
+def test_csv_report_writes_verifiability(wb, tmp_path):
+    """CSV 报告额外写出 *_verifiability.csv。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    path = tmp_path / "r.csv"
+    written = cli.write_report(str(path), rep, "synthetic.xlsx")
+    verif = [p for p in written if p.endswith("_verifiability.csv")]
+    assert verif, "应生成可验证性 CSV"
+    content = open(verif[0], encoding="utf-8-sig").read()
+    assert "可验证性" in content

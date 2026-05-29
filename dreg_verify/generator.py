@@ -356,7 +356,24 @@ def report(wb, opts):
             "control": ",".join(meta.get("control", [])), "data": ",".join(meta.get("data", [])),
             "unresolved": ";".join(sorted(unresolved_bases)), "error": "",
         })
-    return {"summary": summary, "detail": detail, "tables": tables}
+
+    # ── 可验证性（取代旧 GUI"覆盖诊断"按钮）：逐信号给健康度 + 风险输入说明 ──
+    verif = {"counts": {"clean": 0, "wire-fallback": 0, "unresolved": 0, "parse-err": 0},
+             "signals": []}
+    for sig in sigs:
+        a = analyze_signal(resolver, sig)
+        st = a["status"]
+        verif["counts"][st] = verif["counts"].get(st, 0) + 1
+        risky = [i for i in a["inputs"] if (not i["resolved"]) or i["found_in"] == "wire"]
+        risky_str = "; ".join(
+            "%s=%s(%s)" % (i["letter"], i["base"], "未解析" if not i["resolved"] else "wire兜底")
+            for i in risky)
+        verif["signals"].append({
+            "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+            "type": sig.suffix, "top": sig.top_output, "status": st,
+            "detail": risky_str or a.get("error", ""), "out_net": a.get("out_net", ""),
+        })
+    return {"summary": summary, "detail": detail, "tables": tables, "verifiability": verif}
 
 
 def diagnose(wb, opts=None):

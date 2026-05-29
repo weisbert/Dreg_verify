@@ -137,7 +137,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b_selall = QtWidgets.QPushButton("全选输出(可见)"); b_selall.setToolTip("勾选所有可见信号的'选'")
         b_selall.clicked.connect(lambda: self.set_all_visible(True))
         b_selnone = QtWidgets.QPushButton("清空选择"); b_selnone.clicked.connect(lambda: self.set_all_visible(False))
-        b_negall = QtWidgets.QPushButton("全部加负向"); b_negall.setToolTip("给所有可见信号都加负向测试(按下方 first/all)")
+        b_negall = QtWidgets.QPushButton("全部加负向"); b_negall.setToolTip("给所有可见信号的每条正向测试各加一条负向")
         b_negall.clicked.connect(lambda: self.on_all_signals_neg(True))
         b_negnone = QtWidgets.QPushButton("清除负向"); b_negnone.setToolTip("清除所有可见信号的负向测试")
         b_negnone.clicked.connect(lambda: self.on_all_signals_neg(False))
@@ -171,28 +171,33 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(splitter, 1)
 
         opt = QtWidgets.QHBoxLayout()
-        self.mode_combo = QtWidgets.QComboBox(); self.mode_combo.addItems(["min", "max"])
-        self.exhaustive = QtWidgets.QCheckBox("小信号全穷举")
+        # 覆盖度：把旧的 min/max + 小信号全穷举 合成一个高层选择(精简<全面<穷举)。
+        self.coverage = QtWidgets.QComboBox(); self.coverage.addItems(["精简", "全面", "穷举"])
+        self.coverage.setToolTip(
+            "测试用例的覆盖强度(对'未自定义'的信号即时生效)：\n"
+            "  精简 = 每种控制位组合各取 1 组代表数据(最少用例)\n"
+            "  全面 = 每种控制位组合再扫多组数据(全0/全1/反码/走步/区分)\n"
+            "  穷举 = 所有输入的全部组合(仅当总输入位≤10，否则自动退化为'全面')")
+        self.coverage.currentIndexChanged.connect(self.on_coverage_changed)
+        self.cov_hint = QtWidgets.QLabel("")            # 实时显示当前信号的用例条数
+        self.cov_hint.setStyleSheet("color:#1558d6;")
         self.max_tests = QtWidgets.QSpinBox(); self.max_tests.setRange(1, 100000); self.max_tests.setValue(256)
-        self.comments = QtWidgets.QCheckBox("加注释")
-        self.neg_mode = QtWidgets.QComboBox(); self.neg_mode.addItems(["invert", "inc", "value"])
-        self.neg_which = QtWidgets.QComboBox(); self.neg_which.addItems(["first", "all"])
-        self.neg_separate = QtWidgets.QCheckBox("负向单独出文件")
-        for w in (QtWidgets.QLabel("向量:"), self.mode_combo, self.exhaustive,
-                  QtWidgets.QLabel("上限"), self.max_tests, self.comments,
-                  QtWidgets.QLabel("  负向:"), self.neg_mode, self.neg_which, self.neg_separate):
+        self.max_tests.setToolTip("用例数上限(安全阀，防止穷举/全面产生过多用例)")
+        self.max_tests.valueChanged.connect(self.on_coverage_changed)
+        for w in (QtWidgets.QLabel("覆盖度:"), self.coverage, self.cov_hint,
+                  QtWidgets.QLabel("   上限"), self.max_tests):
             opt.addWidget(w)
         opt.addStretch(1)
         root.addLayout(opt)
 
         btns = QtWidgets.QHBoxLayout()
-        diag = QtWidgets.QPushButton("覆盖诊断"); diag.clicked.connect(self.on_diagnose)
         prev = QtWidgets.QPushButton("预览选中"); prev.clicked.connect(self.on_preview)
         rep = QtWidgets.QPushButton("导出报告(HTML/CSV)…"); rep.clicked.connect(self.on_report)
         rep.setToolTip("出'给人看'的测试用例报告(汇总+每信号真值表+完整明细)，自动带上你的编辑；"
                        "未勾选则覆盖全部信号")
         gen = QtWidgets.QPushButton("生成 .sv …"); gen.clicked.connect(self.on_generate)
-        btns.addWidget(diag); btns.addStretch(1); btns.addWidget(prev); btns.addWidget(rep); btns.addWidget(gen)
+        gen.setToolTip("点开后可选导出范围(全部/仅正向/仅负向)与是否加注释")
+        btns.addStretch(1); btns.addWidget(prev); btns.addWidget(rep); btns.addWidget(gen)
         root.addLayout(btns)
 
         self.status = self.statusBar()
@@ -213,7 +218,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ("复制列", self.on_ti_copy, "复制当前选中的测试列"),
                 ("删除列", self.on_ti_del, "删除选中的测试列"),
                 ("重命名列…", self.on_ti_rename_current, "给用户新增的测试列改名(双击列头亦可；自动生成的 T0/T1 不可改)"),
-                ("加负向", self.on_ti_add_neg, "为本信号追加负向测试(按下方 first/all；正向测试不动)"),
+                ("加负向", self.on_ti_add_neg, "为本信号每条正向测试各追加一条负向(故意填错期望)；正向测试不动"),
                 ("删负向", self.on_ti_del_neg, "删除本信号所有负向测试(保留正向)"),
                 ("预览本信号.sv", self.on_ti_preview_signal, "用当前(含编辑)测试项渲染该信号的 .sv 片段"),
                 ("导出CSV", self.on_ti_export_csv, "把本信号测试项导出为 CSV(Excel 可开)")]
@@ -240,6 +245,50 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _mono(self, w):
         f = w.font(); f.setFamily("Consolas"); w.setFont(f)
+
+    # ───────────── 覆盖度（精简/全面/穷举 → 向量生成参数） ─────────────
+    def _coverage(self):
+        """把「覆盖度」下拉映射成 (mode, exhaustive)。穷举位数过多时由 vectors 自动退化为'全面'。"""
+        c = self.coverage.currentText()
+        if c == "穷举":
+            return ("max", True)
+        if c == "全面":
+            return ("max", False)
+        return ("min", False)       # 精简
+
+    def on_coverage_changed(self, *args):
+        """覆盖度/上限变化 → 即时重算当前信号的测试项：
+        · 纯自动信号：直接按新覆盖度重算；
+        · 仅靠'负向'定制(无手改正向)的信号：按新覆盖度重算正向后再补回负向；
+        · 手改过测试项的信号：保留编辑不动(避免冲掉用户工作)。"""
+        if self._sig_loading or getattr(self, "_ti_loading", False):
+            return
+        sig, name_low = self._ti_sig, self._ti_name_low
+        if sig is not None and name_low is not None:
+            if name_low not in self._customized:
+                self._load_test_items(sig)               # 纯自动：按新覆盖度重算
+            elif name_low in self._neg_only:
+                # 仅负向定制(无手改) → 撤销定制、按新覆盖度重算正向、再补回负向
+                self._customized.discard(name_low)
+                self._neg_only.discard(name_low)
+                self._edited.pop(name_low, None)
+                self._load_test_items(sig)
+                self._set_signal_negatives(sig, True, "all")
+                self._load_test_items(sig)
+        self._update_cov_hint()
+
+    def _update_cov_hint(self):
+        """工具栏「覆盖度」旁实时显示当前信号的用例条数，把抽象档位变具体。"""
+        if not hasattr(self, "cov_hint"):
+            return
+        if self._ti_sig is None or not self._ti_rows:
+            self.cov_hint.setText("")
+            return
+        n = len(self._ti_rows)
+        n_neg = sum(1 for rd in self._ti_rows if rd.get("is_negative"))
+        tag = "（已自定义）" if self._ti_name_low in self._customized else ""
+        extra = "，含 %d 负向" % n_neg if n_neg else ""
+        self.cov_hint.setText("→ 当前信号 %d 条%s%s" % (n, extra, tag))
 
     # ───────────── 加载 + 分析 ─────────────
     def on_browse(self):
@@ -385,19 +434,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ───────────── 左侧"负向"列 → 联动测试项 ─────────────
     def on_signal_table_item_changed(self, item):
-        """勾/取消左侧"负向"列 = 给该信号的测试项批量设/清负向(按下方 first/all)。
+        """勾/取消左侧"负向"列 = 给该信号每条正向测试各设/清一条负向。
         这样左右两边是同一套负向，不再各管各的。"""
         if self._sig_loading or item is None or item.column() != COL_NEG:
             return
         r = item.row()
         sig = self._sig_of_row(r)
         want = item.checkState() == QtCore.Qt.Checked
-        self._set_signal_negatives(sig, want, self.neg_which.currentText())
+        self._set_signal_negatives(sig, want, "all")
         if self._idx_of_row(r) == self._ti_loaded_idx:    # 正在编辑该信号→刷新右表
             self._load_test_items(sig)
         self.status.showMessage(
-            "%s 已%s负向(%s)" % (sig.out_name, "标记" if want else "清除",
-                               "全部用例" if self.neg_which.currentText() == "all" else "首条用例"))
+            "%s 已%s负向(每条正向各一条)" % (sig.out_name, "标记" if want else "清除"))
 
     def _set_signal_negatives(self, sig, want_neg, which):
         """给某信号(重新)设置负向测试：保留全部正向测试，按 first/all 追加正向测试的"故意填错"
@@ -475,7 +523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """对所有可见信号一键加/清负向(满足'R 全部负向')。受筛选范围限制，可先筛再点。"""
         if not self.wb:
             return
-        which = self.neg_which.currentText()
+        which = "all"          # 每条正向各加一条负向
         self._sig_loading = True
         n = 0
         try:
@@ -492,9 +540,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sig_loading = False
         if self._ti_sig is not None and self._ti_loaded_idx is not None:
             self._load_test_items(self._ti_sig)   # 当前编辑器信号若被影响则刷新
-        self.status.showMessage("已对 %d 个可见信号%s负向测试(%s)"
-                                % (n, "添加" if want else "清除",
-                                   "每条正向各一" if which == "all" else "仅首条正向"))
+        self.status.showMessage("已对 %d 个可见信号%s负向测试(每条正向各一条)"
+                                % (n, "添加" if want else "清除"))
 
     # ───────────── 点信号看明细（debug 关键） ─────────────
     def on_row_focus(self, row, col, prow, pcol):
@@ -540,6 +587,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_table.setColumnCount(0)
         finally:
             self._ti_loading = False
+        self._update_cov_hint()
 
     def _load_test_items(self, sig):
         if not self.wb or self._resolver is None or sig is None:
@@ -568,11 +616,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _auto_rows(self, sig, node, bindings, groups):
         """按当前向量选项自动生成测试项 → rowdict 列表。"""
+        mode, exhaustive = self._coverage()
         try:
             vecs, _meta = V.generate_vectors(
                 node, bindings, sig.out_width,
-                mode=self.mode_combo.currentText(), max_tests=self.max_tests.value(),
-                exhaustive=self.exhaustive.isChecked())
+                mode=mode, max_tests=self.max_tests.value(), exhaustive=exhaustive)
         except E.ExprError:
             vecs = []
         rows = []
@@ -589,7 +637,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         rd['kind']:
           'pos' —— 正向(真实)测试：期望永远 = 表达式算出的正确值，不会被改坏；
-          'neg' —— 负向(故意填错)测试：期望 = 错误值(rd['wrong_value'] 手填，或按 neg_mode 从 correct 派生)。
+          'neg' —— 负向(故意填错)测试：期望 = 错误值(rd['wrong_value'] 手填，或默认取反 correct 派生)。
         """
         try:
             base_vec = V.make_vector_from_base_values(
@@ -608,8 +656,8 @@ class MainWindow(QtWidgets.QMainWindow):
         rd["correct_width"] = w
         if rd.get("kind") == "neg":
             wv = rd.get("wrong_value")
-            if wv is None:                          # 未手填 → 按 neg_mode(invert/inc/value)派生
-                wrong = V.make_negative(base_vec, mode=self.neg_mode.currentText()).neg_value
+            if wv is None:                          # 未手填 → 默认取反正确值(最显然的"错")
+                wrong = V.make_negative(base_vec, mode="invert").neg_value
             else:
                 wrong = wv & m
                 if wrong == correct:                # 手填值恰等于正确值 → 强制翻一位保证"错"
@@ -708,6 +756,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for c in range(len(self._ti_rows)):
             self._ti_render_col(c)
         self.ti_table.resizeColumnsToContents()
+        self._update_cov_hint()
 
     def _mk_item(self, text, editable):
         it = QtWidgets.QTableWidgetItem(text)
@@ -829,7 +878,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
-        self._set_signal_negatives(self._ti_sig, True, self.neg_which.currentText())
+        self._set_signal_negatives(self._ti_sig, True, "all")
         self._load_test_items(self._ti_sig)
         self._sync_left_neg()
         n = sum(1 for rd in self._ti_rows if rd.get("kind") == "neg")
@@ -839,7 +888,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """删除本信号所有负向测试，保留正向。"""
         if not self._ti_sig:
             return
-        self._set_signal_negatives(self._ti_sig, False, self.neg_which.currentText())
+        self._set_signal_negatives(self._ti_sig, False, "all")
         self._load_test_items(self._ti_sig)
         self._sync_left_neg()
         self.status.showMessage("已删除 %s 的全部负向测试" % self._ti_sig.out_name)
@@ -951,7 +1000,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vecs = self._rows_to_vectors(self._ti_node, self._ti_bindings, self._ti_groups,
                                      sig.out_width, self._ti_rows)
         lines, _stats = W.render_signal_block(sig, self._ti_bindings, vecs,
-                                              {"truncated": False}, comments=self.comments.isChecked())
+                                              {"truncated": False}, comments=True)
         self.preview.setPlainText("\n".join(lines))
         self.tabs.setCurrentWidget(self.preview_tab)
         self.status.showMessage("已预览信号 %s 的 .sv 片段（%d 用例）" % (sig.out_name, len(vecs)))
@@ -1004,9 +1053,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 index=i, expected_override=exp_override, name=rd.get("name")))
         return vecs
 
-    def _vector_overrides(self, positive_only=False):
+    def _vector_overrides(self, positive_only=False, negative_only=False):
         """汇总所有被用户改过的信号的测试项 → {out_name(小写): [TestVector]} 喂给 build()。
-        positive_only=True 时剔除负向向量(供"负向单独出文件"的正向文件，避免负向断言泄入)。
+        positive_only=True 时剔除负向向量(供"仅正向"导出，避免负向断言泄入)。
+        negative_only=True 时只保留负向向量、且无负向的信号整个不出现(供"仅负向"导出)。
         删光所有行的信号会得到空列表(=该信号零用例)，而非回退自动生成——尊重用户清空意图。
         """
         if not self._customized or self._resolver is None:
@@ -1026,19 +1076,23 @@ class MainWindow(QtWidgets.QMainWindow):
             vecs = self._rows_to_vectors(node, bindings, groups, sig.out_width, rows)
             if positive_only:
                 vecs = [v for v in vecs if not v.is_negative]
+            elif negative_only:
+                vecs = [v for v in vecs if v.is_negative]
+                if not vecs:
+                    continue                 # 该信号无负向 → "仅负向"导出里整个略过
             ov[name_low] = vecs          # 空列表也保留：删空=零用例，不回退自动
         return ov or None
 
-    def _opts(self, signals, neg_signals=None, positive_only=False):
+    def _opts(self, signals, neg_signals=None, positive_only=False, negative_only=False):
         # 注意：GUI 的负向统一走 vector_overrides(左侧"负向"列与右侧编辑器是同一套)，
         # 故这里默认不传 neg_signals，避免与 override 里的负向重复追加。
+        mode, exhaustive = self._coverage()
         return generator.GenOptions(
             signals=signals or None, neg_signals=neg_signals or None,
-            mode=self.mode_combo.currentText(), max_tests=self.max_tests.value(),
-            exhaustive=self.exhaustive.isChecked(), comments=self.comments.isChecked(),
-            neg_mode=self.neg_mode.currentText(), neg_which=self.neg_which.currentText(),
+            mode=mode, max_tests=self.max_tests.value(), exhaustive=exhaustive,
             top_output_only=False,   # GUI 已按表勾选，不再二次过滤
-            vector_overrides=self._vector_overrides(positive_only=positive_only))
+            vector_overrides=self._vector_overrides(positive_only=positive_only,
+                                                    negative_only=negative_only))
 
     # ───────────── 收集 / 选项 ─────────────
     def _collect(self):
@@ -1049,34 +1103,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 sel.append(self._sig_of_row(r).out_name)
         return sel
 
-    def _has_negatives(self):
-        """选中信号里是否有任何负向用例(用于'负向单独出文件'的判定)。"""
-        ov = self._vector_overrides()
-        return bool(ov) and any(any(v.is_negative for v in vs) for vs in ov.values() if vs)
+    def _negative_signal_names(self, sel):
+        """从勾选信号 sel 里挑出"含负向测试"的原始信号名(用于'仅负向'导出)。"""
+        ovneg = self._vector_overrides(negative_only=True) or {}
+        low2name = {s.lower(): s for s in sel}
+        return [low2name[k] for k in ovneg if k in low2name]
 
-    # ───────────── 诊断 / 预览 / 生成 ─────────────
-    def on_diagnose(self):
-        if not self.wb:
-            return
-        d = generator.diagnose(self.wb, generator.GenOptions(top_output_only=False))
-        c = d["cats"]
-        lines = ["覆盖诊断（全部信号）:",
-                 "  RF_WRITE(RW): %d   force-RO: %d   force-级联: %d   force-wire兜底: %d   UNKNOWN: %d"
-                 % (c["rfwrite"], c["force_ro"], c["force_chained"], c["force_wire"], c["unknown"]),
-                 "", "tmm 类型分布: %s" % d["tmm_type_raw"]]
-        if d["fallback_wires"]:
-            lines.append("\n⚠ wire 兜底(表中查无，按名 force——elaboration 最易 CUVUNF):")
-            for name, ltr, base, w in d["fallback_wires"][:60]:
-                lines.append("   %s.%s=%s" % (name, ltr, base))
-        if d["unknown"]:
-            lines.append("\n✗ UNKNOWN(未解析):")
-            for name, ltr, base, note in d["unknown"][:60]:
-                lines.append("   %s.%s=%s" % (name, ltr, base))
-        self.preview.setPlainText("\n".join(lines))
-        self.tabs.setCurrentWidget(self.preview_tab)
-        self.status.showMessage("诊断完成：wire兜底 %d，UNKNOWN %d（这些最可能让 elaboration 失败）"
-                                % (len(d["fallback_wires"]), len(d["unknown"])))
-
+    # ───────────── 预览 / 生成 ─────────────
     def on_preview(self):
         if not self.wb:
             return
@@ -1085,7 +1118,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "请先勾选至少一个信号")
             return
         res = generator.build(self.wb, self._opts(sel))
-        text = generator.render(res, comments=self.comments.isChecked())
+        text = generator.render(res, comments=True)
         lines = text.splitlines()
         self.preview.setPlainText("\n".join(lines[:600])
                                   + ("\n... (预览截断，共 %d 行)" % len(lines) if len(lines) > 600 else ""))
@@ -1103,6 +1136,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 tip += "\n//   %s ← %s" % (name, ", ".join("%s=%s" % (l, b) for l, b, _ in risky))
             self.preview.appendPlainText(tip)
 
+    def _ask_export_options(self, title):
+        """生成 .sv 前的导出选项：内容范围(全部/仅正向/仅负向) + 是否加注释。
+        返回 {"scope": "all"/"pos"/"neg", "comments": bool} 或 None(取消)。"""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.addWidget(QtWidgets.QLabel("导出内容范围："))
+        scope_combo = QtWidgets.QComboBox()
+        scope_combo.addItem("全部（正向 + 负向）", "all")
+        scope_combo.addItem("仅正向（正确用例）", "pos")
+        scope_combo.addItem("仅负向（故意填错，预期 FAIL）", "neg")
+        scope_combo.setToolTip("仅负向：只导出你标了'负向'的故意填错用例，方便单独验证'错了能否被抓到'")
+        lay.addWidget(scope_combo)
+        cm_chk = QtWidgets.QCheckBox("加注释（在 .sv 里标注每条用例/负向说明）")
+        lay.addWidget(cm_chk)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return None
+        return {"scope": scope_combo.currentData(), "comments": cm_chk.isChecked()}
+
     def on_generate(self):
         if not self.wb:
             return
@@ -1110,36 +1165,48 @@ class MainWindow(QtWidgets.QMainWindow):
         if not sel:
             QtWidgets.QMessageBox.information(self, "提示", "请先勾选至少一个信号")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "保存 wr_rf_tc.sv", "wr_rf_tc.sv",
+        opt = self._ask_export_options("生成 .sv — 导出选项")
+        if opt is None:
+            return
+        scope, cm = opt["scope"], opt["comments"]
+        # 按内容范围构建：全部 / 仅正向(剔负向) / 仅负向(只含负向、无负向的信号略过)
+        if scope == "neg":
+            names = self._negative_signal_names(sel)
+            if not names:
+                QtWidgets.QMessageBox.information(
+                    self, "提示", "勾选的信号里没有任何负向测试，无法只导出'错误用例'。\n"
+                    "请先在右侧测试项里'加负向'，或勾左侧'负向'列。")
+                return
+            res = generator.build(self.wb, self._opts(names, negative_only=True))
+            scope_msg = "（仅负向，共 %d 个含负向信号）" % len(names)
+        elif scope == "pos":
+            res = generator.build(self.wb, self._opts(sel, positive_only=True))
+            scope_msg = "（仅正向）"
+        else:
+            res = generator.build(self.wb, self._opts(sel))
+            scope_msg = ""
+
+        default_name = {"neg": "wr_rf_tc_neg.sv", "pos": "wr_rf_tc_pos.sv"}.get(scope, "wr_rf_tc.sv")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "保存 .sv", default_name,
                                                         "SystemVerilog (*.sv)")
         if not path:
             return
-        cm = self.comments.isChecked()
-        if self.neg_separate.isChecked() and self._has_negatives():
-            # 正向文件：剔除自定义测试项里的负向向量，避免故意填错的断言泄入主文件
-            pos = generator.build(self.wb, self._opts(sel, positive_only=True))
-            self._write(path, generator.render(pos, comments=cm))
-            npath = os.path.splitext(path)[0] + "_neg.sv"
-            negres = generator.build(self.wb, self._opts(sel))
-            negblocks = [(l, st) for (l, st) in negres["blocks"] if st["n_negative"] > 0]
-            self._write(npath, generator.render({"blocks": negblocks, "selected": [],
-                                                 "errors": [], "summary": negres["summary"]}, comments=cm))
-            extra = "；负向→%s" % os.path.basename(npath)
-            nsk = pos["summary"].get("n_skipped", 0)
-        else:
-            res = generator.build(self.wb, self._opts(sel))
-            self._write(path, generator.render(res, comments=cm))
-            extra = ""
-            nsk = res["summary"].get("n_skipped", 0)
+        self._write(path, generator.render(res, comments=cm))
+        nsk = res["summary"].get("n_skipped", 0)
         skipmsg = ("\n\n↷ 跳过了 %d 个含不可驱动输入的信号(默认跳过以保证可 elaborate)；"
                    "如需强制生成用 CLI --include-risky。" % nsk) if nsk else ""
-        custmsg = ("\n\n含 %d 个已自定义测试项的信号(编辑已写入产物)。" % len(self._customized)
-                   if self._customized else "")
-        ndup = (res if not (self.neg_separate.isChecked() and self._has_negatives()) else pos)["summary"].get("n_dup_labels", 0)
+        # 已自定义信号数按"真正写进本次产物"的 block 统计(而非全局 _customized，后者会把
+        # 未勾选/被范围过滤掉的信号也算进来，导致弹窗数字虚高)
+        n_cust = sum(1 for (_l, st) in res["blocks"]
+                     if st.get("out_name", "").lower() in self._customized)
+        custmsg = ("\n\n含 %d 个已自定义测试项的信号(编辑已写入产物)。" % n_cust
+                   if n_cust else "")
+        ndup = res["summary"].get("n_dup_labels", 0)
         dupmsg = ("\n\n⛔ 警告：有 %d 处重复 assert 标号(同一作用域重复=非法 SV，会 elaboration 失败)！"
                   "多因两信号共用同一 R(序号)，请核对。" % ndup) if ndup else ""
-        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s%s%s%s" % (path, extra, skipmsg, custmsg, dupmsg))
-        self.status.showMessage("已生成：%s%s" % (path, extra))
+        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s%s%s%s"
+                                          % (path, scope_msg, skipmsg, custmsg, dupmsg))
+        self.status.showMessage("已生成：%s%s" % (path, scope_msg))
 
     def on_report(self):
         """导出'给人看'的测试用例报告(HTML 三段：汇总+每信号真值表+完整明细；或 CSV)。
