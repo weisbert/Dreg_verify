@@ -388,6 +388,225 @@ def run_expr_forms(args):
               else "（未装 dreg_verify，仅做了形态归并，未做解析校验。）")
 
 
+# ───────────────────────────── 信号聚焦调试模式 (--signal) ─────────────────────────────
+# 目的：调一个具体输出信号(如 d_en_refbuf)时，一条命令把它在各页的相关信息全抠出来：
+#   ① logic 页该信号的定义行(竖排, L/M 不截断)；
+#   ② 自动展开它表达式里的输入名(如 testmode)，在其它页一并定位(抓"testmode value error")；
+#   ③ for_test / *_tc 等"块状页"按【整块】抠(含横向 T0..T63 向量, 不再漏行)；
+#   ④ regmap / total_memory_map 抠出"目标 + 各输入"的定义行。
+_SIG_INPUT_COLS = list("ABCDEFGHIJ")
+
+
+def _cell_by_letter(row, letter):
+    """按列字母从 values_only 的 row(tuple) 取值；越界返回 None。"""
+    idx = column_index_from_string(letter) - 1
+    return row[idx] if 0 <= idx < len(row) else None
+
+
+def _strip_sig(name):
+    """去位宽 [..] 与 _to_logic 后缀，返回小写基名，用于跨页匹配。空→''。"""
+    s = "" if name is None else str(name).strip()
+    s = re.sub(r"\[[^\]]*\]", "", s)              # 去 [8:0] / [2]
+    for suf in ("_to_logic", "_TO_LOGIC"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+    return s.strip().lower()
+
+
+def _row_contains(row, keywords):
+    """整行任意单元格(字符串化小写)是否含任一关键词(子串匹配)。"""
+    text = " ".join("" if v is None else str(v) for v in row).lower()
+    return any(k in text for k in keywords)
+
+
+def _has_row2_header(sheet_name):
+    """tmm 是块结构无统一表头；其余页(logic/regmap/for_test)真表头在第 2 行。"""
+    return sheet_name.lower() not in ("total_memory_map", "total memory map", "memory_map")
+
+
+def _header_map_line(ws, args, header_row=2):
+    """轻量读第 header_row 行，渲染成 '字母=表头' 列映射，帮助解读列。"""
+    hdr = None
+    for ri, row in enumerate(ws.iter_rows(min_row=1, max_row=header_row, values_only=True), start=1):
+        if ri == header_row:
+            hdr = row
+    if not hdr:
+        return None
+    parts = []
+    for c in range(len(hdr)):
+        h = hdr[c]
+        if h is None or (isinstance(h, str) and h.strip() == ""):
+            continue
+        parts.append("%s=%s" % (get_column_letter(c + 1), cell_str(h, args.maxlen)))
+    return "--- 列映射(第%d行表头) --- %s" % (header_row, " | ".join(parts))
+
+
+def _dump_matching_rows(out, ws, sn, keywords, args):
+    """普通页(regmap/tmm/mux/…)：抠出任意单元格含关键词的行(含目标信号及其各输入)。"""
+    out.append("")
+    out.append("=" * 70)
+    out.append("==== %s : 含关键词的行 ====" % sn)
+    if _has_row2_header(sn):
+        hl = _header_map_line(ws, args)
+        if hl:
+            out.append(hl)
+    cap = 20000
+    matched = 0
+    for ri, row in enumerate(ws.iter_rows(min_row=1, max_row=min(ws.max_row or 0, cap),
+                                          values_only=True), start=1):
+        if _has_row2_header(sn) and ri <= 2:
+            continue   # 跳过表头行(仅对有统一表头的页；tmm 无表头, 行 1-2 是真数据)
+        if _row_contains(row, keywords):
+            cells = []
+            for c in range(len(row)):
+                raw = row[c]
+                if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                    continue
+                cells.append("%s=%s" % (get_column_letter(c + 1), cell_str(raw, args.maxlen)))
+            out.append("[row %d] %s" % (ri, " | ".join(cells)))
+            matched += 1
+            if matched >= args.find_max:
+                out.append("...(达每页上限 %d, 截断)" % args.find_max)
+                break
+    out.append("(本页命中 %d 行)" % matched)
+
+
+def _dump_fortest_blocks(out, ws, sn, keywords, args):
+    """块状页(for_test / *_tc)：A 列=输出名，每个输出一个行块；T0..T63 横向铺在右侧。
+    用 A 列(去位宽基名)变化界定块边界；A 命中目标关键词的块整块 dump(含横向所有列)。"""
+    out.append("")
+    out.append("=" * 70)
+    out.append("==== %s : 信号整块(含横向 T 向量) ====" % sn)
+    if _has_row2_header(sn):
+        hl = _header_map_line(ws, args)
+        if hl:
+            out.append(hl)
+    cap = 20000
+    rows = []
+    for ri, row in enumerate(ws.iter_rows(min_row=1, max_row=min(ws.max_row or 0, cap),
+                                          values_only=True), start=1):
+        rows.append((ri, row))
+    n = len(rows)
+    # 块起点：A 列基名非空且与上一个非空 A 不同
+    starts, last = [], None
+    for idx, (_ri, row) in enumerate(rows):
+        a = _strip_sig(_cell_by_letter(row, "A"))
+        if a and a != last:
+            starts.append(idx)
+        if a:
+            last = a
+    dumped = 0
+    for si, start_idx in enumerate(starts):
+        _ri, row = rows[start_idx]
+        if _strip_sig(_cell_by_letter(row, "A")) not in keywords:
+            continue
+        end_idx = starts[si + 1] if si + 1 < len(starts) else n
+        end_idx = min(end_idx, start_idx + args.block_tail)
+        head_a = cell_str(_cell_by_letter(rows[start_idx][1], "A"), args.maxlen)
+        out.append("")
+        out.append("---- 块 A=%s  (行 %d..%d) ----"
+                   % (head_a, rows[start_idx][0], rows[min(end_idx, n) - 1][0]))
+        for k in range(start_idx, min(end_idx, n)):
+            ri2, row2 = rows[k]
+            cells = []
+            for c in range(len(row2)):
+                raw = row2[c]
+                if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                    continue
+                cells.append("%s=%s" % (get_column_letter(c + 1), cell_str(raw, args.maxlen)))
+            if cells:
+                out.append("[row %d] %s" % (ri2, " | ".join(cells)))
+        dumped += 1
+    if dumped == 0:
+        out.append("⚠ 未找到 A 列等于目标信号的块；退化为'含关键词的行':")
+        _dump_matching_rows(out, ws, sn, keywords, args)
+    else:
+        out.append("(共 dump %d 个块)" % dumped)
+
+
+def _is_block_sheet(sheet_name):
+    low = sheet_name.lower()
+    return ("for_test" in low) or ("fortest" in low) or low.endswith("_tc") or low.endswith("tc")
+
+
+def run_signal(args):
+    wb = openpyxl.load_workbook(args.excel, data_only=True, read_only=True)
+    all_sheets = wb.sheetnames
+    targets = [t.strip() for t in args.signal.split(",") if t.strip()]
+    base_kw = {_strip_sig(t) for t in targets} | {t.lower() for t in targets}
+    base_kw = {k for k in base_kw if k}
+
+    out = []
+    out.append("Dreg 信号聚焦调试导出 (--signal)")
+    out.append("文件: %s" % os.path.basename(args.excel))
+    out.append("目标信号/关键词: %s" % targets)
+    out.append("全部 sheet (%d): %s" % (len(all_sheets), all_sheets))
+
+    # ── Pass 1：logic 页定位目标行，收集其输入名做 1 级展开(抓 testmode 等) ──
+    logic_name = next((s for s in all_sheets if s.lower() == "logic"), None)
+    expanded = set(base_kw)
+    logic_hits = []
+    if logic_name:
+        ws = wb[logic_name]
+        header = None
+        for ri, row in enumerate(ws.iter_rows(min_row=1, values_only=True), start=1):
+            if ri == 2:
+                header = row
+                continue
+            if ri < 2:
+                continue
+            kbase = _strip_sig(_cell_by_letter(row, "K"))
+            if kbase in base_kw or _row_contains(row, base_kw):
+                logic_hits.append((ri, row))
+                if args.signal_expand > 0:
+                    for col in _SIG_INPUT_COLS:
+                        b = _strip_sig(_cell_by_letter(row, col))
+                        if b:
+                            expanded.add(b)
+        out.append("")
+        out.append("=" * 70)
+        out.append("==== logic 命中行 (目标信号定义；L/M 列不截断) ====")
+        if not logic_hits:
+            out.append("⚠ 在 logic 页未找到目标信号的行 —— 核对名字/位宽/前缀(K 列原文)。")
+        for ri, row in logic_hits:
+            out.append("[logic row %d]" % ri)
+            for c in range(len(row)):
+                raw = row[c]
+                if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                    continue
+                letter = get_column_letter(c + 1)
+                hname = cell_str(header[c] if header and c < len(header) else None, 30)
+                no_trunc = letter in ("L", "M")
+                out.append("    %-3s [%s]: %s" % (letter, hname, cell_str(raw, args.maxlen, no_trunc)))
+        out.append("")
+        out.append("展开后的关键词集合(目标 + 其 logic 输入, 用于在其它页定位 testmode 等):")
+        out.append("  %s" % sorted(expanded))
+
+    # ── Pass 2：其它页 ──
+    if args.sheets:
+        want = [s.strip() for s in args.sheets.split(",") if s.strip()]
+        sheets = [s for s in all_sheets if s in want]
+    else:
+        sheets = list(all_sheets)
+    for sn in sheets:
+        if logic_name and sn == logic_name:
+            continue
+        ws = wb[sn]
+        if _is_block_sheet(sn):
+            _dump_fortest_blocks(out, ws, sn, expanded, args)
+        else:
+            _dump_matching_rows(out, ws, sn, expanded, args)
+
+    wb.close()
+    out_path = args.out if args.out else os.path.splitext(args.excel)[0] + "_signal.txt"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    print("已导出信号聚焦报告: %s" % out_path)
+    print("命中 logic 行: %d；展开关键词: %d 个；行数: %d。"
+          % (len(logic_hits), len(expanded), len(out)))
+    print("请把该 txt 全文贴给我。")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("excel", help="Excel 文件路径 (.xlsx)")
@@ -406,6 +625,15 @@ def main():
     ap.add_argument("--expr-forms", action="store_true",
                     help="只生成表达式形态覆盖报告: 枚举 logic.L 所有不同表达式/结构形态, "
                          "并用 dreg_verify 求值器逐条试解析(OK/FAIL), 闭合覆盖风险")
+    ap.add_argument("--signal", default=None,
+                    help="信号聚焦调试: 逗号分隔的信号名/关键词(如 d_en_refbuf,testmode)。"
+                         "跨页抠出: logic 定义行(竖排) + 自动展开其输入 + for_test/*_tc 整块"
+                         "(含横向 T 向量) + regmap/tmm 定义行。专为调单个信号设计。")
+    ap.add_argument("--signal-expand", type=int, default=1,
+                    help="--signal 时自动展开 logic 输入的层数(默认 1: 连同 testmode 等输入一起抠)。"
+                         "设 0 则只抠目标信号本身。")
+    ap.add_argument("--block-tail", type=int, default=120,
+                    help="--signal 抠 for_test 类整块时, 块头后最多带多少行(默认 120)。")
     args = ap.parse_args()
 
     if not os.path.isfile(args.excel):
@@ -415,6 +643,10 @@ def main():
 
     if args.expr_forms:
         run_expr_forms(args)
+        return
+
+    if args.signal:
+        run_signal(args)
         return
 
     wb = openpyxl.load_workbook(args.excel, data_only=True, read_only=True)
