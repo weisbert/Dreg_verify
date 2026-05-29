@@ -18,9 +18,17 @@ dist/
 # inspect_excel.py 的导出文本（可能含真实信号名）
 *_inspect.txt
 *_anon.txt
+*_exprforms.txt
+# inspect_vba.py 抽取的 VBA 源码（含公司真实宏代码/IP，绝不提交）
+*_vba.txt
+*_vba_find.txt
+# 测试用例报告（含真实信号名）
+*_summary.csv
 # 生成的验证文件输出
 wr_rf_tc.sv
+*wr_rf_tc*.sv
 *.sv.out
+*.sv
 
 # ---- 编辑器 / 系统 ----
 .vscode/
