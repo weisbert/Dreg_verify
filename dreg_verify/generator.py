@@ -18,7 +18,7 @@ class GenOptions:
                  neg_which="first", neg_value=None,
                  force_overrides=None, rfwrite_overrides=None, default_kind=None,
                  top_output_only=False, types=None):
-        self.owners = _norm_set(owners)
+        self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
         self.mode = mode
@@ -42,6 +42,18 @@ def _norm_set(x):
     return {s.strip().lower() for s in x if s and s.strip()}
 
 
+def _ws(s):
+    """折叠多余空白并小写，用于 owner 等可能含空格的字段比较（如 'Wei  Yu'→'wei yu'）。"""
+    return " ".join(str(s or "").split()).lower()
+
+
+def _norm_owner_set(x):
+    if not x:
+        return None
+    out = {_ws(s) for s in x if s and s.strip()}
+    return out or None
+
+
 def _name_matches(sig, names):
     """信号是否在指定名集合里（支持 K 全名与去位宽基名）。"""
     if names is None:
@@ -56,7 +68,7 @@ def select_signals(wb, opts):
     rx = re.compile(opts.signal_regex, re.I) if opts.signal_regex else None
     out = []
     for sig in wb.logic:
-        if opts.owners is not None and sig.owner.lower() not in opts.owners:
+        if opts.owners is not None and _ws(sig.owner) not in opts.owners:
             continue
         if not _name_matches(sig, opts.signals):
             continue
@@ -137,3 +149,66 @@ def build(wb, opts):
 
 def render(result, header_info=None):
     return W.render_file(result["blocks"], header_info=header_info)
+
+
+def diagnose(wb, opts=None):
+    """
+    覆盖诊断：在真表上实测"我们到底把哪些输入解析成了 force(RO)/RF_WRITE(RW)/未知"，
+    以及类型列里到底有哪些写法、有没有 >16bit 的输入(force/RF_WRITE 固定 16'h 会截断)。
+    用于回答"force/RF_WRITE 之外是否还有别的类型、是否验证到位"。
+    返回 dict（CLI 负责打印）。
+    """
+    opts = opts or GenOptions()
+    resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
+                          rfwrite_overrides=opts.rfwrite_overrides,
+                          default_kind=opts.default_kind)
+    sigs = select_signals(wb, opts)
+
+    # 1) 类型列原文分布（tmm H / regmap F）
+    tmm_types = {}
+    for f in wb.tmm.values():
+        key = f.reg_type_raw or "(空)"
+        tmm_types[key] = tmm_types.get(key, 0) + 1
+    rm_types = {}
+    for e in wb.regmap.values():
+        key = (e.reg_type or "(空)")
+        rm_types[key] = rm_types.get(key, 0) + 1
+    tmm_pins = {}
+    for f in wb.tmm.values():
+        key = f.dig_top_pin if f.dig_top_pin is not None else "(空/其它)"
+        tmm_pins[key] = tmm_pins.get(key, 0) + 1
+
+    # 2) 逐输入解析分类
+    kinds = {"RO": 0, "RW": 0, "UNKNOWN": 0}
+    wide_inputs = []        # >16bit 的输入（驱动会截断）
+    unresolved = []         # (信号, 字母, 基名, note)
+    seen_inputs = set()
+    for sig in sigs:
+        bindings = resolver.resolve_signal_inputs(sig)
+        try:
+            used = E.collect_vars(E.parse(sig.expr))
+        except E.ExprError:
+            used = list(bindings.keys())
+        for ltr in used:
+            b = bindings.get(ltr)
+            if b is None:
+                continue
+            key = (sig.out_name, ltr)
+            if key in seen_inputs:
+                continue
+            seen_inputs.add(key)
+            kinds[b.kind if b.kind in kinds else "UNKNOWN"] += 1
+            if b.width > 16:
+                wide_inputs.append((sig.out_name, ltr, b.base, b.width, b.kind))
+            if not b.resolved:
+                unresolved.append((sig.out_name, ltr, b.base, b.note))
+
+    return {
+        "n_signals": len(sigs),
+        "tmm_type_raw": dict(sorted(tmm_types.items(), key=lambda kv: -kv[1])),
+        "regmap_type_raw": dict(sorted(rm_types.items(), key=lambda kv: -kv[1])),
+        "tmm_dig_top_pin": dict(sorted(tmm_pins.items(), key=lambda kv: -kv[1])),
+        "input_kinds": kinds,
+        "wide_inputs": wide_inputs,
+        "unresolved": unresolved,
+    }

@@ -13,7 +13,8 @@ from dreg_verify import expr as E             # noqa: E402
 from dreg_verify import vectors as V          # noqa: E402
 from dreg_verify import sv_writer as W        # noqa: E402
 from dreg_verify import excel_model as M      # noqa: E402
-from dreg_verify.excel_model import _normalize_type, read_tmm, DregWorkbook, TmmField  # noqa: E402
+from dreg_verify import generator as G       # noqa: E402
+from dreg_verify.excel_model import _normalize_type, read_tmm, DregWorkbook, TmmField, LogicSignal  # noqa: E402
 from dreg_verify.resolver import Resolver, InputBinding  # noqa: E402
 
 
@@ -119,6 +120,18 @@ def test_dig_top_pin_exact():
     assert fields["f_na"].dig_top_pin is None      # 'NA' → None（不再误判 'N'）
     assert fields["f_y"].dig_top_pin == "Y"
     assert fields["f_n"].dig_top_pin == "N"
+
+
+# ── 追加: owner 名字含空格的筛选（大小写无关 + 折叠多余空格）──
+def test_owner_filter_with_spaces():
+    sig = LogicSignal(row=3, out_name="d_x", out_width=1, expr="A", suffix="ls",
+                      top_output=1, notes="", owner="Wei Yu", assert_id="1",
+                      inputs={"A": {"raw": "a_to_logic", "base": "a", "width": 1,
+                                    "msb": None, "lsb": None}})
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm={}, sheet_names=[])
+    for q in ["Wei Yu", "wei yu", "Wei  Yu", "  WEI YU  "]:
+        assert len(G.select_signals(wb, G.GenOptions(owners=[q]))) == 1, q
+    assert len(G.select_signals(wb, G.GenOptions(owners=["Alice"]))) == 0
 
 
 # ── #8 重复次数取自变量值时不被声明位宽截断 ──

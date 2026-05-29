@@ -44,7 +44,13 @@ python -m dreg_verify.cli --excel 核心文件.xlsx \
 
 # 列出可生成信号清单（不生成）
 python -m dreg_verify.cli --excel 核心文件.xlsx --list
+
+# 覆盖诊断：实测各输入被解析成 force(RO)/RF_WRITE(RW)/未知，类型列有哪些写法，有无 >16bit 输入
+python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 ```
+
+> **owner 名字含空格**（如 `Wei Yu`）：CLI 加引号 `--owner "Wei Yu"`（多个用逗号 `"Wei Yu,Alice"`）；
+> 匹配大小写无关且会折叠多余空格。GUI 里直接从 owner 下拉框选即可。
 
 常用参数：
 
@@ -60,6 +66,7 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --list
 | `--neg-which first\|all` | 每信号造 1 个还是每向量都造 |
 | `--neg-file inline\|separate` | 负向放同文件还是单独 `*_neg.sv` |
 | `--force-signals` / `--rfwrite-signals` | 手动指定 RO/RW（修正名称/类型判定） |
+| `--diagnose` | 覆盖诊断：类型列原文分布 + 输入归类(force/RF_WRITE/未知)覆盖率 + >16bit 输入告警 |
 
 ## 图形界面（PySide6）
 

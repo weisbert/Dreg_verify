@@ -55,12 +55,14 @@ class RegmapEntry:
 
 
 class TmmField:
-    def __init__(self, name, bit_msb, bit_lsb, address, reg_type, dig_top_pin, reg_name):
+    def __init__(self, name, bit_msb, bit_lsb, address, reg_type, dig_top_pin, reg_name,
+                 reg_type_raw=""):
         self.name = name
         self.bit_msb = bit_msb
         self.bit_lsb = bit_lsb
         self.address = address          # int
-        self.reg_type = reg_type        # 'RO'/'RW'/None
+        self.reg_type = reg_type        # 归一化后 'RO'/'RW'/None
+        self.reg_type_raw = reg_type_raw  # H 列原文（诊断用）
         self.dig_top_pin = dig_top_pin  # 'Y'/'N'/None
         self.reg_name = reg_name        # 所属寄存器名（B 列里寄存器行给出）
 
@@ -236,12 +238,14 @@ def read_tmm(ws):
             name = a
             pin = _s(_col(row, "D")).upper()
             dig = "Y" if pin in ("Y", "YES") else ("N" if pin in ("N", "NO") else None)
+            raw_type = _s(_col(row, "H"))
             entry = TmmField(
                 name=name,
                 bit_msb=bit_msb,
                 bit_lsb=bit_lsb,
                 address=field_addr,
-                reg_type=_normalize_type(_col(row, "H")),
+                reg_type=_normalize_type(raw_type),
+                reg_type_raw=raw_type,
                 dig_top_pin=dig,        # 精确匹配，避免 'NA'/'N/A' 被首字符截断误判为 'N'
                 reg_name=cur_reg_name,
             )

@@ -46,6 +46,9 @@ def build_argparser():
     p.add_argument("--excel", required=True, help="核心 Excel (.xlsx) 路径")
     p.add_argument("--out", default="wr_rf_tc.sv", help="输出 .sv 路径 (默认 wr_rf_tc.sv)")
     p.add_argument("--list", action="store_true", help="只列出可生成信号清单，不生成")
+    p.add_argument("--diagnose", action="store_true",
+                   help="覆盖诊断: 实测各输入被解析成 force(RO)/RF_WRITE(RW)/未知, "
+                        "类型列有哪些写法, 有无 >16bit 输入(驱动会截断), 不生成")
 
     g = p.add_argument_group("信号筛选")
     g.add_argument("--owner", help="按 owner 筛选(逗号分隔，匹配 logic P 列)")
@@ -93,6 +96,47 @@ def cmd_list(wb, opts):
                  (s.suffix or "")[:12], s.top_output, s.expr[:50]))
 
 
+def cmd_diagnose(wb, opts):
+    d = generator.diagnose(wb, opts)
+    print("\n===== 覆盖诊断 =====")
+    print("参与诊断信号: %d" % d["n_signals"])
+    print("\n[total_memory_map H 列(类型)原文分布]  ← 看是否只有 RO/RW 系，有无没覆盖的写法")
+    for k, v in d["tmm_type_raw"].items():
+        print("   %-16s x %d" % (k, v))
+    print("[regmap F 列(Reg Type)原文分布]")
+    for k, v in d["regmap_type_raw"].items():
+        print("   %-16s x %d" % (k, v))
+    print("[total_memory_map D 列(DIG TOP PIN)分布]")
+    for k, v in d["tmm_dig_top_pin"].items():
+        print("   %-16s x %d" % (k, v))
+
+    k = d["input_kinds"]
+    total = sum(k.values())
+    print("\n[输入驱动方式分类]  (RO→force, RW→RF_WRITE)")
+    print("   RO(force)    : %d" % k["RO"])
+    print("   RW(RF_WRITE) : %d" % k["RW"])
+    print("   UNKNOWN(未解析): %d" % k["UNKNOWN"])
+    if total:
+        cov = 100.0 * (k["RO"] + k["RW"]) / total
+        print("   → 已明确归类覆盖率: %.1f%% (%d/%d)" % (cov, k["RO"] + k["RW"], total))
+
+    if d["wide_inputs"]:
+        print("\n⚠ [>16bit 输入] force/RF_WRITE 固定 16'h 会截断这些输入（需特别核对/跨寄存器处理）:")
+        for name, ltr, base, w, kind in d["wide_inputs"]:
+            print("   %s 的 %s=%s (%dbit, %s)" % (name, ltr, base, w, kind))
+    else:
+        print("\n✅ 无 >16bit 输入，16'h 驱动不会截断。")
+
+    if d["unresolved"]:
+        print("\n⚠ [未解析输入] 这些既非干净 RO 也非干净 RW，需人工核对/覆盖参数:")
+        for name, ltr, base, note in d["unresolved"][:50]:
+            print("   %s 的 %s=%s: %s" % (name, ltr, base, note))
+        if len(d["unresolved"]) > 50:
+            print("   ...(共 %d 条)" % len(d["unresolved"]))
+    else:
+        print("✅ 无未解析输入：所有被引用输入都干净归类为 force 或 RF_WRITE。")
+
+
 def main(argv=None):
     args = build_argparser().parse_args(argv)
     if not os.path.isfile(args.excel):
@@ -123,6 +167,10 @@ def main(argv=None):
 
     if args.list:
         cmd_list(wb, opts)
+        return 0
+
+    if args.diagnose:
+        cmd_diagnose(wb, opts)
         return 0
 
     # 负向用例单独出文件：分两次生成
