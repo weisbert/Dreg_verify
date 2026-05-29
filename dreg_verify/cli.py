@@ -201,91 +201,178 @@ def write_report(path, rep, excel):
     return [detail_path, summary_path]
 
 
+_REPORT_CSS = """
+:root{--bd:#ccc;--hd:#f0f3f7}
+*{box-sizing:border-box}
+body{font-family:"Segoe UI",Microsoft YaHei,sans-serif;margin:0;color:#222}
+header{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--bd);
+ padding:14px 24px 0;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,.04)}
+h1{font-size:19px;margin:0 0 4px} h3{font-size:13px;margin:22px 0 0}
+.sum{color:#555;margin:2px 0;font-size:12px}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.toolbar input[type=text]{padding:5px 9px;border:1px solid var(--bd);border-radius:5px;
+ width:300px;font-size:13px}
+.toolbar select{padding:5px;border:1px solid var(--bd);border-radius:5px}
+.toolbar label{font-size:13px;color:#444;user-select:none}
+#count{color:#888;font-size:12px;margin-left:auto}
+.tabs{display:flex;gap:4px;margin-top:8px}
+.tabbtn{border:1px solid var(--bd);border-bottom:none;background:#f4f6f9;cursor:pointer;
+ padding:7px 16px;font-size:13px;border-radius:6px 6px 0 0;color:#555}
+.tabbtn.active{background:#fff;color:#1558d6;font-weight:600;box-shadow:0 -2px 0 #1558d6 inset}
+main{padding:6px 24px 40px}
+.tab{display:none} .tab.active{display:block}
+table{border-collapse:collapse;font-size:12px;margin-top:8px}
+table.full,table.sum{width:100%}
+th,td{border:1px solid var(--bd);padding:4px 6px;text-align:left;vertical-align:top}
+th{background:var(--hd)} thead th{position:sticky;top:128px}
+tbody tr:nth-child(even){background:#fafbfc}
+tr.neg{background:#fff3f3} tr.err{background:#ffe9e9}
+.tt td,.tt th{text-align:center} .tt th.rowhdr{text-align:left;background:#eef1f5;white-space:nowrap}
+.tt td.neg,.tt th.negh{background:#ffe3e3;color:#a40000}
+.tt tr.exprow th,.tt tr.exprow td{font-weight:600;border-top:2px solid #999}
+.tt td.drv{font-family:Consolas,monospace;font-size:11px;text-align:left;color:#555}
+.ttblock{margin-bottom:6px} .ex{color:#888} code{background:#f5f5f5;padding:0 3px}
+.empty{color:#999;padding:20px}
+"""
+
+_REPORT_JS = """
+(function(){
+  var q=document.getElementById('q'),ow=document.getElementById('owner'),
+      no=document.getElementById('negonly'),cnt=document.getElementById('count');
+  function tab(name){
+    var bs=document.querySelectorAll('.tabbtn'),ss=document.querySelectorAll('.tab'),i;
+    for(i=0;i<bs.length;i++)bs[i].classList.toggle('active',bs[i].getAttribute('data-tab')===name);
+    for(i=0;i<ss.length;i++)ss[i].classList.toggle('active',ss[i].id===name);
+  }
+  var btns=document.querySelectorAll('.tabbtn');
+  for(var i=0;i<btns.length;i++)(function(b){b.onclick=function(){tab(b.getAttribute('data-tab'));};})(btns[i]);
+  function ok(el){
+    var t=el.getAttribute('data-text')||'';
+    if(q.value && t.indexOf(q.value.toLowerCase())<0)return false;
+    if(ow.value && el.getAttribute('data-owner')!==ow.value)return false;
+    if(no.checked && el.getAttribute('data-neg')!=='1')return false;
+    return true;
+  }
+  function apply(){
+    var els=document.querySelectorAll('.filt'),vis=0,sig=0,j;
+    for(j=0;j<els.length;j++){var m=ok(els[j]);els[j].style.display=m?'':'none';
+      if(m){vis++;if(els[j].classList.contains('srow'))sig++;}}
+    cnt.textContent='匹配信号 '+sig;
+  }
+  q.oninput=apply;ow.onchange=apply;no.onchange=apply;apply();
+})();
+"""
+
+
 def _write_report_html(path, rep, excel):
     import html
 
     def esc(x):
         return html.escape(str(x))
 
-    def table(rows, cols):
+    def attr(signal, owner, neg, text):
+        return ' data-signal="%s" data-owner="%s" data-neg="%s" data-text="%s"' % (
+            esc(signal), esc(owner or ""), "1" if neg else "0", esc((text or "").lower()))
+
+    def flat_table(rows, cols, rowcls, cls_attr, kind):
+        """① 汇总 / ③ 明细：可过滤的横表。rowcls=srow/drow；每行带 data-* 供 JS 过滤。"""
         if not rows:
-            return "<p>（无数据）</p>"
+            return '<p class="empty">（无数据）</p>'
         th = "".join("<th>%s</th>" % esc(h) for _k, h in cols)
         trs = []
         for r in rows:
+            if kind == "sum":
+                neg = bool(r.get("n_neg"))
+                text = "%s %s %s" % (r.get("signal", ""), r.get("owner", ""), r.get("expr", ""))
+                extra = " err" if r.get("error") else (" neg" if neg else "")
+            else:
+                neg = r.get("neg") == "是"
+                text = "%s %s %s %s" % (r.get("signal", ""), r.get("owner", ""),
+                                        r.get("test", ""), r.get("expr", ""))
+                extra = " neg" if neg else ""
             tds = "".join("<td>%s</td>" % esc(r.get(k, "")) for k, _h in cols)
-            cls = ' class="neg"' if r.get("neg") == "是" else (' class="err"' if r.get("error") else "")
-            trs.append("<tr%s>%s</tr>" % (cls, tds))
-        return "<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (th, "".join(trs))
+            trs.append('<tr class="filt %s%s"%s>%s</tr>'
+                       % (rowcls, extra, attr(r.get("signal", ""), r.get("owner", ""), neg, text), tds))
+        return ('<table class="%s"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
+                % (cls_attr, th, "".join(trs)))
 
     def truth_tables(tabs):
-        """② 每信号纵向真值表：输入(带位宽)做行、各测试做列；负向列标红 + _NEG。"""
+        """② 每信号纵向真值表：输入(带位宽)做行、各测试做列；负向列标红 + _NEG。整块可过滤。"""
         if not tabs:
-            return "<p>（无数据）</p>"
+            return '<p class="empty">（无数据）</p>'
         out = []
         for t in tabs:
             tests = t["tests"]
-            # 列头：信号\测试 + 各 T；负向列加 class
             hdr = ['<th class="rowhdr">信号\\测试</th>']
             for tc in tests:
                 hdr.append('<th class="%s">%s</th>' % ("negh" if tc["neg"] else "", esc(tc["name"])))
             body = []
-            for ri, inp in enumerate(t["inputs"]):       # 每个输入一行
+            for ri, inp in enumerate(t["inputs"]):
                 cells = ['<th class="rowhdr">%s</th>' % esc(inp["label"])]
                 for tc in tests:
                     cells.append('<td class="%s">%s</td>'
                                  % ("neg" if tc["neg"] else "", esc(tc["values"][ri])))
                 body.append("<tr>%s</tr>" % "".join(cells))
-            # 期望行（负向单元格红，hover 显示正确值）
             exp_cells = ['<th class="rowhdr">%s</th>' % esc(t.get("exp_label", "期望(out)"))]
             for tc in tests:
                 title = ' title="正确应为 %s"' % esc(tc["correct"]) if tc["neg"] else ""
                 exp_cells.append('<td class="%s"%s>%s</td>'
                                  % ("neg" if tc["neg"] else "", title, esc(tc["expected"])))
             body.append('<tr class="exprow">%s</tr>' % "".join(exp_cells))
-            # force / RF_WRITE 两行（驱动）
             for label, key in (("force", "force"), ("RF_WRITE", "rfwrite")):
                 cells = ['<th class="rowhdr">%s</th>' % label]
                 for tc in tests:
                     cells.append('<td class="drv %s">%s</td>'
                                  % ("neg" if tc["neg"] else "", esc(tc.get(key, ""))))
                 body.append("<tr>%s</tr>" % "".join(cells))
-            out.append('<h3>R%s　<code>%s</code>　<span class="ex">%s</span></h3>'
-                       '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
-                       % (esc(t["R"]), esc(t["signal"]), esc(t["expr"]),
+            neg_block = any(tc["neg"] for tc in tests)
+            text = "%s %s %s" % (t["signal"], t.get("owner", ""), t["expr"])
+            out.append('<div class="filt ttblock"%s>'
+                       '<h3>R%s　<code>%s</code>　<span class="ex">%s</span></h3>'
+                       '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
+                       % (attr(t["signal"], t.get("owner", ""), neg_block, text),
+                          esc(t["R"]), esc(t["signal"]), esc(t["expr"]),
                           "".join(hdr), "".join(body)))
         return "\n".join(out)
 
+    owners = sorted({(r.get("owner") or "") for r in rep["summary"] if r.get("owner")})
+    owner_opts = '<option value="">全部 owner</option>' + "".join(
+        '<option value="%s">%s</option>' % (esc(o), esc(o)) for o in owners)
     n_sig = len(rep["summary"])
     n_tc = len(rep["detail"])
     n_neg = sum(1 for r in rep["detail"] if r.get("neg") == "是")
-    doc = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<title>Dreg 测试用例报告</title><style>
-body{{font-family:"Segoe UI",Microsoft YaHei,sans-serif;margin:24px;color:#222}}
-h1{{font-size:20px}} h2{{font-size:16px;margin-top:28px}} h3{{font-size:13px;margin:20px 0 0}}
-table{{border-collapse:collapse;font-size:12px;margin-top:8px}}
-table.full,table.sum{{width:100%}}
-th,td{{border:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:top}}
-th{{background:#f0f3f7}} thead th{{position:sticky;top:0}}
-tr:nth-child(even){{background:#fafbfc}}
-tr.neg{{background:#fff3f3}} tr.err{{background:#ffe9e9}}
-.tt td,.tt th{{text-align:center}} .tt th.rowhdr{{text-align:left;background:#eef1f5}}
-.tt td.neg,.tt th.negh{{background:#ffe3e3;color:#a40000}}
-.tt tr.exprow th,.tt tr.exprow td{{font-weight:600;border-top:2px solid #999}}
-.tt td.drv{{font-family:Consolas,monospace;font-size:11px;text-align:left;color:#555}}
-.ex{{color:#888}} .sum{{color:#555;margin:6px 0 0}} code{{background:#f5f5f5;padding:0 3px}}
-</style></head><body>
-<h1>Dreg 测试用例报告</h1>
-<p class="sum">源 Excel: <code>{excel}</code>　信号 {n_sig} 个　用例 {n_tc} 条（其中负向 {n_neg} 条）</p>
-<p class="sum">负向用例(红/_NEG)=故意填错期望值, 预期应 FAIL, 用于自检 checker。</p>
-<h2>① 每信号汇总</h2>{tbl_sum}
-<h2>② 每信号真值表（输入做行 / 各测试做列）</h2>{tbl_tt}
-<h2>③ 每条用例明细</h2>{tbl_det}
-</body></html>""".format(
-        excel=esc(os.path.basename(excel)), n_sig=n_sig, n_tc=n_tc, n_neg=n_neg,
-        tbl_sum=table(rep["summary"], SUMMARY_COLS).replace("<table>", '<table class="sum">', 1),
-        tbl_tt=truth_tables(rep.get("tables", [])),
-        tbl_det=table(rep["detail"], DETAIL_COLS).replace("<table>", '<table class="full">', 1))
+
+    # 仅对 body 模板做 % 替换；CSS/JS 含字面 % 与 {}，单独拼接(不参与格式化)。
+    body = (
+        '<header>'
+        '<h1>Dreg 测试用例报告</h1>'
+        '<p class="sum">源 Excel: <code>%s</code>　信号 %d 个　用例 %d 条（其中负向 %d 条）　'
+        '负向(红/_NEG)=故意填错期望, 预期应 FAIL。</p>'
+        '<div class="toolbar">'
+        '<input type="text" id="q" placeholder="搜索 信号名 / owner / 表达式…">'
+        '<select id="owner">%s</select>'
+        '<label><input type="checkbox" id="negonly"> 只看负向</label>'
+        '<span id="count"></span>'
+        '</div>'
+        '<div class="tabs">'
+        '<button class="tabbtn active" data-tab="sum">① 汇总</button>'
+        '<button class="tabbtn" data-tab="tt">② 真值表</button>'
+        '<button class="tabbtn" data-tab="det">③ 明细</button>'
+        '</div></header>'
+        '<main>'
+        '<section id="sum" class="tab active">%s</section>'
+        '<section id="tt" class="tab">%s</section>'
+        '<section id="det" class="tab">%s</section>'
+        '</main>'
+    ) % (
+        esc(os.path.basename(excel)), n_sig, n_tc, n_neg, owner_opts,
+        flat_table(rep["summary"], SUMMARY_COLS, "srow", "sum", "sum"),
+        truth_tables(rep.get("tables", [])),
+        flat_table(rep["detail"], DETAIL_COLS, "drow", "full", "det"),
+    )
+    doc = ('<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+           '<title>Dreg 测试用例报告</title><style>' + _REPORT_CSS + '</style></head><body>'
+           + body + '<script>' + _REPORT_JS + '</script></body></html>')
     with open(path, "w", encoding="utf-8") as f:
         f.write(doc)
 
@@ -417,6 +504,12 @@ def _report(res, out):
         print("  ⚠ 表达式解析失败 %d 个:" % s["n_parse_errors"])
         for name, aid, msg in res["errors"]:
             print("    - [R=%s] %s: %s" % (aid, name, msg))
+    if s.get("n_dup_labels"):
+        print("  ⛔ 发现 %d 处重复 assert 标号（同一作用域内重复=非法 SV，会 elaboration 失败）:"
+              % s["n_dup_labels"])
+        for lbl, sig1, sig2 in res.get("dup_labels", [])[:20]:
+            print("    - assert_%s: 同时来自 %s 与 %s" % (lbl, sig1, sig2))
+        print("    多因两信号共用同一 R(序号)；请核对 logic R 列唯一性，或改掉自定义测试名。")
     if s.get("n_skipped"):
         print("  ↷ 跳过 %d 个含'不可驱动输入'的信号（force 不存在的 net 会 elaboration 失败；VBA 也跳过这类）:"
               % s["n_skipped"])
