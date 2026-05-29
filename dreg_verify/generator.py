@@ -171,6 +171,38 @@ def render(result, header_info=None, comments=False):
     return W.render_file(result["blocks"], header_info=header_info, comments=comments)
 
 
+def analyze_signal(resolver, sig):
+    """单信号解析画像（GUI debug 用）：返回 status + 每输入的 force/RF_WRITE net + 输出 net。
+    status: clean / wire-fallback / unresolved / parse-err —— 用于挑出可能导致 elaboration 失败的信号。
+    """
+    out_net = "`%s.%s" % (W.ENV, sig.out_name)
+    try:
+        node = E.parse(sig.expr)
+    except E.ExprError as ex:
+        return {"status": "parse-err", "inputs": [], "out_net": out_net, "error": str(ex)}
+    used = E.collect_vars(node)
+    bindings = resolver.resolve_signal_inputs(sig)
+    rows, status = [], "clean"
+    for ltr in used:
+        b = bindings.get(ltr)
+        if b is None:
+            continue
+        if b.kind == "RW" and b.address is not None:
+            net = "`%s(10'h%X, ...) bit<<%s" % (W.RF_WRITE, b.address, b.reg_lsb)
+        elif b.kind == "RO":
+            net = "force `%s.%s" % (W.ENV, b.wire_lhs)
+        else:
+            net = "(UNRESOLVED)"
+        rows.append({"letter": ltr, "base": b.base, "kind": b.kind,
+                     "found_in": b.found_in, "net": net, "resolved": b.resolved,
+                     "note": b.note})
+        if not b.resolved:
+            status = "unresolved"
+        elif b.found_in == "wire" and status == "clean":
+            status = "wire-fallback"
+    return {"status": status, "inputs": rows, "out_net": out_net, "error": ""}
+
+
 def report(wb, opts):
     """
     生成"给人看"的测试用例清单（结构化），CLI 负责写成 CSV/HTML。

@@ -88,8 +88,12 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 python -m dreg_verify.gui
 ```
 
-加载 Excel → 信号表（按 owner / type / 名字 筛选，多选 + 全选/清空）→ 勾"负向"列给信号加异常用例
+加载 Excel → 信号表（按 owner / type / 名字 / **状态** 筛选，多选 + 全选/清空）→ 勾"负向"列加异常用例
 → "预览选中"看 .sv 片段 → "生成 .sv …"导出。后端与 CLI 同一套逻辑。
+
+**debug 辅助**：每信号有**状态列**（clean / ⚠wire兜底 / ✗未解析 / 解析错）——非 clean 的最可能导致
+elaboration 失败；**点信号**看它 force/RF_WRITE 哪些 net 的明细（对比 `ENV_RF` 层是否真有该 net）；
+**覆盖诊断**按钮列出所有 wire兜底/未解析输入；**状态筛选**可只看有问题的信号，用来二分定位"跑不出结果"。
 
 ## 表达式形态覆盖自检（强烈建议先跑）
 
