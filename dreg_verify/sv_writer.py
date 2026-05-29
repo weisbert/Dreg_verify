@@ -20,7 +20,10 @@ RF_WRITE = "RF_WRITE"   # 寄存器写宏名
 INDENT = "  "
 ADDR_WIDTH_HEX = 10     # RF_WRITE 地址用 10'h
 DATA_WIDTH_HEX = 16     # 数据/force 用 16'h
-UVM_COMP = "uvm_test_top"   # uvm_report_info 的 id 字段（按需改）
+UVM_COMP = "uvm_test_top"   # uvm 消息的 id 字段（按需改）
+# ⚠ UVM 里带反引号的是宏：`uvm_info / `uvm_error（uvm_report_info 是函数，不能加反引号）
+UVM_INFO = "uvm_info"       # 信息宏：`uvm_info(ID, MSG, VERBOSITY)
+UVM_ERROR = "uvm_error"     # 报错宏：`uvm_error(ID, MSG)
 
 
 # ───────────────────────────── 值格式化 ─────────────────────────────
@@ -115,16 +118,16 @@ def _build_drive_lines(vec, bindings, used_vars):
     for f in forces:
         lines.append("%sforce `%s.%s = %s;   // %s (%s, 位宽%d)"
                      % (INDENT, ENV, f["wire"], f["hex"], f["base"], f["src"], f["width"]))
-        lines.append('%s`uvm_report_info("%s", "drive %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_COMP, f["wire"], f["hex"]))
+        lines.append('%s`%s("%s", "drive %s = %s", UVM_LOW);'
+                     % (INDENT, UVM_INFO, UVM_COMP, f["wire"], f["hex"]))
 
     # RW：同地址合并成一条 RF_WRITE
     for w in writes:
         desc = ", ".join("%s<<%d=%s" % (fl["base"], fl["lsb"], fl["hex"]) for fl in w["fields"])
         lines.append("%s`%s(%s, %s);   // %s"
                      % (INDENT, RF_WRITE, w["addr"], w["hex"], desc))
-        lines.append('%s`uvm_report_info("%s", "RF_WRITE %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_COMP, w["addr"], w["hex"]))
+        lines.append('%s`%s("%s", "RF_WRITE %s = %s", UVM_LOW);'
+                     % (INDENT, UVM_INFO, UVM_COMP, w["addr"], w["hex"]))
 
     unresolved_strs = ["%s(%s): %s" % (l, b, n) for (l, b, n) in unresolved]
     return lines, unresolved_strs
@@ -178,15 +181,15 @@ def render_signal_block(sig, bindings, vectors, meta):
         lines.append("%s%s: assert(`%s.%s == %s)" % (INDENT, label, ENV, sig.out_name, exp))
         if vec.is_negative:
             n_neg += 1
-            lines.append('%s%selse `uvm_error("%s", "NEG-OK: checker 抓到注入错误 %s 期望应为 %s");'
-                         % (INDENT, INDENT, UVM_COMP, exp, fmt_bin(vec.exp_value, vec.exp_width)))
-            lines.append('%s%s`uvm_report_info("%s", "%s 负向(故意错): 若此处未报错说明 checker 失效", UVM_LOW);'
-                         % (INDENT, INDENT, UVM_COMP, label))
+            lines.append('%s%selse `%s("%s", "NEG-OK: checker 抓到注入错误 %s 期望应为 %s");'
+                         % (INDENT, INDENT, UVM_ERROR, UVM_COMP, exp, fmt_bin(vec.exp_value, vec.exp_width)))
+            lines.append('%s%s`%s("%s", "%s 负向(故意错): 若此处未报错说明 checker 失效", UVM_LOW);'
+                         % (INDENT, INDENT, UVM_INFO, UVM_COMP, label))
         else:
-            lines.append('%s%selse `uvm_error("%s", "断言失败: %s 期望 %s");'
-                         % (INDENT, INDENT, UVM_COMP, sig.out_name, exp))
-            lines.append('%s%s`uvm_report_info("%s", "%s 通过, %s == %s", UVM_LOW);'
-                         % (INDENT, INDENT, UVM_COMP, label, sig.out_name, exp))
+            lines.append('%s%selse `%s("%s", "断言失败: %s 期望 %s");'
+                         % (INDENT, INDENT, UVM_ERROR, UVM_COMP, sig.out_name, exp))
+            lines.append('%s%s`%s("%s", "%s 通过, %s == %s", UVM_LOW);'
+                         % (INDENT, INDENT, UVM_INFO, UVM_COMP, label, sig.out_name, exp))
     lines.append("")
 
     stats = {

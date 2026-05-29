@@ -137,6 +137,15 @@ def test_negative_cases(wb):
     assert "故意填错" in text
 
 
+# ───────────── UVM 宏正确性（uvm_info 是宏，uvm_report_info 是函数不能加反引号）─────────────
+def test_uvm_macros_valid(wb):
+    opts = generator.GenOptions(neg_all=True)
+    text = generator.render(generator.build(wb, opts))
+    assert "`uvm_report_info" not in text   # 这是函数名误加反引号 → 编译报 NOTDIR
+    assert "`uvm_info(" in text             # 正确的信息宏
+    assert "`uvm_error(" in text            # 正确的报错宏
+
+
 # ───────────── 覆盖诊断 ─────────────
 def test_diagnose(wb):
     d = generator.diagnose(wb, generator.GenOptions())
