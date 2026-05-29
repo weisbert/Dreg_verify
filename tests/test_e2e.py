@@ -140,11 +140,11 @@ def test_negative_cases(wb):
 # ───────────── 覆盖诊断 ─────────────
 def test_diagnose(wb):
     d = generator.diagnose(wb, generator.GenOptions())
-    assert d["input_kinds"]["UNKNOWN"] == 0
-    assert d["input_kinds"]["RO"] >= 1        # iddq / lna_agc_line 是 RO(force)
-    assert d["input_kinds"]["RW"] >= 1        # 多数字段是 RW(RF_WRITE)
+    assert d["cats"]["unknown"] == 0
+    assert d["cats"]["force_ro"] >= 1         # iddq / lna_agc_line 是 RO(force)
+    assert d["cats"]["rfwrite"] >= 1          # 多数字段是 RW(RF_WRITE)
     assert d["wide_inputs"] == []             # 合成表无 >16bit 输入
-    assert d["unresolved"] == []              # 全部干净归类
+    assert d["unknown"] == []                 # 全部干净归类
     assert "RW" in d["tmm_type_raw"] and "RO" in d["tmm_type_raw"]
 
 

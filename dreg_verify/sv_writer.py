@@ -69,13 +69,14 @@ def _build_drive_lines(vec, bindings, used_vars):
         else:  # RW
             rw_by_addr.setdefault(b.address, []).append((b, val))
 
-    # RO：逐个 force
+    # RO：逐个 force（force 字面量按 wire 位宽自适应，>16bit 不截断）
     for b, val in ro:
-        lines.append("%sforce `%s.%s = %s;   // %s (RO, 位[%s:%s])"
-                     % (INDENT, ENV, b.wire, fmt_hex(val), b.base,
-                        _s(b.reg_msb), _s(b.reg_lsb)))
+        hw = max(DATA_WIDTH_HEX, b.width)
+        src = {"tmm": "RO", "regmap": "RO", "logic": "级联wire", "wire": "wire"}.get(b.found_in, "RO")
+        lines.append("%sforce `%s.%s = %s;   // %s (%s, 位宽%d)"
+                     % (INDENT, ENV, b.wire, fmt_hex(val, hw), b.base, src, b.width))
         lines.append('%s`uvm_report_info("%s", "drive %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_COMP, b.wire, fmt_hex(val)))
+                     % (INDENT, UVM_COMP, b.wire, fmt_hex(val, hw)))
 
     # RW：同地址合并
     for addr in sorted(rw_by_addr.keys()):

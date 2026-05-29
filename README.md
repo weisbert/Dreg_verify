@@ -66,7 +66,13 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 | `--neg-which first\|all` | 每信号造 1 个还是每向量都造 |
 | `--neg-file inline\|separate` | 负向放同文件还是单独 `*_neg.sv` |
 | `--force-signals` / `--rfwrite-signals` | 手动指定 RO/RW（修正名称/类型判定） |
-| `--diagnose` | 覆盖诊断：类型列原文分布 + 输入归类(force/RF_WRITE/未知)覆盖率 + >16bit 输入告警 |
+| `--no-wire-fallback` | 关闭 wire 兜底：非 RW 寄存器且查不到的输入不再默认 force，而是标 UNKNOWN |
+| `--diagnose` | 覆盖诊断：类型列原文分布 + 输入归类(RF_WRITE/force-RO/force-级联/force-wire/UNKNOWN)覆盖率 |
+
+**输入驱动模型**（沿用旧 for_test 规则）：输入是 **RW 寄存器**（在 total_memory_map/regmap 有地址）→ `` `RF_WRITE ``；
+其余都是 **wire** → `force`（按信号名），包括 RO 管脚、**级联中间信号**（某输入其实是另一个 logic 的输出，
+位宽自动取该输出的真实位宽）、以及表中查不到的信号（wire 兜底）。`--diagnose` 会把这几类分开列出，
+其中"wire 兜底"是你需要重点确认"是否真是 wire、还是命名没匹配上的寄存器"的部分。
 
 ## 图形界面（PySide6）
 

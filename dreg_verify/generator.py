@@ -17,7 +17,7 @@ class GenOptions:
                  neg_signals=None, neg_all=False, neg_mode="invert",
                  neg_which="first", neg_value=None,
                  force_overrides=None, rfwrite_overrides=None, default_kind=None,
-                 top_output_only=False, types=None):
+                 top_output_only=False, types=None, wire_fallback=True):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -34,6 +34,7 @@ class GenOptions:
         self.default_kind = default_kind
         self.top_output_only = top_output_only
         self.types = _norm_set(types)
+        self.wire_fallback = wire_fallback
 
 
 def _norm_set(x):
@@ -99,7 +100,8 @@ def build(wb, opts):
     """
     resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
                           rfwrite_overrides=opts.rfwrite_overrides,
-                          default_kind=opts.default_kind)
+                          default_kind=opts.default_kind,
+                          wire_fallback=opts.wire_fallback)
     selected = select_signals(wb, opts)
     blocks = []
     errors = []
@@ -161,7 +163,8 @@ def diagnose(wb, opts=None):
     opts = opts or GenOptions()
     resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
                           rfwrite_overrides=opts.rfwrite_overrides,
-                          default_kind=opts.default_kind)
+                          default_kind=opts.default_kind,
+                          wire_fallback=opts.wire_fallback)
     sigs = select_signals(wb, opts)
 
     # 1) 类型列原文分布（tmm H / regmap F）
@@ -178,10 +181,11 @@ def diagnose(wb, opts=None):
         key = f.dig_top_pin if f.dig_top_pin is not None else "(空/其它)"
         tmm_pins[key] = tmm_pins.get(key, 0) + 1
 
-    # 2) 逐输入解析分类
-    kinds = {"RO": 0, "RW": 0, "UNKNOWN": 0}
-    wide_inputs = []        # >16bit 的输入（驱动会截断）
-    unresolved = []         # (信号, 字母, 基名, note)
+    # 2) 逐输入解析分类（force 再按来源细分）
+    cats = {"rfwrite": 0, "force_ro": 0, "force_chained": 0, "force_wire": 0, "unknown": 0}
+    wide_inputs = []        # >16bit 的输入（force 会自适应位宽；RF_WRITE 仍 16'h 受限）
+    unknown = []            # (信号, 字母, 基名, note)
+    fallback_wires = []     # 表里查无、按 wire force 的（需你确认是否真是 wire）
     seen_inputs = set()
     for sig in sigs:
         bindings = resolver.resolve_signal_inputs(sig)
@@ -197,18 +201,28 @@ def diagnose(wb, opts=None):
             if key in seen_inputs:
                 continue
             seen_inputs.add(key)
-            kinds[b.kind if b.kind in kinds else "UNKNOWN"] += 1
+            if b.kind == "RW" and b.address is not None:
+                cats["rfwrite"] += 1
+            elif b.kind == "RO" and b.found_in in ("tmm", "regmap"):
+                cats["force_ro"] += 1
+            elif b.kind == "RO" and b.found_in == "logic":
+                cats["force_chained"] += 1
+            elif b.kind == "RO" and b.found_in == "wire":
+                cats["force_wire"] += 1
+                fallback_wires.append((sig.out_name, ltr, b.base, b.width))
+            else:
+                cats["unknown"] += 1
+                unknown.append((sig.out_name, ltr, b.base, b.note))
             if b.width > 16:
-                wide_inputs.append((sig.out_name, ltr, b.base, b.width, b.kind))
-            if not b.resolved:
-                unresolved.append((sig.out_name, ltr, b.base, b.note))
+                wide_inputs.append((sig.out_name, ltr, b.base, b.width, b.kind, b.found_in))
 
     return {
         "n_signals": len(sigs),
         "tmm_type_raw": dict(sorted(tmm_types.items(), key=lambda kv: -kv[1])),
         "regmap_type_raw": dict(sorted(rm_types.items(), key=lambda kv: -kv[1])),
         "tmm_dig_top_pin": dict(sorted(tmm_pins.items(), key=lambda kv: -kv[1])),
-        "input_kinds": kinds,
+        "cats": cats,
         "wide_inputs": wide_inputs,
-        "unresolved": unresolved,
+        "fallback_wires": fallback_wires,
+        "unknown": unknown,
     }

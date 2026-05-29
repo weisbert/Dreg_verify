@@ -81,6 +81,8 @@ def build_argparser():
     g4.add_argument("--rfwrite-signals", help="强制按 RW(RF_WRITE) 处理的基名(逗号分隔)")
     g4.add_argument("--default-kind", choices=["RO", "RW"], default=None,
                     help="类型判不出时的兜底(默认保持未解析并报告)")
+    g4.add_argument("--no-wire-fallback", action="store_true",
+                    help="关闭 wire 兜底：非 RW 寄存器且查不到的输入不再默认 force，而是标 UNKNOWN 交人工")
     return p
 
 
@@ -110,31 +112,43 @@ def cmd_diagnose(wb, opts):
     for k, v in d["tmm_dig_top_pin"].items():
         print("   %-16s x %d" % (k, v))
 
-    k = d["input_kinds"]
-    total = sum(k.values())
-    print("\n[输入驱动方式分类]  (RO→force, RW→RF_WRITE)")
-    print("   RO(force)    : %d" % k["RO"])
-    print("   RW(RF_WRITE) : %d" % k["RW"])
-    print("   UNKNOWN(未解析): %d" % k["UNKNOWN"])
+    c = d["cats"]
+    total = sum(c.values())
+    print("\n[输入驱动方式分类]")
+    print("   RF_WRITE (RW 寄存器)       : %d" % c["rfwrite"])
+    print("   force - RO 寄存器/管脚      : %d" % c["force_ro"])
+    print("   force - 级联中间信号(logic 输出): %d" % c["force_chained"])
+    print("   force - wire 兜底(表中查无)  : %d  ← 需你确认这些确实是 wire" % c["force_wire"])
+    print("   UNKNOWN (仍无法处理)        : %d" % c["unknown"])
     if total:
-        cov = 100.0 * (k["RO"] + k["RW"]) / total
-        print("   → 已明确归类覆盖率: %.1f%% (%d/%d)" % (cov, k["RO"] + k["RW"], total))
+        ok = total - c["unknown"]
+        print("   → 可生成(force/RF_WRITE)覆盖率: %.1f%% (%d/%d)" % (100.0 * ok / total, ok, total))
 
     if d["wide_inputs"]:
-        print("\n⚠ [>16bit 输入] force/RF_WRITE 固定 16'h 会截断这些输入（需特别核对/跨寄存器处理）:")
-        for name, ltr, base, w, kind in d["wide_inputs"]:
-            print("   %s 的 %s=%s (%dbit, %s)" % (name, ltr, base, w, kind))
+        print("\n[>16bit 输入] force 会按位宽自适应(如 32'h)不截断；但若它是 RW 寄存器，RF_WRITE 仍 16'h 受限:")
+        for name, ltr, base, w, kind, src in d["wide_inputs"][:30]:
+            print("   %s 的 %s=%s (%dbit, %s, %s)" % (name, ltr, base, w, kind, src))
+        if len(d["wide_inputs"]) > 30:
+            print("   ...(共 %d 条)" % len(d["wide_inputs"]))
     else:
-        print("\n✅ 无 >16bit 输入，16'h 驱动不会截断。")
+        print("\n（无 >16bit 输入）")
 
-    if d["unresolved"]:
-        print("\n⚠ [未解析输入] 这些既非干净 RO 也非干净 RW，需人工核对/覆盖参数:")
-        for name, ltr, base, note in d["unresolved"][:50]:
+    if d["fallback_wires"]:
+        print("\n⚠ [wire 兜底] 表中查无、按 wire 直接 force 的输入——请确认它们确实是 wire/管脚/中间信号；")
+        print("   若其实是寄存器，用 --rfwrite-signals 指定，否则会 force 而非 RF_WRITE:")
+        for name, ltr, base, w in d["fallback_wires"][:40]:
+            print("   %s 的 %s=%s (%dbit)" % (name, ltr, base, w))
+        if len(d["fallback_wires"]) > 40:
+            print("   ...(共 %d 条)" % len(d["fallback_wires"]))
+
+    if d["unknown"]:
+        print("\n⚠ [UNKNOWN] 仍无法处理(多为命名歧义)，需人工核对:")
+        for name, ltr, base, note in d["unknown"][:40]:
             print("   %s 的 %s=%s: %s" % (name, ltr, base, note))
-        if len(d["unresolved"]) > 50:
-            print("   ...(共 %d 条)" % len(d["unresolved"]))
+        if len(d["unknown"]) > 40:
+            print("   ...(共 %d 条)" % len(d["unknown"]))
     else:
-        print("✅ 无未解析输入：所有被引用输入都干净归类为 force 或 RF_WRITE。")
+        print("\n✅ 无 UNKNOWN：所有被引用输入都已归类为 force 或 RF_WRITE。")
 
 
 def main(argv=None):
@@ -159,6 +173,7 @@ def main(argv=None):
         force_overrides=_split(args.force_signals),
         rfwrite_overrides=_split(args.rfwrite_signals),
         default_kind=args.default_kind,
+        wire_fallback=not args.no_wire_fallback,
     )
 
     print("装载 Excel: %s ..." % args.excel)

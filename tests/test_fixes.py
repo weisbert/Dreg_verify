@@ -134,6 +134,48 @@ def test_owner_filter_with_spaces():
     assert len(G.select_signals(wb, G.GenOptions(owners=["Alice"]))) == 0
 
 
+# ── 追加: 级联中间信号 + wire 兜底（对应真表诊断里的 pll_n*/*_mux_out 等）──
+def _logic(out_name, out_width, expr, inputs, aid, owner="C", suffix="ls"):
+    return LogicSignal(row=1, out_name=out_name, out_width=out_width, expr=expr,
+                       suffix=suffix, top_output=0, notes="", owner=owner,
+                       assert_id=aid, inputs=inputs)
+
+
+def test_chained_and_wire_fallback():
+    # plln1 是一个 32bit logic 输出；plln2 把 plln1 当输入(级联中间信号)
+    s1 = _logic("d_plln1[31:0]", 32, "A",
+                {"A": {"raw": "int_n_to_logic[31:0]", "base": "int_n", "width": 32,
+                       "msb": 31, "lsb": 0}}, "60")
+    s2 = _logic("d_plln2[31:0]", 32, "A",
+                {"A": {"raw": "d_plln1", "base": "d_plln1", "width": 1,
+                       "msb": None, "lsb": None}}, "61", suffix="to_mux")
+    wb = DregWorkbook(logic=[s1, s2], regmap={}, tmm={}, sheet_names=[])
+    res = Resolver(wb)
+    # s1.A=int_n 表里查无 → wire 兜底 force
+    b1 = res.resolve_signal_inputs(s1)["A"]
+    assert b1.kind == "RO" and b1.found_in == "wire" and b1.resolved
+    # s2.A=d_plln1 是 logic 输出 → 级联，宽度取真实 32
+    b2 = res.resolve_signal_inputs(s2)["A"]
+    assert b2.kind == "RO" and b2.found_in == "logic" and b2.width == 32
+
+
+def test_force_literal_width_adaptive():
+    # 32bit wire 的 force 字面量应是 32'h，不被截成 16'h
+    b = InputBinding("A", "d_plln1", "d_plln1", width=32, kind="RO", address=None,
+                     reg_lsb=None, reg_msb=None, wire="d_plln1", found_in="logic")
+    vec = V.TestVector(0, {"A": 0x12345678}, exp_value=0, exp_width=32)
+    lines, _ = W._build_drive_lines(vec, {"A": b}, ["A"])
+    assert "32'h12345678" in "\n".join(lines)
+
+
+def test_no_wire_fallback_keeps_unknown():
+    s1 = _logic("d_x", 1, "A",
+                {"A": {"raw": "foo", "base": "foo", "width": 1, "msb": None, "lsb": None}}, "1")
+    wb = DregWorkbook(logic=[s1], regmap={}, tmm={}, sheet_names=[])
+    b = Resolver(wb, wire_fallback=False).resolve_signal_inputs(s1)["A"]
+    assert b.kind == "UNKNOWN" and not b.resolved
+
+
 # ── #8 重复次数取自变量值时不被声明位宽截断 ──
 def test_repeat_count_not_truncated():
     # A 声明 1 位但取值 2 → {2{B}} = 2'b11 = 3

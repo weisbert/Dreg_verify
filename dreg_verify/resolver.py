@@ -44,19 +44,27 @@ class InputBinding:
 
 class Resolver:
     def __init__(self, wb, force_overrides=None, rfwrite_overrides=None,
-                 default_kind=None):
+                 default_kind=None, wire_fallback=True):
         """
         wb: DregWorkbook
         force_overrides / rfwrite_overrides: 基名集合(小写比较)，强制 RO / RW。
         default_kind: 当类型完全判不出时的兜底 ('RO'/'RW'/None)。None=保持 UNKNOWN。
+        wire_fallback: True(默认) → 凡不是干净 RW 寄存器的输入都按 wire 处理(force 信号名)，
+                       与旧 for_test 行为一致（输入是 wire 就 force，是寄存器才 RF_WRITE）。
+                       False → 查不到就标 UNKNOWN 交人工。
         """
         self.wb = wb
         self.force_overrides = {s.lower() for s in (force_overrides or [])}
         self.rfwrite_overrides = {s.lower() for s in (rfwrite_overrides or [])}
         self.default_kind = default_kind
+        self.wire_fallback = wire_fallback
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}
+        # logic 输出名(去位宽,小写) → 位宽：用于识别"输入其实是另一个 logic 的输出"(级联中间信号)
+        self._logic_outputs = {}
+        for s in wb.logic:
+            self._logic_outputs.setdefault(s.out_base.lower(), s.out_width)
 
     # ───────────── 名称匹配（多策略，歧义不静默猜） ─────────────
     def _match(self, base, table_lower, tag):
@@ -114,6 +122,23 @@ class Resolver:
             note = "字段 %r 找到但 RO/RW 类型判不出（可用 --force-signals/--rfwrite-signals 指定）" % base
         elif kind == "RW" and address is None:
             note = "字段 %r 判为 RW 但缺地址（tmm 未命中，regmap 无地址）" % base
+
+        # ── 不是干净的 RW 寄存器时，按 for_test 规则把它当 wire → force（按信号名）──
+        # 但"歧义匹配"不走兜底：它很可能是某个寄存器，应交人工，而非当 wire 强行 force。
+        clean_rw = (kind == "RW" and address is not None)
+        if not clean_rw and not overridden and not amb_note:
+            chained_w = self._logic_outputs.get(low)
+            if chained_w is not None:
+                # 输入其实是另一个 logic 的输出（级联中间信号）→ force 该 wire，宽度取其真实位宽
+                kind = "RO"
+                width = max(width, chained_w)
+                found_in = "logic"
+                note = "级联：输入是另一个 logic 输出 %r（%dbit），按中间 wire 直接 force" % (base, width)
+            elif found_in is None and self.wire_fallback and kind != "RW":
+                # tmm/regmap 都查不到 → 视作普通 wire（顶层管脚/中间信号）→ force 信号名
+                kind = "RO"
+                found_in = "wire"
+                note = "表中查无字段，按 wire 处理(force 信号名)——若它其实是寄存器请用 --rfwrite-signals 指定"
 
         return InputBinding(
             letter=letter, raw=raw, base=base, width=width, kind=kind,
