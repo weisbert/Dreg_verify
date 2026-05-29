@@ -15,7 +15,7 @@ resolver.py — 把 logic 输入信号解析为驱动方式（force / RF_WRITE�
 
 class InputBinding:
     def __init__(self, letter, raw, base, width, kind, address, reg_lsb, reg_msb,
-                 wire, found_in, reg_name="", note=""):
+                 wire, found_in, reg_name="", note="", slice_msb=None, slice_lsb=None):
         self.letter = letter
         self.raw = raw                 # logic 单元格原文
         self.base = base               # 去 _to_logic 的基名（= wire 名 / 查表 key）
@@ -28,6 +28,17 @@ class InputBinding:
         self.found_in = found_in       # 'tmm' | 'regmap' | None
         self.reg_name = reg_name
         self.note = note               # 诊断信息
+        self.slice_msb = slice_msb     # 输入自身位宽切片(来自 logic 单元格 [msb:lsb])，force LHS 用
+        self.slice_lsb = slice_lsb
+
+    @property
+    def wire_lhs(self):
+        """force 目标 LHS：多位带位宽切片(如 d_x[2:0])，标量不带。"""
+        if self.width <= 1:
+            return self.wire
+        if self.slice_msb is not None and self.slice_lsb is not None:
+            return "%s[%d:%d]" % (self.wire, self.slice_msb, self.slice_lsb)
+        return "%s[%d:0]" % (self.wire, self.width - 1)
 
     @property
     def resolved(self):
@@ -153,6 +164,7 @@ class Resolver:
             letter=letter, raw=raw, base=base, width=width, kind=kind,
             address=address, reg_lsb=reg_lsb, reg_msb=reg_msb,
             wire=base, found_in=found_in, reg_name=reg_name, note=note,
+            slice_msb=info.get("msb"), slice_lsb=info.get("lsb"),
         )
 
     def _decide_kind(self, low, tmm, rm):

@@ -74,6 +74,7 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 | `--force-signals` / `--rfwrite-signals` | 手动指定 RO/RW（修正名称/类型判定） |
 | `--no-wire-fallback` | 关闭 wire 兜底：非 RW 寄存器且查不到的输入不再默认 force，而是标 UNKNOWN |
 | `--diagnose` | 覆盖诊断：类型列原文分布 + 输入归类(RF_WRITE/force-RO/force-级联/force-wire/UNKNOWN)覆盖率 |
+| `--comments` | 在 .sv 加少量导航注释（默认零注释，对齐真实模板） |
 | `--report 路径.csv\|.html` | 导出给人看的测试用例表格（每信号汇总 + 每条用例明细：驱动值/期望/负向）。可与 `--out` 并用 |
 
 **输入驱动模型**（沿用旧 for_test 规则）：输入是 **RW 寄存器**（在 total_memory_map/regmap 有地址）→ `` `RF_WRITE ``；

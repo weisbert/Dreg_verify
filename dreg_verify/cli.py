@@ -49,6 +49,8 @@ def build_argparser():
                    help="导出'给人看'的测试用例表格(按扩展名: .csv 用 Excel 打开 / .html 网页)。"
                         "可与 --out 同时用(同时出 .sv 和报告)；只传 --report 则只出报告")
     p.add_argument("--list", action="store_true", help="只列出可生成信号清单，不生成")
+    p.add_argument("--comments", action="store_true",
+                   help="在 .sv 里加少量导航注释(文件头 + 每信号 1 行 // 名)；默认零注释(对齐真实模板)")
     p.add_argument("--diagnose", action="store_true",
                    help="覆盖诊断: 实测各输入被解析成 force(RO)/RF_WRITE(RW)/未知, "
                         "类型列有哪些写法, 有无 >16bit 输入(驱动会截断), 不生成")
@@ -257,6 +259,7 @@ def main(argv=None):
         rfwrite_overrides=_split(args.rfwrite_signals),
         default_kind=args.default_kind,
         wire_fallback=not args.no_wire_fallback,
+        comments=args.comments,
     )
 
     print("装载 Excel: %s ..." % args.excel)
@@ -289,18 +292,18 @@ def main(argv=None):
         # 正常文件：不含负向
         pos_opts = _copy_opts(opts, neg_all=False, neg_signals=None)
         pos_res = generator.build(wb, pos_opts)
-        _write(out, generator.render(pos_res, _header(args.excel, pos_opts, "正常用例")))
+        _write(out, generator.render(pos_res, comments=opts.comments))
         _report(pos_res, out)
         # 负向文件：只含被选信号、仅负向
         neg_path = _neg_path(out)
         neg_res = generator.build(wb, _copy_opts(opts, neg_which=opts.neg_which))
         neg_only = _filter_negative_only(neg_res)
-        _write(neg_path, generator.render(neg_only, _header(args.excel, opts, "负向(异常)用例")))
+        _write(neg_path, generator.render(neg_only, comments=opts.comments))
         print("负向用例已单独写入: %s" % neg_path)
         return 0
 
     res = generator.build(wb, opts)
-    text = generator.render(res, _header(args.excel, opts, "正常+负向(inline)"))
+    text = generator.render(res, comments=opts.comments)
     _write(out, text)
     _report(res, out)
     return 0

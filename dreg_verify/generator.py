@@ -18,7 +18,7 @@ class GenOptions:
                  neg_which="first", neg_value=None,
                  force_overrides=None, rfwrite_overrides=None, default_kind=None,
                  top_output_only=False, types=None, wire_fallback=True,
-                 exclude=None, exclude_regex=None):
+                 exclude=None, exclude_regex=None, comments=False):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -38,6 +38,7 @@ class GenOptions:
         self.top_output_only = top_output_only
         self.types = _norm_set(types)
         self.wire_fallback = wire_fallback
+        self.comments = comments
 
 
 def _norm_set(x):
@@ -145,7 +146,7 @@ def build(wb, opts):
             for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
                 v.index = i
 
-        lines, stats = W.render_signal_block(sig, bindings, vecs, meta)
+        lines, stats = W.render_signal_block(sig, bindings, vecs, meta, comments=opts.comments)
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
@@ -166,8 +167,8 @@ def build(wb, opts):
     return {"blocks": blocks, "selected": selected, "errors": errors, "summary": summary}
 
 
-def render(result, header_info=None):
-    return W.render_file(result["blocks"], header_info=header_info)
+def render(result, header_info=None, comments=False):
+    return W.render_file(result["blocks"], header_info=header_info, comments=comments)
 
 
 def report(wb, opts):

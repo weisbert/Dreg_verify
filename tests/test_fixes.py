@@ -173,6 +173,22 @@ def test_chained_to_internal_flagged():
     assert "内部信号" in b.note
 
 
+def test_multibit_force_wire_has_slice():
+    # 多位 force wire 的 LHS 要带位宽切片 [msb:lsb]；标量不带（对齐真实 VBA）
+    bus = InputBinding("A", "x", "d_lna", width=3, kind="RO", address=None, reg_lsb=None,
+                       reg_msb=None, wire="d_lna", found_in="wire", slice_msb=2, slice_lsb=0)
+    scalar = InputBinding("B", "y", "d_en", width=1, kind="RO", address=None, reg_lsb=None,
+                          reg_msb=None, wire="d_en", found_in="wire")
+    assert bus.wire_lhs == "d_lna[2:0]"
+    assert scalar.wire_lhs == "d_en"
+    vec = V.TestVector(0, {"A": 5, "B": 1}, exp_value=0, exp_width=1)
+    lines, _ = W._build_drive_lines(vec, {"A": bus, "B": scalar}, ["A", "B"])
+    text = "\n".join(lines)
+    assert "force `ENV_RF.d_lna[2:0]=16'h5;" in text          # 多位带切片
+    assert "force `ENV_RF.d_en=16'h1;" in text                # 标量不带
+    assert '"d_lna[2:0]"' in text                             # 消息里 wire 名也带切片
+
+
 def test_force_literal_width_adaptive():
     # 32bit wire 的 force 字面量应是 32'h，不被截成 16'h
     b = InputBinding("A", "d_plln1", "d_plln1", width=32, kind="RO", address=None,
