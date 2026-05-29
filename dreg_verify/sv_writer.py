@@ -5,9 +5,13 @@ sv_writer.py — 把 logic 信号 + 测试向量渲染为 wr_rf_tc.sv 的过程�
 格式（generation-rules）：
   - RO 输入 → force `ENV_RF.<wire> = 16'h<值>;
   - 同地址 RW 输入合并一条 `RF_WRITE(10'h<addr>, 16'h<寄存器值>);  寄存器值=OR(字段值<<lsb)
-  - 每条驱动后跟 `uvm_report_info；全部驱动后 #1ps；
-  - assert_<R>_T<n>: assert(`ENV_RF.<输出K原文> == <宽>'b<二进制>) else `uvm_error; `uvm_report_info
-  - 负向用例标签加 _NEG，期望值故意填错，注释说明。
+  - 每条驱动后跟 uvm_report_info(函数式)；全部驱动后 #1ps；
+  - 断言对齐 for_test 模板（无标号，id 作字符串进 $sformatf）：
+      assert (`ENV_RF.<输出K原文> == <宽>'b<二进制>) begin
+        uvm_report_info("write assert rf_test",
+          $sformatf("assert_%s: %s, sim out:0x%0h, you set:0x%0h", "<R>_T<n>", "<out>", `ENV_RF.<out>, <exp>), UVM_LOW);
+      end else begin uvm_report_error(... 同上 ...); end
+  - 负向用例 id 加 _NEG，期望值故意填错，注释说明。
 
 UVM 消息字符串集中在下方常量，按需调整以贴合你们的脚手架。
 """
@@ -20,10 +24,10 @@ RF_WRITE = "RF_WRITE"   # 寄存器写宏名
 INDENT = "  "
 ADDR_WIDTH_HEX = 10     # RF_WRITE 地址用 10'h
 DATA_WIDTH_HEX = 16     # 数据/force 用 16'h
-UVM_COMP = "uvm_test_top"   # uvm 消息的 id 字段（按需改）
-# ⚠ UVM 里带反引号的是宏：`uvm_info / `uvm_error（uvm_report_info 是函数，不能加反引号）
-UVM_INFO = "uvm_info"       # 信息宏：`uvm_info(ID, MSG, VERBOSITY)
-UVM_ERROR = "uvm_error"     # 报错宏：`uvm_error(ID, MSG)
+# 对齐 for_test 模板：用函数式 uvm_report_info/uvm_report_error(不带反引号)，消息走 $sformatf
+UVM_INFO = "uvm_report_info"     # 函数：uvm_report_info(id, msg, verbosity)
+UVM_ERROR = "uvm_report_error"   # 函数：uvm_report_error(id, msg, verbosity)
+UVM_MSG_ID = "write assert rf_test"   # 消息 id 字段（for_test 用此串）
 
 
 # ───────────────────────────── 值格式化 ─────────────────────────────
@@ -118,16 +122,16 @@ def _build_drive_lines(vec, bindings, used_vars):
     for f in forces:
         lines.append("%sforce `%s.%s = %s;   // %s (%s, 位宽%d)"
                      % (INDENT, ENV, f["wire"], f["hex"], f["base"], f["src"], f["width"]))
-        lines.append('%s`%s("%s", "drive %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_INFO, UVM_COMP, f["wire"], f["hex"]))
+        lines.append('%s%s("%s", "drive %s = %s", UVM_LOW);'
+                     % (INDENT, UVM_INFO, UVM_MSG_ID, f["wire"], f["hex"]))
 
     # RW：同地址合并成一条 RF_WRITE
     for w in writes:
         desc = ", ".join("%s<<%d=%s" % (fl["base"], fl["lsb"], fl["hex"]) for fl in w["fields"])
         lines.append("%s`%s(%s, %s);   // %s"
                      % (INDENT, RF_WRITE, w["addr"], w["hex"], desc))
-        lines.append('%s`%s("%s", "RF_WRITE %s = %s", UVM_LOW);'
-                     % (INDENT, UVM_INFO, UVM_COMP, w["addr"], w["hex"]))
+        lines.append('%s%s("%s", "RF_WRITE %s = %s", UVM_LOW);'
+                     % (INDENT, UVM_INFO, UVM_MSG_ID, w["addr"], w["hex"]))
 
     unresolved_strs = ["%s(%s): %s" % (l, b, n) for (l, b, n) in unresolved]
     return lines, unresolved_strs
@@ -175,21 +179,21 @@ def render_signal_block(sig, bindings, vectors, meta):
         lines.extend(drive)
         for u in unresolved:
             block_unresolved.add(u)
-        lines.append("%s#1ps;" % INDENT)
-        exp = fmt_bin(vec.asserted_value, vec.exp_width)
-        label = "assert_%s_%s" % (aid, tag)
-        lines.append("%s%s: assert(`%s.%s == %s)" % (INDENT, label, ENV, sig.out_name, exp))
         if vec.is_negative:
             n_neg += 1
-            lines.append('%s%selse `%s("%s", "NEG-OK: checker 抓到注入错误 %s 期望应为 %s");'
-                         % (INDENT, INDENT, UVM_ERROR, UVM_COMP, exp, fmt_bin(vec.exp_value, vec.exp_width)))
-            lines.append('%s%s`%s("%s", "%s 负向(故意错): 若此处未报错说明 checker 失效", UVM_LOW);'
-                         % (INDENT, INDENT, UVM_INFO, UVM_COMP, label))
-        else:
-            lines.append('%s%selse `%s("%s", "断言失败: %s 期望 %s");'
-                         % (INDENT, INDENT, UVM_ERROR, UVM_COMP, sig.out_name, exp))
-            lines.append('%s%s`%s("%s", "%s 通过, %s == %s", UVM_LOW);'
-                         % (INDENT, INDENT, UVM_INFO, UVM_COMP, label, sig.out_name, exp))
+        lines.append("%s#1ps;" % INDENT)
+        exp = fmt_bin(vec.asserted_value, vec.exp_width)
+        aid_str = "%s_%s" % (aid, tag)              # 如 160_T0 / 160_T0_NEG
+        lhs = "`%s.%s" % (ENV, sig.out_name)
+        msg = ('$sformatf("assert_%%s: %%s, sim out:0x%%0h, you set:0x%%0h", '
+               '"%s", "%s", %s, %s)' % (aid_str, sig.out_name, lhs, exp))
+        # 对齐 for_test：assert(cond) begin uvm_report_info(..) end else begin uvm_report_error(..) end
+        lines.append("%sassert (%s == %s) begin" % (INDENT, lhs, exp))
+        lines.append('%s%s%s("%s", %s, UVM_LOW);' % (INDENT, INDENT, UVM_INFO, UVM_MSG_ID, msg))
+        lines.append("%send" % INDENT)
+        lines.append("%selse begin" % INDENT)
+        lines.append('%s%s%s("%s", %s, UVM_LOW);' % (INDENT, INDENT, UVM_ERROR, UVM_MSG_ID, msg))
+        lines.append("%send" % INDENT)
     lines.append("")
 
     stats = {

@@ -89,7 +89,7 @@ def test_full_build_reserve(wb):
     assert res["summary"]["n_generated"] == 1
     assert res["summary"]["n_unresolved_signals"] == 0
     text = generator.render(res)
-    assert "assert_106_T0:" in text
+    assert "106_T0" in text
     assert "`ENV_RF.d_logic_bt_lp_reserve ==" in text
 
 
@@ -98,7 +98,7 @@ def test_lna_agc_mux_3bit(wb):
     res = generator.build(wb, opts)
     assert res["summary"]["n_generated"] == 1
     text = generator.render(res)
-    assert "assert_108_T0:" in text
+    assert "108_T0" in text
     # 输出 3 位 → 期望值用 3'bxxx
     assert "`ENV_RF.d_logic_bt_lp_lna_agc[2:0] == 3'b" in text
     # lna_agc_line 是 RO(DIG PIN Y) → force；lna_agc_local 是 RW → RF_WRITE
@@ -112,7 +112,7 @@ def test_ls_passthrough_name(wb):
     text = generator.render(res)
     # ls 信号输出名无 d_logic_ 前缀，原样
     assert "`ENV_RF.d_en_refbuf ==" in text
-    assert "assert_50_T0:" in text
+    assert "50_T0" in text
 
 
 # ───────────── owner 筛选 ─────────────
@@ -133,7 +133,7 @@ def test_negative_cases(wb):
     res = generator.build(wb, opts)
     assert res["summary"]["n_negative"] == 1
     text = generator.render(res)
-    assert "_NEG:" in text
+    assert "_NEG" in text
     assert "故意填错" in text
 
 
@@ -141,9 +141,11 @@ def test_negative_cases(wb):
 def test_uvm_macros_valid(wb):
     opts = generator.GenOptions(neg_all=True)
     text = generator.render(generator.build(wb, opts))
-    assert "`uvm_report_info" not in text   # 这是函数名误加反引号 → 编译报 NOTDIR
-    assert "`uvm_info(" in text             # 正确的信息宏
-    assert "`uvm_error(" in text            # 正确的报错宏
+    assert "`uvm_report_info" not in text     # 函数名误加反引号 → 编译报 NOTDIR
+    assert "`uvm_info" not in text            # 不用宏形式
+    assert "uvm_report_info(" in text         # 对齐 for_test：函数式
+    assert "uvm_report_error(" in text
+    assert "$sformatf(" in text               # 消息走 sformatf(打印 sim out + you set)
 
 
 # ───────────── 覆盖诊断 ─────────────
