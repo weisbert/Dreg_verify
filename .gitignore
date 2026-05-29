@@ -1,0 +1,30 @@
+# ---- Python ----
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+
+# ---- 敏感数据：绝不提交 ----
+# 真实 Dreg 核心 Excel（含公司 IP / 信号名）
+*.xlsx
+*.xls
+*.xlsm
+# inspect_excel.py 的导出文本（可能含真实信号名）
+*_inspect.txt
+*_anon.txt
+# 生成的验证文件输出
+wr_rf_tc.sv
+*.sv.out
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
