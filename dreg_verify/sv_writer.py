@@ -130,6 +130,15 @@ def _build_drive_lines(vec, bindings, used_vars):
     return lines, unresolved_strs
 
 
+def test_label(vec):
+    """测试名：自定义 name 优先，否则 T<index>；负向保证以 _NEG 结尾(便于日志一眼辨认)。
+    .sv 断言 id、人读报告、GUI 列头都用它，保持一致。"""
+    base = vec.name if getattr(vec, "name", None) else ("T%d" % vec.index)
+    if vec.is_negative and not base.upper().endswith("NEG"):
+        base += "_NEG"
+    return base
+
+
 def _s(v):
     return "" if v is None else str(v)
 
@@ -158,8 +167,8 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False):
             n_neg += 1
         lines.append("#1ps;")
         exp = fmt_bin(vec.asserted_value, vec.exp_width)
-        # 负向(故意填错期望)的断言 id 加 _NEG，便于在仿真日志里和正向用例区分(与 report() 一致)
-        aid_str = "%s_T%d%s" % (aid, vec.index, "_NEG" if vec.is_negative else "")   # e.g. 8_T0 / 8_T1_NEG
+        # 断言 id = <R>_<测试名>；测试名见 test_label(自定义名/T<index>，负向带 _NEG)
+        aid_str = "%s_%s" % (aid, test_label(vec))   # e.g. 8_T0 / 8_T1_NEG / 8_my_case
         if comments and vec.is_negative:
             lines.append("// NEG: 故意填错期望值，此断言预期应 FAIL(用于自检 checker 能抓错)")
         lines.append("assert_%s:" % aid_str)

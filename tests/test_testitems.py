@@ -251,6 +251,114 @@ def test_report_tables_bitwidth_label(wb):
     assert t["exp_label"] == "期望(out)[2:0]"
 
 
+def test_custom_test_name_flows_to_sv(wb):
+    """自定义 name 贯穿到 .sv 断言 id；默认 None 时仍是 T<index>；负向仍带 _NEG。"""
+    import dreg_verify.sv_writer as W
+    sig, node, bindings, groups = _reserve(wb)
+    bv = {g["base"].lower(): 0 for g in groups}
+    v_named = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width,
+                                             index=0, name="boundary_case")
+    v_default = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width, index=1)
+    v_neg = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width,
+                                           index=2, expected_override=1, name="bad_iddq")
+    assert W.test_label(v_named) == "boundary_case"
+    assert W.test_label(v_default) == "T1"               # 默认仍 T<index>
+    assert W.test_label(v_neg) == "bad_iddq_NEG"          # 负向自动带 _NEG
+    res = generator.build(wb, generator.GenOptions(
+        signals=["d_logic_bt_lp_reserve"], top_output_only=False,
+        vector_overrides={"d_logic_bt_lp_reserve": [v_named, v_neg]}))
+    text = "\n".join(res["blocks"][0][0])
+    assert "assert_106_boundary_case:" in text
+    assert "assert_106_bad_iddq_NEG:" in text
+
+
+def test_gui_rename_only_user_added(qapp, wb, tmp_path_factory):
+    """自动列不可改名；用户新增列可改名，且贯穿到生成的 .sv。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "g7")
+    w._load_test_items(sig)
+    n_auto = len(w._ti_rows)
+    # 自动列(col 0)拒绝改名
+    ok, msg = w._ti_set_test_name(0, "should_fail")
+    assert not ok
+    # 新增一正向列 → 可改名
+    w.on_ti_add()
+    new_col = len(w._ti_rows) - 1
+    ok, final = w._ti_set_test_name(new_col, "my special case!")   # 非法字符会被清成 _
+    assert ok and final == "my_special_case_"
+    assert w._ti_rows[new_col]["name"] == "my_special_case_"
+    # 列头显示自定义名
+    assert w.ti_table.horizontalHeaderItem(new_col).text() == "my_special_case_"
+    # 改名贯穿 .sv
+    sel = [sig.out_name]
+    res = generator.build(w.wb, w._opts(sel))
+    text = generator.render(res)
+    assert "_my_special_case_:" in text
+    # 重名拒绝
+    w.on_ti_add()
+    ok2, msg2 = w._ti_set_test_name(len(w._ti_rows) - 1, "my special case!")
+    assert not ok2 and "重复" in msg2
+
+
+def test_gui_reject_reserved_tname(qapp, wb, tmp_path_factory):
+    """禁止把列改名成 T<编号>(自动测试保留命名)，防后续位移撞名→重复标号(审查#1/#5)。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "g8")
+    w._load_test_items(sig)
+    w.on_ti_add()
+    col = len(w._ti_rows) - 1
+    ok, msg = w._ti_set_test_name(col, "T5")
+    assert not ok and "冲突" in msg
+    ok2, _ = w._ti_set_test_name(col, "t9_neg")     # 大小写/带 _neg 也拒绝
+    assert not ok2
+    ok3, final = w._ti_set_test_name(col, "boundary")   # 正常名可改
+    assert ok3 and final == "boundary"
+
+
+def test_build_no_dup_labels_normal(wb):
+    """正常情况(R 各异)无重复标号。"""
+    res = generator.build(wb, generator.GenOptions(top_output_only=False))
+    assert res["summary"]["n_dup_labels"] == 0
+    assert res["dup_labels"] == []
+
+
+def test_build_dup_labels_same_R(wb, tmp_path_factory):
+    """构造一张两信号同 R 的表，确认 build 抓到重复标号。"""
+    import openpyxl
+    from openpyxl.utils import column_index_from_string
+    path = tmp_path_factory.mktemp("dup") / "dup.xlsx"
+    import fixtures
+    fixtures.build_workbook(str(path))
+    # 把 lna_agc(R=108) 的 R 改成和 reserve 一样的 106
+    wbx = openpyxl.load_workbook(str(path))
+    ws = wbx["logic"]
+    for row in ws.iter_rows():
+        if ws.cell(row=row[0].row, column=column_index_from_string("K")).value == "d_logic_bt_lp_lna_agc[2:0]":
+            ws.cell(row=row[0].row, column=column_index_from_string("R")).value = 106
+    wbx.save(str(path))
+    wb2 = excel_model.load_workbook(str(path))
+    res = generator.build(wb2, generator.GenOptions(top_output_only=False))
+    assert res["summary"]["n_dup_labels"] > 0          # 106_T0 等被两信号共用
+    assert any("106_T0" == lbl for lbl, _a, _b in res["dup_labels"])
+
+
+def test_gui_neg_rebuild_keeps_name_and_wrong(qapp, wb, tmp_path_factory):
+    """重建负向时保留用户对负向列的改名与手填错值(审查#2/#3)。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "g9")
+    w._load_test_items(sig)
+    w.neg_which.setCurrentText("first")
+    w.on_ti_add_neg()                                  # 追加一条负向
+    neg_col = next(i for i, rd in enumerate(w._ti_rows) if rd.get("kind") == "neg")
+    # 改名 + 手填错值
+    ok, _ = w._ti_set_test_name(neg_col, "my_special_neg")
+    assert ok
+    w._ti_rows[neg_col]["wrong_value"] = 1
+    w._edited[sig.out_name.lower()] = {"sig": sig, "rows": w._ti_rows}
+    # 再次"加负向"(重建路径)
+    w.on_ti_add_neg()
+    negs = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
+    assert any(rd.get("name") == "my_special_neg" for rd in negs), "重建丢了负向列改名"
+    assert any(rd.get("wrong_value") == 1 for rd in negs), "重建丢了手填错值"
+
+
 def test_report_honors_overrides(wb):
     """#8: report() 也用 override，与 .sv 一致。"""
     sig, node, bindings, groups = _reserve(wb)

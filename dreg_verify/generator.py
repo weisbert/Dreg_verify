@@ -130,6 +130,8 @@ def build(wb, opts):
     n_total_vectors = 0
     n_total_neg = 0
     n_unresolved_signals = 0
+    seen_labels = {}    # assert 标号 -> 首个出现的信号；查全局重复(重复=非法 SV，elaboration 失败)
+    dup_labels = []
 
     for sig in selected:
         try:
@@ -188,6 +190,16 @@ def build(wb, opts):
                 for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
                     v.index = i
 
+        # 全局 assert 标号唯一性检查：标号 = <R>_<test_label>，重复(同信号自定义名撞自动名、
+        # 或两信号共用同一 R)在 SV 同一作用域里非法，会 elaboration 失败 → 收集并上报，不静默。
+        aid = sig.assert_id or "X"
+        for v in vecs:
+            lbl = "%s_%s" % (aid, W.test_label(v))
+            if lbl in seen_labels:
+                dup_labels.append((lbl, seen_labels[lbl], sig.out_name))
+            else:
+                seen_labels[lbl] = sig.out_name
+
         lines, stats = W.render_signal_block(sig, bindings, vecs, meta, comments=opts.comments)
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
@@ -204,11 +216,12 @@ def build(wb, opts):
         "n_negative": n_total_neg,
         "n_parse_errors": len(errors),
         "n_unresolved_signals": n_unresolved_signals,
+        "n_dup_labels": len(dup_labels),
         "tmm_fields": len(wb.tmm),
         "regmap_signals": len(wb.regmap),
     }
     return {"blocks": blocks, "selected": selected, "errors": errors,
-            "skipped": skipped, "summary": summary}
+            "skipped": skipped, "dup_labels": dup_labels, "summary": summary}
 
 
 def render(result, header_info=None, comments=False):
@@ -315,7 +328,7 @@ def report(wb, opts):
             write_str = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
             bv = V.vector_to_base_values(vec, groups)
             table["tests"].append({
-                "name": "T%d%s" % (vec.index, "_NEG" if vec.is_negative else ""),
+                "name": W.test_label(vec),
                 "neg": vec.is_negative,
                 "values": [_fmt_cell(bv.get(g["base"].lower(), 0), g["width"]) for g in groups],
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
@@ -325,7 +338,7 @@ def report(wb, opts):
             detail.append({
                 "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                 "type": sig.suffix, "expr": sig.expr,
-                "test": "T%d%s" % (vec.index, "_NEG" if vec.is_negative else ""),
+                "test": W.test_label(vec),
                 "neg": "是" if vec.is_negative else "",
                 "expected": W.fmt_bin(vec.asserted_value, vec.exp_width),
                 "correct": W.fmt_bin(vec.exp_value, vec.exp_width) if vec.is_negative else "",

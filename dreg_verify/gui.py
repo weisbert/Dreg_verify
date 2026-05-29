@@ -212,6 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ("加正向列", self.on_ti_add, "新增一条正向(真实)测试(输入全 0，期望自动算)"),
                 ("复制列", self.on_ti_copy, "复制当前选中的测试列"),
                 ("删除列", self.on_ti_del, "删除选中的测试列"),
+                ("重命名列…", self.on_ti_rename_current, "给用户新增的测试列改名(双击列头亦可；自动生成的 T0/T1 不可改)"),
                 ("加负向", self.on_ti_add_neg, "为本信号追加负向测试(按下方 first/all；正向测试不动)"),
                 ("删负向", self.on_ti_del_neg, "删除本信号所有负向测试(保留正向)"),
                 ("预览本信号.sv", self.on_ti_preview_signal, "用当前(含编辑)测试项渲染该信号的 .sv 片段"),
@@ -227,6 +228,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
         self.ti_table.setAlternatingRowColors(True)
         self.ti_table.itemChanged.connect(self.on_ti_item_changed)
+        self.ti_table.horizontalHeader().sectionDoubleClicked.connect(self.on_ti_rename_col)
         lay.addWidget(self.ti_table, 1)
 
         hint = QtWidgets.QLabel("纵向真值表：每行一个输入/输出，每列一条测试 T0/T1…。"
@@ -421,13 +423,26 @@ class MainWindow(QtWidgets.QMainWindow):
         pos_rows = [rd for rd in rows if rd.get("kind") != "neg"]
         if not pos_rows:
             return
+        # 现存负向行按其输入取值建索引，重建时继承用户对负向列的改名/手填错值(不静默丢失)
+        old_negs = {}
+        for rd in rows:
+            if rd.get("kind") == "neg":
+                old_negs.setdefault(tuple(sorted(rd["base_values"].items())), []).append(rd)
         new_rows = list(pos_rows)                      # 正向测试原样保留
         if want_neg:
             targets = pos_rows if which == "all" else pos_rows[:1]
             for prd in targets:                        # 每个(或首个)正向 → 追加一条负向副本
-                new_rows.append({"base_values": dict(prd["base_values"]),
-                                 "kind": "neg", "wrong_value": None,
-                                 "note": "负向(真实测试的故意填错副本)"})
+                neg = {"base_values": dict(prd["base_values"]),
+                       "kind": "neg", "wrong_value": None, "user_added": True,
+                       "note": "负向(真实测试的故意填错副本)"}
+                bucket = old_negs.get(tuple(sorted(prd["base_values"].items())))
+                if bucket:                             # 继承同源旧负向的自定义名与手填错值
+                    old = bucket.pop(0)
+                    if old.get("name") is not None:
+                        neg["name"] = old["name"]
+                    if old.get("wrong_value") is not None:
+                        neg["wrong_value"] = old["wrong_value"]
+                new_rows.append(neg)
         for rd in new_rows:
             self._recompute_row(node, bindings, groups, sig.out_width, rd)
         self._edited[name_low] = {"sig": sig, "rows": new_rows}
@@ -661,6 +676,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return str(val & 1)
         return "0x%X" % val
 
+    @staticmethod
+    def _ti_label(rd, idx):
+        """列头/测试名显示：自定义 name 优先，否则 T<idx>；负向保证带 _NEG。"""
+        nm = rd.get("name")
+        label = nm if nm else ("T%d" % idx)
+        if rd.get("is_negative") and not label.upper().endswith("NEG"):
+            label += "_NEG"
+        return label
+
     def _ti_populate(self):
         self._ti_loading = True
         try:
@@ -720,12 +744,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 tip += "\nRF_WRITE: %s" % ws
             expit.setToolTip(tip)
             self.ti_table.setItem(self.R_EXP, c, expit)
-            # 列头：负向列显示 T<n>_NEG(红字) 以便一眼区分；tooltip 放该测试的驱动
+            # 列头：自定义名/T<n>(负向带 _NEG，红字)；tooltip 提示可否改名 + 驱动
             hh = self.ti_table.horizontalHeaderItem(c)
             if hh:
-                hh.setText("T%d%s" % (c, "_NEG" if neg else ""))
-                hh.setToolTip(("%s\nforce: %s\nRF_WRITE: %s"
-                               % ("负向(故意填错)" if neg else "正向(真实)", fs or "(无)", ws or "(无)")))
+                hh.setText(self._ti_label(rd, c))
+                rename_hint = "双击列头可改名" if rd.get("user_added") else "自动生成，名字不可改"
+                hh.setToolTip("%s · %s\nforce: %s\nRF_WRITE: %s"
+                              % ("负向(故意填错)" if neg else "正向(真实)", rename_hint,
+                                 fs or "(无)", ws or "(无)"))
                 hh.setForeground(QtGui.QColor("red") if neg else QtGui.QColor("black"))
             if neg:
                 for r in range(self.ti_table.rowCount()):
@@ -791,7 +817,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
         rd = {"base_values": {g["base"].lower(): 0 for g in self._ti_groups},
-              "kind": "pos", "note": ""}        # 新增的是正向(真实)测试列
+              "kind": "pos", "note": "", "user_added": True}   # 用户新增正向列(可改名)
         self._ti_recompute(rd)
         self._ti_rows.append(rd)
         self._ti_mark_customized()
@@ -818,6 +844,60 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_left_neg()
         self.status.showMessage("已删除 %s 的全部负向测试" % self._ti_sig.out_name)
 
+    # ───────────── 测试列改名（仅用户新增的可改） ─────────────
+    @staticmethod
+    def _sanitize_name(s):
+        """把用户输入清成合法的 SV 标号片段(只留字母/数字/下划线)。"""
+        import re
+        return re.sub(r"[^0-9A-Za-z_]", "_", str(s).strip())
+
+    def on_ti_rename_current(self):
+        c = self.ti_table.currentColumn()
+        if c < 0:
+            QtWidgets.QMessageBox.information(self, "提示", "请先选中一个测试列")
+            return
+        self.on_ti_rename_col(c)
+
+    def on_ti_rename_col(self, col):
+        """改第 col 个测试列的名字。仅用户新增的列可改；自动生成的 T0/T1 拒绝。"""
+        if not self._ti_sig or col < 0 or col >= len(self._ti_rows):
+            return
+        rd = self._ti_rows[col]
+        if not rd.get("user_added"):
+            QtWidgets.QMessageBox.information(
+                self, "不可改名", "T%d 是从表达式自动生成的测试，名字不可改。\n只有你自己新增的测试列(加正向列/复制列/加负向)可以改名。" % col)
+            return
+        cur = self._ti_label(rd, col)
+        text, ok = QtWidgets.QInputDialog.getText(self, "重命名测试列",
+                                                  "新名字(字母/数字/下划线)：", text=cur)
+        if not ok:
+            return
+        ok2, msg = self._ti_set_test_name(col, text)
+        if not ok2:
+            QtWidgets.QMessageBox.warning(self, "改名失败", msg)
+
+    def _ti_set_test_name(self, col, new_name):
+        """设置测试列自定义名。返回 (成功, 信息/最终名)。供 UI 与测试调用。"""
+        rd = self._ti_rows[col]
+        if not rd.get("user_added"):
+            return False, "自动生成的测试不可改名"
+        nm = self._sanitize_name(new_name)
+        if not nm:
+            return False, "名字为空或全是非法字符"
+        import re
+        if re.match(r"(?i)^t\d+(_neg)?$", nm):     # T<编号> 是自动测试保留命名，禁止手填(防后续位移撞名)
+            return False, "名字 %s 与自动测试命名(T<编号>)冲突，请换个名字" % nm
+        # 计算该名的最终标号(负向会带 _NEG)，与其它列的最终标号查重
+        final = nm + ("_NEG" if rd.get("is_negative") and not nm.upper().endswith("NEG") else "")
+        for j, other in enumerate(self._ti_rows):
+            if j != col and self._ti_label(other, j) == final:
+                return False, "名字与列 %s 重复(会造成 .sv 标号冲突)" % self._ti_label(other, j)
+        rd["name"] = nm
+        self._ti_mark_customized()
+        self._ti_populate()
+        self.status.showMessage("测试列已改名为 %s" % final)
+        return True, final
+
     def on_ti_copy(self):
         if not self._ti_sig:
             return
@@ -826,8 +906,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "请先选中要复制的测试列")
             return
         src = self._ti_rows[c]
+        # 复制列：用户新建列(可改名)，但不复制 name(避免与原列重名→.sv 标号冲突)
         rd = {"base_values": dict(src["base_values"]),
-              "kind": src.get("kind", "pos"), "note": src.get("note", "")}
+              "kind": src.get("kind", "pos"), "note": src.get("note", ""), "user_added": True}
         if src.get("wrong_value") is not None:
             rd["wrong_value"] = src["wrong_value"]
         self._ti_recompute(rd)
@@ -891,8 +972,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
                 wr = csv.writer(f)
-                wr.writerow(["信号\\测试"] + ["T%d%s" % (i, "_NEG" if rd["is_negative"] else "")
-                                            for i, rd in enumerate(rows)])
+                wr.writerow(["信号\\测试"] + [self._ti_label(rd, i) for i, rd in enumerate(rows)])
                 for g in self._ti_groups:
                     bk = g["base"].lower()
                     wr.writerow([g["label"]] + [self._fmt_val(rd["base_values"].get(bk, 0), g["width"])
@@ -915,13 +995,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("已导出测试项 CSV：%s" % path)
 
     def _rows_to_vectors(self, node, bindings, groups, out_width, rows):
-        """把 rowdict 列表构造成 TestVector 列表（负向行用 expected 作 override 编码）。"""
+        """把 rowdict 列表构造成 TestVector 列表（负向行用 expected 作 override 编码；带自定义名）。"""
         vecs = []
         for i, rd in enumerate(rows):
             exp_override = rd["expected"] if rd.get("is_negative") else None
             vecs.append(V.make_vector_from_base_values(
                 node, bindings, groups, rd["base_values"], out_width,
-                index=i, expected_override=exp_override))
+                index=i, expected_override=exp_override, name=rd.get("name")))
         return vecs
 
     def _vector_overrides(self, positive_only=False):
@@ -1055,7 +1135,10 @@ class MainWindow(QtWidgets.QMainWindow):
                    "如需强制生成用 CLI --include-risky。" % nsk) if nsk else ""
         custmsg = ("\n\n含 %d 个已自定义测试项的信号(编辑已写入产物)。" % len(self._customized)
                    if self._customized else "")
-        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s%s%s" % (path, extra, skipmsg, custmsg))
+        ndup = (res if not (self.neg_separate.isChecked() and self._has_negatives()) else pos)["summary"].get("n_dup_labels", 0)
+        dupmsg = ("\n\n⛔ 警告：有 %d 处重复 assert 标号(同一作用域重复=非法 SV，会 elaboration 失败)！"
+                  "多因两信号共用同一 R(序号)，请核对。" % ndup) if ndup else ""
+        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s%s%s%s" % (path, extra, skipmsg, custmsg, dupmsg))
         self.status.showMessage("已生成：%s%s" % (path, extra))
 
     def on_report(self):

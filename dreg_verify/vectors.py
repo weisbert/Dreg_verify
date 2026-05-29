@@ -18,8 +18,8 @@ from . import expr as E
 
 class TestVector:
     def __init__(self, index, assignments, exp_value, exp_width,
-                 is_negative=False, neg_value=None, neg_mode=None, note=""):
-        self.index = index                  # T 编号
+                 is_negative=False, neg_value=None, neg_mode=None, note="", name=None):
+        self.index = index                  # T 编号(默认命名 T<index> 用)
         self.assignments = assignments       # {字母: int}
         self.exp_value = exp_value           # 正确期望值
         self.exp_width = exp_width
@@ -27,6 +27,7 @@ class TestVector:
         self.neg_value = neg_value           # 负向时实际写入断言的(错误)期望
         self.neg_mode = neg_mode
         self.note = note
+        self.name = name                     # 自定义测试名(None→用 T<index>)；用户可对自己加的测试改名
 
     @property
     def asserted_value(self):
@@ -323,10 +324,10 @@ def vector_to_base_values(vec, groups):
 
 
 def make_vector_from_base_values(node, bindings, groups, base_values, out_width,
-                                 index=0, expected_override=None):
+                                 index=0, expected_override=None, name=None):
     """从 GUI 编辑的 {base_lower:int} 构造一个 TestVector。
     期望值由表达式自动重算(永远自洽)；若给了 expected_override 且与算出值不同 →
-    标负向(故意填错，复用负向机制：asserted_value 取 neg_value)。
+    标负向(故意填错，复用负向机制：asserted_value 取 neg_value)。name 为自定义测试名(可选)。
     """
     widths = {ltr: b.width for ltr, b in bindings.items()}
     assign = _expand_base_values(groups, base_values, widths)
@@ -337,6 +338,6 @@ def make_vector_from_base_values(node, bindings, groups, base_values, out_width,
         wrong = expected_override & E.mask(exp_width)
         if wrong != exp_value:
             return TestVector(index, assign, exp_value, exp_width,
-                              is_negative=True, neg_value=wrong, neg_mode="value",
+                              is_negative=True, neg_value=wrong, neg_mode="value", name=name,
                               note="手工指定期望值(与表达式计算值不同)，预期断言应 FAIL，用于负向自检")
-    return TestVector(index, assign, exp_value, exp_width)
+    return TestVector(index, assign, exp_value, exp_width, name=name)
