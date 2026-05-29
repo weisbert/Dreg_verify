@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from PySide6 import QtCore, QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets
 except Exception as ex:  # noqa: BLE001
     raise SystemExit("需要 PySide6：pip install PySide6（原始错误：%s）" % ex)
 
@@ -62,7 +62,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_combo.currentIndexChanged.connect(self.apply_filter)
         self.name_edit = QtWidgets.QLineEdit(); self.name_edit.setPlaceholderText("名字/正则搜索…")
         self.name_edit.textChanged.connect(self.apply_filter)
-        self.top_only = QtWidgets.QCheckBox("仅 top_output=1"); self.top_only.setChecked(True)
+        self.top_only = QtWidgets.QCheckBox("仅 top_output=1")    # 默认显示全部，便于 debug
         self.top_only.stateChanged.connect(self.apply_filter)
         for w in (QtWidgets.QLabel("筛选:"), self.owner_combo, self.type_combo,
                   self.status_combo, self.name_edit, self.top_only):
@@ -140,15 +140,27 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "加载失败", str(ex))
             return
         self.signals = list(self.wb.logic)
-        # 解析画像：每个信号算 force/RF_WRITE net + 状态（debug 用）
+        # 解析画像：逐信号 try，一个坏信号不连累整体加载
         res = R.Resolver(self.wb)
-        self._analysis = {i: generator.analyze_signal(res, s) for i, s in enumerate(self.signals)}
+        self._analysis = {}
+        errs = []
+        for i, s in enumerate(self.signals):
+            try:
+                self._analysis[i] = generator.analyze_signal(res, s)
+            except Exception as ex:  # noqa: BLE001
+                self._analysis[i] = {"status": "解析异常", "inputs": [], "out_net": "",
+                                     "error": repr(ex)}
+                errs.append((s.out_name, s.assert_id, repr(ex)))
         self._populate_filters()
         self._populate_table()
         nbad = sum(1 for a in self._analysis.values() if a["status"] != "clean")
-        self.status.showMessage("已加载 %d 信号（其中 %d 个状态非 clean，可能影响 elaboration）；"
-                                "tmm字段=%d regmap=%d"
-                                % (len(self.signals), nbad, len(self.wb.tmm), len(self.wb.regmap)))
+        msg = ("已加载 %d 信号（%d 个非 clean）；tmm字段=%d regmap=%d"
+               % (len(self.signals), nbad, len(self.wb.tmm), len(self.wb.regmap)))
+        if errs:
+            msg += "；⚠ %d 个信号分析异常(状态'解析异常',点开看 error)" % len(errs)
+            self.preview.setPlainText("分析异常的信号(请把下面发给维护者):\n" +
+                                      "\n".join("R=%s %s: %s" % (a, n, e) for n, a, e in errs[:50]))
+        self.status.showMessage(msg)
 
     def _populate_filters(self):
         owners = sorted({s.owner for s in self.signals if s.owner})
@@ -162,20 +174,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.signals))
         for r, sig in enumerate(self.signals):
-            self._set_check(r, COL_SEL, False)
-            self._set_check(r, COL_NEG, False)
-            self._set_text(r, COL_R, str(sig.assert_id))
-            self._set_text(r, COL_K, sig.out_name)
-            self._set_text(r, COL_OWNER, sig.owner)
-            self._set_text(r, COL_TYPE, sig.suffix)
-            self._set_text(r, COL_TOP, str(sig.top_output))
-            st = self._analysis[r]["status"]
-            it = QtWidgets.QTableWidgetItem(STATUS_LABEL.get(st, st))
-            if st != "clean":
-                it.setForeground(QtCore.Qt.red)
-            self.table.setItem(r, COL_STATUS, it)
-            self._set_text(r, COL_EXPR, sig.expr)
-            self.table.item(r, COL_R).setData(QtCore.Qt.UserRole, r)
+            try:
+                self._set_check(r, COL_SEL, False)
+                self._set_check(r, COL_NEG, False)
+                self._set_text(r, COL_R, str(sig.assert_id))
+                self._set_text(r, COL_K, sig.out_name)
+                self._set_text(r, COL_OWNER, sig.owner)
+                self._set_text(r, COL_TYPE, sig.suffix)
+                self._set_text(r, COL_TOP, str(sig.top_output))
+                st = self._analysis.get(r, {}).get("status", "?")
+                it = QtWidgets.QTableWidgetItem(STATUS_LABEL.get(st, st))
+                if st != "clean":
+                    it.setForeground(QtGui.QColor("red"))
+                self.table.setItem(r, COL_STATUS, it)
+                self._set_text(r, COL_EXPR, sig.expr)
+                self.table.item(r, COL_R).setData(QtCore.Qt.UserRole, r)
+            except Exception:  # noqa: BLE001  单行异常不连累整表
+                self._set_text(r, COL_R, str(getattr(sig, "assert_id", "?")))
+                self._set_text(r, COL_K, getattr(sig, "out_name", "?"))
+                self.table.item(r, COL_R).setData(QtCore.Qt.UserRole, r)
         self.table.setSortingEnabled(True)
         self.table.resizeColumnsToContents()
         self.apply_filter()
