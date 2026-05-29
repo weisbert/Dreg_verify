@@ -57,6 +57,8 @@ def build_argparser():
     g.add_argument("--owner", help="按 owner 筛选(逗号分隔，匹配 logic P 列)")
     g.add_argument("--signals", help="按信号名筛选(逗号分隔，K 全名或去位宽基名)")
     g.add_argument("--regex", help="按信号名正则筛选")
+    g.add_argument("--exclude", help="排除这些信号(逗号分隔，K 全名或去位宽基名)")
+    g.add_argument("--exclude-regex", help="按正则排除信号(如 'pll_n|_to_dsm' 排掉 datapath 中间信号)")
     g.add_argument("--type", help="按 type/suffix(M 列)筛选，如 to_mux,ls")
     g.add_argument("--top-output-only", action="store_true", help="只取 top_output=1 的信号")
 
@@ -235,6 +237,8 @@ def main(argv=None):
         owners=_split(args.owner),
         signals=_split(args.signals),
         signal_regex=args.regex,
+        exclude=_split(args.exclude),
+        exclude_regex=args.exclude_regex,
         types=_split(args.type),
         top_output_only=args.top_output_only,
         mode=args.mode,

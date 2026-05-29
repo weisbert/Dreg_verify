@@ -168,6 +168,20 @@ def test_force_literal_width_adaptive():
     assert "32'h12345678" in "\n".join(lines)
 
 
+def test_exclude_signals_and_regex():
+    s1 = _logic("pll_n1[31:0]", 32, "A", {"A": {"raw": "x", "base": "x", "width": 1,
+                                                  "msb": None, "lsb": None}}, "1")
+    s2 = _logic("d_logic_bt_lp_reserve", 1, "A", {"A": {"raw": "y", "base": "y", "width": 1,
+                                                         "msb": None, "lsb": None}}, "2")
+    wb = DregWorkbook(logic=[s1, s2], regmap={}, tmm={}, sheet_names=[])
+    # 按名排除
+    sel = G.select_signals(wb, G.GenOptions(exclude=["pll_n1"]))
+    assert [s.out_name for s in sel] == ["d_logic_bt_lp_reserve"]
+    # 按正则排除 datapath
+    sel2 = G.select_signals(wb, G.GenOptions(exclude_regex="pll_n|_to_dsm"))
+    assert [s.out_name for s in sel2] == ["d_logic_bt_lp_reserve"]
+
+
 def test_no_wire_fallback_keeps_unknown():
     s1 = _logic("d_x", 1, "A",
                 {"A": {"raw": "foo", "base": "foo", "width": 1, "msb": None, "lsb": None}}, "1")

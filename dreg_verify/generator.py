@@ -17,10 +17,13 @@ class GenOptions:
                  neg_signals=None, neg_all=False, neg_mode="invert",
                  neg_which="first", neg_value=None,
                  force_overrides=None, rfwrite_overrides=None, default_kind=None,
-                 top_output_only=False, types=None, wire_fallback=True):
+                 top_output_only=False, types=None, wire_fallback=True,
+                 exclude=None, exclude_regex=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
+        self.exclude = _norm_set(exclude)
+        self.exclude_regex = exclude_regex
         self.mode = mode
         self.max_tests = max_tests
         self.exhaustive = exhaustive
@@ -64,9 +67,10 @@ def _name_matches(sig, names):
 
 
 def select_signals(wb, opts):
-    """按 owner / 名称 / 正则 / top_output / 类型 过滤 logic 信号。"""
+    """按 owner / 名称 / 正则 / top_output / 类型 过滤 logic 信号；支持排除。"""
     import re
     rx = re.compile(opts.signal_regex, re.I) if opts.signal_regex else None
+    exrx = re.compile(opts.exclude_regex, re.I) if opts.exclude_regex else None
     out = []
     for sig in wb.logic:
         if opts.owners is not None and _ws(sig.owner) not in opts.owners:
@@ -74,6 +78,12 @@ def select_signals(wb, opts):
         if not _name_matches(sig, opts.signals):
             continue
         if rx and not (rx.search(sig.out_name) or rx.search(sig.out_base)):
+            continue
+        # 排除：按名集合 或 正则（匹配 K 全名或去位宽基名）
+        if opts.exclude is not None and (sig.out_name.lower() in opts.exclude
+                                         or sig.out_base.lower() in opts.exclude):
+            continue
+        if exrx and (exrx.search(sig.out_name) or exrx.search(sig.out_base)):
             continue
         if opts.top_output_only and str(sig.top_output).strip() not in ("1", "1.0", "True", "true"):
             continue
