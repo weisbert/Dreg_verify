@@ -1,3 +1,4 @@
 openpyxl>=3.1
 PySide6>=6.6
 pytest>=8.0
+oletools>=0.60   # 仅 inspect_vba.py 抽取 VBA 宏用，可选（缺失时 inspect_vba.py 有纯 Python 兜底）

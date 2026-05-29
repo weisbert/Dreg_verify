@@ -101,6 +101,17 @@ python inspect_excel.py 核心文件.xlsx --expr-forms
 会导出 `<名字>_exprforms.txt`：枚举所有不同表达式、按结构形态归并、并用求值器逐条试解析
 （`[OK]` / `[解析失败]`）。若有 `[解析失败]`，把那几条发给维护者扩展 `dreg_verify/expr.py` 即可。
 
+## 抽取 VBA 宏源码（`inspect_vba.py`）
+
+原始核心文件是带宏的 `.xlsm`，旧的 `.sv` 由其中 VBA 宏生成。要 1:1 复刻生成逻辑（地址算法、cone 展开、消息格式等），直接读 VBA 源码最准。
+
+```powershell
+pip install oletools                       # 推荐(更稳)；缺失时脚本用内置纯 Python 兜底
+python inspect_vba.py 核心文件.xlsm --list   # 列出模块，标出疑似生成 .sv 的模块
+python inspect_vba.py 核心文件.xlsm          # 导出全部 VBA 源码到 <名字>_vba.txt
+python inspect_vba.py 核心文件.xlsm --find "Print #,RF_WRITE,pll_n,top_output"   # 定位相关过程
+```
+
 ## Excel 结构导出（`inspect_excel.py`）
 
 把各 sheet 的列结构 / 表头 / 样本 / 取值枚举导出成文本，便于审阅。
