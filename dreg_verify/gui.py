@@ -103,6 +103,8 @@ INPUT_COLS = ["字母", "信号(位宽)", "角色", "类型", "驱动"]
 # 负向用 琥珀，刻意区别于"状态列红=信号坏掉/会 elaboration 失败"；红只留给真正的故障
 NEG_BG = QtGui.QColor("#fdeccb")        # 负向用例行底色（琥珀，能压过隔行底色）
 NEG_FG = QtGui.QColor("#9a5b00")        # 负向列头/标记文字色（深琥珀）
+HL_BG = QtGui.QColor("#dbe8ff")         # 当前选中测试列的高亮底色（淡蓝；列多横滚时不丢"我在哪列"）
+HL_NEG_BG = QtGui.QColor("#ffdca0")     # 负向列又被选中：琥珀+高亮叠加（更深的琥珀）
 
 
 class FlowLayout(QtWidgets.QLayout):
@@ -196,6 +198,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_rows = []
         self._ti_name_low = None
         self._ti_loaded_idx = None
+        self._ti_hl_col = -1      # 当前高亮(选中)的测试列；-1=无
         self._ti_loading = False  # 程序化填表时屏蔽 itemChanged，防递归
         self._sig_loading = False # 程序化改信号表(含左侧负向勾选)时屏蔽其 itemChanged
         self._build_ui()
@@ -402,6 +405,9 @@ class MainWindow(QtWidgets.QMainWindow):
         copy_sc = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+D"), self.ti_table)
         copy_sc.setContext(QtCore.Qt.WidgetShortcut)
         copy_sc.activated.connect(self.on_ti_copy)
+        # 当前测试列高亮：列多横滚时随时知道光标在哪条测试上(行表头已是冻结的纵表头，自然不跟着横滚)
+        self.ti_table.currentCellChanged.connect(self._ti_on_current_col)
+        self.ti_table.horizontalHeader().setHighlightSections(True)
         lay.addWidget(self.ti_table, 1)
 
         hint = QtWidgets.QLabel(
@@ -840,6 +846,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_sig = None; self._ti_node = None
         self._ti_bindings = {}; self._ti_groups = []; self._ti_rows = []
         self._ti_name_low = None
+        self._ti_hl_col = -1
         self.ti_header.setText(header_text)
         self._ti_loading = True
         try:
@@ -1076,6 +1083,7 @@ class MainWindow(QtWidgets.QMainWindow):
         t.setFixedHeight((shown + 1) * row_h + 6)       # +1 行给表头
 
     def _ti_populate(self):
+        self._ti_hl_col = -1          # 列集变了，旧高亮作废(下次选中再亮)
         self._ti_loading = True
         try:
             self.ti_table.clear()
@@ -1153,13 +1161,27 @@ class MainWindow(QtWidgets.QMainWindow):
                               % ("负向(故意填错)" if neg else "正向(真实)", rename_hint,
                                  fs or "(无)", ws or "(无)"))
                 hh.setForeground(NEG_FG if neg else QtGui.QColor("black"))   # 负向=琥珀，不与"状态红=坏掉"撞色
-            if neg:
+            # 列底色：负向=琥珀；当前选中列=淡蓝高亮；两者叠加=更深琥珀。其余列不设(留给隔行底色)。
+            hl = (c == self._ti_hl_col)
+            if neg or hl:
+                bg = HL_NEG_BG if (neg and hl) else (NEG_BG if neg else HL_BG)
                 for r in range(self.ti_table.rowCount()):
                     cell = self.ti_table.item(r, c)
                     if cell is not None:
-                        cell.setBackground(NEG_BG)
+                        cell.setBackground(bg)
         finally:
             self._ti_loading = False
+
+    def _ti_on_current_col(self, row, col, prow, pcol):
+        """选中单元格变列 → 移动列高亮(只重绘旧/新两列，便宜)。行表头是冻结纵表头，横滚自然不丢。"""
+        if self._ti_loading or col == self._ti_hl_col:
+            return
+        old = self._ti_hl_col
+        self._ti_hl_col = col
+        if 0 <= old < len(self._ti_rows):
+            self._ti_render_col(old)        # 旧列：清掉高亮(此时 old != _ti_hl_col)
+        if 0 <= col < len(self._ti_rows):
+            self._ti_render_col(col)        # 新列：加上高亮
 
     @staticmethod
     def _parse_int(s):

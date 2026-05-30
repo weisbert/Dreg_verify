@@ -881,6 +881,26 @@ def test_gui_bulk_scope_excludes_hidden_checked(qapp, wb, tmp_path_factory):
     assert r0 not in w._scope_rows()             # 也不进批量作用域(回退到其它可见行)
 
 
+def test_gui_truthtable_active_column_highlight(qapp, wb, tmp_path_factory):
+    """选中某测试列→该列高亮(淡蓝)；换列旧列恢复；负向列被选=琥珀+高亮叠加(列多横滚时不丢位置)。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "g_hl")
+    w._load_test_items(sig)
+    w.on_ti_add_neg_all()                       # 让后面有负向列
+    def bg(c):
+        return w.ti_table.item(0, c).background().color().name().lower()
+    w.ti_table.setCurrentCell(0, 0)             # 选中正向列 0
+    assert w._ti_hl_col == 0
+    assert bg(0) == gui.HL_BG.name().lower()
+    negc = next(c for c, rd in enumerate(w._ti_rows) if rd.get("is_negative"))
+    w.ti_table.setCurrentCell(0, negc)          # 选中负向列 → 叠加色
+    assert w._ti_hl_col == negc
+    assert bg(negc) == gui.HL_NEG_BG.name().lower()
+    assert bg(0) != gui.HL_BG.name().lower()    # 旧正向列已恢复
+    others = [c for c, rd in enumerate(w._ti_rows) if rd.get("is_negative") and c != negc]
+    if others:
+        assert bg(others[0]) == gui.NEG_BG.name().lower()   # 未选的负向列仍普通琥珀
+
+
 def test_gui_copy_shortcut_is_widget_scoped(qapp, wb, tmp_path_factory):
     """审查修复#1：复制列快捷键挂在真值表上且为 WidgetShortcut(编辑单元格时不触发)，
     而不是挂按钮的 WindowShortcut。"""
