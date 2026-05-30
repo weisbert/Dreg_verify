@@ -75,7 +75,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # ── 测试项编辑状态 ──
         self._edited = {}        # out_name(小写) -> {"sig":LogicSignal, "rows":[rowdict]}
         self._customized = set() # 被用户改过的信号名(小写)，仅这些走 vector_overrides
-        self._neg_only = set()   # 定制仅来自"加负向"(正向全自动)的信号——清负向时可整体撤销定制
+        self._neg_only = {}      # {信号名小写: 负向规则"first"/"all"} —— 正向全自动、仅加了负向的信号；
+                                 # 记规则是为了切覆盖度重算时按原规则补回(默认1条不会被炸成每条一条)；清负向时可整体撤销定制
         self._ti_sig = None      # 当前在编辑器里的信号
         self._ti_node = None
         self._ti_bindings = {}
@@ -137,7 +138,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b_selall = QtWidgets.QPushButton("全选输出(可见)"); b_selall.setToolTip("勾选所有可见信号的'选'")
         b_selall.clicked.connect(lambda: self.set_all_visible(True))
         b_selnone = QtWidgets.QPushButton("清空选择"); b_selnone.clicked.connect(lambda: self.set_all_visible(False))
-        b_negall = QtWidgets.QPushButton("全部加负向"); b_negall.setToolTip("给所有可见信号的每条正向测试各加一条负向")
+        b_negall = QtWidgets.QPushButton("全部加负向"); b_negall.setToolTip("给所有可见信号各加 1 条负向自检(每信号 1 条)")
         b_negall.clicked.connect(lambda: self.on_all_signals_neg(True))
         b_negnone = QtWidgets.QPushButton("清除负向"); b_negnone.setToolTip("清除所有可见信号的负向测试")
         b_negnone.clicked.connect(lambda: self.on_all_signals_neg(False))
@@ -218,7 +219,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 ("复制列", self.on_ti_copy, "复制当前选中的测试列"),
                 ("删除列", self.on_ti_del, "删除选中的测试列"),
                 ("重命名列…", self.on_ti_rename_current, "给用户新增的测试列改名(双击列头亦可；自动生成的 T0/T1 不可改)"),
-                ("加负向", self.on_ti_add_neg, "为本信号每条正向测试各追加一条负向(故意填错期望)；正向测试不动"),
+                ("加负向(选中)", self.on_ti_add_neg_selected,
+                 "给选中的测试列各加一条负向(故意填错期望)；未选中则取首条正向。正向测试不动"),
+                ("全部用例加负向", self.on_ti_add_neg_all,
+                 "每条正向测试各追加一条负向(全覆盖；用例数翻倍，按需用)"),
                 ("删负向", self.on_ti_del_neg, "删除本信号所有负向测试(保留正向)"),
                 ("预览本信号.sv", self.on_ti_preview_signal, "用当前(含编辑)测试项渲染该信号的 .sv 片段"),
                 ("导出CSV", self.on_ti_export_csv, "把本信号测试项导出为 CSV(Excel 可开)")]
@@ -268,12 +272,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if name_low not in self._customized:
                 self._load_test_items(sig)               # 纯自动：按新覆盖度重算
             elif name_low in self._neg_only:
-                # 仅负向定制(无手改) → 撤销定制、按新覆盖度重算正向、再补回负向
+                # 仅负向定制(无手改) → 撤销定制、按新覆盖度重算正向、再按原规则补回负向
+                rule = self._neg_only[name_low]   # "first"/"all"——保住"默认1条不被炸成每条一条"
                 self._customized.discard(name_low)
-                self._neg_only.discard(name_low)
+                self._neg_only.pop(name_low, None)
                 self._edited.pop(name_low, None)
                 self._load_test_items(sig)
-                self._set_signal_negatives(sig, True, "all")
+                self._set_signal_negatives(sig, True, rule)
                 self._load_test_items(sig)
         self._update_cov_hint()
 
@@ -314,7 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 切换工作簿，清空旧的测试项编辑状态
         self._edited = {}
         self._customized = set()
-        self._neg_only = set()
+        self._neg_only = {}
         self._ti_loaded_idx = None
         self._clear_test_items("加载完成，点左侧信号查看测试项。")
         errs = []
@@ -433,19 +438,50 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
 
     # ───────────── 左侧"负向"列 → 联动测试项 ─────────────
+    def _signal_negatives(self, name_low):
+        """该信号当前所有负向行(从 _edited 里取；未定制信号没有负向)。"""
+        return [rd for rd in self._edited.get(name_low, {}).get("rows", [])
+                if rd.get("kind") == "neg"]
+
+    def _signal_has_negative(self, name_low):
+        return bool(self._signal_negatives(name_low))
+
+    def _signal_has_named_negative(self, name_low):
+        """是否含"值得保护"的负向：有自定义名或手填错值(误删它们=丢用户的活)。"""
+        return any(rd.get("name") or rd.get("wrong_value") is not None
+                   for rd in self._signal_negatives(name_low))
+
     def on_signal_table_item_changed(self, item):
-        """勾/取消左侧"负向"列 = 给该信号每条正向测试各设/清一条负向。
-        这样左右两边是同一套负向，不再各管各的。"""
+        """勾/取消左侧"负向"列：勾=确保该信号至少有 1 条负向自检(已有更多的保持不动，不塌成1条)；
+        取消=清掉全部负向(若含命名/手填错值的负向，先确认防误删)。
+        想要更多/更精确，去右侧编辑器「加负向(选中)」或「全部用例加负向」。左右联动。"""
         if self._sig_loading or item is None or item.column() != COL_NEG:
             return
         r = item.row()
         sig = self._sig_of_row(r)
+        name_low = sig.out_name.lower()
         want = item.checkState() == QtCore.Qt.Checked
-        self._set_signal_negatives(sig, want, "all")
+        if want:
+            if not self._signal_has_negative(name_low):   # 没有才加 1 条；已有的原样保留
+                self._set_signal_negatives(sig, True, "first")
+            msg = "%s 已标记负向(1 条自检)" % sig.out_name
+        else:
+            if self._signal_has_named_negative(name_low):
+                if QtWidgets.QMessageBox.question(
+                        self, "确认清除负向",
+                        "%s 有自定义命名或手填错值的负向，取消勾选会全部删除。确定？" % sig.out_name
+                        ) != QtWidgets.QMessageBox.Yes:
+                    self._sig_loading = True               # 用户取消 → 还原勾选状态
+                    try:
+                        item.setCheckState(QtCore.Qt.Checked)
+                    finally:
+                        self._sig_loading = False
+                    return
+            self._set_signal_negatives(sig, False, "first")
+            msg = "%s 已清除负向" % sig.out_name
         if self._idx_of_row(r) == self._ti_loaded_idx:    # 正在编辑该信号→刷新右表
             self._load_test_items(sig)
-        self.status.showMessage(
-            "%s 已%s负向(每条正向各一条)" % (sig.out_name, "标记" if want else "清除"))
+        self.status.showMessage(msg)
 
     def _set_signal_negatives(self, sig, want_neg, which):
         """给某信号(重新)设置负向测试：保留全部正向测试，按 first/all 追加正向测试的"故意填错"
@@ -464,7 +500,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not want_neg and not hand_edited:
             self._edited.pop(name_low, None)
             self._customized.discard(name_low)
-            self._neg_only.discard(name_low)
+            self._neg_only.pop(name_low, None)
             return
         rows = (self._edited[name_low]["rows"] if name_low in self._edited
                 else self._auto_rows(sig, node, bindings, groups))
@@ -496,11 +532,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._edited[name_low] = {"sig": sig, "rows": new_rows}
         self._customized.add(name_low)
         if hand_edited:
-            self._neg_only.discard(name_low)
+            self._neg_only.pop(name_low, None)
         elif want_neg:
-            self._neg_only.add(name_low)       # 正向全自动、仅加了负向
+            self._neg_only[name_low] = which   # 正向全自动、仅加了负向；记住规则(first/all)
         else:
-            self._neg_only.discard(name_low)
+            self._neg_only.pop(name_low, None)
 
     def _sync_left_neg(self):
         """编辑器里负向有变 → 回写左侧"负向"勾选(任一用例为负向则勾上)。"""
@@ -520,10 +556,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
     def on_all_signals_neg(self, want):
-        """对所有可见信号一键加/清负向(满足'R 全部负向')。受筛选范围限制，可先筛再点。"""
+        """对所有可见信号一键加/清负向(满足'R 全部负向')。每信号默认 1 条自检。
+        受筛选范围限制，可先筛再点。"""
         if not self.wb:
             return
-        which = "all"          # 每条正向各加一条负向
         self._sig_loading = True
         n = 0
         try:
@@ -531,7 +567,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self.table.isRowHidden(r):
                     continue
                 sig = self._sig_of_row(r)
-                self._set_signal_negatives(sig, want, which)
+                name_low = sig.out_name.lower()
+                if want:
+                    # 已有负向的信号原样保留(不把"全部用例加负向"等多条塌成 1 条)；没有才加 1 条
+                    if not self._signal_has_negative(name_low):
+                        self._set_signal_negatives(sig, True, "first")
+                else:
+                    self._set_signal_negatives(sig, False, "first")
                 cell = self.table.item(r, COL_NEG)
                 if cell is not None:
                     cell.setCheckState(QtCore.Qt.Checked if want else QtCore.Qt.Unchecked)
@@ -540,7 +582,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sig_loading = False
         if self._ti_sig is not None and self._ti_loaded_idx is not None:
             self._load_test_items(self._ti_sig)   # 当前编辑器信号若被影响则刷新
-        self.status.showMessage("已对 %d 个可见信号%s负向测试(每条正向各一条)"
+        self.status.showMessage("已对 %d 个可见信号%s负向测试(每信号 1 条自检；已有的保持不动)"
                                 % (n, "添加" if want else "清除"))
 
     # ───────────── 点信号看明细（debug 关键） ─────────────
@@ -705,7 +747,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._edited[self._ti_name_low] = {"sig": self._ti_sig, "rows": self._ti_rows}
         self._customized.add(self._ti_name_low)
-        self._neg_only.discard(self._ti_name_low)   # 有手工编辑 → 不再是"纯负向定制"
+        self._neg_only.pop(self._ti_name_low, None)   # 有手工编辑 → 不再是"纯负向定制"(冻结，保住编辑)
         self._update_ti_header(True)
         self._sync_left_neg()        # 右表负向变化 → 回写左侧"负向"勾选
 
@@ -873,8 +915,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_populate()
         self.ti_table.setCurrentCell(0, len(self._ti_rows) - 1)
 
-    def on_ti_add_neg(self):
-        """给本信号添加负向测试(按 first/all)：复制正向测试为故意填错的副本，正向测试不动。"""
+    def on_ti_add_neg_selected(self):
+        """给选中的测试列各加一条负向(精确控制)；未选中则取首条正向。正向测试不动。
+        这是"手挑哪几条加负向"的入口——属手工定制，切换覆盖度时会保留(不被重算冲掉)。"""
+        if not self._ti_sig:
+            QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
+            return
+        cols = sorted({i.column() for i in self.ti_table.selectedItems()})
+        if not cols:                          # 无多选 → 退当前列(与"复制列/删除列"一致)
+            c = self.ti_table.currentColumn()
+            cols = [c] if c >= 0 else []
+        pos_cols = [c for c in cols if 0 <= c < len(self._ti_rows)
+                    and self._ti_rows[c].get("kind") != "neg"]
+        if not pos_cols:                      # 仍无正向列 → 默认首条正向
+            first = next((i for i, rd in enumerate(self._ti_rows)
+                          if rd.get("kind") != "neg"), None)
+            if first is None:
+                QtWidgets.QMessageBox.information(self, "提示", "本信号没有可作负向来源的正向用例")
+                return
+            pos_cols = [first]
+        # 已有负向的输入取值集合 → 跳过，避免给同一条用例叠出重复负向断言
+        existing = {tuple(sorted(rd["base_values"].items()))
+                    for rd in self._ti_rows if rd.get("kind") == "neg"}
+        added = skipped = 0
+        for c in pos_cols:
+            prd = self._ti_rows[c]
+            key = tuple(sorted(prd["base_values"].items()))
+            if key in existing:               # 这条正向已经有负向了 → 不重复加
+                skipped += 1
+                continue
+            existing.add(key)
+            neg = {"base_values": dict(prd["base_values"]), "kind": "neg",
+                   "wrong_value": None, "user_added": True,
+                   "note": "负向(真实测试的故意填错副本)"}
+            self._ti_recompute(neg)
+            self._ti_rows.append(neg)
+            added += 1
+        if added == 0:
+            self.status.showMessage("选中的列都已有负向，未重复添加")
+            return
+        self._ti_mark_customized()            # 含 _sync_left_neg；精挑负向 → 手工定制(冻结)
+        self._ti_populate()
+        msg = "已为 %s 加 %d 条负向(选中列)" % (self._ti_sig.out_name, added)
+        if skipped:
+            msg += "；%d 列已有负向已跳过" % skipped
+        self.status.showMessage(msg)
+
+    def on_ti_add_neg_all(self):
+        """每条正向测试各追加一条负向(全覆盖)：复制每条正向为故意填错的副本，正向测试不动。"""
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
@@ -882,7 +970,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_test_items(self._ti_sig)
         self._sync_left_neg()
         n = sum(1 for rd in self._ti_rows if rd.get("kind") == "neg")
-        self.status.showMessage("已为 %s 添加 %d 条负向测试(正向测试未改动)" % (self._ti_sig.out_name, n))
+        self.status.showMessage("已为 %s 添加 %d 条负向测试(每条正向各一条)" % (self._ti_sig.out_name, n))
 
     def on_ti_del_neg(self):
         """删除本信号所有负向测试，保留正向。"""
@@ -986,7 +1074,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._ti_sig:
             return
         self._customized.discard(self._ti_name_low)
-        self._neg_only.discard(self._ti_name_low)
+        self._neg_only.pop(self._ti_name_low, None)
         self._edited.pop(self._ti_name_low, None)
         self._load_test_items(self._ti_sig)
         self.status.showMessage("已从表达式重新生成 %s 的测试项（丢弃自定义）" % self._ti_sig.out_name
@@ -1175,7 +1263,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not names:
                 QtWidgets.QMessageBox.information(
                     self, "提示", "勾选的信号里没有任何负向测试，无法只导出'错误用例'。\n"
-                    "请先在右侧测试项里'加负向'，或勾左侧'负向'列。")
+                    "请先勾左侧'负向'列(1条)，或在右侧编辑器'加负向(选中)'/'全部用例加负向'。")
                 return
             res = generator.build(self.wb, self._opts(names, negative_only=True))
             scope_msg = "（仅负向，共 %d 个含负向信号）" % len(names)

@@ -344,7 +344,7 @@ def test_gui_neg_rebuild_keeps_name_and_wrong(qapp, wb, tmp_path_factory):
     """重建负向时保留用户对负向列的改名与手填错值(审查#2/#3)。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "g9")
     w._load_test_items(sig)
-    w.on_ti_add_neg()                                  # 每条正向各追加一条负向
+    w.on_ti_add_neg_all()                                  # 每条正向各追加一条负向
     neg_col = next(i for i, rd in enumerate(w._ti_rows) if rd.get("kind") == "neg")
     # 改名 + 手填错值
     ok, _ = w._ti_set_test_name(neg_col, "my_special_neg")
@@ -352,7 +352,7 @@ def test_gui_neg_rebuild_keeps_name_and_wrong(qapp, wb, tmp_path_factory):
     w._ti_rows[neg_col]["wrong_value"] = 1
     w._edited[sig.out_name.lower()] = {"sig": sig, "rows": w._ti_rows}
     # 再次"加负向"(重建路径)
-    w.on_ti_add_neg()
+    w.on_ti_add_neg_all()
     negs = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
     assert any(rd.get("name") == "my_special_neg" for rd in negs), "重建丢了负向列改名"
     assert any(rd.get("wrong_value") == 1 for rd in negs), "重建丢了手填错值"
@@ -438,7 +438,7 @@ def test_gui_add_negative_appends_not_modifies(qapp, wb, tmp_path_factory):
     w._load_test_items(sig)
     n_pos = len(w._ti_rows)
     pos_snapshot = [(dict(rd["base_values"]), rd["expected"]) for rd in w._ti_rows]
-    w.on_ti_add_neg()
+    w.on_ti_add_neg_all()
     pos = [rd for rd in w._ti_rows if rd.get("kind") != "neg"]
     neg = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
     assert len(pos) == n_pos and len(neg) == n_pos      # 正向数不变，等量追加负向
@@ -452,8 +452,8 @@ def test_gui_add_negative_appends_not_modifies(qapp, wb, tmp_path_factory):
     assert all(rd.get("kind") != "neg" for rd in w._ti_rows) and len(w._ti_rows) == n_pos
 
 
-def test_gui_left_neg_adds_negatives(qapp, wb, tmp_path_factory):
-    """左侧'负向'勾选 → 给该信号追加负向测试(正向保留)；取消 → 撤销定制。"""
+def test_gui_left_neg_adds_one(qapp, wb, tmp_path_factory):
+    """左侧'负向'勾选 → 默认只加 1 条负向自检(正向保留)；取消 → 撤销定制。"""
     from PySide6 import QtCore
     gui, w, sig = _reserve_window(tmp_path_factory, "g5")
     row = next(r for r in range(w.table.rowCount())
@@ -463,20 +463,43 @@ def test_gui_left_neg_adds_negatives(qapp, wb, tmp_path_factory):
     w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)
     pos = [rd for rd in w._ti_rows if rd.get("kind") != "neg"]
     neg = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
-    assert len(pos) == n_pos and len(neg) == n_pos       # 每条正向各一负向
+    assert len(pos) == n_pos and len(neg) == 1           # 默认仅 1 条
+    assert "d_logic_bt_lp_reserve" in w._neg_only        # 仅负向定制(可随覆盖度重算)
     # 取消 → 该信号定制被整体撤销(纯自动，不留 override)
     w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Unchecked)
     assert "d_logic_bt_lp_reserve" not in w._customized
 
 
+def test_gui_add_neg_selected_precise(qapp, wb, tmp_path_factory):
+    """编辑器'加负向(选中)' → 只给选中的正向列各加一条负向(精确控制)。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "gsel")
+    w._load_test_items(sig)
+    n_pos = len([rd for rd in w._ti_rows if rd.get("kind") != "neg"])
+    assert n_pos >= 2                                     # 需要 ≥2 条正向才能验证"只选其一"
+    # 选中第 1 列(T0) → 只加 1 条负向，且 base_values 复制自 T0
+    w.ti_table.setCurrentCell(0, 0)
+    w.on_ti_add_neg_selected()
+    neg = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
+    assert len(neg) == 1
+    assert neg[0]["base_values"] == w._ti_rows[0]["base_values"]
+    assert sig.out_name.lower() in w._customized and sig.out_name.lower() not in w._neg_only
+    # 再选中 T1 → 再加 1 条(累加，且这条复制自 T1，而非又一条 T0)
+    t1_bv = dict(w._ti_rows[1]["base_values"])
+    w.ti_table.setCurrentCell(0, 1)
+    w.on_ti_add_neg_selected()
+    negs = [rd for rd in w._ti_rows if rd.get("kind") == "neg"]
+    assert len(negs) == 2
+    assert any(rd["base_values"] == t1_bv for rd in negs)   # 精确命中 T1，不是兜底回 T0
+
+
 def test_gui_all_signals_negative(qapp, wb, tmp_path_factory):
-    """'全部加负向' → 所有可见信号都拿到负向测试(满足 R 全部负向)。"""
+    """'全部加负向' → 每个可见信号各拿到【恰好 1 条】负向自检(满足 R 全部负向、默认1条)。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "g6")
     w.on_all_signals_neg(True)
     ov = w._vector_overrides()
     assert ov is not None
-    # 每个有 override 的信号都至少含一条负向
-    assert all(any(v.is_negative for v in vs) for vs in ov.values() if vs)
+    # 每个有 override 的信号恰好 1 条负向(不是每条正向各一条)
+    assert all(sum(1 for v in vs if v.is_negative) == 1 for vs in ov.values() if vs)
     assert len(ov) == len(w.signals)            # 3 个信号都加了
     # 列头 _NEG 检查(打开 reserve)
     w._load_test_items(sig)
@@ -487,11 +510,52 @@ def test_gui_all_signals_negative(qapp, wb, tmp_path_factory):
     assert not w._customized
 
 
+def test_gui_bulk_neg_nondestructive(qapp, wb, tmp_path_factory):
+    """审查#1：'全部加负向'不能把已有多条负向的信号塌成 1 条。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "gbulk")
+    w._load_test_items(sig)
+    w.on_ti_add_neg_all()                                  # reserve 拿到 N 条(每条正向各一)
+    n_neg_before = sum(1 for rd in w._ti_rows if rd.get("kind") == "neg")
+    assert n_neg_before >= 2
+    w.on_all_signals_neg(True)                            # 批量加负向：已有的应保持不动
+    ov = w._vector_overrides()
+    n_neg_after = sum(1 for v in ov[sig.out_name.lower()] if v.is_negative)
+    assert n_neg_after == n_neg_before                    # 没被塌成 1 条
+
+
+def test_gui_add_neg_selected_no_duplicate(qapp, wb, tmp_path_factory):
+    """审查#2：对'已经有负向'的正向列再'加负向(选中)'不产生重复负向。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "gdup")
+    w._load_test_items(sig)
+    w.on_ti_add_neg_all()                                 # 每条正向各 1 条
+    n_neg = sum(1 for rd in w._ti_rows if rd.get("kind") == "neg")
+    w.ti_table.setCurrentCell(0, 0)                       # T0 已有负向
+    w.on_ti_add_neg_selected()
+    assert sum(1 for rd in w._ti_rows if rd.get("kind") == "neg") == n_neg   # 没增加
+
+
+def test_gui_default_one_survives_coverage_change(qapp, wb, tmp_path_factory):
+    """审查#5(头号)：左侧勾选的 1 条负向，切覆盖度后仍是 1 条(不被炸成每条一条)。"""
+    from PySide6 import QtCore
+    gui, w, sig = _reserve_window(tmp_path_factory, "gcov1")
+    row = next(r for r in range(w.table.rowCount())
+               if w._sig_of_row(r).out_name == sig.out_name)
+    w.coverage.setCurrentText("全面")
+    w.on_row_focus(row, gui.COL_K, -1, -1)
+    w.table.item(row, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)   # 默认 1 条
+    assert sum(1 for rd in w._ti_rows if rd.get("kind") == "neg") == 1
+    assert w._neg_only.get(sig.out_name.lower()) == "first"           # 规则被记住
+    w.coverage.setCurrentText("精简")                                  # 切覆盖度 → 重算
+    n_neg = sum(1 for rd in w._ti_rows if rd.get("kind") == "neg")
+    assert n_neg == 1                                                  # 仍是 1 条，不是每条一条！
+    assert w._neg_only.get(sig.out_name.lower()) == "first"
+
+
 def test_gui_positive_only_strips_negatives(qapp, wb, tmp_path_factory):
     """#2: positive_only 把自定义负向向量从正向文件剔除。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "g4")
     w._load_test_items(sig)
-    w.on_ti_add_neg()
+    w.on_ti_add_neg_all()
     name = "d_logic_bt_lp_reserve"
     ov_all = w._vector_overrides()
     ov_pos = w._vector_overrides(positive_only=True)
@@ -557,7 +621,7 @@ def test_gui_coverage_live_update_neg_only(qapp, wb, tmp_path_factory):
                if w._sig_of_row(r).out_name == sig.out_name)
     w.coverage.setCurrentText("全面")
     w.on_row_focus(row, gui.COL_K, -1, -1)
-    w.on_ti_add_neg()                            # 仅负向定制(进入 _neg_only)
+    w.on_ti_add_neg_all()                            # 仅负向定制(进入 _neg_only)
     assert sig.out_name.lower() in w._neg_only
     n_pos_max = sum(1 for rd in w._ti_rows if rd.get("kind") != "neg")
     # 切回精简：正向应按新覆盖度重算(更少)，且负向仍在(每条正向各一)
@@ -573,7 +637,7 @@ def test_gui_export_negative_only(qapp, wb, tmp_path_factory):
     """'仅负向'导出：override 只剩负向向量、无负向的信号被略过；build 出的全是负向。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "exp1")
     w._load_test_items(sig)
-    w.on_ti_add_neg()
+    w.on_ti_add_neg_all()
     name = sig.out_name
     ov_neg = w._vector_overrides(negative_only=True)
     assert name.lower() in ov_neg
