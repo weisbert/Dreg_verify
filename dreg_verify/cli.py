@@ -334,7 +334,9 @@ def _write_report_html(path, rep, excel):
                 hdr.append('<th class="%s">%s</th>' % ("negh" if tc["neg"] else "", esc(tc["name"])))
             body = []
             for ri, inp in enumerate(t["inputs"]):
-                cells = ['<th class="rowhdr">%s</th>' % esc(inp["label"])]
+                ltr = inp.get("letters") or ""               # 表达式变量(A/B/C…) → 物理信号
+                rh = ("%s → %s" % (ltr, inp["label"])) if ltr else inp["label"]
+                cells = ['<th class="rowhdr">%s</th>' % esc(rh)]
                 for tc in tests:
                     cells.append('<td class="%s">%s</td>'
                                  % ("neg" if tc["neg"] else "", esc(tc["values"][ri])))

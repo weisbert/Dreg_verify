@@ -694,3 +694,57 @@ def test_csv_report_writes_verifiability(wb, tmp_path):
     assert verif, "应生成可验证性 CSV"
     content = open(verif[0], encoding="utf-8-sig").read()
     assert "可验证性" in content
+
+
+# ───────────── 真值表标注表达式字母 A/B/C（#1） ─────────────
+def test_gui_truthtable_rows_carry_expr_letters(qapp, wb, tmp_path_factory):
+    """纵向真值表的行表头带上表达式变量字母(A/B/C…)，并在头部给出字母→信号对照。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "g_letters")   # (A?C:B)&(~J)
+    w._load_test_items(sig)
+    headers = [w.ti_table.verticalHeaderItem(i).text()
+               for i in range(len(w._ti_groups))]
+    # 每个输入行表头都形如 "<字母> → <信号名>"，且字母来自表达式
+    assert all(" → " in h for h in headers)
+    letters = {h.split(" → ", 1)[0] for h in headers}
+    assert {"A", "B", "C", "J"} <= letters
+    # 头部等式 + 字母对照
+    assert "(A?C:B)&(~J)" in w.ti_header.text()
+    assert "字母对应" in w.ti_header.text()
+    assert "A=d_bt_lp_linelocal_mode_ctrl" in w.ti_header.text()
+
+
+def test_report_table_inputs_carry_letters(wb):
+    """report() 的真值表 inputs 每项带 letters（A/B/C…），供 HTML/CSV 对照表达式。"""
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    t = next(x for x in rep["tables"] if x["signal"] == "d_logic_bt_lp_reserve")
+    assert [i["letters"] for i in t["inputs"]] == ["A", "C", "B", "J"]
+    assert all("label" in i for i in t["inputs"])   # 原 label 不破坏
+
+
+def test_html_report_maps_letters_to_signals(wb, tmp_path):
+    """HTML 报告真值表行表头出现 '字母 → 信号' 的映射。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    html = path.read_text(encoding="utf-8")
+    assert "A → d_bt_lp_linelocal_mode_ctrl" in html
+    assert "J → d_bt_lp_iddq" in html
+
+
+# ───────────── 面板可自由拖动大小（#2：FlowLayout + 不可塌陷） ─────────────
+def test_gui_panes_are_resizable(qapp, wb, tmp_path_factory):
+    """两个工具条用 FlowLayout（最小宽度≈单按钮、可换行），主分割条不可把面板拖没。"""
+    from PySide6 import QtWidgets
+    gui, w, _sig = _reserve_window(tmp_path_factory, "g_resize")
+    sp = w.centralWidget().findChild(QtWidgets.QSplitter)
+    assert not sp.childrenCollapsible()              # 拖到底也不会被吞掉
+    assert sp.widget(0).minimumWidth() <= 260        # 左面板能缩到较窄
+    flows = [c.layout() for c in w.findChildren(QtWidgets.QWidget)
+             if isinstance(c.layout(), gui.FlowLayout)]
+    assert len(flows) == 2                           # 左批量条 + 右编辑条
+    for fl in flows:
+        # 最小宽度≈单个最宽按钮，而不是所有按钮之和（否则 splitter 拖不动）
+        assert 0 < fl.minimumSize().width() < 260
+        # 窄到 180px 时会换行（高度 > 单行）
+        assert fl.heightForWidth(180) >= fl.heightForWidth(2000)

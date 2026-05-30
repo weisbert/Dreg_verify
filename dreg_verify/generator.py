@@ -318,7 +318,9 @@ def report(wb, opts):
         groups = V.input_groups(node, bindings)
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
-                 "inputs": [{"label": g["label"]} for g in groups], "tests": []}
+                 # letters = 该输入对应的表达式变量(A/B/C…)，让报告里的真值表能对上表达式
+                 "inputs": [{"label": g["label"], "letters": ",".join(g.get("letters") or [])}
+                            for g in groups], "tests": []}
         unresolved_bases = set()
         for vec in vecs:
             forces, writes, unres = W.compute_drives(vec, bindings, used)

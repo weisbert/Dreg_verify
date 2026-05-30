@@ -63,6 +63,76 @@ STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
 NEG_BG = QtGui.QColor("#fff3f3")        # 负向用例行底色（与报告 HTML 一致）
 
 
+class FlowLayout(QtWidgets.QLayout):
+    """按钮按可用宽度自动换行的布局（Qt 官方 FlowLayout 示例改写）。
+
+    用途：工具条按钮一多，普通 QHBoxLayout 会把"所有按钮宽度之和"作为父面板的最小宽度，
+    导致 QSplitter 拖不动、面板被挤没。FlowLayout 在宽度不够时把按钮折到下一行，
+    面板最小宽度 ≈ 单个最宽按钮，于是 splitter 可以自由拖动、按钮永不被吞。
+    """
+
+    def __init__(self, parent=None, margin=0, hspacing=6, vspacing=4):
+        super().__init__(parent)
+        self._items = []
+        self._hspace = hspacing
+        self._vspace = vspacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    # Qt 要求实现的接口 ----------------------------------------------------
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientations()
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QtCore.QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QtCore.QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())     # ≈ 单个最宽控件 → 面板可缩到很窄
+        m = self.contentsMargins()
+        return size + QtCore.QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h = eff.x(), eff.y(), 0
+        for it in self._items:
+            w, h = it.sizeHint().width(), it.sizeHint().height()
+            next_x = x + w + self._hspace
+            if next_x - self._hspace > eff.right() and line_h > 0:   # 放不下且本行已有控件 → 换行
+                x = eff.x()
+                y = y + line_h + self._vspace
+                next_x = x + w + self._hspace
+                line_h = 0
+            if not test_only:
+                it.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), QtCore.QSize(w, h)))
+            x = next_x
+            line_h = max(line_h, h)
+        return y + line_h - rect.y() + m.bottom()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -133,8 +203,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table.currentCellChanged.connect(self.on_row_focus)
         self.table.itemChanged.connect(self.on_signal_table_item_changed)  # 左侧"负向"勾选→联动右表
         tv.addWidget(self.table)
-        # 批量操作条（就近放在信号表下方，符合使用习惯）
-        bulk = QtWidgets.QHBoxLayout()
+        # 批量操作条（就近放在信号表下方，符合使用习惯）。用 FlowLayout：窄了自动换行，不卡死 splitter。
+        bulk_box = QtWidgets.QWidget()
+        bulk = FlowLayout(bulk_box)
         b_selall = QtWidgets.QPushButton("全选输出(可见)"); b_selall.setToolTip("勾选所有可见信号的'选'")
         b_selall.clicked.connect(lambda: self.set_all_visible(True))
         b_selnone = QtWidgets.QPushButton("清空选择"); b_selnone.clicked.connect(lambda: self.set_all_visible(False))
@@ -144,11 +215,10 @@ class MainWindow(QtWidgets.QMainWindow):
         b_negnone.clicked.connect(lambda: self.on_all_signals_neg(False))
         for b in (b_selall, b_selnone):
             bulk.addWidget(b)
-        bulk.addSpacing(16); bulk.addWidget(QtWidgets.QLabel("负向:"))
+        bulk.addWidget(QtWidgets.QLabel(" 负向:"))
         for b in (b_negall, b_negnone):
             bulk.addWidget(b)
-        bulk.addStretch(1)
-        tv.addLayout(bulk)
+        tv.addWidget(bulk_box)
         left.addWidget(top_box)
         self.detail = QtWidgets.QPlainTextEdit(); self.detail.setReadOnly(True)
         self.detail.setMaximumHeight(200)
@@ -168,6 +238,14 @@ class MainWindow(QtWidgets.QMainWindow):
         pv.addWidget(self.preview)
         self.tabs.addTab(self.preview_tab, ".sv 预览")
         splitter.addWidget(self.tabs)
+        # 拖动体验：两侧都不可被拖没(setChildrenCollapsible False)，给小而合理的最小宽度，
+        # 加粗手柄更易抓取；左侧固定、右侧吃伸缩。配合 FlowLayout 工具条 → 可自由拖动两侧大小。
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(6)
+        left.setMinimumWidth(220)
+        self.tabs.setMinimumWidth(300)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
         splitter.setSizes([640, 700])
         root.addWidget(splitter, 1)
 
@@ -213,7 +291,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_header.setStyleSheet("color:#445;")
         lay.addWidget(self.ti_header)
 
-        bar = QtWidgets.QHBoxLayout()
+        bar_box = QtWidgets.QWidget()
+        bar = FlowLayout(bar_box)        # 按钮多，窄屏自动换行，避免给右面板强加大最小宽度
         defs = [("重新生成", self.on_ti_regen, "丢弃本信号自定义，按当前向量选项从表达式重新生成"),
                 ("加正向列", self.on_ti_add, "新增一条正向(真实)测试(输入全 0，期望自动算)"),
                 ("复制列", self.on_ti_copy, "复制当前选中的测试列"),
@@ -229,8 +308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for text, slot, tip in defs:
             b = QtWidgets.QPushButton(text); b.clicked.connect(slot); b.setToolTip(tip)
             bar.addWidget(b)
-        bar.addStretch(1)
-        lay.addLayout(bar)
+        lay.addWidget(bar_box)
 
         self.ti_table = QtWidgets.QTableWidget(0, 0)
         self._mono(self.ti_table)
@@ -738,9 +816,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_ti_header(self, custom):
         tag = "   [已自定义★]" if custom else ""
-        self.ti_header.setText("信号: %s    表达式: %s    用例 %d 条%s"
-                               % (self._ti_sig.out_name, self._ti_sig.expr,
-                                  len(self._ti_rows), tag))
+        legend = self._expr_legend()
+        # 表达式写成 "输出 = RHS" 的等式形式 + 字母对照，让真值表与表达式一目了然
+        self.ti_header.setText(
+            "信号 %s     %s = %s     用例 %d 条%s%s"
+            % (self._ti_sig.out_name, self._ti_sig.out_base or "out", self._ti_sig.expr,
+               len(self._ti_rows), tag,
+               ("\n字母对应： " + legend) if legend else ""))
 
     def _ti_mark_customized(self):
         if not self._ti_sig:
@@ -775,6 +857,27 @@ class MainWindow(QtWidgets.QMainWindow):
             label += "_NEG"
         return label
 
+    @staticmethod
+    def _group_letters(g):
+        """该输入组对应的表达式变量字母(可能多个，如同一物理信号占 A、B 两个字母)。"""
+        return ",".join(g.get("letters") or [])
+
+    @classmethod
+    def _vheader_label(cls, g):
+        """纵向真值表的行表头：'A,B → d_xxx[14:14]'——字母在前，方便对照表达式。"""
+        ltr = cls._group_letters(g)
+        base_lbl = g.get("label", g["base"])
+        return "%s → %s" % (ltr, base_lbl) if ltr else base_lbl
+
+    def _expr_legend(self):
+        """字母→物理信号 的对照串，如 'A,B=d_xxx   C=en_pll   D=…'，给读表达式时对照用。"""
+        parts = []
+        for g in self._ti_groups:
+            ltr = self._group_letters(g)
+            if ltr:
+                parts.append("%s=%s" % (ltr, g["base"]))
+        return "   ".join(parts)
+
     def _ti_populate(self):
         self._ti_loading = True
         try:
@@ -784,14 +887,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_table.setRowCount(nrows)
             self.ti_table.setColumnCount(ntests)
             out_w = self._ti_sig.out_width if self._ti_sig else 1
-            exp_label = "期望(out)%s" % ("[%d:0]" % (out_w - 1) if out_w and out_w > 1 else "")
-            vlabels = [g.get("label", g["base"]) for g in self._ti_groups] + [exp_label]
+            exp_label = "out → 期望%s" % ("[%d:0]" % (out_w - 1) if out_w and out_w > 1 else "")
+            # 行表头带上表达式字母(A/B/C…)，让用户能把表达式里的变量对上物理信号
+            vlabels = [self._vheader_label(g) for g in self._ti_groups] + [exp_label]
             self.ti_table.setVerticalHeaderLabels(vlabels)
             for i, g in enumerate(self._ti_groups):
                 hi = self.ti_table.verticalHeaderItem(i)
                 if hi:
-                    hi.setToolTip("%s  (%s, %dbit%s)" % (g["label"], g["kind"], g["width"],
-                                                         ", 控制位" if g["is_control"] else ""))
+                    hi.setToolTip("表达式变量 %s  =  %s\n(%s, %dbit%s)"
+                                  % (self._group_letters(g) or "?", g["label"], g["kind"], g["width"],
+                                     ", 控制位/选择位" if g["is_control"] else ", 数据位"))
+            # 期望行表头：把输出信号名也带上，呼应表达式左边
+            hexp = self.ti_table.verticalHeaderItem(self.R_EXP)
+            if hexp:
+                hexp.setToolTip("输出(表达式左边) = %s\n各列是该输入组合下表达式算出的期望值"
+                                % (self._ti_sig.out_name if self._ti_sig else "out"))
             self.ti_table.setHorizontalHeaderLabels(["T%d" % i for i in range(ntests)])
         finally:
             self._ti_loading = False
@@ -1112,8 +1222,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 wr.writerow(["信号\\测试"] + [self._ti_label(rd, i) for i, rd in enumerate(rows)])
                 for g in self._ti_groups:
                     bk = g["base"].lower()
-                    wr.writerow([g["label"]] + [self._fmt_val(rd["base_values"].get(bk, 0), g["width"])
-                                                for rd in rows])
+                    wr.writerow([self._vheader_label(g)] + [self._fmt_val(rd["base_values"].get(bk, 0), g["width"])
+                                                            for rd in rows])
                 out_w = self._ti_sig.out_width or 1
                 exp_label = "期望(out)%s" % ("[%d:0]" % (out_w - 1) if out_w > 1 else "")
                 wr.writerow([exp_label] + [self._fmt_val(rd["expected"] & E.mask(rd.get("correct_width") or 1),
