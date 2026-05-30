@@ -98,6 +98,8 @@ STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE
                "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
                "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
                "parse-err": "表达式或输入解析出错"}
+# 「输入信号」表(真值表上方)：把字母→信号/角色/驱动 集中成一张可读的小表(取代头部那行难读的图例)
+INPUT_COLS = ["字母", "信号(位宽)", "角色", "类型", "驱动"]
 # 负向用 琥珀，刻意区别于"状态列红=信号坏掉/会 elaboration 失败"；红只留给真正的故障
 NEG_BG = QtGui.QColor("#fdeccb")        # 负向用例行底色（琥珀，能压过隔行底色）
 NEG_FG = QtGui.QColor("#9a5b00")        # 负向列头/标记文字色（深琥珀）
@@ -368,6 +370,27 @@ class MainWindow(QtWidgets.QMainWindow):
             bar.addWidget(b)
         lay.addWidget(bar_box)
 
+        # 「输入信号」表：字母 → 物理信号 / 角色(控制·数据) / 类型(RO·RW) / 驱动机制(force·RF_WRITE)。
+        # 取代头部那行难读的小字图例，并把原本只在左下明细里的驱动信息搬到真值表正上方。
+        cap = QtWidgets.QLabel("输入信号  （字母 → 物理信号 · 角色 · 驱动机制）")
+        cap.setStyleSheet("color:#445;font-weight:bold;")
+        lay.addWidget(cap)
+        self.ti_inputs = QtWidgets.QTableWidget(0, len(INPUT_COLS))
+        self.ti_inputs.setHorizontalHeaderLabels(INPUT_COLS)
+        self._mono(self.ti_inputs)
+        self.ti_inputs.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.ti_inputs.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.ti_inputs.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.ti_inputs.verticalHeader().setVisible(False)
+        self.ti_inputs.horizontalHeader().setStretchLastSection(True)   # 驱动列吃剩余宽度
+        self.ti_inputs.setToolTip("每个表达式变量对应的物理信号、是控制位还是数据位、以及怎么被驱动"
+                                  "(RO→force net；RW→RF_WRITE 地址+bit位)")
+        self._fit_inputs_height()         # 起始(无信号)也保持紧凑，不留大空白
+        lay.addWidget(self.ti_inputs)
+
+        cap2 = QtWidgets.QLabel("真值表  （行=输入/输出，列=测试 T0/T1…）")
+        cap2.setStyleSheet("color:#445;font-weight:bold;")
+        lay.addWidget(cap2)
         self.ti_table = QtWidgets.QTableWidget(0, 0)
         self._mono(self.ti_table)
         self.ti_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
@@ -382,9 +405,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.ti_table, 1)
 
         hint = QtWidgets.QLabel(
-            "纵向真值表：每行一个输入/输出，每列一条测试 T0/T1…。"
-            "粗体行=控制/选择位（决定逻辑走哪条分支；测试穷举它们的全部 0/1 组合，列数主要由控制位个数决定），"
-            "其余=数据位（采样取值）。"
+            "行表头=字母(粗体=控制/选择位，决定逻辑分支、测试穷举其 0/1 组合)，详见上方『输入信号』表；"
             "改输入值→期望自动重算；改期望值或勾“负向”→该列标为故意填错(预期 FAIL)。编辑会在生成/预览的 .sv 里生效。")
         hint.setWordWrap(True); hint.setStyleSheet("color:#888;font-size:11px;")
         lay.addWidget(hint)
@@ -825,6 +846,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_table.clear()
             self.ti_table.setRowCount(0)
             self.ti_table.setColumnCount(0)
+            if hasattr(self, "ti_inputs"):
+                self.ti_inputs.setRowCount(0)
         finally:
             self._ti_loading = False
         self._update_cov_hint()
@@ -852,6 +875,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for rd in self._ti_rows:
             self._ti_recompute(rd)
         self._update_ti_header(custom)
+        self._populate_inputs()       # 上方『输入信号』表(字母/角色/驱动)，随信号刷新
         self._ti_populate()
 
     def _auto_rows(self, sig, node, bindings, groups):
@@ -936,13 +960,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_ti_header(self, custom):
         tag = "   [已自定义★]" if custom else ""
-        legend = self._expr_legend()
-        # 表达式写成 "输出 = RHS" 的等式形式 + 字母对照，让真值表与表达式一目了然
+        # 表达式写成 "输出 = RHS" 等式；字母对照已下移到『输入信号』表，头部保持精简
         self.ti_header.setText(
-            "信号 %s     %s = %s     用例 %d 条%s%s"
+            "信号 %s     %s = %s     用例 %d 条%s"
             % (self._ti_sig.out_name, self._ti_sig.out_base or "out", self._ti_sig.expr,
-               len(self._ti_rows), tag,
-               ("\n字母对应： " + legend) if legend else ""))
+               len(self._ti_rows), tag))
 
     def _ti_mark_customized(self):
         if not self._ti_sig:
@@ -995,21 +1017,63 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @classmethod
     def _vheader_label(cls, g):
-        """纵向真值表的行表头：'A,B → d_xxx[14:14]'——字母在前，方便对照表达式。"""
+        """完整行表头：'A,B → d_xxx[14:14]'（CSV 导出用，保持自描述）。"""
         ltr = cls._group_letters(g)
         base_lbl = g.get("label", g["base"])
         return "%s → %s" % (ltr, base_lbl) if ltr else base_lbl
 
-    def _expr_legend(self):
-        """字母→物理信号 的对照串，如 'A=d_xxx(控制位)   C=en_pll   …'。
-        给控制/选择位打『(控制位)』标签——和真值表里的加粗行对应，让加粗自己会说话。"""
-        parts = []
-        for g in self._ti_groups:
-            ltr = self._group_letters(g)
-            if ltr:
-                tag = "(控制位)" if g["is_control"] else ""
-                parts.append("%s=%s%s" % (ltr, g["base"], tag))
-        return "   ".join(parts)
+    @classmethod
+    def _vheader_short(cls, g):
+        """精简行表头(GUI 真值表用)：只留字母(+控制标记)；信号全名/角色/驱动在上方『输入信号』表。"""
+        ltr = cls._group_letters(g)
+        if not ltr:
+            return g.get("label", g["base"])
+        return "%s (控制)" % ltr if g.get("is_control") else ltr
+
+    def _input_meta(self, g):
+        """该输入组的 (类型, 驱动机制) 文本，供『输入信号』表的『类型』『驱动』列：
+        RO→force <net>；RW→RF_WRITE 0x<地址> bit<<<lsb>；未解析→标红提示。"""
+        b = self._ti_bindings.get(g["rep"]) if self._ti_bindings else None
+        if b is None:
+            return ("?", "(无绑定)")
+        kind = b.kind or "?"
+        if not getattr(b, "resolved", True):
+            note = getattr(b, "note", "") or ""
+            return (kind, "✗未解析" + ("：" + note if note else ""))
+        if b.kind == "RW" and b.address is not None:
+            return (kind, "RF_WRITE 0x%X bit<<%d" % (b.address, b.reg_lsb or 0))
+        if b.kind == "RO":
+            return (kind, "force ENV_RF.%s" % b.wire_lhs)
+        return (kind, getattr(b, "note", "") or "?")
+
+    def _populate_inputs(self):
+        """填『输入信号』表：每个输入一行(字母/信号(位宽)/角色/类型/驱动)。随信号变化，不随逐格编辑变。"""
+        if not hasattr(self, "ti_inputs"):
+            return
+        tbl = self.ti_inputs
+        tbl.setRowCount(len(self._ti_groups))
+        for i, g in enumerate(self._ti_groups):
+            kind, drive = self._input_meta(g)
+            role = "控制/选择位" if g["is_control"] else "数据位"
+            for c, v in enumerate([self._group_letters(g), g.get("label", g["base"]),
+                                   role, kind, drive]):
+                it = QtWidgets.QTableWidgetItem(v)
+                if g["is_control"] and c == 0:           # 控制位字母加粗，与真值表行表头呼应
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                if c == 4 and "未解析" in v:
+                    it.setForeground(QtGui.QColor("red"))
+                tbl.setItem(i, c, it)
+        tbl.resizeColumnsToContents()
+        self._fit_inputs_height()
+
+    def _fit_inputs_height(self):
+        """『输入信号』表高度贴合行数(最多约 7 行可见，多了内部滚动)，不抢真值表空间。
+        用 defaultSectionSize 估行高(未 show 时也稳定)，把表头当作 1 行。"""
+        t = self.ti_inputs
+        n = t.rowCount()
+        row_h = max(t.verticalHeader().defaultSectionSize(), 22)
+        shown = min(max(n, 1), 7)
+        t.setFixedHeight((shown + 1) * row_h + 6)       # +1 行给表头
 
     def _ti_populate(self):
         self._ti_loading = True
@@ -1021,8 +1085,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_table.setColumnCount(ntests)
             out_w = self._ti_sig.out_width if self._ti_sig else 1
             exp_label = "out → 期望%s" % ("[%d:0]" % (out_w - 1) if out_w and out_w > 1 else "")
-            # 行表头带上表达式字母(A/B/C…)，让用户能把表达式里的变量对上物理信号
-            vlabels = [self._vheader_label(g) for g in self._ti_groups] + [exp_label]
+            # 行表头精简为字母(+控制标记)；完整信号/角色/驱动在上方『输入信号』表
+            vlabels = [self._vheader_short(g) for g in self._ti_groups] + [exp_label]
             self.ti_table.setVerticalHeaderLabels(vlabels)
             for i, g in enumerate(self._ti_groups):
                 hi = self.ti_table.verticalHeaderItem(i)

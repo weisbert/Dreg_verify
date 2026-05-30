@@ -697,28 +697,40 @@ def test_csv_report_writes_verifiability(wb, tmp_path):
 
 
 # ───────────── 真值表标注表达式字母 A/B/C（#1） ─────────────
-def test_gui_truthtable_rows_carry_expr_letters(qapp, wb, tmp_path_factory):
-    """纵向真值表的行表头带上表达式变量字母(A/B/C…)，并在头部给出字母→信号对照。"""
+def test_gui_truthtable_short_headers_and_inputs_table(qapp, wb, tmp_path_factory):
+    """真值表行表头精简为字母(+控制标记)；字母→信号/角色/类型/驱动 集中到上方『输入信号』表。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "g_letters")   # (A?C:B)&(~J)
     w._load_test_items(sig)
-    headers = [w.ti_table.verticalHeaderItem(i).text()
-               for i in range(len(w._ti_groups))]
-    # 每个输入行表头都形如 "<字母> → <信号名>"，且字母来自表达式
-    assert all(" → " in h for h in headers)
-    letters = {h.split(" → ", 1)[0] for h in headers}
-    assert {"A", "B", "C", "J"} <= letters
-    # 头部等式 + 字母对照
+    # 真值表行表头：只留字母，控制位带 "(控制)"，不再塞信号全名
+    headers = [w.ti_table.verticalHeaderItem(i).text() for i in range(len(w._ti_groups))]
+    assert {h.split()[0] for h in headers} >= {"A", "B", "C", "J"}
+    assert "A (控制)" in headers and "J (控制)" in headers      # A=三元条件 J=门控 → 控制位
+    assert "C" in headers and "B" in headers                    # 数据位无标记
+    assert all(" → " not in h for h in headers)                 # 信号全名已移到输入表
+    # 加粗行=控制位
+    bold = {w._group_letters(g) for i, g in enumerate(w._ti_groups)
+            if w.ti_table.verticalHeaderItem(i).font().bold()}
+    assert bold == {"A", "J"}
+    # 头部精简：等式在，难读的字母图例没了
     assert "(A?C:B)&(~J)" in w.ti_header.text()
-    assert "字母对应" in w.ti_header.text()
-    assert "A=d_bt_lp_linelocal_mode_ctrl" in w.ti_header.text()
-    # 控制/选择位(A=三元条件, J=门控)在图例里打『(控制位)』标签，与真值表加粗行对应
-    assert "A=d_bt_lp_linelocal_mode_ctrl(控制位)" in w.ti_header.text()
-    assert "J=d_bt_lp_iddq(控制位)" in w.ti_header.text()
-    assert "C=d_bt_lp_bt_mode_sel_local(控制位)" not in w.ti_header.text()   # C 是数据位，不打标
-    # 加粗行 = 控制位，正好是 A、J
-    bold_letters = {w._group_letters(g) for i, g in enumerate(w._ti_groups)
-                    if w.ti_table.verticalHeaderItem(i).font().bold()}
-    assert bold_letters == {"A", "J"}
+    assert "字母对应" not in w.ti_header.text()
+    # 『输入信号』表：每输入一行，列= 字母/信号(位宽)/角色/类型/驱动
+    ti = w.ti_inputs
+    assert ti.columnCount() == 5
+    assert ti.rowCount() == len(w._ti_groups)
+    rowmap = {ti.item(r, 0).text(): r for r in range(ti.rowCount())}
+    assert set(rowmap) >= {"A", "B", "C", "J"}
+    assert "d_bt_lp_linelocal_mode_ctrl" in ti.item(rowmap["A"], 1).text()
+    assert "控制" in ti.item(rowmap["A"], 2).text() and "控制" in ti.item(rowmap["J"], 2).text()
+    assert "数据" in ti.item(rowmap["C"], 2).text() and "数据" in ti.item(rowmap["B"], 2).text()
+    # 类型↔驱动机制自洽：RO→force ENV_RF.，RW→RF_WRITE
+    for L in ("A", "B", "C", "J"):
+        kind, drive = ti.item(rowmap[L], 3).text(), ti.item(rowmap[L], 4).text()
+        assert kind in ("RO", "RW", "UNKNOWN", "?")
+        if kind == "RO":
+            assert drive.startswith("force ENV_RF.")
+        elif kind == "RW":
+            assert drive.startswith("RF_WRITE")
 
 
 def test_report_table_inputs_carry_letters(wb):
