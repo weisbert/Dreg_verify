@@ -381,9 +381,11 @@ class MainWindow(QtWidgets.QMainWindow):
         copy_sc.activated.connect(self.on_ti_copy)
         lay.addWidget(self.ti_table, 1)
 
-        hint = QtWidgets.QLabel("纵向真值表：每行一个输入/输出，每列一条测试 T0/T1…。"
-                                "改输入值→期望自动重算；改期望值或勾“负向”→该列标为故意填错(预期 FAIL)。"
-                                "编辑会在生成/预览的 .sv 里生效。")
+        hint = QtWidgets.QLabel(
+            "纵向真值表：每行一个输入/输出，每列一条测试 T0/T1…。"
+            "粗体行=控制/选择位（决定逻辑走哪条分支；测试穷举它们的全部 0/1 组合，列数主要由控制位个数决定），"
+            "其余=数据位（采样取值）。"
+            "改输入值→期望自动重算；改期望值或勾“负向”→该列标为故意填错(预期 FAIL)。编辑会在生成/预览的 .sv 里生效。")
         hint.setWordWrap(True); hint.setStyleSheet("color:#888;font-size:11px;")
         lay.addWidget(hint)
         return page
@@ -999,12 +1001,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return "%s → %s" % (ltr, base_lbl) if ltr else base_lbl
 
     def _expr_legend(self):
-        """字母→物理信号 的对照串，如 'A,B=d_xxx   C=en_pll   D=…'，给读表达式时对照用。"""
+        """字母→物理信号 的对照串，如 'A=d_xxx(控制位)   C=en_pll   …'。
+        给控制/选择位打『(控制位)』标签——和真值表里的加粗行对应，让加粗自己会说话。"""
         parts = []
         for g in self._ti_groups:
             ltr = self._group_letters(g)
             if ltr:
-                parts.append("%s=%s" % (ltr, g["base"]))
+                tag = "(控制位)" if g["is_control"] else ""
+                parts.append("%s=%s%s" % (ltr, g["base"], tag))
         return "   ".join(parts)
 
     def _ti_populate(self):

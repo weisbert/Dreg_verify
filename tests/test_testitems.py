@@ -711,6 +711,14 @@ def test_gui_truthtable_rows_carry_expr_letters(qapp, wb, tmp_path_factory):
     assert "(A?C:B)&(~J)" in w.ti_header.text()
     assert "字母对应" in w.ti_header.text()
     assert "A=d_bt_lp_linelocal_mode_ctrl" in w.ti_header.text()
+    # 控制/选择位(A=三元条件, J=门控)在图例里打『(控制位)』标签，与真值表加粗行对应
+    assert "A=d_bt_lp_linelocal_mode_ctrl(控制位)" in w.ti_header.text()
+    assert "J=d_bt_lp_iddq(控制位)" in w.ti_header.text()
+    assert "C=d_bt_lp_bt_mode_sel_local(控制位)" not in w.ti_header.text()   # C 是数据位，不打标
+    # 加粗行 = 控制位，正好是 A、J
+    bold_letters = {w._group_letters(g) for i, g in enumerate(w._ti_groups)
+                    if w.ti_table.verticalHeaderItem(i).font().bold()}
+    assert bold_letters == {"A", "J"}
 
 
 def test_report_table_inputs_carry_letters(wb):
