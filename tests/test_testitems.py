@@ -748,3 +748,125 @@ def test_gui_panes_are_resizable(qapp, wb, tmp_path_factory):
         assert 0 < fl.minimumSize().width() < 260
         # 窄到 180px 时会换行（高度 > 单行）
         assert fl.heightForWidth(180) >= fl.heightForWidth(2000)
+
+
+# ───────────── Batch A/B/C：安全 / 清晰 / 效率 回归 ─────────────
+def test_gui_cell_text_binary_roundtrip(qapp):
+    """B3：小字段显二进制(0bXXXX)，且能被 _parse_int 原样读回(round-trip)。"""
+    from dreg_verify import gui
+    M = gui.MainWindow
+    assert M._cell_text(5, 3) == "0b101"
+    assert M._cell_text(1, 1) == "1"
+    assert M._cell_text(0xAB, 8) == "0xAB"
+    assert M._parse_int("0b101") == 5
+    assert M._parse_int("0b0011") == 3
+    assert M._parse_int("0xAB") == 0xAB        # 0b 之后仍能解析裸/带前缀 hex
+    # 审查修复#3：'0bc' 这类裸 hex(0b 后非全 0/1)仍按 16 进制，不被新 0b 分支吃掉
+    assert M._parse_int("0bc") == 0xBC
+    assert M._parse_int("0bf") == 0xBF
+    assert M._parse_int("0b11") == 3           # 全 0/1 → 二进制
+
+
+def test_gui_header_tooltips_present(qapp, wb, tmp_path_factory):
+    """B2：'负向'/'状态'表头与状态单元格带说明 tooltip。"""
+    from dreg_verify import gui
+    _g, w, _sig = _reserve_window(tmp_path_factory, "g_tips")
+    assert "负向" in w.table.horizontalHeaderItem(gui.COL_NEG).toolTip()
+    assert w.table.horizontalHeaderItem(gui.COL_STATUS).toolTip()
+    assert w.table.item(0, gui.COL_STATUS).toolTip()
+
+
+def test_gui_check_selected_rows_and_scope(qapp, wb, tmp_path_factory):
+    """C1/C2：多选行→『勾选选中行』一次勾上；有勾选时批量作用域取勾选行。"""
+    from PySide6 import QtCore
+    gui, w, _sig = _reserve_window(tmp_path_factory, "g_check")
+    w.table.clearSelection()
+    sm = w.table.selectionModel()
+    for r in (0, 2):
+        sm.select(w.table.model().index(r, 0),
+                  QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+    w.on_check_selected_rows()
+    checked = w._checked_rows()
+    assert set(checked) >= {0, 2}
+    assert sorted(w._scope_rows()) == sorted(checked)
+
+
+def test_gui_bulk_neg_scoped_to_checked(qapp, wb, tmp_path_factory):
+    """C2：勾了某信号后『全部加负向』只作用于已勾选信号，不波及其它。"""
+    from PySide6 import QtCore
+    gui, w, _sig = _reserve_window(tmp_path_factory, "g_scope")
+    target = next(r for r in range(w.table.rowCount())
+                  if w._sig_of_row(r).out_name == "d_logic_bt_lp_reserve")
+    w.table.item(target, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
+    w.on_all_signals_neg(True)
+    assert w._signal_has_negative("d_logic_bt_lp_reserve")
+    others = [w._sig_of_row(r).out_name.lower() for r in range(w.table.rowCount()) if r != target]
+    assert not any(w._signal_has_negative(o) for o in others)
+
+
+def test_gui_del_neg_confirms_named(qapp, wb, tmp_path_factory, monkeypatch):
+    """A3：删除含命名负向时先确认——选 No 不删、选 Yes 才删。"""
+    from PySide6 import QtWidgets
+    gui, w, sig = _reserve_window(tmp_path_factory, "g_delneg")
+    w._load_test_items(sig)
+    w.on_ti_add_neg_all()
+    negcol = next(c for c, rd in enumerate(w._ti_rows) if rd.get("is_negative"))
+    w._ti_rows[negcol]["name"] = "MYNEG"
+    assert w._signal_has_named_negative(w._ti_name_low)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.No))
+    w.on_ti_del_neg()
+    assert any(rd.get("is_negative") for rd in w._ti_rows)     # No → 保住
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    w.on_ti_del_neg()
+    assert not any(rd.get("is_negative") for rd in w._ti_rows)  # Yes → 删掉
+
+
+def test_gui_confirm_dup_labels_no_dups_is_silent(qapp):
+    """A1：无重复标号时 _confirm_dup_labels 直接放行(不弹框)。"""
+    from dreg_verify import gui
+    w = gui.MainWindow()
+    assert w._confirm_dup_labels({"dup_labels": []}) is True
+    assert w._confirm_dup_labels({}) is True
+
+
+def test_git_repo_root_detects(tmp_path):
+    """A4：_git_repo_root 能从产物路径向上找到 .git（目录 或 worktree/submodule 的 .git 文件）。"""
+    import os
+    from dreg_verify import gui
+    (tmp_path / ".git").mkdir()
+    sub = tmp_path / "a" / "b"; sub.mkdir(parents=True)
+    assert os.path.samefile(gui._git_repo_root(str(sub / "out.sv")), str(tmp_path))
+
+
+def test_git_repo_root_detects_git_file(tmp_path):
+    """审查修复#4：worktree/submodule 里 .git 是文件也要识别(否则机密提醒静默失效)。"""
+    import os
+    from dreg_verify import gui
+    (tmp_path / ".git").write_text("gitdir: /somewhere/.git/worktrees/x\n", encoding="utf-8")
+    sub = tmp_path / "wt"; sub.mkdir()
+    assert os.path.samefile(gui._git_repo_root(str(sub / "out.sv")), str(tmp_path))
+
+
+def test_gui_bulk_scope_excludes_hidden_checked(qapp, wb, tmp_path_factory):
+    """审查修复#2：勾了但被筛掉(隐藏)的行不进批量负向作用域，避免改到看不见的信号。"""
+    from PySide6 import QtCore
+    gui, w, _sig = _reserve_window(tmp_path_factory, "g_hidden")
+    r0 = 0
+    w.table.item(r0, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
+    assert r0 in w._scope_rows()                 # 可见时在作用域内
+    w.table.setRowHidden(r0, True)
+    assert r0 not in w._checked_rows()           # 隐藏后不算"已勾选可见"
+    assert r0 not in w._scope_rows()             # 也不进批量作用域(回退到其它可见行)
+
+
+def test_gui_copy_shortcut_is_widget_scoped(qapp, wb, tmp_path_factory):
+    """审查修复#1：复制列快捷键挂在真值表上且为 WidgetShortcut(编辑单元格时不触发)，
+    而不是挂按钮的 WindowShortcut。"""
+    from PySide6 import QtCore, QtGui
+    gui, w, _sig = _reserve_window(tmp_path_factory, "g_copysc")
+    scs = [s for s in w.ti_table.findChildren(QtGui.QShortcut)
+           if s.key() == QtGui.QKeySequence("Ctrl+D")]
+    assert scs, "应在 ti_table 上挂 Ctrl+D 的 QShortcut"
+    assert any(s.context() == QtCore.Qt.WidgetShortcut for s in scs)

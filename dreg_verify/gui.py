@@ -37,30 +37,70 @@ from dreg_verify import sv_writer as W           # noqa: E402
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_gui.json")
 
 
-def _load_last_excel():
+def _load_settings():
+    """读取持久化配置(上次的 Excel、上次的导出选项等)。返回 dict。"""
     try:
         with open(SETTINGS_PATH, encoding="utf-8") as f:
-            return json.load(f).get("last_excel")
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
     except Exception:  # noqa: BLE001
-        return None
+        return {}
 
 
-def _save_last_excel(path):
-    # 测试环境(pytest)下不落盘，避免把临时表路径污染到用户的真实"上次文件"
+def _save_settings(d):
+    # 测试环境(pytest)下不落盘，避免把临时状态污染到用户的真实配置
     if "pytest" in sys.modules:
         return
     try:
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump({"last_excel": path}, f)
+            json.dump(d, f)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _load_last_excel():
+    return _load_settings().get("last_excel")
+
+
+def _save_last_excel(path):
+    d = _load_settings()
+    d["last_excel"] = path
+    _save_settings(d)
+
+
+def _git_repo_root(path):
+    """从 path(文件或目录)向上找 .git，找到则返回仓库根，否则 None。
+    用于在写出含机密信号名的产物时提醒'别提交进 git 仓库'。"""
+    try:
+        d = os.path.abspath(path)
+        if os.path.isfile(d) or os.path.splitext(d)[1]:
+            d = os.path.dirname(d)
+        while True:
+            # .git 可能是目录(常规仓库)或文件(worktree/submodule 里 .git 是 'gitdir: …' 文件)
+            if os.path.exists(os.path.join(d, ".git")):
+                return d
+            parent = os.path.dirname(d)
+            if parent == d:
+                return None
+            d = parent
+    except Exception:  # noqa: BLE001
+        return None
+
+
+SECRET_HINT = "产物可能含机密信号名，请勿提交到 git。"
 
 
 COL_SEL, COL_NEG, COL_R, COL_K, COL_OWNER, COL_TYPE, COL_TOP, COL_STATUS, COL_EXPR = range(9)
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "表达式"]
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "unresolved": "✗未解析", "parse-err": "✗解析错"}
-NEG_BG = QtGui.QColor("#fff3f3")        # 负向用例行底色（与报告 HTML 一致）
+STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE 驱动",
+               "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
+               "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
+               "parse-err": "表达式或输入解析出错"}
+# 负向用 琥珀，刻意区别于"状态列红=信号坏掉/会 elaboration 失败"；红只留给真正的故障
+NEG_BG = QtGui.QColor("#fdeccb")        # 负向用例行底色（琥珀，能压过隔行底色）
+NEG_FG = QtGui.QColor("#9a5b00")        # 负向列头/标记文字色（深琥珀）
 
 
 class FlowLayout(QtWidgets.QLayout):
@@ -168,7 +208,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.path_edit = QtWidgets.QLineEdit()
         self.path_edit.setPlaceholderText("选择 Dreg 核心 Excel (.xlsx) ...")
         browse = QtWidgets.QPushButton("浏览…"); browse.clicked.connect(self.on_browse)
+        browse.setShortcut("Ctrl+O"); browse.setToolTip("选择 Excel (Ctrl+O)")
         load = QtWidgets.QPushButton("加载"); load.clicked.connect(self.on_load)
+        load.setShortcut("Ctrl+L"); load.setToolTip("重新加载当前 Excel (Ctrl+L)")
         top.addWidget(QtWidgets.QLabel("Excel:")); top.addWidget(self.path_edit, 1)
         top.addWidget(browse); top.addWidget(load)
         root.addLayout(top)
@@ -200,20 +242,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table.setHorizontalHeaderLabels(HEADERS)
         self.table.setSortingEnabled(True)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        # 行多选(框选/Ctrl/Shift)，配合"勾选选中行"按钮，一次勾一批
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.table.currentCellChanged.connect(self.on_row_focus)
         self.table.itemChanged.connect(self.on_signal_table_item_changed)  # 左侧"负向"勾选→联动右表
+        self._set_header_tooltips()
         tv.addWidget(self.table)
         # 批量操作条（就近放在信号表下方，符合使用习惯）。用 FlowLayout：窄了自动换行，不卡死 splitter。
         bulk_box = QtWidgets.QWidget()
         bulk = FlowLayout(bulk_box)
+        b_check = QtWidgets.QPushButton("勾选选中行")
+        b_check.setToolTip("把表里当前选中的行(框选/Ctrl/Shift 多选)一次性勾上'选'")
+        b_check.clicked.connect(self.on_check_selected_rows)
         b_selall = QtWidgets.QPushButton("全选输出(可见)"); b_selall.setToolTip("勾选所有可见信号的'选'")
         b_selall.clicked.connect(lambda: self.set_all_visible(True))
         b_selnone = QtWidgets.QPushButton("清空选择"); b_selnone.clicked.connect(lambda: self.set_all_visible(False))
-        b_negall = QtWidgets.QPushButton("全部加负向"); b_negall.setToolTip("给所有可见信号各加 1 条负向自检(每信号 1 条)")
+        b_negall = QtWidgets.QPushButton("全部加负向")
+        b_negall.setToolTip("给目标信号各加 1 条负向自检(每信号 1 条)。\n有勾选→只作用于已勾选信号，否则作用于全部可见。")
         b_negall.clicked.connect(lambda: self.on_all_signals_neg(True))
-        b_negnone = QtWidgets.QPushButton("清除负向"); b_negnone.setToolTip("清除所有可见信号的负向测试")
+        b_negnone = QtWidgets.QPushButton("清除负向")
+        b_negnone.setToolTip("清除目标信号的负向(有勾选→只清已勾选，否则清全部可见)。含命名/手填错值会先确认。")
         b_negnone.clicked.connect(lambda: self.on_all_signals_neg(False))
-        for b in (b_selall, b_selnone):
+        for b in (b_check, b_selall, b_selnone):
             bulk.addWidget(b)
         bulk.addWidget(QtWidgets.QLabel(" 负向:"))
         for b in (b_negall, b_negnone):
@@ -271,11 +322,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         btns = QtWidgets.QHBoxLayout()
         prev = QtWidgets.QPushButton("预览选中"); prev.clicked.connect(self.on_preview)
+        prev.setShortcut("Ctrl+P")
+        prev.setToolTip("预览所有已勾选信号合并生成的 .sv (Ctrl+P)；只看单信号用右侧『预览本信号.sv』")
         rep = QtWidgets.QPushButton("导出报告(HTML/CSV)…"); rep.clicked.connect(self.on_report)
+        rep.setShortcut("Ctrl+R")
         rep.setToolTip("出'给人看'的测试用例报告(汇总+每信号真值表+完整明细)，自动带上你的编辑；"
-                       "未勾选则覆盖全部信号")
+                       "未勾选则覆盖全部信号 (Ctrl+R)")
         gen = QtWidgets.QPushButton("生成 .sv …"); gen.clicked.connect(self.on_generate)
-        gen.setToolTip("点开后可选导出范围(全部/仅正向/仅负向)与是否加注释")
+        gen.setShortcut("Ctrl+G")
+        gen.setToolTip("点开后可选导出范围(全部/仅正向/仅负向)与是否加注释 (Ctrl+G)")
         btns.addStretch(1); btns.addWidget(prev); btns.addWidget(rep); btns.addWidget(gen)
         root.addLayout(btns)
 
@@ -306,7 +361,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 ("预览本信号.sv", self.on_ti_preview_signal, "用当前(含编辑)测试项渲染该信号的 .sv 片段"),
                 ("导出CSV", self.on_ti_export_csv, "把本信号测试项导出为 CSV(Excel 可开)")]
         for text, slot, tip in defs:
-            b = QtWidgets.QPushButton(text); b.clicked.connect(slot); b.setToolTip(tip)
+            b = QtWidgets.QPushButton(text); b.clicked.connect(slot)
+            if text == "复制列":
+                tip = "%s (Ctrl+D)" % tip       # 快捷键用 ti_table 上的 WidgetShortcut(见下)，不挂按钮(否则编辑中也会触发)
+            b.setToolTip(tip)
             bar.addWidget(b)
         lay.addWidget(bar_box)
 
@@ -316,6 +374,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_table.setAlternatingRowColors(True)
         self.ti_table.itemChanged.connect(self.on_ti_item_changed)
         self.ti_table.horizontalHeader().sectionDoubleClicked.connect(self.on_ti_rename_col)
+        # Ctrl+D 复制列：用 WidgetShortcut 挂在真值表上——仅当表本身有焦点时触发；
+        # 单元格正在编辑时焦点在子 QLineEdit 上，快捷键不会触发，避免打断/丢失编辑(对抗式审查 #1)
+        copy_sc = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+D"), self.ti_table)
+        copy_sc.setContext(QtCore.Qt.WidgetShortcut)
+        copy_sc.activated.connect(self.on_ti_copy)
         lay.addWidget(self.ti_table, 1)
 
         hint = QtWidgets.QLabel("纵向真值表：每行一个输入/输出，每列一条测试 T0/T1…。"
@@ -445,6 +508,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 it = QtWidgets.QTableWidgetItem(STATUS_LABEL.get(st, st))
                 if st != "clean":
                     it.setForeground(QtGui.QColor("red"))
+                it.setToolTip(STATUS_HELP.get(st, st))
                 self.table.setItem(r, COL_STATUS, it)
                 self._set_text(r, COL_EXPR, sig.expr)
                 self.table.item(r, COL_R).setData(QtCore.Qt.UserRole, r)
@@ -465,6 +529,22 @@ class MainWindow(QtWidgets.QMainWindow):
         it.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
         it.setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
         self.table.setItem(r, c, it)
+
+    def _set_header_tooltips(self):
+        """给关键表头加说明——把'负向'(自检语义)和'状态'(可验证性/CUVUNF)讲在用户第一眼看到的地方。"""
+        tips = {
+            COL_SEL: "勾选要写进 wr_rf_tc.sv 的信号",
+            COL_NEG: "负向 = 故意把期望填错的自检测试，断言预期 FAIL，用来验证 checker 真能抓错；"
+                     "默认每信号 1 条足够。\n勾此 = 给该信号加 1 条；要多条/精确选，去右侧『测试项』编辑器。",
+            COL_STATUS: "信号可验证性（点信号看右下明细的 force/输出 net 名）：\n"
+                        "  clean = 输入都解析到 net\n"
+                        "  ⚠wire兜底 = 输入回退成 wire，elaboration 可能找不到\n"
+                        "  ✗未解析/解析错 = 输入在 ENV_RF 层探不到（CUVUNF）",
+        }
+        for c, t in tips.items():
+            it = self.table.horizontalHeaderItem(c)
+            if it:
+                it.setToolTip(t)
 
     # ───────────── 筛选 ─────────────
     def apply_filter(self):
@@ -514,6 +594,40 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self.table.isRowHidden(r):
                 self.table.item(r, COL_SEL).setCheckState(
                     QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+
+    def on_check_selected_rows(self):
+        """把信号表里当前『选中的行』(框选/Ctrl/Shift)一次性勾上『选』——省去逐个点小复选框。"""
+        rows = sorted({i.row() for i in self.table.selectedItems()})
+        if not rows:
+            self.status.showMessage("先在信号表里选中若干行(鼠标框选 / Ctrl·Shift 点)，再点『勾选选中行』")
+            return
+        for r in rows:
+            cell = self.table.item(r, COL_SEL)
+            if cell is not None:
+                cell.setCheckState(QtCore.Qt.Checked)
+        self.status.showMessage("已把选中的 %d 行勾上『选』" % len(rows))
+
+    def _checked_rows(self):
+        """勾了『选』且当前可见的行——隐藏行不进批量作用域，避免改到被筛掉、看不见的信号
+        (批量负向用；导出用的 _collect() 另算，仍含隐藏的勾选行)。"""
+        return [r for r in range(self.table.rowCount())
+                if not self.table.isRowHidden(r)
+                and self.table.item(r, COL_SEL) is not None
+                and self.table.item(r, COL_SEL).checkState() == QtCore.Qt.Checked]
+
+    def _scope_rows(self):
+        """批量操作的目标行：有勾选→只取已勾选行；否则取全部可见行。"""
+        checked = self._checked_rows()
+        if checked:
+            return checked
+        return [r for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
+
+    def _confirm_lose_named(self, names):
+        return QtWidgets.QMessageBox.question(
+            self, "确认清除负向",
+            "将清除负向，其中 %d 个信号含手工命名/填错值的负向(会一并丢失)：\n%s\n\n确定？"
+            % (len(names), "、".join(names[:10]) + (" …" if len(names) > 10 else ""))
+            ) == QtWidgets.QMessageBox.Yes
 
     # ───────────── 左侧"负向"列 → 联动测试项 ─────────────
     def _signal_negatives(self, name_low):
@@ -634,21 +748,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
     def on_all_signals_neg(self, want):
-        """对所有可见信号一键加/清负向(满足'R 全部负向')。每信号默认 1 条自检。
-        受筛选范围限制，可先筛再点。"""
+        """对『目标信号』一键加/清负向：有勾选→只作用于已勾选信号，否则作用于全部可见。
+        每信号默认 1 条自检，已有负向的不动；清除时若含命名/手填错值的负向先确认(防误删)。"""
         if not self.wb:
             return
+        rows = self._scope_rows()
+        scope_word = "已勾选" if self._checked_rows() else "可见"
+        if not want:
+            protected = [self._sig_of_row(r).out_name for r in rows
+                         if self._signal_has_named_negative(self._sig_of_row(r).out_name.lower())]
+            if protected and not self._confirm_lose_named(protected):
+                return
         self._sig_loading = True
         n = 0
         try:
-            for r in range(self.table.rowCount()):
-                if self.table.isRowHidden(r):
-                    continue
+            for r in rows:
                 sig = self._sig_of_row(r)
                 name_low = sig.out_name.lower()
                 if want:
-                    # 已有负向的信号原样保留(不把"全部用例加负向"等多条塌成 1 条)；没有才加 1 条
-                    if not self._signal_has_negative(name_low):
+                    if not self._signal_has_negative(name_low):   # 已有负向的不塌成 1 条
                         self._set_signal_negatives(sig, True, "first")
                 else:
                     self._set_signal_negatives(sig, False, "first")
@@ -660,8 +778,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sig_loading = False
         if self._ti_sig is not None and self._ti_loaded_idx is not None:
             self._load_test_items(self._ti_sig)   # 当前编辑器信号若被影响则刷新
-        self.status.showMessage("已对 %d 个可见信号%s负向测试(每信号 1 条自检；已有的保持不动)"
-                                % (n, "添加" if want else "清除"))
+        self.status.showMessage("已对 %d 个%s信号%s负向(每信号 1 条自检；已有的保持不动)"
+                                % (n, scope_word, "添加" if want else "清除"))
 
     # ───────────── 点信号看明细（debug 关键） ─────────────
     def on_row_focus(self, row, col, prow, pcol):
@@ -843,10 +961,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _fmt_val(val, width):
-        """单元格里的取值显示：1 位 → 0/1；多位 → 0xNN（真值表观感）。"""
+        """取值显示(CSV 用，Excel 友好的纯 hex)：1 位 → 0/1；多位 → 0xNN。"""
         if width <= 1:
             return str(val & 1)
         return "0x%X" % val
+
+    @staticmethod
+    def _cell_text(val, width):
+        """编辑器单元格取值显示(GUI 专用，能被 _parse_int 原样读回)：
+        1 位→0/1；2..4 位→0bXXXX(零填充,真值表里看清每个控制/数据位)；更宽→0xNN。"""
+        m = E.mask(width)
+        if width <= 1:
+            return str(val & 1)
+        if width <= 4:
+            return "0b" + format(val & m, "0%db" % width)
+        return "0x%X" % (val & m)
 
     @staticmethod
     def _ti_label(rd, idx):
@@ -897,6 +1026,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     hi.setToolTip("表达式变量 %s  =  %s\n(%s, %dbit%s)"
                                   % (self._group_letters(g) or "?", g["label"], g["kind"], g["width"],
                                      ", 控制位/选择位" if g["is_control"] else ", 数据位"))
+                    if g["is_control"]:          # 控制/选择位加粗，提示"看这几行的 0/1 组合"
+                        f = hi.font(); f.setBold(True); hi.setFont(f)
             # 期望行表头：把输出信号名也带上，呼应表达式左边
             hexp = self.ti_table.verticalHeaderItem(self.R_EXP)
             if hexp:
@@ -930,15 +1061,15 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             for i, g in enumerate(self._ti_groups):
                 val = rd["base_values"].get(g["base"].lower(), 0)
-                it = self._mk_item(self._fmt_val(val, g["width"]), True)
-                it.setTextAlignment(QtCore.Qt.AlignCenter)
+                it = self._mk_item(self._cell_text(val, g["width"]), True)
+                it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)   # 右对齐→低位对齐，列间差异一眼看出
                 self.ti_table.setItem(i, c, it)
             # 期望：正向只读(永远=正确值，不可改坏)；负向可编辑(可手填具体错值)
-            expit = self._mk_item(self._fmt_val(rd["expected"] & E.mask(w), w), neg)
-            expit.setTextAlignment(QtCore.Qt.AlignCenter)
+            expit = self._mk_item(self._cell_text(rd["expected"] & E.mask(w), w), neg)
+            expit.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             tip = "期望 bin: %s" % W.fmt_bin(rd["expected"], w)
             if neg:
-                tip += "\n(负向：故意填错，正确应为 %s；可双击改这个错值)" % self._fmt_val(rd["correct"], w)
+                tip += "\n(负向：故意填错，正确应为 %s；可双击改这个错值)" % self._cell_text(rd["correct"], w)
             if fs:
                 tip += "\nforce: %s" % fs
             if ws:
@@ -953,7 +1084,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 hh.setToolTip("%s · %s\nforce: %s\nRF_WRITE: %s"
                               % ("负向(故意填错)" if neg else "正向(真实)", rename_hint,
                                  fs or "(无)", ws or "(无)"))
-                hh.setForeground(QtGui.QColor("red") if neg else QtGui.QColor("black"))
+                hh.setForeground(NEG_FG if neg else QtGui.QColor("black"))   # 负向=琥珀，不与"状态红=坏掉"撞色
             if neg:
                 for r in range(self.ti_table.rowCount()):
                     cell = self.ti_table.item(r, c)
@@ -978,6 +1109,8 @@ class MainWindow(QtWidgets.QMainWindow):
         m = re.search(r"'d(\d+)$", t)
         if m:
             return int(m.group(1), 10)
+        if t.startswith("0b") and t[2:] and set(t[2:]) <= {"0", "1"}:
+            return int(t, 2)             # 仅当 0b 后全是 0/1 才当二进制；'0bc' 之类仍按裸 hex 解析(向后兼容)
         if t.startswith("0x"):
             return int(t, 16)
         if t.startswith("h"):
@@ -1083,9 +1216,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("已为 %s 添加 %d 条负向测试(每条正向各一条)" % (self._ti_sig.out_name, n))
 
     def on_ti_del_neg(self):
-        """删除本信号所有负向测试，保留正向。"""
+        """删除本信号所有负向测试，保留正向。含命名/手填错值的负向先确认(防误删)。"""
         if not self._ti_sig:
             return
+        if self._signal_has_named_negative(self._ti_name_low):
+            if QtWidgets.QMessageBox.question(
+                    self, "确认删除负向",
+                    "%s 有手工命名/填错值的负向，删除会丢失。确定？" % self._ti_sig.out_name
+                    ) != QtWidgets.QMessageBox.Yes:
+                return
         self._set_signal_negatives(self._ti_sig, False, "all")
         self._load_test_items(self._ti_sig)
         self._sync_left_neg()
@@ -1237,8 +1376,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
-        QtWidgets.QMessageBox.information(self, "完成", "已导出 %d 条测试项：\n%s"
-                                          % (len(self._ti_rows), path))
+        QtWidgets.QMessageBox.information(self, "完成", "已导出 %d 条测试项：\n%s\n\n（%s）"
+                                          % (len(self._ti_rows), path, SECRET_HINT))
         self.status.showMessage("已导出测试项 CSV：%s" % path)
 
     def _rows_to_vectors(self, node, bindings, groups, out_width, rows):
@@ -1327,6 +1466,8 @@ class MainWindow(QtWidgets.QMainWindow):
             msg += "；含 %d 个已自定义信号" % len(self._customized)
         if s.get("n_skipped"):
             msg += "；↷ 跳过 %d 个(含不可驱动输入，会 elaboration 失败)" % s["n_skipped"]
+        if s.get("n_dup_labels"):
+            msg += "；⛔ %d 处重复标号(非法SV，生成时会拦截)" % s["n_dup_labels"]
         self.status.showMessage(msg)
         if s.get("n_skipped") and res.get("skipped"):
             tip = "\n\n// ↷ 跳过 %d 个含不可驱动输入(wire兜底/未解析)的信号:" % s["n_skipped"]
@@ -1336,7 +1477,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _ask_export_options(self, title):
         """生成 .sv 前的导出选项：内容范围(全部/仅正向/仅负向) + 是否加注释。
-        返回 {"scope": "all"/"pos"/"neg", "comments": bool} 或 None(取消)。"""
+        记住上次选择(下次预选)，并提醒产物含机密信号名。返回 {"scope":..., "comments":bool} 或 None。"""
+        st = _load_settings()
+        last_scope, last_cm = st.get("export_scope", "all"), bool(st.get("export_comments", False))
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle(title)
         lay = QtWidgets.QVBoxLayout(dlg)
@@ -1346,15 +1489,39 @@ class MainWindow(QtWidgets.QMainWindow):
         scope_combo.addItem("仅正向（正确用例）", "pos")
         scope_combo.addItem("仅负向（故意填错，预期 FAIL）", "neg")
         scope_combo.setToolTip("仅负向：只导出你标了'负向'的故意填错用例，方便单独验证'错了能否被抓到'")
+        si = scope_combo.findData(last_scope)
+        if si >= 0:
+            scope_combo.setCurrentIndex(si)
         lay.addWidget(scope_combo)
         cm_chk = QtWidgets.QCheckBox("加注释（在 .sv 里标注每条用例/负向说明）")
+        cm_chk.setChecked(last_cm)
         lay.addWidget(cm_chk)
+        warn = QtWidgets.QLabel("⚠ " + SECRET_HINT)
+        warn.setStyleSheet("color:#9a5b00;")
+        lay.addWidget(warn)
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
         lay.addWidget(bb)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return None
-        return {"scope": scope_combo.currentData(), "comments": cm_chk.isChecked()}
+        scope, comments = scope_combo.currentData(), cm_chk.isChecked()
+        st["export_scope"] = scope; st["export_comments"] = comments
+        _save_settings(st)               # 记住，下次预选
+        return {"scope": scope, "comments": comments}
+
+    def _confirm_dup_labels(self, res):
+        """有重复 assert 标号(非法 SV)就弹警告列出冲突对，让用户选『仍然生成/取消』。无冲突直接 True。"""
+        dups = res.get("dup_labels") or []
+        if not dups:
+            return True
+        lines = "\n".join("  %s  ←  %s / %s" % (lbl, a, b) for lbl, a, b in dups[:15])
+        more = "\n  …(共 %d 处)" % len(dups) if len(dups) > 15 else ""
+        return QtWidgets.QMessageBox.warning(
+            self, "重复 assert 标号（非法 SV）",
+            "检测到 %d 处重复的 assert 标号；同一作用域内重复会导致 elaboration 失败：\n%s%s\n\n"
+            "多因两个信号共用同一 R(序号)。仍要生成吗？" % (len(dups), lines, more),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
 
     def on_generate(self):
         if not self.wb:
@@ -1384,26 +1551,35 @@ class MainWindow(QtWidgets.QMainWindow):
             res = generator.build(self.wb, self._opts(sel))
             scope_msg = ""
 
+        # 生成前拦截：重复 assert 标号 = 非法 SV(elaboration 必失败)，先让用户知情再决定写不写
+        if not self._confirm_dup_labels(res):
+            return
         default_name = {"neg": "wr_rf_tc_neg.sv", "pos": "wr_rf_tc_pos.sv"}.get(scope, "wr_rf_tc.sv")
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "保存 .sv", default_name,
                                                         "SystemVerilog (*.sv)")
         if not path:
             return
-        self._write(path, generator.render(res, comments=cm))
+        try:
+            self._write(path, generator.render(res, comments=cm))
+        except OSError as ex:
+            QtWidgets.QMessageBox.critical(
+                self, "写出失败",
+                "无法写入 %s：\n%s\n\n(文件是否正被仿真器/编辑器占用？)" % (path, ex))
+            return
         nsk = res["summary"].get("n_skipped", 0)
         skipmsg = ("\n\n↷ 跳过了 %d 个含不可驱动输入的信号(默认跳过以保证可 elaborate)；"
                    "如需强制生成用 CLI --include-risky。" % nsk) if nsk else ""
-        # 已自定义信号数按"真正写进本次产物"的 block 统计(而非全局 _customized，后者会把
-        # 未勾选/被范围过滤掉的信号也算进来，导致弹窗数字虚高)
+        # 已自定义信号数按"真正写进本次产物"的 block 统计(避免把未勾选/被范围过滤的也算进来)
         n_cust = sum(1 for (_l, st) in res["blocks"]
                      if st.get("out_name", "").lower() in self._customized)
         custmsg = ("\n\n含 %d 个已自定义测试项的信号(编辑已写入产物)。" % n_cust
                    if n_cust else "")
-        ndup = res["summary"].get("n_dup_labels", 0)
-        dupmsg = ("\n\n⛔ 警告：有 %d 处重复 assert 标号(同一作用域重复=非法 SV，会 elaboration 失败)！"
-                  "多因两信号共用同一 R(序号)，请核对。" % ndup) if ndup else ""
-        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s%s%s%s"
-                                          % (path, scope_msg, skipmsg, custmsg, dupmsg))
+        gitwarn = ""
+        root = _git_repo_root(path)
+        if root:
+            gitwarn = "\n⚠ 该位置在 git 仓库内（%s），注意别 add/commit。" % root
+        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s%s%s\n\n（%s）%s"
+                                          % (path, scope_msg, skipmsg, custmsg, SECRET_HINT, gitwarn))
         self.status.showMessage("已生成：%s%s" % (path, scope_msg))
 
     def on_report(self):
@@ -1425,9 +1601,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         scope = "勾选的 %d 个" % len(sel) if sel else "全部"
         n_tc = len(rep["detail"]); n_neg = sum(1 for r in rep["detail"] if r.get("neg") == "是")
+        gitwarn = "\n⚠ 在 git 仓库内，注意别 add/commit。" if _git_repo_root(path) else ""
         QtWidgets.QMessageBox.information(
-            self, "完成", "已导出报告(%s信号，用例 %d 条，负向 %d 条)：\n%s"
-            % (scope, n_tc, n_neg, "\n".join(written)))
+            self, "完成", "已导出报告(%s信号，用例 %d 条，负向 %d 条)：\n%s\n\n（%s）%s"
+            % (scope, n_tc, n_neg, "\n".join(written), SECRET_HINT, gitwarn))
         self.status.showMessage("已导出报告：%s" % "  ".join(written))
 
     def _write(self, path, text):
