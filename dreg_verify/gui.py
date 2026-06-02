@@ -68,26 +68,16 @@ def _save_last_excel(path):
     _save_settings(d)
 
 
-def _git_repo_root(path):
-    """从 path(文件或目录)向上找 .git，找到则返回仓库根，否则 None。
-    用于在写出含机密信号名的产物时提醒'别提交进 git 仓库'。"""
-    try:
-        d = os.path.abspath(path)
-        if os.path.isfile(d) or os.path.splitext(d)[1]:
-            d = os.path.dirname(d)
-        while True:
-            # .git 可能是目录(常规仓库)或文件(worktree/submodule 里 .git 是 'gitdir: …' 文件)
-            if os.path.exists(os.path.join(d, ".git")):
-                return d
-            parent = os.path.dirname(d)
-            if parent == d:
-                return None
-            d = parent
-    except Exception:  # noqa: BLE001
-        return None
-
-
-SECRET_HINT = "产物可能含机密信号名，请勿提交到 git。"
+def _skipped_detail_text(skipped):
+    """被跳过信号的明细文本：每个信号一段，列出哪些输入不可驱动及原因。
+    skipped: list[(out_name, assert_id, risky)]，risky = list[(字母, 输入名, 原因)]。"""
+    parts = []
+    for name, _aid, risky in skipped:
+        reasons = "\n".join("    %s = %s：%s" % (letter, base, note or "不可驱动")
+                            for letter, base, note in risky)
+        parts.append("%s\n%s" % (name, reasons))
+    return ("跳过原因：以下输入在 ENV_RF 层探不到（force 会 elaboration 失败）。\n"
+            "如需强制生成请用 CLI --include-risky。\n\n" + "\n\n".join(parts))
 
 
 COL_SEL, COL_NEG, COL_R, COL_K, COL_OWNER, COL_TYPE, COL_TOP, COL_STATUS, COL_EXPR = range(9)
@@ -1466,8 +1456,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
-        QtWidgets.QMessageBox.information(self, "完成", "已导出 %d 条测试项：\n%s\n\n（%s）"
-                                          % (len(self._ti_rows), path, SECRET_HINT))
+        QtWidgets.QMessageBox.information(self, "完成", "已导出 %d 条测试项：\n%s"
+                                          % (len(self._ti_rows), path))
         self.status.showMessage("已导出测试项 CSV：%s" % path)
 
     def _rows_to_vectors(self, node, bindings, groups, out_width, rows):
@@ -1567,7 +1557,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _ask_export_options(self, title):
         """生成 .sv 前的导出选项：内容范围(全部/仅正向/仅负向) + 是否加注释。
-        记住上次选择(下次预选)，并提醒产物含机密信号名。返回 {"scope":..., "comments":bool} 或 None。"""
+        记住上次选择(下次预选)。返回 {"scope":..., "comments":bool} 或 None。"""
         st = _load_settings()
         last_scope, last_cm = st.get("export_scope", "all"), bool(st.get("export_comments", False))
         dlg = QtWidgets.QDialog(self)
@@ -1586,9 +1576,6 @@ class MainWindow(QtWidgets.QMainWindow):
         cm_chk = QtWidgets.QCheckBox("加注释（在 .sv 里标注每条用例/负向说明）")
         cm_chk.setChecked(last_cm)
         lay.addWidget(cm_chk)
-        warn = QtWidgets.QLabel("⚠ " + SECRET_HINT)
-        warn.setStyleSheet("color:#9a5b00;")
-        lay.addWidget(warn)
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
         lay.addWidget(bb)
@@ -1657,19 +1644,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 "无法写入 %s：\n%s\n\n(文件是否正被仿真器/编辑器占用？)" % (path, ex))
             return
         nsk = res["summary"].get("n_skipped", 0)
-        skipmsg = ("\n\n↷ 跳过了 %d 个含不可驱动输入的信号(默认跳过以保证可 elaborate)；"
-                   "如需强制生成用 CLI --include-risky。" % nsk) if nsk else ""
+        skipped = res.get("skipped") or []
+        skipmsg = ""
+        if nsk:
+            names = [name for name, _aid, _risky in skipped]
+            shown = "\n".join("  ↷ %s" % n for n in names[:12])
+            more = "\n  …等共 %d 个（点『Show Details』看全部及原因）" % nsk if nsk > 12 else ""
+            skipmsg = ("\n\n跳过 %d 个含不可驱动输入的信号（保证产物能 elaborate）：\n%s%s"
+                       % (nsk, shown, more))
         # 已自定义信号数按"真正写进本次产物"的 block 统计(避免把未勾选/被范围过滤的也算进来)
         n_cust = sum(1 for (_l, st) in res["blocks"]
                      if st.get("out_name", "").lower() in self._customized)
         custmsg = ("\n\n含 %d 个已自定义测试项的信号(编辑已写入产物)。" % n_cust
                    if n_cust else "")
-        gitwarn = ""
-        root = _git_repo_root(path)
-        if root:
-            gitwarn = "\n⚠ 该位置在 git 仓库内（%s），注意别 add/commit。" % root
-        QtWidgets.QMessageBox.information(self, "完成", "已写出：%s%s%s%s\n\n（%s）%s"
-                                          % (path, scope_msg, skipmsg, custmsg, SECRET_HINT, gitwarn))
+        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Information, "完成",
+                                    "已写出：%s%s%s%s" % (path, scope_msg, skipmsg, custmsg),
+                                    QtWidgets.QMessageBox.Ok, self)
+        if skipped:
+            box.setDetailedText(_skipped_detail_text(skipped))
+        box.exec()
         self.status.showMessage("已生成：%s%s" % (path, scope_msg))
 
     def on_report(self):
@@ -1691,10 +1684,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         scope = "勾选的 %d 个" % len(sel) if sel else "全部"
         n_tc = len(rep["detail"]); n_neg = sum(1 for r in rep["detail"] if r.get("neg") == "是")
-        gitwarn = "\n⚠ 在 git 仓库内，注意别 add/commit。" if _git_repo_root(path) else ""
         QtWidgets.QMessageBox.information(
-            self, "完成", "已导出报告(%s信号，用例 %d 条，负向 %d 条)：\n%s\n\n（%s）%s"
-            % (scope, n_tc, n_neg, "\n".join(written), SECRET_HINT, gitwarn))
+            self, "完成", "已导出报告(%s信号，用例 %d 条，负向 %d 条)：\n%s"
+            % (scope, n_tc, n_neg, "\n".join(written)))
         self.status.showMessage("已导出报告：%s" % "  ".join(written))
 
     def _write(self, path, text):

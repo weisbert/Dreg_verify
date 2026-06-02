@@ -851,22 +851,21 @@ def test_gui_confirm_dup_labels_no_dups_is_silent(qapp):
     assert w._confirm_dup_labels({}) is True
 
 
-def test_git_repo_root_detects(tmp_path):
-    """A4：_git_repo_root 能从产物路径向上找到 .git（目录 或 worktree/submodule 的 .git 文件）。"""
-    import os
-    from dreg_verify import gui
-    (tmp_path / ".git").mkdir()
-    sub = tmp_path / "a" / "b"; sub.mkdir(parents=True)
-    assert os.path.samefile(gui._git_repo_root(str(sub / "out.sv")), str(tmp_path))
-
-
-def test_git_repo_root_detects_git_file(tmp_path):
-    """审查修复#4：worktree/submodule 里 .git 是文件也要识别(否则机密提醒静默失效)。"""
-    import os
-    from dreg_verify import gui
-    (tmp_path / ".git").write_text("gitdir: /somewhere/.git/worktrees/x\n", encoding="utf-8")
-    sub = tmp_path / "wt"; sub.mkdir()
-    assert os.path.samefile(gui._git_repo_root(str(sub / "out.sv")), str(tmp_path))
+def test_skipped_detail_text_lists_names_and_reasons():
+    """生成完成弹窗：跳过的信号在『显示详情』里逐个列出名字 + 不可驱动原因。"""
+    from dreg_verify.gui import _skipped_detail_text
+    skipped = [
+        ("d_logic_pll_gear_shift_mux_sel", "130",
+         [("A", "close_ready_flag", "表中查无字段，按 wire 处理(force 信号名)")]),
+        ("d_logic_pll_n2", "131",
+         [("B", "pll_n1", "输入是内部信号(top_output=0)"), ("C", "int_n", "")]),
+    ]
+    text = _skipped_detail_text(skipped)
+    assert "d_logic_pll_gear_shift_mux_sel" in text
+    assert "close_ready_flag" in text and "wire" in text
+    assert "d_logic_pll_n2" in text and "pll_n1" in text
+    assert "C = int_n：不可驱动" in text       # 空原因 → 兜底文案
+    assert "--include-risky" in text           # 告诉用户如何强制生成
 
 
 def test_gui_bulk_scope_excludes_hidden_checked(qapp, wb, tmp_path_factory):
