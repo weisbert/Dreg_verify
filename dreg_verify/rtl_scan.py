@@ -24,7 +24,9 @@ from scan_rtl import (KEYWORDS, build_signal_map, find_verilog_files,           
 def collect_excel_nets(wb):
     """Excel → 需要在 ENV_RF 层级存在的网名集合：
 
-    ① 每个 top_output=1 输出的 RTL 网名（含 _ls 后缀规则）—— assert 探针
+    ① 每个输出的 RTL 网名 —— assert 探针：
+         top_output=1 → K 列名（ls 行带 _ls 后缀）
+         top_output=0 → K 列名 + _to_logic（在 sig_logic 模块内部，需要探针前缀才能验）
     ② 它们的 force 输入（RO/wire 兜底/级联）—— force 路径
     RW 寄存器输入走 RF_WRITE，不需要层级。返回 {网名: 用途说明}。
     """
@@ -35,9 +37,8 @@ def collect_excel_nets(wb):
     resolver = R.Resolver(wb)
     nets = {}
     for sig in wb.logic:
-        if not generator.is_top_output(sig.top_output):
-            continue
-        nets.setdefault(sig.rtl_base, "输出 %s 的 assert 探针" % sig.out_name)
+        kind = "" if sig.is_top else "（内部信号）"
+        nets.setdefault(sig.rtl_base, "输出 %s 的 assert 探针%s" % (sig.out_name, kind))
         try:
             node, bindings, _ = generator.expand_signal(wb, resolver, sig)
         except Exception:  # noqa: BLE001  cone 失败时退回原始绑定

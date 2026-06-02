@@ -38,11 +38,19 @@ class LogicSignal:
         self.assert_id = assert_id       # R 列序号
         # inputs: dict 字母 -> {'raw','base','width','msb','lsb'}
         self.inputs = inputs
+        # 是否被下游 logic 行以 <名>_to_logic 引用（read_logic 装载后回填；决定 RTL 网名后缀）
+        self.to_logic_ref = False
+
+    @property
+    def is_top(self):
+        """top_output==1：RTL/ENV_RF 顶层可见输出。"""
+        return str(self.top_output).strip() in ("1", "1.0", "True", "true")
 
     @property
     def rtl_base(self):
-        """RTL 真实网名(去位宽)。ls 行的 RTL 顶层端口带 _ls 后缀，K 列原文没写。"""
-        return rtl_net_name(self.out_base, self.suffix)
+        """RTL 真实网名(去位宽)。ls 行带 _ls 后缀；被下游引用的内部信号带 _to_logic 后缀。"""
+        return rtl_net_name(self.out_base, self.suffix,
+                            is_top=self.is_top, to_logic_ref=self.to_logic_ref)
 
     @property
     def rtl_name(self):
@@ -115,16 +123,23 @@ def strip_to_logic(name):
     return name
 
 
-def rtl_net_name(base, suffix):
+def rtl_net_name(base, suffix, is_top=True, to_logic_ref=False):
     """K 列名 → RTL 真实网名。
 
-    实证（2026-06-02 公司 lpbt_dig_top.v）：M=ls 行的 RTL 顶层端口带 _ls 后缀
-    （logic K 列 d_en_refbuf → RTL 端口 d_en_refbuf_ls），K 列原文没写后缀；
-    直接用 K 列名探针会 elaboration CUVUNF。to_logic/to_mux 行 K 列已是全名，原样用。
+    实证（2026-06-02 公司 lpbt_dig_top.v / BT_LP_DREG_sig_logic.v）：
+      - M=ls 行：RTL 端口 = K 列名 + "_ls"（d_en_refbuf → d_en_refbuf_ls）
+      - 内部信号(top_output=0)且被下游 logic 行以 <名>_to_logic 引用：
+        RTL wire = K 列名 + "_to_logic"（pll_n1 → pll_n1_to_logic，
+        在 BT_LP_DREG_sig_logic 模块内部，配合探针前缀即可验证）
+      - 其余（to_logic/to_mux 顶层输出、未被引用的内部信号如 reserve）：K 列已是全名，原样用
+    直接用 K 列名探针会 elaboration CUVUNF。
     """
     sfx = _s(suffix).lower()
-    if sfx == "ls" and not base.lower().endswith("_ls"):
+    low = base.lower()
+    if sfx == "ls" and not low.endswith("_ls"):
         return base + "_ls"
+    if not is_top and to_logic_ref and not low.endswith("_to_logic"):
+        return base + "_to_logic"
     return base
 
 
@@ -204,6 +219,18 @@ def read_logic(ws, header_row=2):
             assert_id=_s(_col(row, "R")),
             inputs=inputs,
         ))
+
+    # ── 标注"被下游以 <名>_to_logic 引用"的信号 ──
+    # 实证(2026-06-02 BT_LP_DREG_sig_logic.v)：这类内部信号的 RTL wire 名 = K列名 + "_to_logic"
+    # (pll_n1 → pll_n1_to_logic)。reserve 这类没被下游引用的内部信号 RTL 名 = K 原文。
+    referenced = set()
+    for sig in signals:
+        for info in sig.inputs.values():
+            raw_base = _strip_width(info["raw"])[0]
+            if raw_base.lower().endswith("_to_logic"):
+                referenced.add(info["base"].lower())
+    for sig in signals:
+        sig.to_logic_ref = sig.out_base.lower() in referenced
     return signals
 
 

@@ -119,10 +119,13 @@ def test_match_excel(wb, modules):
     # iddq 输入在顶层 → 无需前缀
     assert "d_bt_lp_pll_dig_dft_iddq_mode" in at_top
     # 合成 Excel 里的 lna_agc(top_output=1)在 RTL 里没有 → 列入缺失
-    # (reserve 是 top_output=0 内部信号，本就不收集，不在缺失清单里)
     missing_names = {n for n, _why in missing}
     assert "d_logic_bt_lp_lna_agc" in missing_names
-    assert "d_logic_bt_lp_reserve" not in missing_names
+    # 内部信号也被收集：pll_n1 被下游引用 → RTL 名 pll_n1_to_logic，在 U_BT_LP_DREG 里找到
+    assert prefixes["pll_n1_to_logic"] == "U_BT_LP_PLL_DIG.U_BT_LP_DREG"
+    # pll_n2_to_logic 合成 RTL 里没写 → 缺失；reserve(未被下游引用)保持 K 名原文 → 也缺失
+    assert "pll_n2_to_logic" in missing_names
+    assert "d_logic_bt_lp_reserve" in missing_names
 
 
 def test_render_prefix_file_round_trip(wb, modules):

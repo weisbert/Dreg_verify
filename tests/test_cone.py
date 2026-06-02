@@ -232,6 +232,33 @@ def test_wire_prefix_by_rtl_name_for_cascade_input(wb, resolver):
     assert b.wire == "U_BT_LP_PLL_DIG.d_en_refbuf_ls"
 
 
+def test_internal_signal_rtl_name_to_logic_suffix(wb):
+    """内部信号 RTL 网名规则（2026-06-02 BT_LP_DREG_sig_logic.v 实证）：
+
+    被下游 logic 行以 <名>_to_logic 引用的内部信号 → RTL 名 = K + "_to_logic"（pll_n1/pll_n2）；
+    未被引用的内部信号（reserve）→ K 原文；顶层输出（pll_n）→ K 原文。"""
+    by_base = {s.out_base: s for s in wb.logic}
+    assert by_base["pll_n1"].rtl_name == "pll_n1_to_logic[31:0]"     # 被 pll_n2 引用
+    assert by_base["pll_n2"].rtl_name == "pll_n2_to_logic[31:0]"     # 被 pll_n 引用
+    assert by_base["pll_n"].rtl_name == "pll_n[31:0]"                # 顶层输出, 原样
+    assert by_base["d_logic_bt_lp_reserve"].rtl_name == "d_logic_bt_lp_reserve"   # 未被引用, 原样
+
+
+def test_internal_signal_verifiable_with_prefix(wb):
+    """top_output=0 的 pll_n1 也可以验：探针 = `ENV_RF.<层级>.pll_n1_to_logic[31:0]，
+    输入是 RW 寄存器照常 RF_WRITE。"""
+    prefix = "U_BT_LP_PLL_DIG.U_BT_LP_DREG.U_SIG_LOGIC"
+    opts = generator.GenOptions(signals=["pll_n1"], mode="min",
+                                top_output_only=False,
+                                probe_prefixes={"pll_n1_to_logic": prefix})
+    res = generator.build(wb, opts)
+    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+    text = generator.render(res)
+    assert "assert (`ENV_RF.%s.pll_n1_to_logic[31:0]==32'b" % prefix in text
+    # 驱动不受影响: int_n/frac_n 等 RW 寄存器
+    assert "`RF_WRITE(10'h2," in text and "`RF_WRITE(10'h3," in text
+
+
 def test_probe_prefix_cli_parse():
     from dreg_verify.cli import _parse_probe_prefixes
     assert _parse_probe_prefixes(["pll_n=U_BT_LP_PLL_DIG", "x=A.B"]) == {
