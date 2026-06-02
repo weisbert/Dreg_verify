@@ -179,6 +179,27 @@ def test_probe_prefix_only_for_named_signal(wb):
     assert "`ENV_RF.d_en_refbuf_ls==" in text          # 不带前缀(且带 _ls 后缀)
 
 
+def test_force_prefix_for_input_wire(wb):
+    """mon_active 风格：force 的输入 wire 在 ENV_RF 子模块里 → force 路径带前缀，
+    且配置前缀后不再被当 wire 兜底风险跳过。"""
+    # 无前缀：mon_active 是 wire 兜底 → 默认 risky → 整个信号被跳过
+    res0 = generator.build(wb, generator.GenOptions(signals=["d_pfd_en_lnmode"]))
+    assert res0["summary"]["n_generated"] == 0 and res0["summary"]["n_skipped"] == 1
+
+    # 配置前缀：mon_active 在 U_BT_LP_PLL_DIG 下 → 信号可生成，force 带前缀
+    opts = generator.GenOptions(signals=["d_pfd_en_lnmode"],
+                                probe_prefixes={"mon_active": "U_BT_LP_PLL_DIG"})
+    res = generator.build(wb, opts)
+    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+    text = generator.render(res)
+    assert "force `ENV_RF.U_BT_LP_PLL_DIG.mon_active=" in text
+    # 输出探针不带前缀(映射里没有 d_pfd_en_lnmode)，且 ls 信号自动加 _ls 后缀
+    assert "assert (`ENV_RF.d_pfd_en_lnmode_ls==" in text
+    # 其它输入不受影响：寄存器位 RF_WRITE、iddq force 无前缀
+    assert "`RF_WRITE(10'hD," in text
+    assert "force `ENV_RF.d_bt_lp_pll_dig_dft_iddq_mode=" in text
+
+
 def test_probe_prefix_cli_parse():
     from dreg_verify.cli import _parse_probe_prefixes
     assert _parse_probe_prefixes(["pll_n=U_BT_LP_PLL_DIG", "x=A.B"]) == {
@@ -246,3 +267,28 @@ def test_gui_probe_prefix_flows_to_sv(tmp_path_factory):
     res = generator.build(w.wb, w._opts(["pll_n"]))
     text = generator.render(res)
     assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in text
+
+
+def test_gui_prefix_mapping_covers_input_wire(tmp_path_factory):
+    """GUI 映射编辑器数据路径：配置 mon_active 前缀 → _reanalyze_all → 信号变 clean，force 带前缀。"""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("gui_wire_pfx") / "synthetic_pll.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path)); w.on_load()
+    sig = next(s for s in w.signals if s.out_base == "d_pfd_en_lnmode")
+    idx = w.signals.index(sig)
+    # 无前缀: mon_active wire 兜底 → 非 clean
+    assert w._analysis[idx]["status"] == "wire-fallback"
+    # 配置前缀并全表重析（与映射编辑器保存后路径一致）
+    w._probe_prefixes = {"mon_active": "U_BT_LP_PLL_DIG"}
+    w._reanalyze_all()
+    assert w._analysis[idx]["status"] == "clean"
+    nets = {i["base"]: i["net"] for i in w._analysis[idx]["inputs"]}
+    assert "U_BT_LP_PLL_DIG.mon_active" in nets["mon_active"]
+    # 导出路径同样生效
+    text = generator.render(generator.build(w.wb, w._opts([sig.out_name])))
+    assert "force `ENV_RF.U_BT_LP_PLL_DIG.mon_active=" in text

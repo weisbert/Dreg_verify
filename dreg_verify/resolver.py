@@ -55,7 +55,7 @@ class InputBinding:
 
 class Resolver:
     def __init__(self, wb, force_overrides=None, rfwrite_overrides=None,
-                 default_kind=None, wire_fallback=True):
+                 default_kind=None, wire_fallback=True, wire_prefixes=None):
         """
         wb: DregWorkbook
         force_overrides / rfwrite_overrides: 基名集合(小写比较)，强制 RO / RW。
@@ -63,12 +63,16 @@ class Resolver:
         wire_fallback: True(默认) → 凡不是干净 RW 寄存器的输入都按 wire 处理(force 信号名)，
                        与旧 for_test 行为一致（输入是 wire 就 force，是寄存器才 RF_WRITE）。
                        False → 查不到就标 UNKNOWN 交人工。
+        wire_prefixes: {信号名(小写): 层级前缀} —— 该 wire 不在 ENV_RF 顶层而在子模块里时，
+                       force 路径写 ENV_RF.<前缀>.<名>（如 mon_active 在 U_BT_LP_PLL_DIG 内部）。
+                       命中映射的 wire 视为"用户确认存在"，不再算 wire 兜底风险。
         """
         self.wb = wb
         self.force_overrides = {s.lower() for s in (force_overrides or [])}
         self.rfwrite_overrides = {s.lower() for s in (rfwrite_overrides or [])}
         self.default_kind = default_kind
         self.wire_fallback = wire_fallback
+        self.wire_prefixes = {k.lower(): v for k, v in (wire_prefixes or {}).items()}
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}
@@ -163,6 +167,15 @@ class Resolver:
                 kind = "RO"
                 found_in = "wire"
                 note = "表中查无字段，按 wire 处理(force 信号名)——若它其实是寄存器请用 --rfwrite-signals 指定"
+
+        # ── 探针前缀：该 wire 在 ENV_RF 的子模块里(用户显式指定) → force 路径加前缀 ──
+        # 例: mon_active 是 U_BT_LP_PLL_DIG 内部 wire → force `ENV_RF.U_BT_LP_PLL_DIG.mon_active
+        prefix = self.wire_prefixes.get(low)
+        if prefix and kind != "RW":
+            wire_name = "%s.%s" % (prefix.strip("."), wire_name)
+            if found_in in ("wire", None):
+                found_in = "prefixed-wire"   # 用户确认该网存在 → 不再算 wire 兜底风险
+            note = (note + "；" if note else "") + "探针前缀: 在 ENV_RF.%s 下" % prefix
 
         return InputBinding(
             letter=letter, raw=raw, base=base, width=width, kind=kind,

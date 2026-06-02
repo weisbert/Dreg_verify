@@ -151,7 +151,8 @@ def build(wb, opts):
     resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
-                          wire_fallback=opts.wire_fallback)
+                          wire_fallback=opts.wire_fallback,
+                          wire_prefixes=opts.probe_prefixes)
     selected = select_signals(wb, opts)
     blocks = []
     errors = []
@@ -326,7 +327,8 @@ def report(wb, opts):
     resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
-                          wire_fallback=opts.wire_fallback)
+                          wire_fallback=opts.wire_fallback,
+                          wire_prefixes=opts.probe_prefixes)
     sigs = select_signals(wb, opts)
     summary, detail, tables = [], [], []
     for sig in sigs:
@@ -435,7 +437,8 @@ def diagnose(wb, opts=None):
     resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
-                          wire_fallback=opts.wire_fallback)
+                          wire_fallback=opts.wire_fallback,
+                          wire_prefixes=opts.probe_prefixes)
     sigs = select_signals(wb, opts)
 
     # 1) 类型列原文分布（tmm H / regmap F）

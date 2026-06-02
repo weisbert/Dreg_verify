@@ -89,6 +89,17 @@ def build_workbook(path, with_pll_chain=False):
             "L": "E?{B,C,D,1'b0}:{A,B,C,D}",
             "N": 1, "O": "to_pll_ctrl", "P": "Yao Wang", "R": 3,
         })
+        # d_pfd_en_lnmode（镜像真表 row21）：输入 C=mon_active 是 PLL 控制器 FSM 输出，
+        # 不在 RF 表里(wire 兜底)，且实际位于 U_BT_LP_PLL_DIG 子模块内部 → 需要探针前缀
+        _set_row(ws, 9, {
+            "A": "d_pfd_en_lnmode_to_logic[1]",
+            "B": "d_pfd_en_lnmode_to_logic[0]",
+            "C": "mon_active_to_logic",
+            "F": "d_bt_lp_pll_dig_dft_iddq_mode_to_logic",
+            "K": "d_pfd_en_lnmode",
+            "L": "(A?B:C)&(~F)",
+            "M": "ls", "N": 1, "O": "lnmode", "P": "Yao Wang", "R": 19,
+        })
 
     # ───────── regmap 页 ─────────
     rm = wb.create_sheet("regmap")
@@ -134,6 +145,11 @@ def build_workbook(path, with_pll_chain=False):
         r = _tmm_field(tmm, r, "frac_n_lsb[15:0]", "15:0", addr="h3", dig="N", typ="RW")
         r = _tmm_reg(tmm, r, "REFBUF2", "hC")
         r = _tmm_field(tmm, r, "d_xo_freq_sel", "0", addr="hC", dig="N", typ="RW")
+        # d_pfd_en_lnmode 用：寄存器位自身 RW + iddq RO；mon_active 故意不入表(wire 兜底)
+        r = _tmm_reg(tmm, r, "ANA_CTRL", "hD")
+        r = _tmm_field(tmm, r, "d_pfd_en_lnmode[1:0]", "15:14", addr="hD", dig="N", typ="RW")
+        r = _tmm_reg(tmm, r, "IDDQ_REG", "h29")
+        r = _tmm_field(tmm, r, "d_bt_lp_pll_dig_dft_iddq_mode", "2", addr="h29", dig="Y", typ="RO")
 
     wb.save(path)
     return path

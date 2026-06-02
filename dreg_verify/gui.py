@@ -482,8 +482,10 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "加载失败", str(ex))
             return
         self.signals = list(self.wb.logic)
+        # 探针前缀按 Excel 路径持久化：换表自动恢复上次配置（须在建 Resolver 前加载——wire 前缀要传进去）
+        self._probe_prefixes = dict(_load_settings().get("probe_prefixes", {}).get(path, {}))
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
-        self._resolver = R.Resolver(self.wb)
+        self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes)
         self._analysis = {}
         # 切换工作簿，清空旧的测试项编辑状态
         self._edited = {}
@@ -491,8 +493,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._neg_only = {}
         self._ti_loaded_idx = None
         self._clear_test_items("加载完成，点左侧信号查看测试项。")
-        # 探针前缀按 Excel 路径持久化：换表自动恢复上次配置
-        self._probe_prefixes = dict(_load_settings().get("probe_prefixes", {}).get(path, {}))
         errs = []
         for i, s in enumerate(self.signals):
             try:
@@ -728,37 +728,54 @@ class MainWindow(QtWidgets.QMainWindow):
         _save_settings(st)
 
     def on_set_probe_prefix(self):
-        """给勾选(优先)/选中的信号设置探针层级前缀。
+        """探针前缀映射编辑器：每行『信号名=层级前缀』。
 
-        用途：输出网不在 ENV_RF 顶层、而在子模块里（如 pll_n 在 U_BT_LP_PLL_DIG 内部）时，
-        断言要写 `ENV_RF.U_BT_LP_PLL_DIG.pll_n。留空 = 清除前缀。
+        作用于两类网（同一张映射表）：
+        ① 被验证输出（如 pll_n）→ 断言写 `ENV_RF.<前缀>.pll_n[31:0]
+        ② force 的输入 wire（如 mon_active）→ force `ENV_RF.<前缀>.mon_active
+        勾选/选中的信号会自动带进编辑器(前缀留空待填)。删除该行 = 清除映射。
         """
-        rows = self._scope_rows()
-        if not rows:
-            QtWidgets.QMessageBox.information(self, "提示", "请先勾选或选中至少一个信号")
+        if not self.wb:
             return
-        cur = self._prefix_of(self._sig_of_row(rows[0]))
-        text, ok = QtWidgets.QInputDialog.getText(
-            self, "设置探针前缀",
-            "层级前缀（输出网在 ENV_RF 的子模块里时填写，如 U_BT_LP_PLL_DIG；留空=清除）：\n"
-            "断言将写成 `ENV_RF.<前缀>.<信号名>",
-            QtWidgets.QLineEdit.Normal, cur)
+        lines = ["%s=%s" % (k, v) for k, v in sorted(self._probe_prefixes.items())]
+        existing = set(self._probe_prefixes)
+        for r in self._scope_rows():
+            sig = self._sig_of_row(r)
+            if sig.out_name.lower() not in existing and sig.out_base.lower() not in existing:
+                lines.append("%s=" % sig.out_base.lower())
+        text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self, "探针前缀映射",
+            "每行一条：信号名=层级前缀（被验证输出、force 的输入 wire 都可以）。\n"
+            "用于该网不在 ENV_RF 顶层、而在子模块里时，如：\n"
+            "    pll_n=U_BT_LP_PLL_DIG\n    mon_active=U_BT_LP_PLL_DIG\n"
+            "删除整行 = 清除该映射；前缀留空的行被忽略。",
+            "\n".join(lines))
         if not ok:
             return
-        prefix = text.strip().strip(".")
-        for r in rows:
-            sig = self._sig_of_row(r)
-            idx = self._idx_of_row(r)
-            if prefix:
-                self._probe_prefixes[sig.out_name.lower()] = prefix
-            else:
-                self._probe_prefixes.pop(sig.out_name.lower(), None)
-                self._probe_prefixes.pop(sig.out_base.lower(), None)
-            self._analysis[idx] = generator.analyze_signal(
-                self._resolver, sig, wb=self.wb, probe_prefix=prefix)
+        mapping = {}
+        for ln in text.splitlines():
+            ln = ln.strip()
+            if not ln or "=" not in ln:
+                continue
+            name, prefix = ln.split("=", 1)
+            if name.strip() and prefix.strip():
+                mapping[name.strip().lower()] = prefix.strip().strip(".")
+        self._probe_prefixes = mapping
         self._save_probe_prefixes()
+        self._reanalyze_all()
+        self.status.showMessage("探针前缀映射已更新（共 %d 条）" % len(mapping))
+
+    def _reanalyze_all(self):
+        """探针前缀变更后重建 Resolver（wire 前缀影响所有信号的输入解析）并刷新全表。"""
+        self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes)
+        for i, s in enumerate(self.signals):
+            try:
+                self._analysis[i] = generator.analyze_signal(
+                    self._resolver, s, wb=self.wb, probe_prefix=self._prefix_of(s))
+            except Exception as ex:  # noqa: BLE001
+                self._analysis[i] = {"status": "解析异常", "inputs": [], "out_net": "",
+                                     "error": repr(ex)}
         self._populate_table()
-        self.status.showMessage("已为 %d 个信号设置探针前缀：%s" % (len(rows), prefix or "(已清除)"))
 
     def _expand_sig(self, sig):
         """解析 + 按需 cone 展开 + 输入分组。返回 (node, bindings, groups, err)；失败时 node=None。"""
