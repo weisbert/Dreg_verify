@@ -144,12 +144,13 @@ def _s(v):
 
 
 # ───────────────────────────── 单个信号块 ─────────────────────────────
-def render_signal_block(sig, bindings, vectors, meta, comments=False):
+def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None):
     """
     返回 (lines:list[str], stats:dict)。comments=True 时每信号加 1 行 // <名> 便于导航(默认零注释)。
+    node: 已解析(或 cone 展开后)的表达式 AST；None 则从 sig.expr 解析。
     """
     lines = []
-    used_vars = E.collect_vars(E.parse(sig.expr))
+    used_vars = E.collect_vars(node if node is not None else E.parse(sig.expr))
     aid = sig.assert_id or "X"
     # 探针名用 RTL 真实网名（ls 行 = K 列名 + "_ls" 后缀），不是 K 列原文
     rtl_name = getattr(sig, "rtl_name", sig.out_name)

@@ -16,7 +16,9 @@ def _set_row(ws, rownum, mapping):
         ws.cell(row=rownum, column=column_index_from_string(col), value=val)
 
 
-def build_workbook(path):
+def build_workbook(path, with_pll_chain=False):
+    """with_pll_chain=True 额外加入 pll_n←pll_n2←pll_n1 三层 cone 链
+    （镜像 2026-06-02 真表 Hi1108 的 pll_n 结构，用于 cone 展开测试）。"""
     wb = openpyxl.Workbook()
 
     # ───────── logic 页 ─────────
@@ -55,6 +57,38 @@ def build_workbook(path):
         "L": "A",
         "M": "ls", "N": 1, "O": "to_top", "P": "Alice", "R": 50,
     })
+    # pll_n 三层 cone 链（镜像真表 logic row3/4/5：内部信号 pll_n1/pll_n2 逐层代入）
+    if with_pll_chain:
+        _set_row(ws, 6, {
+            "A": "int_n_to_logic[8:0]",
+            "B": "frac_n_msb_to_logic[6:0]",
+            "C": "frac_n_lsb_to_logic[15:1]",
+            "D": "frac_n_lsb_to_logic[0]",
+            "E": "d_xo_freq_sel_to_logic",
+            "K": "pll_n1[31:0]",
+            "L": "E?{1'b0,A,B,C}:{A,B,C,D}",
+            "M": "to_logic", "N": 0, "O": "internal", "P": "Yao Wang", "R": 1,
+        })
+        _set_row(ws, 7, {
+            "A": "pll_n1_to_logic[31]",
+            "B": "pll_n1_to_logic[30:23]",
+            "C": "pll_n1_to_logic[22:16]",
+            "D": "pll_n1_to_logic[15:0]",
+            "E": "en_dig_clk_div2_to_logic",
+            "K": "pll_n2[31:0]",
+            "L": "E?{B,C,D,1'b0}:{A,B,C,D}",
+            "M": "to_logic", "N": 0, "O": "internal", "P": "Yao Wang", "R": 2,
+        })
+        _set_row(ws, 8, {
+            "A": "pll_n2_to_logic[31]",
+            "B": "pll_n2_to_logic[30:23]",
+            "C": "pll_n2_to_logic[22:16]",
+            "D": "pll_n2_to_logic[15:0]",
+            "E": "en_dig_clk_div4_to_logic",
+            "K": "pll_n[31:0]",
+            "L": "E?{B,C,D,1'b0}:{A,B,C,D}",
+            "N": 1, "O": "to_pll_ctrl", "P": "Yao Wang", "R": 3,
+        })
 
     # ───────── regmap 页 ─────────
     rm = wb.create_sheet("regmap")
@@ -87,6 +121,19 @@ def build_workbook(path):
     r = _tmm_field(tmm, r, "d_bt_lp_lna_agc_line", "2:0", addr="h33", dig="Y", typ="RO")
     r = _tmm_reg(tmm, r, "REFBUF", "h10")
     r = _tmm_field(tmm, r, "d_bt_lp_en_refbuf_cfg", "0", addr="h10", dig="N", typ="RW")
+
+    # pll_n cone 链的叶子寄存器（地址/位段 1:1 取自真表 total_memory_map）
+    if with_pll_chain:
+        r = _tmm_reg(tmm, r, "TOP_EN", "h1")
+        r = _tmm_field(tmm, r, "en_dig_clk_div2", "7", addr="h1", dig="N", typ="RW")
+        r = _tmm_field(tmm, r, "en_dig_clk_div4", "6", addr="h1", dig="N", typ="RW")
+        r = _tmm_reg(tmm, r, "INT_N", "h2")
+        r = _tmm_field(tmm, r, "int_n[8:0]", "15:7", addr="h2", dig="N", typ="RW")
+        r = _tmm_field(tmm, r, "frac_n_msb[6:0]", "6:0", addr="h2", dig="N", typ="RW")
+        r = _tmm_reg(tmm, r, "INT_N", "h3")
+        r = _tmm_field(tmm, r, "frac_n_lsb[15:0]", "15:0", addr="h3", dig="N", typ="RW")
+        r = _tmm_reg(tmm, r, "REFBUF2", "hC")
+        r = _tmm_field(tmm, r, "d_xo_freq_sel", "0", addr="hC", dig="N", typ="RW")
 
     wb.save(path)
     return path

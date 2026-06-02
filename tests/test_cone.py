@@ -1,0 +1,184 @@
+# -*- coding: utf-8 -*-
+"""Cone 展开测试 — 用真表 pll_n←pll_n2←pll_n1 三层链做 oracle（2026-06-02 实证数据）。
+
+for_test 对 pll_n 的处理（块 行154..160）：
+  驱动 6 个叶子寄存器: en_dig_clk_div2(0x1 bit7) en_dig_clk_div4(0x1 bit6)
+                       int_n[8:0](0x2 15:7)  frac_n_msb[6:0](0x2 6:0)
+                       frac_n_lsb[15:0](0x3) d_xo_freq_sel(0xC bit0)
+  T0: int_n=256 frac_n_msb=64 frac_n_lsb=0xFFFF 其余=1
+  → RF_WRITE 0x1=0xC0, 0x2=0x8040, 0x3=0xFFFF, 0xC=0x1
+  期望(按 logic 表达式) pll_n = pll_n1 << 2 = 0x0081FFFC（for_test 写的 32'b1 是错的，不抄）。
+"""
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import fixtures                                     # noqa: E402
+from dreg_verify import cone, excel_model, generator  # noqa: E402
+from dreg_verify import expr as E                   # noqa: E402
+from dreg_verify import resolver as R               # noqa: E402
+from dreg_verify import vectors as V                # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def wb(tmp_path_factory):
+    path = tmp_path_factory.mktemp("cone") / "synthetic_pll.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    return excel_model.load_workbook(str(path))
+
+
+@pytest.fixture(scope="module")
+def resolver(wb):
+    return R.Resolver(wb)
+
+
+# ───────────── expr.Part 节点 ─────────────
+def test_part_eval_and_width():
+    node = E.Part(E.Var("A"), 30, 23)
+    env = E.Env({"A": 32}, {"A": 0x40207FFF})
+    assert E.self_width(node, env) == 8
+    # 0x40207FFF bits[30:23] = 0x80
+    assert E.evaluate(node, env, 8)[0] == 0x80
+    # Part 嵌套: ((A)[30:23])[7]  → bit7 of 0x80 = 1
+    nested = E.Part(E.Part(E.Var("A"), 30, 23), 7, 7)
+    assert E.evaluate(nested, env, 1)[0] == 1
+    assert E.collect_vars(nested) == ["A"]
+
+
+# ───────────── 展开结构 ─────────────
+def test_expand_pll_chain_leaves(wb, resolver):
+    sig = next(s for s in wb.logic if s.out_base == "pll_n")
+    node, bindings = cone.expand(sig, wb, resolver)
+    # 叶子 = 6 个真寄存器，全部 RW 可驱动
+    assert set(bindings) == {"INT_N", "FRAC_N_MSB", "FRAC_N_LSB",
+                             "D_XO_FREQ_SEL", "EN_DIG_CLK_DIV2", "EN_DIG_CLK_DIV4"}
+    assert all(b.kind == "RW" and b.address is not None for b in bindings.values())
+    # frac_n_lsb 两个切片([15:1]与[0])合并成一个 16bit 叶子
+    assert bindings["FRAC_N_LSB"].width == 16
+    assert bindings["INT_N"].width == 9
+    # 地址来自 tmm
+    assert bindings["EN_DIG_CLK_DIV2"].address == 0x1
+    assert bindings["INT_N"].address == 0x2
+    assert bindings["FRAC_N_LSB"].address == 0x3
+    assert bindings["D_XO_FREQ_SEL"].address == 0xC
+
+
+def test_expand_expected_value_matches_logic(wb, resolver):
+    """for_test T0 输入 → 期望值按 logic 表达式 = 0x0081FFFC（pll_n1 左移 2 位）。"""
+    sig = next(s for s in wb.logic if s.out_base == "pll_n")
+    node, bindings = cone.expand(sig, wb, resolver)
+    widths = {k: b.width for k, b in bindings.items()}
+    values = {"INT_N": 256, "FRAC_N_MSB": 64, "FRAC_N_LSB": 0xFFFF,
+              "D_XO_FREQ_SEL": 1, "EN_DIG_CLK_DIV2": 1, "EN_DIG_CLK_DIV4": 1}
+    val, w = E.evaluate(node, E.Env(widths, values), sig.out_width)
+    # pll_n1 = {1'b0, 256(9b), 64(7b), 0x7FFF(15b)} = 0x40207FFF；左移两次(高位丢弃) = 0x0081FFFC
+    assert w == 32
+    assert val == 0x0081FFFC
+    # 控制位 = 三个时钟/频率选择，数据 = int_n/frac_n
+    control, data = E.classify_vars(node, E.Env(widths))
+    assert set(control) == {"D_XO_FREQ_SEL", "EN_DIG_CLK_DIV2", "EN_DIG_CLK_DIV4"}
+    assert set(data) == {"INT_N", "FRAC_N_MSB", "FRAC_N_LSB"}
+
+
+def test_expand_only_when_needed(wb, resolver):
+    """没有内部输入的信号不做 cone 展开（reserve 原样）。"""
+    sig = next(s for s in wb.logic if s.out_base == "d_logic_bt_lp_reserve")
+    node, bindings, expanded = generator.expand_signal(wb, resolver, sig)
+    assert not expanded
+    assert set(bindings) == {"A", "B", "C", "J"}
+
+
+def test_expand_cycle_detection(resolver):
+    """内部信号循环引用(top→a→b→a) → ConeError 而非死循环。"""
+    from dreg_verify.excel_model import DregWorkbook, LogicSignal
+    mk = lambda name, inp, r, top: LogicSignal(       # noqa: E731
+        row=1, out_name=name + "[3:0]", out_width=4, expr="A",
+        suffix="to_logic", top_output=top, notes="", owner="", assert_id=r,
+        inputs={"A": {"raw": inp, "base": inp, "width": 4, "msb": 3, "lsb": 0}})
+    wb2 = DregWorkbook(logic=[mk("sig_top", "sig_a", "1", 1),
+                              mk("sig_a", "sig_b", "2", 0),
+                              mk("sig_b", "sig_a", "3", 0)],
+                       regmap={}, tmm={}, sheet_names=[])
+    with pytest.raises(cone.ConeError):
+        cone.expand(wb2.logic[0], wb2, R.Resolver(wb2))
+
+
+# ───────────── 端到端 .sv ─────────────
+def test_pll_n_e2e_sv(wb):
+    opts = generator.GenOptions(signals=["pll_n"], mode="min")
+    res = generator.build(wb, opts)
+    assert res["summary"]["n_generated"] == 1      # 不再被跳过
+    assert res["summary"]["n_skipped"] == 0
+    text = generator.render(res)
+    # 驱动 = 4 个地址的 RF_WRITE（同址合并），无 force
+    assert "`RF_WRITE(10'h1," in text
+    assert "`RF_WRITE(10'h2," in text
+    assert "`RF_WRITE(10'h3," in text
+    assert "`RF_WRITE(10'hC," in text
+    assert "force" not in text
+    # 断言探 pll_n（带位宽），期望 32 位
+    assert "assert (`ENV_RF.pll_n[31:0]==32'b" in text
+    # 标号 = R 列序号
+    assert "assert_3_T0:" in text
+
+
+def test_pll_n_vectors_cover_t0(wb, resolver):
+    """min 模式控制位全组合：3 个控制位 → 至少 8 个用例；期望值全部按表达式计算。"""
+    sig = next(s for s in wb.logic if s.out_base == "pll_n")
+    node, bindings = cone.expand(sig, wb, resolver)
+    vecs, meta = V.generate_vectors(node, bindings, sig.out_width, mode="min")
+    assert len(vecs) >= 8
+    widths = {k: b.width for k, b in bindings.items()}
+    for v in vecs:
+        val, _ = E.evaluate(node, E.Env(widths, v.assignments), sig.out_width)
+        assert val == v.exp_value
+
+
+def test_pll_n_report_and_verifiability(wb):
+    """报告：pll_n 真值表输入为 6 个叶子寄存器；可验证性=clean(经 cone 展开)。"""
+    rep = generator.report(wb, generator.GenOptions(signals=["pll_n"], top_output_only=False))
+    assert len(rep["tables"]) == 1
+    labels = [i["label"] for i in rep["tables"][0]["inputs"]]
+    assert any("int_n" in lb for lb in labels)
+    assert any("frac_n_lsb" in lb for lb in labels)
+    verif = {v["signal"]: v["status"] for v in rep["verifiability"]["signals"]}
+    assert verif["pll_n[31:0]"] == "clean"
+
+
+def test_internal_signals_still_skipped_by_default(wb):
+    """pll_n1/pll_n2 自身是内部信号(top_output=0)：默认仍不出现在产物里。"""
+    opts = generator.GenOptions(top_output_only=True)
+    res = generator.build(wb, opts)
+    names = {st["out_name"] for _l, st in res["blocks"]}
+    assert "pll_n[31:0]" in names
+    assert "pll_n1[31:0]" not in names and "pll_n2[31:0]" not in names
+
+
+# ───────────── GUI 冒烟（离屏） ─────────────
+def test_gui_cone_signal_editor(tmp_path_factory):
+    """GUI 点 pll_n → 测试项编辑器显示 6 个叶子寄存器列；状态=clean；生成不抛异常。"""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("gui_cone") / "synthetic_pll.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path)); w.on_load()
+    sig = next(s for s in w.signals if s.out_base == "pll_n")
+    w._load_test_items(sig)
+    # 输入分组 = 6 个叶子寄存器（不是 pll_n2 切片）
+    bases = {g["base"].lower() for g in w._ti_groups}
+    assert bases == {"int_n", "frac_n_msb", "frac_n_lsb",
+                     "d_xo_freq_sel", "en_dig_clk_div2", "en_dig_clk_div4"}
+    # 状态列：cone 展开后输入全部可驱动 → clean
+    row = next(r for r in range(w.table.rowCount()) if w._sig_of_row(r).out_base == "pll_n")
+    assert w._analysis[row]["status"] == "clean"
+    assert w._analysis[row]["cone"] is True
+    # 全选导出（全部范围）能产出 pll_n 的块
+    res = generator.build(w.wb, w._opts(["pll_n"]))
+    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0

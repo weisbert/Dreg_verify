@@ -182,6 +182,19 @@ class Repeat(Node):
         self.body = body
 
 
+class Part(Node):
+    """对任意子表达式取位段：(子表达式)[msb:lsb]。
+
+    不是解析器产物——cone 展开（内部信号表达式代入）时由 cone.py 构造，
+    用于表示"pll_n2[30:23]"这类对内部信号求值结果的切片。
+    """
+
+    def __init__(self, operand, msb, lsb):
+        self.operand = operand
+        self.msb = msb
+        self.lsb = lsb if lsb is not None else msb
+
+
 # ───────────────────────────── 解析器（带优先级的递归下降） ─────────────────────────────
 # 二元算子优先级（数字大 = 结合更紧）。参考 Verilog 优先级。
 _BINOP_PREC = {
@@ -377,6 +390,8 @@ def self_width(node, env):
     if isinstance(node, Repeat):
         cnt = eval_const(node.count_node, env)
         return cnt * self_width(node.body, env)
+    if isinstance(node, Part):
+        return abs(node.msb - node.lsb) + 1
     raise ExprError("未知 AST 节点 %r" % type(node))
 
 
@@ -523,6 +538,13 @@ def evaluate_node(node, ctx_width, env):
             result = (result << w) | v
         return result & mask(ctx_width)
 
+    if isinstance(node, Part):
+        # 位段选择：内部表达式按自身宽度求值后取 [msb:lsb]
+        sw = self_width(node.operand, env)
+        v = evaluate_node(node.operand, sw, env)
+        lo, hi = min(node.msb, node.lsb), max(node.msb, node.lsb)
+        return ((v >> lo) & mask(hi - lo + 1)) & mask(ctx_width)
+
     raise ExprError("未知 AST 节点 %r" % type(node))
 
 
@@ -570,6 +592,8 @@ def collect_vars(node):
                 walk(p)
         elif isinstance(n, Repeat):
             walk(n.body)
+        elif isinstance(n, Part):
+            walk(n.operand)
 
     walk(node)
     return seen
@@ -587,6 +611,8 @@ def _contains_mux_or_wide(n):
         return any(_contains_mux_or_wide(p) for p in n.parts)
     if isinstance(n, Repeat):
         return _contains_mux_or_wide(n.body)
+    if isinstance(n, Part):
+        return _contains_mux_or_wide(n.operand)
     return False
 
 
@@ -637,6 +663,9 @@ def classify_vars(node, env):
             return
         if isinstance(n, Repeat):
             walk(n.body)
+            return
+        if isinstance(n, Part):
+            walk(n.operand)
             return
 
     walk(node)

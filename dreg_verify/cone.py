@@ -1,0 +1,141 @@
+# -*- coding: utf-8 -*-
+"""
+cone.py — Cone 展开：当一个 logic 输出的输入引用其它 logic 内部信号(top_output=0)时，
+递归把内部信号的表达式代入(AST 级)，直到所有叶子输入都是真实寄存器/可驱动信号。
+
+实证依据（2026-06-02，Hi1108 真表 pll_n）：for_test(VBA) 对 pll_n[31:0] 的做法——
+    pll_n  = en_dig_clk_div4 ? pll_n2<<1 : pll_n2          (logic row5)
+    pll_n2 = en_dig_clk_div2 ? pll_n1<<1 : pll_n1          (logic row4, 内部)
+    pll_n1 = xo_sel ? {1'b0,int_n,frac_msb,frac_lsb[15:1]}
+                    : {int_n,frac_msb,frac_lsb}             (logic row3, 内部)
+最终驱动叶子寄存器 int_n/frac_n_msb/frac_n_lsb/d_xo_freq_sel/en_dig_clk_div2/div4
+（同地址字段合并 RF_WRITE），断言顶层输出 pll_n。
+
+展开结果：
+  node     — 复合 AST（内部信号已代入；切片用 expr.Part 表达）
+  bindings — {叶子大写基名: InputBinding}（驱动叶子寄存器；同寄存器多切片共享一个叶子）
+之后向量生成/.sv 渲染照常使用，无需感知 cone。
+"""
+
+from . import expr as E
+
+
+class ConeError(Exception):
+    pass
+
+
+MAX_DEPTH = 8
+
+
+def find_internal_inputs(node, bindings):
+    """返回表达式里指向"内部 logic 输出"(top_output=0)的变量字母列表。空 = 不需要 cone 展开。"""
+    return [ltr for ltr in E.collect_vars(node)
+            if bindings.get(ltr) is not None and bindings[ltr].found_in == "logic-internal"]
+
+
+def expand(sig, wb, resolver, _depth=0, _stack=None):
+    """递归展开 sig。返回 (node, bindings)。
+
+    node:     复合 AST，所有内部信号引用已替换为其表达式（带 Part 切片）。
+    bindings: {叶子大写基名: InputBinding}，全部为可驱动输入。
+
+    循环引用 / 超深 / 找不到内部信号定义行 / 子表达式解析失败 → 抛 ConeError。
+    """
+    stack = list(_stack or [])
+    me = sig.out_base.lower()
+    if me in stack:
+        raise ConeError("内部信号循环引用: %s" % " → ".join(stack + [me]))
+    if _depth > MAX_DEPTH:
+        raise ConeError("cone 展开深度超过 %d（链: %s）" % (MAX_DEPTH, " → ".join(stack + [me])))
+    stack.append(me)
+
+    try:
+        node = E.parse(sig.expr)
+    except E.ExprError as ex:
+        raise ConeError("信号 %r 表达式解析失败: %s" % (sig.out_name, ex))
+    bindings = resolver.resolve_signal_inputs(sig)
+
+    mapping = {}      # 原表达式变量字母 -> 替换 AST
+    leaves = {}       # 叶子大写基名 -> InputBinding
+    for letter in E.collect_vars(node):
+        b = bindings.get(letter)
+        if b is None:
+            continue
+        if b.found_in == "logic-internal":
+            child = _find_logic(wb, b.base)
+            if child is None:
+                raise ConeError("内部信号 %r 在 logic 页找不到定义行" % b.base)
+            child_node, child_leaves = expand(child, wb, resolver, _depth + 1, stack)
+            for key, leaf in child_leaves.items():
+                leaves[key] = _wider(leaves.get(key), leaf)
+            # 输入单元格带切片(如 pll_n2_to_logic[30:23]) → 对子表达式取位段
+            if b.slice_msb is not None:
+                mapping[letter] = E.Part(child_node, b.slice_msb, b.slice_lsb)
+            else:
+                mapping[letter] = child_node
+        else:
+            # 叶子输入：变量名 = 大写基名；同一寄存器的多个切片共享同一个叶子 binding
+            key = b.base.upper()
+            leaves[key] = _wider(leaves.get(key), _full_binding(key, b, resolver))
+            mapping[letter] = E.Var(key, b.slice_msb, b.slice_lsb)
+
+    return _substitute(node, mapping), leaves
+
+
+# ───────────────────────────── 内部 ─────────────────────────────
+def _find_logic(wb, base):
+    low = str(base).strip().lower()
+    for s in wb.logic:
+        if s.out_base.lower() == low:
+            return s
+    return None
+
+
+def _full_binding(key, b, resolver):
+    """以"整个寄存器字段"为单位重建叶子 binding（切片在表达式 Part/Var 层处理）。
+
+    例: frac_n_lsb[15:1] 与 frac_n_lsb[0] 是同一个 16bit 字段的两个切片，
+    叶子 = frac_n_lsb 全 16bit，RF_WRITE 写全宽度；表达式分别取 [15:1] 与 [0]。
+    """
+    width = b.width
+    if b.reg_msb is not None and b.reg_lsb is not None:
+        width = max(width, b.reg_msb - b.reg_lsb + 1)
+    info = {"raw": b.base, "base": b.base, "width": width,
+            "msb": width - 1 if width > 1 else None,
+            "lsb": 0 if width > 1 else None}
+    return resolver.resolve(key, info)
+
+
+def _wider(old, new):
+    """同名叶子保留更宽的 binding（不同切片并存时取全宽）。"""
+    if old is None:
+        return new
+    return new if new.width > old.width else old
+
+
+def _substitute(node, mapping):
+    """把 AST 里的变量引用替换为 mapping 给定的子树；带位选的变量包成 Part。"""
+    if isinstance(node, E.Var):
+        sub = mapping.get(node.name)
+        if sub is None:
+            return node
+        if node.msb is not None:
+            return E.Part(sub, node.msb, node.lsb)
+        return sub
+    if isinstance(node, E.Const):
+        return node
+    if isinstance(node, E.Unary):
+        return E.Unary(node.op, _substitute(node.operand, mapping))
+    if isinstance(node, E.Binary):
+        return E.Binary(node.op, _substitute(node.left, mapping), _substitute(node.right, mapping))
+    if isinstance(node, E.Ternary):
+        return E.Ternary(_substitute(node.cond, mapping),
+                         _substitute(node.then, mapping),
+                         _substitute(node.els, mapping))
+    if isinstance(node, E.Concat):
+        return E.Concat([_substitute(p, mapping) for p in node.parts])
+    if isinstance(node, E.Repeat):
+        return E.Repeat(node.count_node, _substitute(node.body, mapping))
+    if isinstance(node, E.Part):
+        return E.Part(_substitute(node.operand, mapping), node.msb, node.lsb)
+    return node

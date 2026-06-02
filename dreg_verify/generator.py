@@ -4,6 +4,7 @@ generator.py — 编排层：装载 Excel → 筛选信号 → 解析输入 → 
 CLI 与（未来的）GUI 共用此后端。
 """
 
+from . import cone
 from . import expr as E
 from . import excel_model
 from . import resolver as R
@@ -112,6 +113,23 @@ def _neg_enabled_for(sig, opts):
     return sig.out_name.lower() in opts.neg_signals or sig.out_base.lower() in opts.neg_signals
 
 
+def expand_signal(wb, resolver, sig):
+    """解析表达式并按需做 cone 展开（输入引用内部 logic 信号时递归代入其表达式）。
+
+    返回 (node, bindings, expanded)：
+      node     — 表达式 AST（cone 信号 = 复合 AST）
+      bindings — 输入绑定（cone 信号 = 叶子寄存器绑定，键为大写基名）
+      expanded — 是否做了 cone 展开
+    表达式解析失败抛 expr.ExprError；cone 展开失败抛 cone.ConeError。
+    """
+    node = E.parse(sig.expr)
+    bindings = resolver.resolve_signal_inputs(sig)
+    if cone.find_internal_inputs(node, bindings):
+        node, bindings = cone.expand(sig, wb, resolver)
+        return node, bindings, True
+    return node, bindings, False
+
+
 def build(wb, opts):
     """
     返回 dict:
@@ -135,11 +153,13 @@ def build(wb, opts):
 
     for sig in selected:
         try:
-            node = E.parse(sig.expr)
+            node, bindings, expanded = expand_signal(wb, resolver, sig)
         except E.ExprError as ex:
             errors.append((sig.out_name, sig.assert_id, "表达式解析失败: %s" % ex))
             continue
-        bindings = resolver.resolve_signal_inputs(sig)
+        except cone.ConeError as ex:
+            errors.append((sig.out_name, sig.assert_id, "cone 展开失败: %s" % ex))
+            continue
 
         override = (opts.vector_overrides.get(sig.out_name.lower())
                     if opts.vector_overrides else None)
@@ -200,7 +220,9 @@ def build(wb, opts):
             else:
                 seen_labels[lbl] = sig.out_name
 
-        lines, stats = W.render_signal_block(sig, bindings, vecs, meta, comments=opts.comments)
+        lines, stats = W.render_signal_block(sig, bindings, vecs, meta,
+                                             comments=opts.comments, node=node)
+        stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
@@ -228,17 +250,26 @@ def render(result, header_info=None, comments=False):
     return W.render_file(result["blocks"], header_info=header_info, comments=comments)
 
 
-def analyze_signal(resolver, sig):
+def analyze_signal(resolver, sig, wb=None):
     """单信号解析画像（GUI debug 用）：返回 status + 每输入的 force/RF_WRITE net + 输出 net。
     status: clean / wire-fallback / unresolved / parse-err —— 用于挑出可能导致 elaboration 失败的信号。
+    传入 wb 时对内部信号输入做 cone 展开（展开成功 → 按叶子寄存器评估状态，cone=True）。
     """
-    out_net = "`%s.%s" % (W.ENV, sig.out_name)
+    out_net = "`%s.%s" % (W.ENV, getattr(sig, "rtl_name", sig.out_name))
+    expanded = False
     try:
-        node = E.parse(sig.expr)
+        if wb is not None:
+            node, bindings, expanded = expand_signal(wb, resolver, sig)
+        else:
+            node = E.parse(sig.expr)
+            bindings = resolver.resolve_signal_inputs(sig)
     except E.ExprError as ex:
-        return {"status": "parse-err", "inputs": [], "out_net": out_net, "error": str(ex)}
+        return {"status": "parse-err", "inputs": [], "out_net": out_net, "error": str(ex),
+                "cone": False}
+    except cone.ConeError as ex:
+        return {"status": "unresolved", "inputs": [], "out_net": out_net,
+                "error": "cone 展开失败: %s" % ex, "cone": True}
     used = E.collect_vars(node)
-    bindings = resolver.resolve_signal_inputs(sig)
     rows, status = [], "clean"
     for ltr in used:
         b = bindings.get(ltr)
@@ -257,7 +288,7 @@ def analyze_signal(resolver, sig):
             status = "unresolved"
         elif b.found_in == "wire" and status == "clean":
             status = "wire-fallback"
-    return {"status": status, "inputs": rows, "out_net": out_net, "error": ""}
+    return {"status": status, "inputs": rows, "out_net": out_net, "error": "", "cone": expanded}
 
 
 def _fmt_cell(val, width):
@@ -284,14 +315,13 @@ def report(wb, opts):
     summary, detail, tables = [], [], []
     for sig in sigs:
         try:
-            node = E.parse(sig.expr)
-        except E.ExprError as ex:
+            node, bindings, _expanded = expand_signal(wb, resolver, sig)
+        except (E.ExprError, cone.ConeError) as ex:
             summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                             "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
                             "n_tests": 0, "n_neg": 0, "control": "", "data": "",
-                            "unresolved": "", "error": "表达式解析失败: %s" % ex})
+                            "unresolved": "", "error": "表达式解析/展开失败: %s" % ex})
             continue
-        bindings = resolver.resolve_signal_inputs(sig)
         used = E.collect_vars(node)
         # 与 build() 对齐：有 GUI 定制 override 就用 override，报告才不会与产出的 .sv 不符。
         override = (opts.vector_overrides.get(sig.out_name.lower())
@@ -363,7 +393,7 @@ def report(wb, opts):
     verif = {"counts": {"clean": 0, "wire-fallback": 0, "unresolved": 0, "parse-err": 0},
              "signals": []}
     for sig in sigs:
-        a = analyze_signal(resolver, sig)
+        a = analyze_signal(resolver, sig, wb=wb)
         st = a["status"]
         verif["counts"][st] = verif["counts"].get(st, 0) + 1
         risky = [i for i in a["inputs"] if (not i["resolved"]) or i["found_in"] == "wire"]

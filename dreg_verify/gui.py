@@ -485,7 +485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         errs = []
         for i, s in enumerate(self.signals):
             try:
-                self._analysis[i] = generator.analyze_signal(self._resolver, s)
+                self._analysis[i] = generator.analyze_signal(self._resolver, s, wb=self.wb)
             except Exception as ex:  # noqa: BLE001
                 self._analysis[i] = {"status": "解析异常", "inputs": [], "out_net": "",
                                      "error": repr(ex)}
@@ -694,18 +694,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_test_items(sig)
         self.status.showMessage(msg)
 
+    def _expand_sig(self, sig):
+        """解析 + 按需 cone 展开 + 输入分组。返回 (node, bindings, groups, err)；失败时 node=None。"""
+        try:
+            node, bindings, _expanded = generator.expand_signal(self.wb, self._resolver, sig)
+        except E.ExprError as ex:
+            return None, None, None, "表达式解析失败: %s" % ex
+        except generator.cone.ConeError as ex:
+            return None, None, None, "cone 展开失败: %s" % ex
+        return node, bindings, V.input_groups(node, bindings), None
+
     def _set_signal_negatives(self, sig, want_neg, which):
         """给某信号(重新)设置负向测试：保留全部正向测试，按 first/all 追加正向测试的"故意填错"
         副本作为负向；want_neg=False 则删除所有负向。可作用于未显示的信号(存进 override)。"""
         if self._resolver is None:
             return
         name_low = sig.out_name.lower()
-        try:
-            node = E.parse(sig.expr)
-        except E.ExprError:
+        node, bindings, groups, _err = self._expand_sig(sig)
+        if node is None:
             return
-        bindings = self._resolver.resolve_signal_inputs(sig)
-        groups = V.input_groups(node, bindings)
         hand_edited = (name_low in self._edited and name_low not in self._neg_only)
         # 仅靠"加负向"定制的信号，清负向 = 回到纯自动 → 整体撤销定制(恢复默认 risky-skip 等行为)
         if not want_neg and not hand_edited:
@@ -853,13 +860,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.wb or self._resolver is None or sig is None:
             return
         name_low = sig.out_name.lower()
-        try:
-            node = E.parse(sig.expr)
-        except E.ExprError as ex:
-            self._clear_test_items("信号: %s — 表达式解析失败: %s（无法生成测试项）" % (sig.out_name, ex))
+        node, bindings, groups, err = self._expand_sig(sig)
+        if node is None:
+            self._clear_test_items("信号: %s — %s（无法生成测试项）" % (sig.out_name, err))
             return
-        bindings = self._resolver.resolve_signal_inputs(sig)
-        groups = V.input_groups(node, bindings)
         self._ti_sig = sig; self._ti_node = node
         self._ti_bindings = bindings; self._ti_groups = groups
         self._ti_name_low = name_low
@@ -1484,12 +1488,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ed:
                 continue
             sig, rows = ed["sig"], ed["rows"]
-            try:
-                node = E.parse(sig.expr)
-            except E.ExprError:
+            node, bindings, groups, _err = self._expand_sig(sig)
+            if node is None:
                 continue
-            bindings = self._resolver.resolve_signal_inputs(sig)
-            groups = V.input_groups(node, bindings)
             vecs = self._rows_to_vectors(node, bindings, groups, sig.out_width, rows)
             if positive_only:
                 vecs = [v for v in vecs if not v.is_negative]
