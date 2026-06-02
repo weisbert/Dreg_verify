@@ -60,8 +60,8 @@ def compute_drives(vec, bindings, used_vars):
     """
     forces, writes, unresolved = [], [], []
     ro = []
-    rw_by_addr = {}
-    seen_ro, seen_rw = set(), set()
+    rw_by_addr = {}      # addr -> {字段基名: {"b": binding, "val": 拼好的字段值}}
+    seen_ro = set()
     for ltr in used_vars:
         b = bindings.get(ltr)
         if b is None:
@@ -71,17 +71,18 @@ def compute_drives(vec, bindings, used_vars):
         if not b.resolved:
             unresolved.append((ltr, b.base, b.note or "未解析"))
             continue
+        # 同一物理信号的不同 bit 切片(A=x[1]、B=x[0])各自带值；slice_lsb 决定它落在字段哪一位
+        slice_lsb = b.slice_lsb or 0
         if b.kind == "RO":
-            if b.wire in seen_ro:
+            key = (b.wire, b.slice_msb, b.slice_lsb)
+            if key in seen_ro:
                 continue
-            seen_ro.add(b.wire)
+            seen_ro.add(key)
             ro.append((b, val))
-        else:  # RW
-            key = (b.address, b.base.lower(), b.reg_lsb)
-            if key in seen_rw:
-                continue
-            seen_rw.add(key)
-            rw_by_addr.setdefault(b.address, []).append((b, val))
+        else:  # RW：同名字段的多个切片拼成一个字段值，再合入寄存器
+            ent = rw_by_addr.setdefault(b.address, {}).setdefault(
+                b.base.lower(), {"b": b, "val": 0})
+            ent["val"] |= (val & E.mask(b.width)) << slice_lsb
 
     for b, val in ro:
         hw = max(DATA_WIDTH_HEX, b.width)
@@ -91,11 +92,13 @@ def compute_drives(vec, bindings, used_vars):
     for addr in sorted(rw_by_addr.keys()):
         regval = 0
         fields = []
-        for b, val in rw_by_addr[addr]:
+        for base_low in rw_by_addr[addr]:
+            ent = rw_by_addr[addr][base_low]
+            b = ent["b"]
             lsb = b.reg_lsb or 0
             # ⭐先按字段位宽裁剪字段值，再左移——否则溢出位会侵入同地址相邻字段
             fw = (b.reg_msb - b.reg_lsb + 1) if (b.reg_msb is not None and b.reg_lsb is not None) else 16
-            fval = val & E.mask(fw)
+            fval = ent["val"] & E.mask(fw)
             regval |= (fval << lsb)
             fields.append({"base": b.base, "lsb": lsb, "hex": fmt_hex(fval)})
         regval &= E.mask(16)

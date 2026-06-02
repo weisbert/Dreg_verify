@@ -158,6 +158,57 @@ def test_internal_signals_still_skipped_by_default(wb):
     assert "pll_n1[31:0]" not in names and "pll_n2[31:0]" not in names
 
 
+# ───────────── 同名信号多 bit 切片（A=[1] + B=[0]） ─────────────
+def test_multi_slice_inputs_not_collapsed(wb, resolver):
+    """回归(2026-06-02 严重 bug)：d_pfd_en_lnmode 的 A=[1]、B=[0] 是同一寄存器的两个 bit，
+    分组宽度必须是切片并集 [1:0]（2 bit），不能坍塌成 [1:1]（1 bit）。"""
+    sig = next(s for s in wb.logic if s.out_base == "d_pfd_en_lnmode")
+    node = E.parse(sig.expr)
+    bindings = resolver.resolve_signal_inputs(sig)
+    groups = V.input_groups(node, bindings)
+    g = {x["base"]: x for x in groups}["d_pfd_en_lnmode"]
+    assert g["width"] == 2                                  # [1]+[0] → 2 bit
+    assert g["label"] == "d_pfd_en_lnmode[1:0]"             # 不是 [1:1]
+    assert g["letter_lsbs"] == {"A": 1, "B": 0}             # 字母→bit 位置
+
+    # 物理值 0b10 → A(bit1)=1, B(bit0)=0 —— 修复前 A、B 错误地共享同一个值
+    bv = {"d_pfd_en_lnmode": 0b10, "mon_active": 0, "d_bt_lp_pll_dig_dft_iddq_mode": 0}
+    vec = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
+    assert vec.assignments["A"] == 1 and vec.assignments["B"] == 0
+    # (A?B:C)&(~F) = (1?0:0)&1 = 0
+    assert vec.exp_value == 0
+    # 0b11 → A=1,B=1 → 期望 1；0b01+C=1 → A=0→C=1 → 期望 1
+    vec2 = V.make_vector_from_base_values(node, bindings, groups,
+                                          dict(bv, d_pfd_en_lnmode=0b11), sig.out_width)
+    assert vec2.exp_value == 1
+    vec3 = V.make_vector_from_base_values(node, bindings, groups,
+                                          dict(bv, d_pfd_en_lnmode=0b01, mon_active=1), sig.out_width)
+    assert vec3.exp_value == 1
+    # 往返无损：letters → base_values
+    assert V.vector_to_base_values(vec, groups)["d_pfd_en_lnmode"] == 0b10
+
+
+def test_multi_slice_rf_write_combines_field(wb):
+    """切片合并写寄存器：A=1(bit1) B=0(bit0) → 字段值 0b10，落在 0xD 的 [15:14] → 0x8000。"""
+    sig = next(s for s in wb.logic if s.out_base == "d_pfd_en_lnmode")
+    from dreg_verify import resolver as R
+    res = R.Resolver(wb, wire_prefixes={"mon_active": "U_BT_LP_PLL_DIG"})
+    node = E.parse(sig.expr)
+    bindings = res.resolve_signal_inputs(sig)
+    groups = V.input_groups(node, bindings)
+    bv = {"d_pfd_en_lnmode": 0b10, "mon_active": 1, "d_bt_lp_pll_dig_dft_iddq_mode": 0}
+    vec = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
+    from dreg_verify import sv_writer as W
+    forces, writes, unres = W.compute_drives(vec, bindings, E.collect_vars(node))
+    assert not unres
+    by_addr = {w["addr"]: w["hex"] for w in writes}
+    assert by_addr["10'hD"] == "16'h8000"          # 0b10 << 14
+    # mon_active force 带前缀、iddq force 无前缀
+    wires = {f["wire"] for f in forces}
+    assert "U_BT_LP_PLL_DIG.mon_active" in wires
+    assert "d_bt_lp_pll_dig_dft_iddq_mode" in wires
+
+
 # ───────────── 探针前缀（输出网在 ENV_RF 子模块里） ─────────────
 def test_probe_prefix_in_sv(wb):
     """pll_n 实际在 U_BT_LP_PLL_DIG 内部 → 探针 = `ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]。"""

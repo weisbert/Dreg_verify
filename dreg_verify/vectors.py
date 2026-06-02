@@ -62,10 +62,45 @@ def _pattern(theme, width, var_index):
 
 
 def _control_levels(width):
-    """控制位枚举电平：1 位 → {0,1}；多位 → {0, 全1}（覆盖真值/假值）。"""
-    if width <= 1:
-        return [0, 1]
+    """控制位枚举电平：≤2 位 → 全枚举（多 bit 切片组如 d_pfd_en_lnmode[1:0]，各 bit 独立有意义）；
+    更宽 → {0, 全1}（覆盖真值/假值，避免组合爆炸）。"""
+    if width <= 2:
+        return list(range(1 << max(width, 1)))
     return [0, E.mask(width)]
+
+
+def _group_meta(letters, bindings, widths):
+    """同一物理信号的多个字母可能各占不同 bit 切片（A=d_pfd_en_lnmode[1]、B=[0]）。
+
+    返回 (union_width, union_msb, union_lsb, letter_lsbs)：
+      union 覆盖所有切片（[1]+[0] → 宽 2、[1:0]）；letter_lsbs = {字母: 切片 lsb}，
+      取值/驱动时按位拼装，不再共享同一个值（修：[1:0] 被坍塌成 [1:1] 的 bug）。
+    """
+    union_msb, union_lsb = 0, None
+    letter_lsbs = {}
+    for ltr in letters:
+        b = bindings.get(ltr)
+        msb = getattr(b, "slice_msb", None)
+        lsb = getattr(b, "slice_lsb", None)
+        if lsb is None or msb is None:
+            lsb, msb = 0, widths.get(ltr, 1) - 1
+        letter_lsbs[ltr] = lsb
+        union_msb = max(union_msb, msb)
+        union_lsb = lsb if union_lsb is None else min(union_lsb, lsb)
+    return union_msb + 1, union_msb, (union_lsb or 0), letter_lsbs
+
+
+def group_value_to_letters(letters, letter_lsbs, widths, value):
+    """物理信号取值 → 各字母取值（按各自切片位置取位）。"""
+    return {l: (value >> letter_lsbs[l]) & E.mask(widths.get(l, 1)) for l in letters}
+
+
+def letters_to_group_value(letters, letter_lsbs, widths, assignments):
+    """各字母取值 → 物理信号取值（按各自切片位置拼装）。"""
+    val = 0
+    for l in letters:
+        val |= (assignments.get(l, 0) & E.mask(widths.get(l, 1))) << letter_lsbs[l]
+    return val
 
 
 # ───────────────────────────── 主生成 ─────────────────────────────
@@ -93,22 +128,25 @@ def generate_vectors(node, bindings, out_width, mode="min", max_tests=256,
     for ltr in used:
         groups.setdefault(base_of[ltr], []).append(ltr)
     reps, rep_is_control, rep_width = [], {}, {}
+    group_lsbs = {}                   # base -> {字母: 切片lsb}（同信号多切片时按位拼装）
     for base, letters in groups.items():
         rep = letters[0]
         reps.append(rep)
         rep_is_control[rep] = any(l in control for l in letters)
-        rep_width[rep] = max(widths[l] for l in letters)
+        # 组宽度 = 所有切片的并集宽度（A=[1]+B=[0] → 2 bit），不是单字母宽度的 max
+        union_w, _msb, _lsb, letter_lsbs = _group_meta(letters, bindings, widths)
+        rep_width[rep] = union_w
+        group_lsbs[base] = letter_lsbs
     reps.sort(key=used.index)
     control_reps = [r for r in reps if rep_is_control[r]]
     data_reps = [r for r in reps if not rep_is_control[r]]
 
     def expand(rep_assign):
-        """把每个 base 代表字母的取值展开到同组所有字母(各按自身位宽 mask)。"""
+        """把每个 base(代表字母)的物理信号取值展开到同组所有字母——按各自切片位置取位。"""
         full = {}
         for base, letters in groups.items():
             val = rep_assign.get(letters[0], 0)
-            for l in letters:
-                full[l] = val & E.mask(widths[l])
+            full.update(group_value_to_letters(letters, group_lsbs[base], widths, val))
         for v in used:
             full.setdefault(v, 0)
         return full
@@ -280,24 +318,28 @@ def input_groups(node, bindings):
         rep = max(letters, key=lambda l: widths.get(l, 1))
         b = bindings.get(rep)
         base = (b.base if b and b.base else rep)
-        width = max(widths[l] for l in letters)
+        # 组宽度/切片 = 所有字母切片的并集（A=[1]+B=[0] → 宽 2、显示 [1:0]），不是单字母的
+        union_w, union_msb, union_lsb, letter_lsbs = _group_meta(letters, bindings, widths)
         groups.append({
             "base": base,                          # 查表/取值用的纯基名(不带位宽，勿改)
-            "label": base + _slice_str(b, width),  # 显示用(带 [msb:lsb] 位宽，供 GUI/CSV)
+            "label": base + _slice_str(b, union_w, union_msb, union_lsb),  # 显示用(带位宽)
             "letters": list(letters),
+            "letter_lsbs": letter_lsbs,            # 字母 → 它在该信号里的切片 lsb（取值/驱动按位拼装）
             "rep": rep,
-            "width": width,
+            "width": union_w,
             "is_control": any(l in control_set for l in letters),
             "kind": getattr(b, "kind", "?"),
         })
     return groups
 
 
-def _slice_str(binding, width):
-    """重建位宽切片显示串：优先用 logic 单元格里的 [msb:lsb]，否则按位宽给 [width-1:0]，标量为空。"""
+def _slice_str(binding, width, union_msb=None, union_lsb=None):
+    """重建位宽切片显示串：多字母时用切片并集 [union_msb:union_lsb]；标量为空。"""
+    if union_msb is not None and (union_msb, union_lsb) != (0, 0):
+        return "[%d:%d]" % (union_msb, union_lsb)
     msb = getattr(binding, "slice_msb", None)
     lsb = getattr(binding, "slice_lsb", None)
-    if msb is not None and lsb is not None:
+    if msb is not None and lsb is not None and (msb, lsb) != (0, 0):
         return "[%d:%d]" % (msb, lsb)
     if width and width > 1:
         return "[%d:0]" % (width - 1)
@@ -305,21 +347,21 @@ def _slice_str(binding, width):
 
 
 def _expand_base_values(groups, base_values, widths):
-    """{base_lower:int} → {字母:int}（每字母按自身位宽 mask）。未给的输入按 0。"""
+    """{base_lower:int} → {字母:int}（按各自切片位置取位）。未给的输入按 0。"""
     assign = {}
     for g in groups:
-        bk = g["base"].lower()
-        val = base_values.get(bk, 0)
-        for l in g["letters"]:
-            assign[l] = val & E.mask(widths.get(l, 1))
+        val = base_values.get(g["base"].lower(), 0)
+        assign.update(group_value_to_letters(g["letters"], g["letter_lsbs"], widths, val))
     return assign
 
 
 def vector_to_base_values(vec, groups):
-    """把一个 TestVector(字母→值) 转成 {base_lower:int}，供 GUI 显示成逐输入一列。"""
+    """把一个 TestVector(字母→值) 转成 {base_lower:int}：按切片位置把各字母的值拼回物理信号值。"""
     out = {}
     for g in groups:
-        out[g["base"].lower()] = vec.assignments.get(g["rep"], 0)
+        widths = {l: 64 for l in g["letters"]}      # 拼装时不截位(各字母值已按自身位宽生成)
+        out[g["base"].lower()] = letters_to_group_value(g["letters"], g["letter_lsbs"],
+                                                        widths, vec.assignments)
     return out
 
 
