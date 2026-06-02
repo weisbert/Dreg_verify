@@ -528,11 +528,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _populate_table(self):
         self._sig_loading = True
         self.table.setSortingEnabled(False)
+        # 重建前按信号名保留勾选状态(选/负向)——设置探针前缀等操作会重建表格，
+        # 不能把用户已勾选的测试清零
+        prev_checks = {}
+        for r in range(self.table.rowCount()):
+            k_it = self.table.item(r, COL_K)
+            sel_it = self.table.item(r, COL_SEL)
+            neg_it = self.table.item(r, COL_NEG)
+            if k_it is not None and sel_it is not None and neg_it is not None:
+                prev_checks[k_it.text()] = (sel_it.checkState() == QtCore.Qt.Checked,
+                                            neg_it.checkState() == QtCore.Qt.Checked)
         self.table.setRowCount(len(self.signals))
         for r, sig in enumerate(self.signals):
+            was_sel, was_neg = prev_checks.get(sig.out_name, (False, False))
             try:
-                self._set_check(r, COL_SEL, False)
-                self._set_check(r, COL_NEG, False)
+                self._set_check(r, COL_SEL, was_sel)
+                self._set_check(r, COL_NEG, was_neg)
                 self._set_text(r, COL_R, str(sig.assert_id))
                 self._set_text(r, COL_K, sig.out_name)
                 self._set_text(r, COL_OWNER, sig.owner)

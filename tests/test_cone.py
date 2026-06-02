@@ -354,6 +354,31 @@ def test_gui_prefix_column_shows_input_effect(tmp_path_factory):
     assert w.table.item(row3, gui.COL_PREFIX).text() == ""
 
 
+def test_gui_prefix_update_keeps_checked_signals(tmp_path_factory):
+    """配置探针前缀(OK)后整表重建：用户已勾选的『选』/『负向』必须原样保留。"""
+    from PySide6 import QtCore
+    gui, w = _pll_window(tmp_path_factory, "gui_keep_checks")
+    row_pll = next(r for r in range(w.table.rowCount())
+                   if w._sig_of_row(r).out_base == "pll_n")
+    row_res = next(r for r in range(w.table.rowCount())
+                   if w._sig_of_row(r).out_base == "d_logic_bt_lp_reserve")
+    w.table.item(row_pll, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
+    w.table.item(row_res, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)   # 同时触发负向定制
+    # 模拟『设置探针前缀』点 OK 后的数据路径
+    w._probe_prefixes = {"mon_active": "U_BT_LP_PLL_DIG"}
+    w._save_probe_prefixes()
+    w._reanalyze_all()
+    # 勾选保持（行可能因排序变化，按信号重新定位）
+    row_pll2 = next(r for r in range(w.table.rowCount())
+                    if w._sig_of_row(r).out_base == "pll_n")
+    row_res2 = next(r for r in range(w.table.rowCount())
+                    if w._sig_of_row(r).out_base == "d_logic_bt_lp_reserve")
+    assert w.table.item(row_pll2, gui.COL_SEL).checkState() == QtCore.Qt.Checked
+    assert w.table.item(row_res2, gui.COL_NEG).checkState() == QtCore.Qt.Checked
+    # 负向定制状态也未丢
+    assert "d_logic_bt_lp_reserve" in w._neg_only
+
+
 def test_gui_prefix_mapping_covers_input_wire(tmp_path_factory):
     """GUI 映射编辑器数据路径：配置 mon_active 前缀 → _reanalyze_all → 信号变 clean，force 带前缀。"""
     pytest.importorskip("PySide6")
