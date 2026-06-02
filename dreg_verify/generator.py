@@ -119,9 +119,16 @@ def _neg_enabled_for(sig, opts):
 
 
 def probe_prefix_for(sig, opts):
-    """该信号的探针层级前缀（信号名或基名命中映射即生效），没有则空串。"""
+    """该信号的探针层级前缀，没有则空串。
+
+    映射 key 兼容两套名字：Excel K 列名（d_ndiv_cnt_div_sel）和 RTL 网名（d_ndiv_cnt_div_sel_ls）。
+    scan_rtl.py 导出的映射用 RTL 网名，手工配置常用 K 列名——都认。
+    """
     p = opts.probe_prefixes or {}
-    return p.get(sig.out_name.lower()) or p.get(sig.out_base.lower()) or ""
+    rtl_base = getattr(sig, "rtl_base", sig.out_base)
+    rtl_name = getattr(sig, "rtl_name", sig.out_name)
+    return (p.get(sig.out_name.lower()) or p.get(sig.out_base.lower())
+            or p.get(rtl_name.lower()) or p.get(rtl_base.lower()) or "")
 
 
 def parse_probe_prefix_lines(text):

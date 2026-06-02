@@ -170,7 +170,8 @@ class Resolver:
 
         # ── 探针前缀：该 wire 在 ENV_RF 的子模块里(用户显式指定) → force 路径加前缀 ──
         # 例: mon_active 是 U_BT_LP_PLL_DIG 内部 wire → force `ENV_RF.U_BT_LP_PLL_DIG.mon_active
-        prefix = self.wire_prefixes.get(low)
+        # 映射 key 兼容输入基名(low)与 RTL 网名(级联 ls 输出会带 _ls 后缀)——scan_rtl 导出用后者
+        prefix = self.wire_prefixes.get(low) or self.wire_prefixes.get(wire_name.lower())
         if prefix and kind != "RW":
             wire_name = "%s.%s" % (prefix.strip("."), wire_name)
             if found_in in ("wire", None):

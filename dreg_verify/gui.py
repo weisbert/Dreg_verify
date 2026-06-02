@@ -740,9 +740,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(msg)
 
     def _prefix_of(self, sig):
-        """该信号配置的探针前缀（无则空串）。"""
-        return (self._probe_prefixes.get(sig.out_name.lower())
-                or self._probe_prefixes.get(sig.out_base.lower()) or "")
+        """该信号配置的探针前缀（无则空串）。
+        映射 key 兼容 Excel K 列名与 RTL 网名(_ls 后缀)——scan_rtl.py 导出的是后者。"""
+        p = self._probe_prefixes
+        return (p.get(sig.out_name.lower()) or p.get(sig.out_base.lower())
+                or p.get(sig.rtl_name.lower()) or p.get(sig.rtl_base.lower()) or "")
 
     def _prefix_cell(self, sig, analysis):
         """探针前缀列：输出前缀 + 受前缀影响的输入(如 mon_active→U_BT_LP_PLL_DIG)。

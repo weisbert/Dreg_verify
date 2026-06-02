@@ -200,6 +200,38 @@ def test_force_prefix_for_input_wire(wb):
     assert "force `ENV_RF.d_bt_lp_pll_dig_dft_iddq_mode=" in text
 
 
+def test_probe_prefix_by_rtl_name_with_ls_suffix(wb):
+    """回归(2026-06-02 真实 bug)：scan_rtl 导出的映射 key 是 RTL 网名(带 _ls 后缀)，
+    必须能命中 Excel K 列名为 d_pfd_en_lnmode(无后缀) 的 ls 信号。"""
+    # 映射 key 用带 _ls 后缀的 RTL 网名（scan_rtl 输出格式）
+    opts = generator.GenOptions(signals=["d_pfd_en_lnmode"],
+                                probe_prefixes={"d_pfd_en_lnmode_ls": "U_BT_LP_PLL_DIG",
+                                                "mon_active": "U_BT_LP_PLL_DIG"})
+    res = generator.build(wb, opts)
+    assert res["summary"]["n_generated"] == 1
+    text = generator.render(res)
+    # 探针带前缀（且名字带 _ls）
+    assert "assert (`ENV_RF.U_BT_LP_PLL_DIG.d_pfd_en_lnmode_ls==" in text
+    assert "`ENV_RF.d_pfd_en_lnmode_ls==" not in text
+    # K 列名做 key 同样生效（两套名字都认）
+    opts2 = generator.GenOptions(signals=["d_pfd_en_lnmode"],
+                                 probe_prefixes={"d_pfd_en_lnmode": "U_BT_LP_PLL_DIG",
+                                                 "mon_active": "U_BT_LP_PLL_DIG"})
+    text2 = generator.render(generator.build(wb, opts2))
+    assert "assert (`ENV_RF.U_BT_LP_PLL_DIG.d_pfd_en_lnmode_ls==" in text2
+
+
+def test_wire_prefix_by_rtl_name_for_cascade_input(wb, resolver):
+    """级联输入指向 ls 输出时，force 网名带 _ls 后缀——映射 key 用 RTL 网名(_ls)也要能命中。"""
+    from dreg_verify import resolver as R
+    # d_en_refbuf 是 ls 输出(非寄存器字段)：级联 force 网名 = d_en_refbuf_ls
+    res2 = R.Resolver(wb, wire_prefixes={"d_en_refbuf_ls": "U_BT_LP_PLL_DIG"})
+    b = res2.resolve("A", {"raw": "d_en_refbuf", "base": "d_en_refbuf",
+                           "width": 1, "msb": None, "lsb": None})
+    assert b.kind == "RO" and b.found_in == "logic"
+    assert b.wire == "U_BT_LP_PLL_DIG.d_en_refbuf_ls"
+
+
 def test_probe_prefix_cli_parse():
     from dreg_verify.cli import _parse_probe_prefixes
     assert _parse_probe_prefixes(["pll_n=U_BT_LP_PLL_DIG", "x=A.B"]) == {
