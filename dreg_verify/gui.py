@@ -768,38 +768,76 @@ class MainWindow(QtWidgets.QMainWindow):
         _save_settings(st)
 
     def on_set_probe_prefix(self):
-        """探针前缀映射编辑器：每行『信号名=层级前缀』。
+        """探针前缀映射编辑器：每行『信号名=ENV_RF 下的层级路径』，可导入/导出复用。
 
         作用于两类网（同一张映射表）：
-        ① 被验证输出（如 pll_n）→ 断言写 `ENV_RF.<前缀>.pll_n[31:0]
-        ② force 的输入 wire（如 mon_active）→ force `ENV_RF.<前缀>.mon_active
-        勾选/选中的信号会自动带进编辑器(前缀留空待填)。删除该行 = 清除映射。
+        ① 被验证输出（如 pll_n）→ 断言写 `ENV_RF.<层级>.pll_n[31:0]
+        ② force 的输入 wire（如 mon_active）→ force `ENV_RF.<层级>.mon_active
         """
         if not self.wb:
             return
-        lines = ["%s=%s" % (k, v) for k, v in sorted(self._probe_prefixes.items())]
-        existing = set(self._probe_prefixes)
-        for r in self._scope_rows():
-            sig = self._sig_of_row(r)
-            if sig.out_name.lower() not in existing and sig.out_base.lower() not in existing:
-                lines.append("%s=" % sig.out_base.lower())
-        text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self, "探针前缀映射",
-            "每行一条：信号名=层级前缀（被验证输出、force 的输入 wire 都可以）。\n"
-            "用于该网不在 ENV_RF 顶层、而在子模块里时，如：\n"
-            "    pll_n=U_BT_LP_PLL_DIG\n    mon_active=U_BT_LP_PLL_DIG\n"
-            "删除整行 = 清除该映射；前缀留空的行被忽略。",
-            "\n".join(lines))
-        if not ok:
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("探针前缀映射")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        hint = QtWidgets.QLabel(
+            "每行一条映射：信号名=ENV_RF 之下的层级路径。例如：\n"
+            "    信号实际在  `ENV_RF.U_BT_LP_PLL_DIG.pll_n        →  pll_n=U_BT_LP_PLL_DIG\n"
+            "    信号实际在  `ENV_RF.U_BT_LP_PLL_DIG.DIG_1.xxx    →  xxx=U_BT_LP_PLL_DIG.DIG_1\n"
+            "被验证输出 → assert 探针带层级；force 输入 wire → force 路径带层级。\n"
+            "删除行 = 清除映射；# 开头 = 注释。")
+        lay.addWidget(hint)
+        edit = QtWidgets.QPlainTextEdit()
+        edit.setPlainText("\n".join("%s=%s" % (k, v)
+                                    for k, v in sorted(self._probe_prefixes.items())))
+        self._mono(edit)
+        lay.addWidget(edit)
+
+        btns = QtWidgets.QHBoxLayout()
+        b_imp = QtWidgets.QPushButton("导入…")
+        b_imp.setToolTip("从映射文件(.txt)导入：与现有合并，同名以导入为准")
+        b_exp = QtWidgets.QPushButton("导出…")
+        b_exp.setToolTip("把当前映射存为 .txt，下次/换表/给同事直接导入复用")
+        btns.addWidget(b_imp); btns.addWidget(b_exp); btns.addStretch(1)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        btns.addWidget(bb)
+        lay.addLayout(btns)
+
+        def do_import():
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                dlg, "导入探针前缀映射", "", "映射文本 (*.txt);;全部文件 (*)")
+            if not path:
+                return
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except OSError as ex:
+                QtWidgets.QMessageBox.critical(dlg, "导入失败", str(ex))
+                return
+            merged = generator.parse_probe_prefix_lines(edit.toPlainText())
+            merged.update(generator.parse_probe_prefix_lines(text))
+            edit.setPlainText("\n".join("%s=%s" % (k, v) for k, v in sorted(merged.items())))
+
+        def do_export():
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                dlg, "导出探针前缀映射", "probe_prefixes.txt", "映射文本 (*.txt)")
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(edit.toPlainText().rstrip() + "\n")
+            except OSError as ex:
+                QtWidgets.QMessageBox.critical(dlg, "导出失败", str(ex))
+                return
+            QtWidgets.QMessageBox.information(dlg, "完成", "已导出：%s" % path)
+
+        b_imp.clicked.connect(do_import)
+        b_exp.clicked.connect(do_export)
+        dlg.resize(620, 460)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
-        mapping = {}
-        for ln in text.splitlines():
-            ln = ln.strip()
-            if not ln or "=" not in ln:
-                continue
-            name, prefix = ln.split("=", 1)
-            if name.strip() and prefix.strip():
-                mapping[name.strip().lower()] = prefix.strip().strip(".")
+        mapping = generator.parse_probe_prefix_lines(edit.toPlainText())
         self._probe_prefixes = mapping
         self._save_probe_prefixes()
         self._reanalyze_all()

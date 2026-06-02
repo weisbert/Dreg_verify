@@ -124,6 +124,25 @@ def probe_prefix_for(sig, opts):
     return p.get(sig.out_name.lower()) or p.get(sig.out_base.lower()) or ""
 
 
+def parse_probe_prefix_lines(text):
+    """探针前缀映射文本 → dict。GUI 编辑器与映射文件共用同一格式：
+
+        # 注释行
+        pll_n=U_BT_LP_PLL_DIG
+        mon_active=U_BT_LP_PLL_DIG.DIG_1
+
+    每行 信号名=ENV_RF 下的层级路径。空行/#注释/无等号/空路径 → 跳过。"""
+    out = {}
+    for ln in (text or "").splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#") or "=" not in ln:
+            continue
+        name, prefix = ln.split("=", 1)
+        if name.strip() and prefix.strip():
+            out[name.strip().lower()] = prefix.strip().strip(".")
+    return out
+
+
 def expand_signal(wb, resolver, sig):
     """解析表达式并按需做 cone 展开（输入引用内部 logic 信号时递归代入其表达式）。
 

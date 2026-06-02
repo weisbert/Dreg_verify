@@ -209,6 +209,40 @@ def test_probe_prefix_cli_parse():
         _parse_probe_prefixes(["no_equal_sign"])
 
 
+def test_parse_probe_prefix_lines():
+    """映射文本解析：支持注释/空行/多级层级路径；空路径与坏行跳过；首尾点去除。"""
+    text = """
+# 这是注释
+pll_n=U_BT_LP_PLL_DIG
+
+mon_active=U_BT_LP_PLL_DIG.DIG_1
+empty_prefix=
+no_equal_sign
+spaced  =  U_X.Y.
+"""
+    assert generator.parse_probe_prefix_lines(text) == {
+        "pll_n": "U_BT_LP_PLL_DIG",
+        "mon_active": "U_BT_LP_PLL_DIG.DIG_1",
+        "spaced": "U_X.Y",
+    }
+    assert generator.parse_probe_prefix_lines("") == {}
+    assert generator.parse_probe_prefix_lines(None) == {}
+
+
+def test_probe_prefix_file_cli(tmp_path):
+    """CLI --probe-prefix-file 读 GUI 导出的映射文件；命令行 --probe-prefix 同名覆盖文件。"""
+    from dreg_verify.cli import _parse_probe_prefixes
+    f = tmp_path / "probe_prefixes.txt"
+    f.write_text("# 项目通用映射\npll_n=U_BT_LP_PLL_DIG\nmon_active=U_OLD\n", encoding="utf-8")
+    assert _parse_probe_prefixes([], str(f)) == {
+        "pll_n": "U_BT_LP_PLL_DIG", "mon_active": "U_OLD"}
+    # 命令行优先于文件
+    assert _parse_probe_prefixes(["mon_active=U_NEW"], str(f))["mon_active"] == "U_NEW"
+    # 文件不存在 → 明确报错
+    with pytest.raises(SystemExit):
+        _parse_probe_prefixes([], str(tmp_path / "missing.txt"))
+
+
 def test_probe_prefix_analyze_signal(wb, resolver):
     sig = next(s for s in wb.logic if s.out_base == "pll_n")
     a = generator.analyze_signal(resolver, sig, wb=wb, probe_prefix="U_BT_LP_PLL_DIG")

@@ -101,22 +101,31 @@ def build_argparser():
                     help="复刻 for_test 覆盖面: = --include-internal + --include-risky, 不跳过任何信号"
                          "(含 top_output=0 内部信号、含 close_ready_flag 等不可驱动 wire 的信号)。"
                          "用于和 for_test 逐信号对照；产物可能 CUVUNF 跑不起来(预期内)。")
-    g4.add_argument("--probe-prefix", action="append", default=[], metavar="信号=层级前缀",
-                    help="输出网在 ENV_RF 子模块里时的探针前缀，可多次。"
+    g4.add_argument("--probe-prefix", action="append", default=[], metavar="信号=层级路径",
+                    help="信号网在 ENV_RF 子模块里时的探针前缀，可多次。"
                          "如 --probe-prefix pll_n=U_BT_LP_PLL_DIG → 断言写 "
-                         "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]")
+                         "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]；force 输入 wire 同理")
+    g4.add_argument("--probe-prefix-file", default=None, metavar="映射.txt",
+                    help="从映射文件读探针前缀（每行 信号名=层级路径，# 为注释）。"
+                         "与 GUI『探针前缀映射→导出』的文件格式一致，可直接复用")
     return p
 
 
-def _parse_probe_prefixes(items):
-    """['pll_n=U_BT_LP_PLL_DIG', ...] → {'pll_n': 'U_BT_LP_PLL_DIG'}。格式错给出明确报错。"""
+def _parse_probe_prefixes(items, prefix_file=None):
+    """['pll_n=U_BT_LP_PLL_DIG', ...] + 映射文件 → {'pll_n': 'U_BT_LP_PLL_DIG'}。
+    命令行与文件同名时命令行优先。格式错给出明确报错。"""
     out = {}
+    if prefix_file:
+        if not os.path.isfile(prefix_file):
+            sys.exit("--probe-prefix-file 找不到文件: %s" % prefix_file)
+        with open(prefix_file, "r", encoding="utf-8") as f:
+            out.update(generator.parse_probe_prefix_lines(f.read()))
     for it in items or []:
         if "=" not in it:
-            sys.exit("--probe-prefix 格式应为 信号名=层级前缀，收到: %r" % it)
+            sys.exit("--probe-prefix 格式应为 信号名=层级路径，收到: %r" % it)
         name, prefix = it.split("=", 1)
         if not name.strip() or not prefix.strip():
-            sys.exit("--probe-prefix 信号名与前缀都不能为空: %r" % it)
+            sys.exit("--probe-prefix 信号名与层级路径都不能为空: %r" % it)
         out[name.strip()] = prefix.strip()
     return out
 
@@ -489,7 +498,7 @@ def main(argv=None):
         wire_fallback=not args.no_wire_fallback,
         comments=args.comments,
         include_risky=args.include_risky,
-        probe_prefixes=_parse_probe_prefixes(args.probe_prefix),
+        probe_prefixes=_parse_probe_prefixes(args.probe_prefix, args.probe_prefix_file),
     )
 
     print("装载 Excel: %s ..." % args.excel)
