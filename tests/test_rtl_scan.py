@@ -164,6 +164,32 @@ def test_nets_mode_matches_excel_mode(wb, modules):
     assert p1 == p2 and t1 == t2 and m1 == m2
 
 
+def test_infer_from_dreg_env(monkeypatch, tmp_path):
+    """服务器零参数模式：从 $dreg_dir/$dreg_file/$dreg_top 环境变量自动推断全部参数。"""
+    import argparse
+    import scan_rtl
+    dreg_dir = tmp_path / "digital" / "pll" / "LPBT_DIG_TOP"
+    dreg_dir.mkdir(parents=True)
+    (dreg_dir / "lpbt_dig_top.v").write_text(TOP_V, encoding="utf-8")
+    (tmp_path / "nets.txt").write_text("pll_n\n", encoding="utf-8")
+    monkeypatch.setenv("dreg_dir", str(dreg_dir))
+    monkeypatch.setenv("dreg_file", "lpbt_dig_top")
+    monkeypatch.setenv("dreg_top", "LPBT_DIG_TOP")
+    monkeypatch.chdir(tmp_path)
+
+    args = argparse.Namespace(top=None, top_module=None, rtl_dirs=None, nets=None, excel=None)
+    scan_rtl._infer_from_dreg_env(args)
+    assert args.top == os.path.join(str(dreg_dir), "lpbt_dig_top.v")
+    assert args.top_module == "LPBT_DIG_TOP"
+    assert args.rtl_dirs == os.path.normpath(str(tmp_path / "digital"))   # dreg_dir 上两级
+    assert args.nets == "nets.txt"
+
+    # 显式参数优先于环境变量
+    args2 = argparse.Namespace(top="x.v", top_module="X", rtl_dirs="rtl", nets="n.txt", excel=None)
+    scan_rtl._infer_from_dreg_env(args2)
+    assert args2.top == "x.v" and args2.rtl_dirs == "rtl" and args2.nets == "n.txt"
+
+
 def test_scan_rtl_is_stdlib_only():
     """scan_rtl.py 必须保持零第三方依赖（要能直接拷到无 openpyxl 的服务器上跑）。"""
     import ast

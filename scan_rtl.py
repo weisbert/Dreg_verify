@@ -191,18 +191,46 @@ def _load_excel_nets(excel_path):
     return rtl_scan.collect_excel_nets(wb)
 
 
+def _infer_from_dreg_env(args):
+    """从 dreg 验证环境变量自动推断参数（服务器上用户已 source 过 sourceme，这些变量现成）。
+
+      $dreg_dir  = .../digital/pll/LPBT_DIG_TOP   → DUT 顶层目录
+      $dreg_file = lpbt_dig_top                    → 顶层文件名（不含 .v）
+      $dreg_top  = LPBT_DIG_TOP                    → 顶层模块名
+    缺省 RTL 扫描范围 = $dreg_dir 上两级（即整个 digital/）；信号清单 = ./nets.txt。
+    """
+    dreg_dir = os.environ.get("dreg_dir")
+    dreg_file = os.environ.get("dreg_file")
+    dreg_top = os.environ.get("dreg_top")
+    if not args.top and dreg_dir and dreg_file:
+        args.top = os.path.join(dreg_dir, dreg_file + ".v")
+        print("✓ 自动推断 DUT 顶层 ($dreg_dir/$dreg_file.v): %s" % args.top)
+    if not args.top_module and dreg_top:
+        args.top_module = dreg_top
+        print("✓ 自动推断顶层模块 ($dreg_top): %s" % dreg_top)
+    if not args.rtl_dirs and dreg_dir:
+        args.rtl_dirs = os.path.normpath(os.path.join(dreg_dir, "..", ".."))
+        print("✓ 自动推断 RTL 扫描范围 ($dreg_dir/../..): %s" % args.rtl_dirs)
+    if not args.nets and not args.excel and os.path.isfile("nets.txt"):
+        args.nets = "nets.txt"
+        print("✓ 使用当前目录的 nets.txt")
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="扫描 RTL 自动生成探针前缀映射（--export-nets / --nets 两段式支持跨机器）")
+        description="扫描 RTL 自动生成探针前缀映射。服务器上(已 source dreg 环境 + 当前目录有 nets.txt)"
+                    "直接运行 python3 scan_rtl.py 即可，全部参数自动推断。",
+        epilog="跨机器两段式: ① Windows: scan_rtl.py --excel 真表.xlsx --export-nets nets.txt "
+               "② 传 scan_rtl.py + nets.txt 到服务器 ③ 服务器: python3 scan_rtl.py")
     ap.add_argument("--excel", help="Dreg 核心 Excel (.xlsx)（需要 openpyxl；服务器上用 --nets 代替）")
     ap.add_argument("--export-nets", metavar="nets.txt",
                     help="只导出信号清单（在 Windows 跑，产物上传服务器配合 --nets 用）")
     ap.add_argument("--nets", metavar="nets.txt",
-                    help="信号清单文件（--export-nets 的产物；服务器上零依赖运行）")
-    ap.add_argument("--top", help="DUT 顶层 .v 文件（即 ENV_RF 指向的模块）")
+                    help="信号清单文件（默认: 当前目录的 nets.txt）")
+    ap.add_argument("--top", help="DUT 顶层 .v 文件（默认: $dreg_dir/$dreg_file.v）")
     ap.add_argument("--top-module", default=None,
-                    help="顶层模块名（默认取 --top 文件里的第一个 module）")
-    ap.add_argument("--rtl-dirs", help="RTL 目录（逗号分隔），扫描其下所有 .v/.sv")
+                    help="顶层模块名（默认: $dreg_top 或 --top 文件里的第一个 module）")
+    ap.add_argument("--rtl-dirs", help="RTL 目录（逗号分隔；默认: $dreg_dir 上两级 = 整个 digital/）")
     ap.add_argument("--out", default="probe_prefixes.txt",
                     help="输出映射文件 (默认 probe_prefixes.txt)")
     ap.add_argument("--max-depth", type=int, default=4, help="层级展开深度 (默认 4)")
@@ -216,14 +244,16 @@ def main():
         with open(args.export_nets, "w", encoding="utf-8") as f:
             f.write(render_nets_text(nets))
         print("信号清单已写出: %s（共 %d 个网）" % (args.export_nets, len(nets)))
-        print("下一步: 把 scan_rtl.py + %s 上传到服务器，跑:" % args.export_nets)
-        print("  python3 scan_rtl.py --nets %s --top <DUT顶层.v> --rtl-dirs <RTL目录> --out probe_prefixes.txt"
-              % args.export_nets)
+        print("下一步: 把 scan_rtl.py + %s 上传到服务器(放运行目录)，source dreg 环境后直接跑:" % args.export_nets)
+        print("  python3 scan_rtl.py")
         return 0
 
     # ── 模式②/③：扫描 RTL（--nets 零依赖 / --excel 单机）──
+    _infer_from_dreg_env(args)      # 服务器：从 $dreg_dir/$dreg_file/$dreg_top 自动推断
     if not args.top or not args.rtl_dirs:
-        sys.exit("⛔ 扫描 RTL 需要 --top 和 --rtl-dirs（只想导信号清单用 --export-nets）")
+        sys.exit("⛔ 缺少 --top / --rtl-dirs。两种解决方式：\n"
+                 "  ① 先 source dreg 环境(设置 $dreg_dir/$dreg_file/$dreg_top)再运行（推荐）\n"
+                 "  ② 手动指定: --top <DUT顶层.v> --rtl-dirs <RTL目录>")
     if args.nets:
         with open(args.nets, "r", encoding="utf-8") as f:
             nets = parse_nets_text(f.read())
@@ -231,7 +261,8 @@ def main():
     elif args.excel:
         nets = _load_excel_nets(args.excel)
     else:
-        sys.exit("⛔ 需要 --nets（服务器）或 --excel（单机）提供信号清单")
+        sys.exit("⛔ 找不到信号清单。把 nets.txt 放到当前目录（或用 --nets 指定路径）；"
+                 "单机模式用 --excel 指定真表。")
 
     dirs = [d.strip() for d in args.rtl_dirs.split(",") if d.strip()]
     files = find_verilog_files(dirs)
