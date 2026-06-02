@@ -8,13 +8,15 @@ resolver.py — 把 logic 输入信号解析为驱动方式（force / RF_WRITE�
   3. 地址+bit：去 _to_logic → total_memory_map 按 Field Name 找 → 地址=F, bit=B。
   4. 同地址多 RW 字段合并一条 RF_WRITE（在 sv_writer 里完成）。
 
-⭐ _to_logic 网的物理含义（2026-06-02 d2a_cnt_sclk 实证，BT_LP_DREG.v）：
-  输入列原文带 _to_logic 后缀的网是 **regfile 导出的前级信号**（Excel Q 列 export_from_regmap）：
-      顶层端口 X → regfile → X_to_logic → sig_logic → 输出网 X_ls(/X)
-  X_to_logic 与 logic 输出网 X_ls 是两根不同的 wire。因此当输入与某个 logic 输出
-  同名（自引用，如 d2a_cnt_sclk；或引用另一个 top 输出）时，force 目标是前级原始
-  信号 X（顶层信号名，与 VBA/for_test 一致），绝不能 force 输出网 X_ls——
-  那等于把被验证的输出钉死，断言全部失真。
+⭐ _to_logic 网的物理含义（2026-06-02 d2a_cnt_sclk + d_ndiv_n 仿真实证）：
+  输入列原文 X_to_logic 的驱动者取决于 **X 自己的 logic 行是否自引用**：
+  ① X 的行读自己的 X_to_logic（自引用，如 d2a_cnt_sclk / d_ndiv_n）
+       → X_to_logic 是 regfile 导出的前级信号：端口/寄存器 X → regfile → X_to_logic → sig_logic
+       → 驱动方式 = force 基名 X（RO，透传）或 RF_WRITE（RW）。
+  ② X 的行不读自己的 X_to_logic（如 d_wl_wur_bt_pll_mode_sel）
+       → RTL 是 assign X_to_logic = <X 的表达式>；基名 X 和 X_ls 只是它的下游拷贝
+       → force 基名/X_ls 都钉不住源头 → 必须 force 字面 X_to_logic 网（需探针前缀）。
+  任何情况下都绝不能 force 被验证行自己的输出网（X_ls）——那等于把被断言的输出钉死。
 
 因拿不到真表，名称匹配用多策略，解析不到不静默猜——标记 UNRESOLVED，由 CLI 汇总报告；
 并支持手动覆盖：force_overrides / rfwrite_overrides（基名集合）。
@@ -29,7 +31,8 @@ _WIDTH_TAIL = re.compile(r"\[[^\]]*\]\s*$")
 def _raw_has_to_logic(raw):
     """输入单元格原文(去位宽)是否带 _to_logic 后缀。
 
-    带 → 该网是 regfile 导出的前级信号(X_to_logic)，不是任何 logic 输出网；
+    带 → 该网名是 RTL 里真实存在的 *_to_logic 网（由 regfile 导出 或 上游 logic 表达式驱动，
+         按上游行是否自引用区分，见模块头注释）；
     不带 → 原文就是要 force 的网名（引用另一 logic 输出时用其 RTL 网名，ls 行带 _ls）。
     """
     name = _WIDTH_TAIL.sub("", str(raw or "")).strip()
@@ -99,14 +102,23 @@ class Resolver:
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}
-        # logic 输出名(去位宽,小写) → (位宽, 是否 top_output, RTL 网名)：识别"输入其实是另一个 logic 输出"(级联/自引用)
-        # RTL 网名(ls 行带 _ls 后缀)仅当输入原文"直接写输出名"时才做 force 目标；
-        # 原文带 _to_logic 的输入读的是 regfile 导出的前级信号，force 基名（见 resolve 内注释）
+        # logic 输出名(去位宽,小写) → (位宽, 是否 top_output, RTL 网名, 是否自引用)
+        # 识别"输入其实是另一个 logic 输出"(级联/自引用)。
+        #
+        # ⭐ 第 4 元素 self_ref（2026-06-02 d_ndiv_n 仿真实证）—— 决定该输出的 X_to_logic 网由谁驱动：
+        #   该行读自己的 X_to_logic（自引用，如 d2a_cnt_sclk）
+        #     → X_to_logic 是 regfile 导出的前级信号（端口 X → regfile → X_to_logic → logic）
+        #     → 下游引用它时 force 基名 X 即可（透传）。
+        #   该行不读自己的 X_to_logic（如 d_wl_wur_bt_pll_mode_sel）
+        #     → RTL 是 assign X_to_logic = <表达式>；X / X_ls 只是它的下游拷贝
+        #     → 下游引用它时 force 基名/X_ls 都没用（钉死拷贝不影响源头），必须 force 字面 X_to_logic 网。
         self._logic_outputs = {}
         for s in wb.logic:
             is_top = str(s.top_output).strip() in ("1", "1.0", "True", "true")
+            self_ref = any(str(info.get("base", "")).lower() == s.out_base.lower()
+                           for info in s.inputs.values())
             self._logic_outputs.setdefault(s.out_base.lower(),
-                                           (s.out_width, is_top, s.rtl_base))
+                                           (s.out_width, is_top, s.rtl_base, self_ref))
 
     # ───────────── 名称匹配（多策略，歧义不静默猜） ─────────────
     def _match(self, base, table_lower, tag):
@@ -178,7 +190,7 @@ class Resolver:
             # 原文带 _to_logic → 该网是 regfile 导出的前级信号，不是任何 logic 输出网
             from_regfile = _raw_has_to_logic(raw)
             if chained is not None:
-                chained_w, chained_top, chained_rtl = chained
+                chained_w, chained_top, chained_rtl, chained_self_ref = chained
                 # 位宽推断：仅当输入单元格没写显式切片时，才用上游/本行输出的全宽。
                 # 显式切片(如 d_x_to_logic[1:0])的求值位宽就是切片自身宽度，不能被输出全宽覆盖——
                 # 否则枚举值越界(force 2bit 切片却生成 4bit 值)，断言期望与实际驱动不一致。
@@ -206,9 +218,10 @@ class Resolver:
                     if is_self:
                         note = ("⚠ 内部信号(top_output=0) %r 自引用——组合环，表本身可能有问题；"
                                 "且内部信号没有顶层端口可 force，无法验证" % base)
-                elif from_regfile:
-                    # 级联但原文带 _to_logic：读的是 regfile 导出的前级信号 X_to_logic
-                    # （= 顶层信号 X 的透传），不是上游 logic 输出网 X_ls → force 前级信号名
+                elif from_regfile and chained_self_ref:
+                    # 级联、原文带 _to_logic、且上游 X 自己也是自引用行（如 d2a_cnt_sclk）：
+                    # X_to_logic 是 regfile 导出的前级信号（= 顶层信号 X 的透传），
+                    # 不是上游 logic 输出网 X_ls → force 前级信号名
                     kind = "RO"
                     if found_in is None:
                         found_in = "logic"
@@ -216,6 +229,20 @@ class Resolver:
                     note = ("级联(前级)：输入原文 %s 是 regfile 导出的前级信号(顶层信号 %r 的透传，"
                             "%dbit)，force 前级信号名；它与上游 logic 输出网 %r 是两根不同的 wire"
                             % (raw, base, width, chained_rtl))
+                elif from_regfile:
+                    # ⭐ 级联、原文带 _to_logic、但上游 X 不自引用（2026-06-02 d_ndiv_n 仿真实证：
+                    # 输入 A=d_wl_wur_bt_pll_mode_sel_to_logic）：
+                    # RTL 是 assign X_to_logic = <上游表达式>；基名 X / X_ls 只是它的下游拷贝。
+                    # force 基名/X_ls 都钉不住 X_to_logic（assign 方向相反）→ 必须 force 字面 _to_logic 网。
+                    # 该网在 sig_logic 模块内部 → 需要探针前缀(scan_rtl)；没配前缀时标 needs-prefix
+                    # （build 默认跳过并给原因，保证产物能 elaborate）。
+                    kind = "RO"
+                    wire_name = _WIDTH_TAIL.sub("", str(raw)).strip()
+                    found_in = "needs-prefix"
+                    note = ("级联(上游计算网)：输入 %s 由上游 logic 行 %r 的表达式驱动"
+                            "(RTL: assign %s = <表达式>)，基名/%s 只是它的下游拷贝、force 不生效；"
+                            "必须 force 字面网 %s（在 sig_logic 模块内，需探针前缀——跑 scan_rtl 获取）"
+                            % (wire_name, base, wire_name, chained_rtl, wire_name))
                 else:
                     # 级联且原文不带 _to_logic（Excel 直接写上游输出名）→ force 其 RTL 网名(ls 行带 _ls)
                     kind = "RO"
@@ -230,12 +257,12 @@ class Resolver:
 
         # ── 探针前缀：该 wire 在 ENV_RF 的子模块里(用户显式指定) → force 路径加前缀 ──
         # 例: mon_active 是 U_BT_LP_PLL_DIG 内部 wire → force `ENV_RF.U_BT_LP_PLL_DIG.mon_active
-        # 映射 key 兼容输入基名(low)与 RTL 网名(级联 ls 输出会带 _ls 后缀)——scan_rtl 导出用后者
+        # 映射 key 兼容输入基名(low)与实际 force 网名(级联 _ls / 上游计算网 _to_logic)——scan_rtl 导出用后者
         prefix = self.wire_prefixes.get(low) or self.wire_prefixes.get(wire_name.lower())
         if prefix and kind != "RW":
             wire_name = "%s.%s" % (prefix.strip("."), wire_name)
-            if found_in in ("wire", None):
-                found_in = "prefixed-wire"   # 用户确认该网存在 → 不再算 wire 兜底风险
+            if found_in in ("wire", "needs-prefix", None):
+                found_in = "prefixed-wire"   # 用户/scan_rtl 确认该网存在 → 不再算风险，可生成
             note = (note + "；" if note else "") + "探针前缀: 在 ENV_RF.%s 下" % prefix
 
         return InputBinding(

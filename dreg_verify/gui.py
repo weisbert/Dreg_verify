@@ -92,7 +92,8 @@ STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE
 # 输入来源(found_in)的中文标签——明细面板用；未映射的原样显示
 FOUND_IN_LABEL = {"tmm": "tmm命中", "regmap": "regmap命中", "logic": "级联前级",
                   "logic-internal": "内部信号", "wire": "wire兜底",
-                  "prefixed-wire": "前缀wire", "self-input": "自引用前级"}
+                  "prefixed-wire": "前缀wire", "self-input": "自引用前级",
+                  "needs-prefix": "需探针前缀(跑scan_rtl)"}
 # 「输入信号」表(真值表上方)：把字母→信号/角色/驱动 集中成一张可读的小表(取代头部那行难读的图例)
 INPUT_COLS = ["字母", "信号(位宽)", "角色", "类型", "驱动"]
 # 负向用 琥珀，刻意区别于"状态列红=信号坏掉/会 elaboration 失败"；红只留给真正的故障

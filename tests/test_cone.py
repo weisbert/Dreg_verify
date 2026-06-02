@@ -586,12 +586,14 @@ def test_cone_self_ref_leaf_forces_base_not_ls():
     assert "assert (`ENV_RF.d_x_ls==" in text
 
 
-def test_cone_leaf_cascade_forces_base_not_ls():
-    """cone 叶子是『前级级联』(原文带 _to_logic 引用另一 top 输出)：force 基名，不是 _ls。
+def test_cone_leaf_cascade_self_ref_upstream_forces_base():
+    """cone 叶子原文带 _to_logic、上游行自引用(d2a 形态)：regfile 前级 → force 基名，不是 _ls。
 
     锁定 _full_binding 的 raw=b.raw 传递——mutation 审查确认改回 b.base 会让此叶子塌成 d_up_ls。"""
-    s_up = _mk_logic("d_up", 1, "A",
-                     {"A": {"raw": "cfg_to_logic", "base": "cfg", "width": 1,
+    s_up = _mk_logic("d_up", 1, "B?1'b0:A",
+                     {"A": {"raw": "d_up_to_logic", "base": "d_up", "width": 1,    # 自引用
+                            "msb": None, "lsb": None},
+                      "B": {"raw": "cfg_to_logic", "base": "cfg", "width": 1,
                             "msb": None, "lsb": None}},
                      "210", suffix="ls", top_output=1)
     s_mid = _mk_logic("d_mid", 1, "A",
@@ -606,9 +608,47 @@ def test_cone_leaf_cascade_forces_base_not_ls():
     _node, leaves = cone.expand(s_top, wb2, R.Resolver(wb2))
     leaf = leaves["D_UP"]
     assert leaf.kind == "RO" and leaf.found_in == "logic"
-    assert leaf.wire == "d_up"              # 前级信号基名
+    assert leaf.wire == "d_up"              # 前级信号基名(regfile 导出的透传)
     assert leaf.wire != "d_up_ls"
     assert "前级" in leaf.note
+
+
+def test_cone_leaf_cascade_computed_upstream_forces_to_logic_net():
+    """⭐cone 叶子原文带 _to_logic、上游行不自引用(d_ndiv_n←mode_sel 形态，2026-06-02 仿真实证)：
+
+    X_to_logic 是上游表达式算出来的网 → force 基名/X_ls 都钉不住 → force 字面 _to_logic 网。
+    没配前缀 → needs-prefix(整个信号默认跳过保 elaborate)；配前缀 → 正常生成。"""
+    s_up = _mk_logic("d_up", 1, "A",
+                     {"A": {"raw": "cfg_to_logic", "base": "cfg", "width": 1,     # 不自引用
+                            "msb": None, "lsb": None}},
+                     "230", suffix="ls", top_output=1)
+    s_mid = _mk_logic("d_mid", 1, "A",
+                      {"A": {"raw": "d_up_to_logic", "base": "d_up", "width": 1,
+                             "msb": None, "lsb": None}},
+                      "231", suffix="to_logic", top_output=0)
+    s_top = _mk_logic("d_top", 1, "A",
+                      {"A": {"raw": "d_mid_to_logic", "base": "d_mid", "width": 1,
+                             "msb": None, "lsb": None}},
+                      "232", suffix="ls", top_output=1)
+    wb2 = excel_model.DregWorkbook(logic=[s_up, s_mid, s_top], regmap={}, tmm={}, sheet_names=[])
+    # 没配前缀: 叶子标 needs-prefix, force 目标 = 字面 _to_logic 网
+    _node, leaves = cone.expand(s_top, wb2, R.Resolver(wb2))
+    leaf = leaves["D_UP"]
+    assert leaf.kind == "RO" and leaf.found_in == "needs-prefix"
+    assert leaf.wire == "d_up_to_logic"
+    assert leaf.wire not in ("d_up", "d_up_ls")
+    # build 默认跳过(给原因)，不会产出 CUVUNF 的 .sv
+    res = generator.build(wb2, generator.GenOptions(signals=["d_top"]))
+    assert res["summary"]["n_generated"] == 0 and res["summary"]["n_skipped"] == 1
+    assert "需要探针前缀" in str(res["skipped"][0][2])
+    # 配前缀(scan_rtl 产物)后正常生成
+    res2 = generator.build(wb2, generator.GenOptions(
+        signals=["d_top"], probe_prefixes={"d_up_to_logic": "U_DREG.U_SIG_LOGIC"}))
+    assert res2["summary"]["n_generated"] == 1
+    text = generator.render(res2)
+    assert "force `ENV_RF.U_DREG.U_SIG_LOGIC.d_up_to_logic=" in text
+    assert "force `ENV_RF.d_up=" not in text
+    assert "d_up_ls" not in text
 
 
 def test_cone_leaf_shorthand_cascade_still_forces_ls():

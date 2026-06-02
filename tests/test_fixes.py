@@ -266,13 +266,15 @@ def test_self_ref_input_not_in_tmm_still_generates():
     assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
 
 
-def test_cascade_via_to_logic_forces_base_not_ls():
-    """级联输入原文带 _to_logic(如 d_en_refbuf_to_logic)：读的是 regfile 导出的前级信号，
-    force 基名 d_en_refbuf；不能 force 上游输出网 d_en_refbuf_ls(两根不同的 wire)。
-    与 test_chained_ls_output_forces_rtl_name 对照——那个原文直接写输出名(无 _to_logic)，
-    才 force RTL 网名(_ls)。"""
-    s1 = _logic("d_en_refbuf", 1, "A",
-                {"A": {"raw": "d_en_refbuf_cfg_to_logic", "base": "d_en_refbuf_cfg",
+def test_cascade_to_logic_upstream_self_ref_forces_base():
+    """级联输入原文带 _to_logic、且上游行自引用(d2a 形态)：
+
+    上游 X 自引用 ⟹ X_to_logic 是 regfile 导出的前级信号(端口/寄存器 X 的透传)
+    → 下游 force 基名 X 即可；不能 force 上游输出网 X_ls(两根不同的 wire)。"""
+    s1 = _logic("d_en_refbuf", 1, "B?1'b0:A",
+                {"A": {"raw": "d_en_refbuf_to_logic", "base": "d_en_refbuf",     # 自引用
+                       "width": 1, "msb": None, "lsb": None},
+                 "B": {"raw": "d_iddq_to_logic", "base": "d_iddq",
                        "width": 1, "msb": None, "lsb": None}},
                 "50", suffix="ls", top_output=1)
     s2 = _logic("d_downstream", 1, "A",
@@ -285,6 +287,109 @@ def test_cascade_via_to_logic_forces_base_not_ls():
     assert b.wire == "d_en_refbuf"                      # 前级信号基名
     assert b.wire != "d_en_refbuf_ls"                   # 不是上游输出网
     assert "前级" in b.note
+
+
+def test_cascade_to_logic_upstream_computed_forces_literal_net():
+    """⭐级联输入原文带 _to_logic、但上游行不自引用(d_ndiv_n←mode_sel 形态，2026-06-02 仿真实证)：
+
+    上游 X 不自引用 ⟹ RTL 是 assign X_to_logic = <X 的表达式>；基名 X / X_ls 只是下游拷贝。
+    force 基名钉不住源头(仿真 T6-T9 实证: mux 永远选另一边) → 必须 force 字面 X_to_logic 网。
+    该网在 sig_logic 模块内 → 没配前缀时标 needs-prefix(默认跳过保 elaborate)，配了前缀正常生成。"""
+    s1 = _logic("d_en_refbuf", 1, "A",
+                {"A": {"raw": "d_en_refbuf_cfg_to_logic", "base": "d_en_refbuf_cfg",   # 不自引用
+                       "width": 1, "msb": None, "lsb": None}},
+                "50", suffix="ls", top_output=1)
+    s2 = _logic("d_downstream", 1, "A",
+                {"A": {"raw": "d_en_refbuf_to_logic", "base": "d_en_refbuf",
+                       "width": 1, "msb": None, "lsb": None}},
+                "51", suffix="to_mux", top_output=1)
+    wb = DregWorkbook(logic=[s1, s2], regmap={}, tmm={}, sheet_names=[])
+    # 没配前缀: 标 needs-prefix, force 目标是字面 _to_logic 网
+    b = Resolver(wb).resolve_signal_inputs(s2)["A"]
+    assert b.kind == "RO" and b.found_in == "needs-prefix"
+    assert b.wire == "d_en_refbuf_to_logic"             # 字面 _to_logic 网(上游表达式的输出)
+    assert b.wire not in ("d_en_refbuf", "d_en_refbuf_ls")
+    assert "上游" in b.note
+    # 配了前缀(scan_rtl 产物): 升级为 prefixed-wire, 路径带前缀
+    res2 = Resolver(wb, wire_prefixes={"d_en_refbuf_to_logic": "U_DREG.U_SIG_LOGIC"})
+    b2 = res2.resolve_signal_inputs(s2)["A"]
+    assert b2.found_in == "prefixed-wire"
+    assert b2.wire == "U_DREG.U_SIG_LOGIC.d_en_refbuf_to_logic"
+
+
+def test_d_ndiv_n_cascade_computed_to_logic_e2e():
+    """真实信号 d_ndiv_n[13:0]（2026-06-02 仿真 T6-T9 失败实证）全链路。
+
+    logic 行 42: L=A?{5'b00000,C}:B
+      A=d_wl_wur_bt_pll_mode_sel_to_logic  ← 上游 logic 算出来的网(上游行不自引用)
+      B=d_ndiv_n_to_logic[13:0]            ← 自引用 RW 寄存器(0x17) → RF_WRITE
+      C=ndiv_ls_to_logic[8:0]              ← RO 读回(to_logicro_reg_60) → force 基名
+    RTL:
+      assign d_wl_wur_bt_pll_mode_sel_to_logic = (...)&(...);          ← sig_logic 算的
+      assign d_wl_wur_bt_pll_mode_sel    = ..._to_logic;               ← 下游拷贝
+      assign d_ndiv_n_ls[13:0] = mode_sel_to_logic ? {5'b0,ndiv_ls_to_logic} : d_ndiv_n_to_logic;
+    旧 bug: force 基名(拷贝网) → mode_sel_to_logic 不受影响 → mux 永远选 B → T6-T9 fail。"""
+    s_mode = _logic("d_wl_wur_bt_pll_mode_sel", 1, "(A?C:B)&(~J)",
+                    {"A": {"raw": "d_pll_line_ctrl_mode_to_logic", "base": "d_pll_line_ctrl_mode",
+                           "width": 1, "msb": None, "lsb": None},
+                     "B": {"raw": "d_bt_lp_bt_mode_sel_to_logic", "base": "d_bt_lp_bt_mode_sel",
+                           "width": 1, "msb": None, "lsb": None},
+                     "C": {"raw": "d_pll_wurx_lpbt_mode_to_logic", "base": "d_pll_wurx_lpbt_mode",
+                           "width": 1, "msb": None, "lsb": None},
+                     "J": {"raw": "d_bt_lp_pll_dig_dft_iddq_mode_to_logic",
+                           "base": "d_bt_lp_pll_dig_dft_iddq_mode",
+                           "width": 1, "msb": None, "lsb": None}},
+                    "41", owner="Yao Wang", suffix="ls", top_output=1)
+    s_ndiv = _logic("d_ndiv_n[13:0]", 14, "A?{5'b00000,C}:B",
+                    {"A": {"raw": "d_wl_wur_bt_pll_mode_sel_to_logic",
+                           "base": "d_wl_wur_bt_pll_mode_sel",
+                           "width": 1, "msb": None, "lsb": None},
+                     "B": {"raw": "d_ndiv_n_to_logic[13:0]", "base": "d_ndiv_n",
+                           "width": 14, "msb": 13, "lsb": 0},
+                     "C": {"raw": "ndiv_ls_to_logic[8:0]", "base": "ndiv_ls",
+                           "width": 9, "msb": 8, "lsb": 0}},
+                    "42", owner="Yao Wang", suffix="ls", top_output=1)
+    tmm = {
+        "d_ndiv_n": TmmField("d_ndiv_n", 13, 0, 0x17, "RW", "N", "ANArw_reg_23"),
+        "ndiv_ls": TmmField("ndiv_ls", 8, 0, 0x3C, "RO", None, "to_logicro_reg_60"),
+        "d_pll_line_ctrl_mode": TmmField("d_pll_line_ctrl_mode", 14, 14, 0x17, "RW", "N", "R"),
+        "d_bt_lp_bt_mode_sel": TmmField("d_bt_lp_bt_mode_sel", 0, 0, 0x29, "RO", "Y", "R"),
+        "d_pll_wurx_lpbt_mode": TmmField("d_pll_wurx_lpbt_mode", 1, 1, 0x2C, "RW", "N", "R"),
+        "d_bt_lp_pll_dig_dft_iddq_mode":
+            TmmField("d_bt_lp_pll_dig_dft_iddq_mode", 2, 2, 0x29, "RO", "Y", "R"),
+    }
+    wb = DregWorkbook(logic=[s_mode, s_ndiv], regmap={}, tmm=tmm, sheet_names=[])
+
+    # ── 解析层 ──
+    bindings = Resolver(wb).resolve_signal_inputs(s_ndiv)
+    a, b, c = bindings["A"], bindings["B"], bindings["C"]
+    assert a.kind == "RO" and a.found_in == "needs-prefix"
+    assert a.wire == "d_wl_wur_bt_pll_mode_sel_to_logic"
+    assert b.kind == "RW" and b.address == 0x17          # 自引用 RW → RF_WRITE
+    assert c.kind == "RO" and c.wire == "ndiv_ls"        # RO 读回 → force 基名
+
+    # ── 没配前缀: 跳过(给原因)，保证产物能 elaborate ──
+    res = G.build(wb, G.GenOptions(signals=["d_ndiv_n"]))
+    assert res["summary"]["n_generated"] == 0 and res["summary"]["n_skipped"] == 1
+    assert "需要探针前缀" in str(res["skipped"][0][2])
+
+    # ── 配了前缀(scan_rtl 产物): 正常生成 ──
+    prefix = "U_BT_LP_PLL_DIG.U_BT_LP_DREG.U_SIG_LOGIC"
+    res2 = G.build(wb, G.GenOptions(
+        signals=["d_ndiv_n"],
+        probe_prefixes={"d_wl_wur_bt_pll_mode_sel_to_logic": prefix}))
+    assert res2["summary"]["n_generated"] == 1 and res2["summary"]["n_skipped"] == 0
+    text = G.render(res2)
+    # force 字面 _to_logic 网(带前缀)
+    assert "force `ENV_RF.%s.d_wl_wur_bt_pll_mode_sel_to_logic=" % prefix in text
+    # 绝不能 force 基名(下游拷贝)或 _ls 网——仿真实证那样无效/有害
+    assert "force `ENV_RF.d_wl_wur_bt_pll_mode_sel=" not in text
+    assert "force `ENV_RF.%s.d_wl_wur_bt_pll_mode_sel=" % prefix not in text
+    assert "d_wl_wur_bt_pll_mode_sel_ls" not in text
+    # B 走 RF_WRITE 0x17；C force 基名；断言探 d_ndiv_n_ls
+    assert "`RF_WRITE(10'h17," in text
+    assert "force `ENV_RF.ndiv_ls[8:0]=" in text
+    assert "assert (`ENV_RF.d_ndiv_n_ls[13:0]==" in text
 
 
 def test_multibit_force_wire_has_slice():

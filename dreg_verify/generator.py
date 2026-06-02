@@ -226,6 +226,12 @@ def build(wb, opts):
                     risky.append((ltr, b.base, "未解析"))
                 elif b.found_in == "wire":
                     risky.append((ltr, b.base, "wire兜底(表里查无,非可驱动 net)"))
+                elif b.found_in == "needs-prefix":
+                    # 上游 logic 计算出来的 _to_logic 网，在 sig_logic 模块内部，
+                    # 没有探针前缀 force 必然 CUVUNF → 跳过并给原因，保证产物能 elaborate
+                    risky.append((ltr, b.base,
+                                  "需要探针前缀: %s 是上游 logic 计算网(在 sig_logic 模块内)，"
+                                  "跑 scan_rtl 或手工配置前缀后才能生成" % b.wire))
             if risky:
                 skipped.append((sig.out_name, sig.assert_id, risky))
                 continue
@@ -356,7 +362,7 @@ def analyze_signal(resolver, sig, wb=None, probe_prefix=""):
                      "note": b.note})
         if not b.resolved:
             status = "unresolved"
-        elif b.found_in == "wire" and status == "clean":
+        elif b.found_in in ("wire", "needs-prefix") and status == "clean":
             status = "wire-fallback"
     return {"status": status, "inputs": rows, "out_net": out_net, "error": "", "cone": expanded}
 
@@ -467,9 +473,12 @@ def report(wb, opts):
         a = analyze_signal(resolver, sig, wb=wb)
         st = a["status"]
         verif["counts"][st] = verif["counts"].get(st, 0) + 1
-        risky = [i for i in a["inputs"] if (not i["resolved"]) or i["found_in"] == "wire"]
+        risky = [i for i in a["inputs"]
+                 if (not i["resolved"]) or i["found_in"] in ("wire", "needs-prefix")]
         risky_str = "; ".join(
-            "%s=%s(%s)" % (i["letter"], i["base"], "未解析" if not i["resolved"] else "wire兜底")
+            "%s=%s(%s)" % (i["letter"], i["base"],
+                           "未解析" if not i["resolved"] else
+                           ("需要探针前缀" if i["found_in"] == "needs-prefix" else "wire兜底"))
             for i in risky)
         verif["signals"].append({
             "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
@@ -534,9 +543,10 @@ def diagnose(wb, opts=None):
                 cats["force_ro"] += 1
             elif b.kind == "RO" and b.found_in in ("logic", "self-input"):
                 cats["force_chained"] += 1
-            elif b.kind == "RO" and b.found_in == "wire":
+            elif b.kind == "RO" and b.found_in in ("wire", "needs-prefix", "prefixed-wire"):
                 cats["force_wire"] += 1
-                fallback_wires.append((sig.out_name, ltr, b.base, b.width))
+                if b.found_in != "prefixed-wire":    # 已配前缀确认存在的不算"需你确认"
+                    fallback_wires.append((sig.out_name, ltr, b.base, b.width))
             else:
                 cats["unknown"] += 1
                 unknown.append((sig.out_name, ltr, b.base, b.note))
