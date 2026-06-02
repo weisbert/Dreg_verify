@@ -222,7 +222,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_combo = QtWidgets.QComboBox()
         self.status_combo.addItems(["全部状态", "仅 clean", "仅有问题(非clean)"])
         self.status_combo.currentIndexChanged.connect(self.apply_filter)
-        self.name_edit = QtWidgets.QLineEdit(); self.name_edit.setPlaceholderText("名字/正则搜索…")
+        self.name_edit = QtWidgets.QLineEdit()
+        self.name_edit.setPlaceholderText("搜索: 输出名/表达式/输入信号名(如 mon_active)…支持正则")
+        self.name_edit.setToolTip("除输出名和表达式外，也按【输入信号名】匹配——\n"
+                                  "搜某个输入(如 mon_active)即可列出所有用到它的输出信号。")
         self.name_edit.textChanged.connect(self.apply_filter)
         self.top_only = QtWidgets.QCheckBox("仅 top_output=1")    # 默认显示全部，便于 debug
         self.top_only.stateChanged.connect(self.apply_filter)
@@ -541,7 +544,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     it.setForeground(QtGui.QColor("red"))
                 it.setToolTip(STATUS_HELP.get(st, st))
                 self.table.setItem(r, COL_STATUS, it)
-                self._set_text(r, COL_PREFIX, self._prefix_of(sig))
+                self.table.setItem(r, COL_PREFIX, self._prefix_cell(sig, self._analysis.get(r, {})))
                 self._set_text(r, COL_EXPR, sig.expr)
                 self.table.item(r, COL_R).setData(QtCore.Qt.UserRole, r)
             except Exception:  # noqa: BLE001  单行异常不连累整表
@@ -572,9 +575,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         "  clean = 输入都解析到 net\n"
                         "  ⚠wire兜底 = 输入回退成 wire，elaboration 可能找不到\n"
                         "  ✗未解析/解析错 = 输入在 ENV_RF 层探不到（CUVUNF）",
-            COL_PREFIX: "探针层级前缀：输出网不在 ENV_RF 顶层、而在子模块里时填写。\n"
-                        "例如 pll_n 在 U_BT_LP_PLL_DIG 内部 → 断言写 `ENV_RF.U_BT_LP_PLL_DIG.pll_n。\n"
-                        "设置方法：勾选/选中信号后点下方『设置探针前缀』。",
+            COL_PREFIX: "探针层级前缀：信号网不在 ENV_RF 顶层、而在子模块里时配置（点下方『设置探针前缀』）。\n"
+                        "  输出→U_BT_LP_PLL_DIG = 断言探针带前缀（如 pll_n）\n"
+                        "  mon_active→U_BT_LP_PLL_DIG = 该输入的 force 路径带前缀\n"
+                        "蓝色 = 已生效；鼠标悬停可看完整路径。",
         }
         for c, t in tips.items():
             it = self.table.horizontalHeaderItem(c)
@@ -596,6 +600,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 rx = None
         top_only = self.top_only.isChecked()
         visible = 0
+        n_by_input = 0          # 仅因"输入信号名匹配"而显示的行数（搜输入名时给出明确反馈）
         for r in range(self.table.rowCount()):
             sig = self._sig_of_row(r)
             st = self._analysis[self._idx_of_row(r)]["status"]
@@ -608,15 +613,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 show = False
             if statusf == "仅有问题(非clean)" and st == "clean":
                 show = False
-            if rx and not (rx.search(sig.out_name) or rx.search(sig.expr)):
-                show = False
-            elif pat and not rx and pat.lower() not in (sig.out_name + sig.expr).lower():
-                show = False
+            # 名字搜索：输出名 / 表达式 / 输入信号名（如搜 mon_active → 列出所有用它做输入的输出）
+            if pat:
+                inputs = [i["base"] for i in sig.inputs.values() if i.get("base")]
+                if rx:
+                    out_hit = rx.search(sig.out_name) or rx.search(sig.expr)
+                    in_hit = any(rx.search(b) for b in inputs)
+                else:
+                    low = pat.lower()
+                    out_hit = low in (sig.out_name + sig.expr).lower()
+                    in_hit = any(low in b.lower() for b in inputs)
+                if not out_hit and not in_hit:
+                    show = False
+                elif in_hit and not out_hit:
+                    n_by_input += 1
             if top_only and str(sig.top_output).strip() not in ("1", "1.0", "True", "true"):
                 show = False
             self.table.setRowHidden(r, not show)
             visible += show
-        self.status.showMessage("可见信号 %d / 共 %d" % (visible, len(self.signals)))
+        msg = "可见信号 %d / 共 %d" % (visible, len(self.signals))
+        if pat and n_by_input:
+            msg += "（其中 %d 个因输入信号匹配 %r 而列出）" % (n_by_input, pat)
+        self.status.showMessage(msg)
 
     def _idx_of_row(self, r):
         return self.table.item(r, COL_R).data(QtCore.Qt.UserRole)
@@ -715,6 +733,28 @@ class MainWindow(QtWidgets.QMainWindow):
         return (self._probe_prefixes.get(sig.out_name.lower())
                 or self._probe_prefixes.get(sig.out_base.lower()) or "")
 
+    def _prefix_cell(self, sig, analysis):
+        """探针前缀列：输出前缀 + 受前缀影响的输入(如 mon_active→U_BT_LP_PLL_DIG)。
+
+        让用户一眼看到"映射生效在哪"：输出探针带前缀、哪些输入 wire 的 force 路径带前缀。
+        非空时蓝色高亮；tooltip 给完整 force/assert 路径。
+        """
+        parts, tips = [], []
+        out_pfx = self._prefix_of(sig)
+        if out_pfx:
+            parts.append("输出→%s" % out_pfx)
+            tips.append("输出探针: %s" % analysis.get("out_net", ""))
+        for i in analysis.get("inputs", []):
+            if i.get("found_in") == "prefixed-wire":
+                pfx = self._probe_prefixes.get((i.get("base") or "").lower(), "")
+                parts.append("%s→%s" % (i["base"], pfx))
+                tips.append("输入 %s: %s" % (i["base"], i.get("net", "")))
+        it = QtWidgets.QTableWidgetItem("；".join(parts))
+        if parts:
+            it.setForeground(QtGui.QColor("#0a58c4"))    # 蓝 = 前缀已生效（区别于红=故障）
+            it.setToolTip("探针前缀已生效：\n" + "\n".join(tips))
+        return it
+
     def _save_probe_prefixes(self):
         """探针前缀按 Excel 路径写入 settings（pytest 下 no-op，与其它持久化策略一致）。"""
         st = _load_settings()
@@ -763,7 +803,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._probe_prefixes = mapping
         self._save_probe_prefixes()
         self._reanalyze_all()
-        self.status.showMessage("探针前缀映射已更新（共 %d 条）" % len(mapping))
+        # 反馈映射生效范围：输出探针带前缀 / 任一输入 force 路径带前缀 的信号数
+        affected = sum(1 for i, s in enumerate(self.signals)
+                       if self._prefix_of(s)
+                       or any(x.get("found_in") == "prefixed-wire"
+                              for x in self._analysis.get(i, {}).get("inputs", [])))
+        self.status.showMessage("探针前缀映射已更新（共 %d 条），影响 %d 个信号"
+                                "（见蓝色『探针前缀』列；状态列应变 clean）" % (len(mapping), affected))
 
     def _reanalyze_all(self):
         """探针前缀变更后重建 Resolver（wire 前缀影响所有信号的输入解析）并刷新全表。"""

@@ -260,13 +260,64 @@ def test_gui_probe_prefix_flows_to_sv(tmp_path_factory):
                                                     probe_prefix=w._prefix_of(sig))
     w._populate_table()
     assert w._analysis[idx]["out_net"].startswith("`ENV_RF.U_BT_LP_PLL_DIG.")
-    # 前缀列显示
+    # 前缀列显示（输出前缀 → 带"输出→"标识）
     row = next(r for r in range(w.table.rowCount()) if w._sig_of_row(r).out_base == "pll_n")
-    assert w.table.item(row, gui.COL_PREFIX).text() == "U_BT_LP_PLL_DIG"
+    assert w.table.item(row, gui.COL_PREFIX).text() == "输出→U_BT_LP_PLL_DIG"
     # 生成走 _opts → .sv 探针带前缀
     res = generator.build(w.wb, w._opts(["pll_n"]))
     text = generator.render(res)
     assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in text
+
+
+def _pll_window(tmp_path_factory, sub):
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp(sub) / "synthetic_pll.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path)); w.on_load()
+    return gui, w
+
+
+def test_gui_search_by_input_signal(tmp_path_factory):
+    """按输入信号搜索：搜 mon_active → 只列出用它做输入的输出信号(d_pfd_en_lnmode)。"""
+    gui, w = _pll_window(tmp_path_factory, "gui_search")
+    w.name_edit.setText("mon_active")
+    visible = [w._sig_of_row(r).out_name for r in range(w.table.rowCount())
+               if not w.table.isRowHidden(r)]
+    assert visible == ["d_pfd_en_lnmode"]
+    # 输入名正则同样支持
+    w.name_edit.setText("^mon_act.*e$")
+    visible = [w._sig_of_row(r).out_name for r in range(w.table.rowCount())
+               if not w.table.isRowHidden(r)]
+    assert visible == ["d_pfd_en_lnmode"]
+    # 清空搜索 → 全部显示
+    w.name_edit.setText("")
+    assert all(not w.table.isRowHidden(r) for r in range(w.table.rowCount()))
+
+
+def test_gui_prefix_column_shows_input_effect(tmp_path_factory):
+    """输入信号配置前缀后，『探针前缀』列显示 mon_active→U_BT_LP_PLL_DIG（蓝色）。"""
+    gui, w = _pll_window(tmp_path_factory, "gui_pfxcol")
+    # 配置输入前缀 + 输出前缀
+    w._probe_prefixes = {"mon_active": "U_BT_LP_PLL_DIG", "pll_n": "U_BT_LP_PLL_DIG"}
+    w._reanalyze_all()
+    # d_pfd_en_lnmode：输入 mon_active 受影响
+    row = next(r for r in range(w.table.rowCount())
+               if w._sig_of_row(r).out_base == "d_pfd_en_lnmode")
+    cell = w.table.item(row, gui.COL_PREFIX)
+    assert "mon_active→U_BT_LP_PLL_DIG" in cell.text()
+    assert "U_BT_LP_PLL_DIG.mon_active" in cell.toolTip()   # 完整 force 路径
+    # pll_n：输出受影响
+    row2 = next(r for r in range(w.table.rowCount())
+                if w._sig_of_row(r).out_base == "pll_n")
+    assert "输出→U_BT_LP_PLL_DIG" in w.table.item(row2, gui.COL_PREFIX).text()
+    # 不相关的信号前缀列为空
+    row3 = next(r for r in range(w.table.rowCount())
+                if w._sig_of_row(r).out_base == "d_logic_bt_lp_reserve")
+    assert w.table.item(row3, gui.COL_PREFIX).text() == ""
 
 
 def test_gui_prefix_mapping_covers_input_wire(tmp_path_factory):
