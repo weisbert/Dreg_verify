@@ -1614,11 +1614,15 @@ class MainWindow(QtWidgets.QMainWindow):
         sig = self._ti_sig
         vecs = self._rows_to_vectors(self._ti_node, self._ti_bindings, self._ti_groups,
                                      sig.out_width, self._ti_rows)
-        # node/probe_prefix 必须传：cone 信号的驱动用叶子变量名；前缀信号探针带层级路径
+        # node/probe_prefix 必须传：cone 信号的驱动用叶子变量名；前缀信号探针带层级路径。
+        # owner_in_msg 跟随导出设置(预览=导出，所见即所得)；counters 不传——单信号片段
+        # 没有文件级 begin/end 包裹，计数器++会显示成未声明变量，徒增困惑。
         lines, _stats = W.render_signal_block(sig, self._ti_bindings, vecs,
                                               {"truncated": False}, comments=True,
                                               node=self._ti_node,
-                                              probe_prefix=self._prefix_of(sig))
+                                              probe_prefix=self._prefix_of(sig),
+                                              owner_in_msg=bool(_load_settings().get(
+                                                  "export_owner_in_msg", True)))
         self.preview.setPlainText("\n".join(lines))
         self._preview_source = "signal"
         if switch_tab:
@@ -1700,15 +1704,26 @@ class MainWindow(QtWidgets.QMainWindow):
             ov[name_low] = vecs          # 空列表也保留：删空=零用例，不回退自动
         return ov or None
 
-    def _opts(self, signals, neg_signals=None, positive_only=False, negative_only=False):
+    def _opts(self, signals, neg_signals=None, positive_only=False, negative_only=False,
+              owner_in_msg=None, sv_summary=None):
         # 注意：GUI 的负向统一走 vector_overrides(左侧"负向"列与右侧编辑器是同一套)，
         # 故这里默认不传 neg_signals，避免与 override 里的负向重复追加。
         mode, exhaustive = self._coverage()
+        # owner/汇总选项：on_generate 直接传对话框的返回值(当次导出以对话框为准，
+        # 不依赖"先写盘再读回"的往返——写盘失败/测试环境下会静默丢失)；
+        # 预览等其它路径不传 → 从持久化设置读上次的选择(预览=导出，所见即所得)。
+        st = _load_settings()
+        if owner_in_msg is None:
+            owner_in_msg = bool(st.get("export_owner_in_msg", True))
+        if sv_summary is None:
+            sv_summary = bool(st.get("export_sv_summary", True))
         return generator.GenOptions(
             signals=signals or None, neg_signals=neg_signals or None,
             mode=mode, max_tests=self.max_tests.value(), exhaustive=exhaustive,
             top_output_only=False,   # GUI 已按表勾选，不再二次过滤
             probe_prefixes=dict(self._probe_prefixes),
+            owner_in_msg=owner_in_msg,
+            sv_summary=sv_summary,
             vector_overrides=self._vector_overrides(positive_only=positive_only,
                                                     negative_only=negative_only))
 
@@ -1759,10 +1774,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.preview.appendPlainText(tip)
 
     def _ask_export_options(self, title):
-        """生成 .sv 前的导出选项：内容范围(全部/仅正向/仅负向) + 是否加注释。
-        记住上次选择(下次预选)。返回 {"scope":..., "comments":bool} 或 None。"""
+        """生成 .sv 前的导出选项：内容范围(全部/仅正向/仅负向) + 注释 + owner + 末尾汇总。
+        记住上次选择(下次预选)。返回 {"scope","comments","owner_in_msg","sv_summary"} 或 None。"""
         st = _load_settings()
         last_scope, last_cm = st.get("export_scope", "all"), bool(st.get("export_comments", False))
+        last_owner = bool(st.get("export_owner_in_msg", True))
+        last_summary = bool(st.get("export_sv_summary", True))
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle(title)
         lay = QtWidgets.QVBoxLayout(dlg)
@@ -1770,8 +1787,10 @@ class MainWindow(QtWidgets.QMainWindow):
         scope_combo = QtWidgets.QComboBox()
         scope_combo.addItem("全部（正向 + 负向）", "all")
         scope_combo.addItem("仅正向（正确用例）", "pos")
-        scope_combo.addItem("仅负向（故意填错，预期 FAIL）", "neg")
-        scope_combo.setToolTip("仅负向：只导出你标了'负向'的故意填错用例，方便单独验证'错了能否被抓到'")
+        scope_combo.addItem("仅负向（故意填错）", "neg")
+        scope_combo.setToolTip("仅负向：只导出你标了'负向'的故意填错用例。\n"
+                               "反例断言按'干净日志'风格：按设计 mismatch 时报 info(NEG-OK)，"
+                               "只有输出真等于错值才报 UVM_ERROR(NEG-BROKEN)")
         si = scope_combo.findData(last_scope)
         if si >= 0:
             scope_combo.setCurrentIndex(si)
@@ -1779,15 +1798,30 @@ class MainWindow(QtWidgets.QMainWindow):
         cm_chk = QtWidgets.QCheckBox("加注释（在 .sv 里标注每条用例/负向说明）")
         cm_chk.setChecked(last_cm)
         lay.addWidget(cm_chk)
+        owner_chk = QtWidgets.QCheckBox("断言消息带 owner（log 里直接看出是谁的信号）")
+        owner_chk.setToolTip("在 uvm_report 消息尾部追加 ', owner:<logic P列>'。\n"
+                             "消息前半段格式不变，已有的 log 解析脚本不受影响。产物纯英文。")
+        owner_chk.setChecked(last_owner)
+        lay.addWidget(owner_chk)
+        sum_chk = QtWidgets.QCheckBox("末尾测试汇总（断言总数/反例数/真 FAIL 数）")
+        sum_chk.setToolTip("仿真 log 最后一行直接给出：信号数、断言总数、正/反例数、\n"
+                           "运行时统计的真 FAIL 数(REAL FAIL)和反例异常数(NEG broken)。\n"
+                           "实现上会把整个语句体包进一层命名 begin/end 块(声明计数变量)，\n"
+                           "贴进任何 task/initial 体里都是合法 SV。")
+        sum_chk.setChecked(last_summary)
+        lay.addWidget(sum_chk)
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
         lay.addWidget(bb)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return None
         scope, comments = scope_combo.currentData(), cm_chk.isChecked()
+        owner_in_msg, sv_summary = owner_chk.isChecked(), sum_chk.isChecked()
         st["export_scope"] = scope; st["export_comments"] = comments
+        st["export_owner_in_msg"] = owner_in_msg; st["export_sv_summary"] = sv_summary
         _save_settings(st)               # 记住，下次预选
-        return {"scope": scope, "comments": comments}
+        return {"scope": scope, "comments": comments,
+                "owner_in_msg": owner_in_msg, "sv_summary": sv_summary}
 
     def _confirm_dup_labels(self, res):
         """有重复 assert 标号(非法 SV)就弹警告列出冲突对，让用户选『仍然生成/取消』。无冲突直接 True。"""
@@ -1814,6 +1848,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if opt is None:
             return
         scope, cm = opt["scope"], opt["comments"]
+        # 当次导出以对话框返回值为准(而非磁盘配置往返)；预览路径仍读持久化设置
+        kw = {"owner_in_msg": opt["owner_in_msg"], "sv_summary": opt["sv_summary"]}
         # 按内容范围构建：全部 / 仅正向(剔负向) / 仅负向(只含负向、无负向的信号略过)
         if scope == "neg":
             names = self._negative_signal_names(sel)
@@ -1822,13 +1858,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     self, "提示", "勾选的信号里没有任何负向测试，无法只导出'错误用例'。\n"
                     "请先勾左侧'负向'列(1条)，或在右侧编辑器'加负向(选中)'/'全部用例加负向'。")
                 return
-            res = generator.build(self.wb, self._opts(names, negative_only=True))
+            res = generator.build(self.wb, self._opts(names, negative_only=True, **kw))
             scope_msg = "（仅负向，共 %d 个含负向信号）" % len(names)
         elif scope == "pos":
-            res = generator.build(self.wb, self._opts(sel, positive_only=True))
+            res = generator.build(self.wb, self._opts(sel, positive_only=True, **kw))
             scope_msg = "（仅正向）"
         else:
-            res = generator.build(self.wb, self._opts(sel))
+            res = generator.build(self.wb, self._opts(sel, **kw))
             scope_msg = ""
 
         # 生成前拦截：重复 assert 标号 = 非法 SV(elaboration 必失败)，先让用户知情再决定写不写
@@ -1840,7 +1876,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            self._write(path, generator.render(res, comments=cm))
+            # 汇总命名块后缀跟导出范围走：『仅正向』『仅负向』两份贴进同一作用域也不重名
+            suffix = {"pos": "_pos", "neg": "_neg"}.get(scope, "")
+            self._write(path, generator.render(res, comments=cm, block_suffix=suffix))
         except OSError as ex:
             QtWidgets.QMessageBox.critical(
                 self, "写出失败",

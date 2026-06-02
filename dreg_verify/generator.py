@@ -20,7 +20,8 @@ class GenOptions:
                  force_overrides=None, rfwrite_overrides=None, default_kind=None,
                  top_output_only=False, types=None, wire_fallback=True,
                  exclude=None, exclude_regex=None, comments=False, include_risky=False,
-                 vector_overrides=None, probe_prefixes=None):
+                 vector_overrides=None, probe_prefixes=None,
+                 owner_in_msg=False, sv_summary=False, negative_vectors_only=False):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -50,6 +51,16 @@ class GenOptions:
         # `ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]，否则 CUVUNF。
         self.probe_prefixes = {k.strip().lower(): v.strip() for k, v in
                                (probe_prefixes or {}).items() if v and v.strip()}
+        # 断言消息尾部追加 owner（logic P 列）：log 里直接看出 fail 的是谁的信号。
+        # 前半段消息格式不变(追加式)，默认关以保持产物与旧版逐字节一致。
+        self.owner_in_msg = bool(owner_in_msg)
+        # 末尾测试汇总：产物包进命名 begin/end 块 + 计数器 + 汇总行
+        # (signals/asserts/positive/negative + 运行时 REAL FAIL / NEG broken 数)。
+        self.sv_summary = bool(sv_summary)
+        # 真·仅负向：每个信号只保留负向向量(保持原 T 编号便于与"全部"导出对照)，
+        # 无负向的信号整个跳过。CLI --neg-file separate 的负向文件用——
+        # 之前是块级过滤(负向文件里混着正例)，汇总/REAL FAIL 统计会误导。
+        self.negative_vectors_only = bool(negative_vectors_only)
 
 
 def _norm_set(x):
@@ -248,6 +259,13 @@ def build(wb, opts):
                 for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
                     v.index = i
 
+        # 真·仅负向：只保留负向向量(编号不重排，与"全部"导出的 T 编号一致便于对照)；
+        # 没有负向的信号整个不出现在产物里
+        if opts.negative_vectors_only:
+            vecs = [v for v in vecs if v.is_negative]
+            if not vecs:
+                continue
+
         # 全局 assert 标号唯一性检查：标号 = <R>_<test_label>，重复(同信号自定义名撞自动名、
         # 或两信号共用同一 R)在 SV 同一作用域里非法，会 elaboration 失败 → 收集并上报，不静默。
         aid = sig.assert_id or "X"
@@ -260,7 +278,9 @@ def build(wb, opts):
 
         lines, stats = W.render_signal_block(sig, bindings, vecs, meta,
                                              comments=opts.comments, node=node,
-                                             probe_prefix=probe_prefix_for(sig, opts))
+                                             probe_prefix=probe_prefix_for(sig, opts),
+                                             owner_in_msg=opts.owner_in_msg,
+                                             counters=opts.sv_summary)
         stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
@@ -282,11 +302,18 @@ def build(wb, opts):
         "regmap_signals": len(wb.regmap),
     }
     return {"blocks": blocks, "selected": selected, "errors": errors,
-            "skipped": skipped, "dup_labels": dup_labels, "summary": summary}
+            "skipped": skipped, "dup_labels": dup_labels, "summary": summary,
+            # 计数器++已按 opts.sv_summary 写进 blocks，render 必须配套包裹声明/汇总，
+            # 否则产物里是未声明变量 → 把标志带在结果里保证两者一致。
+            "sv_summary": opts.sv_summary}
 
 
-def render(result, header_info=None, comments=False):
-    return W.render_file(result["blocks"], header_info=header_info, comments=comments)
+def render(result, header_info=None, comments=False, block_suffix=""):
+    """block_suffix: 汇总命名块的后缀("_pos"/"_neg")——『仅正向』『仅负向』产物各取一个，
+    两份贴进同一作用域时块名不重名(同名兄弟命名块 = elaboration 错误)。"""
+    return W.render_file(result["blocks"], header_info=header_info, comments=comments,
+                         summary=result.get("sv_summary", False),
+                         block_suffix=block_suffix)
 
 
 def analyze_signal(resolver, sig, wb=None, probe_prefix=""):

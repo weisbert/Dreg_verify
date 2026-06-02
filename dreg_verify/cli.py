@@ -51,6 +51,12 @@ def build_argparser():
     p.add_argument("--list", action="store_true", help="只列出可生成信号清单，不生成")
     p.add_argument("--comments", action="store_true",
                    help="在 .sv 里加少量导航注释(文件头 + 每信号 1 行 // 名)；默认零注释(对齐真实模板)")
+    p.add_argument("--owner-in-msg", action="store_true",
+                   help="断言消息尾部追加 ', owner:<P列>'(英文)：仿真 log 里直接看出 fail 的是谁的信号。"
+                        "消息前半段格式不变")
+    p.add_argument("--sv-summary", action="store_true",
+                   help="产物末尾加测试汇总：统计断言总数/正反例数 + 运行时真 FAIL 数。"
+                        "会把整个语句体包进一层命名 begin/end 块(任何 task/initial 里贴入都合法)")
     p.add_argument("--diagnose", action="store_true",
                    help="覆盖诊断: 实测各输入被解析成 force(RO)/RF_WRITE(RW)/未知, "
                         "类型列有哪些写法, 有无 >16bit 输入(驱动会截断), 不生成")
@@ -499,6 +505,8 @@ def main(argv=None):
         comments=args.comments,
         include_risky=args.include_risky,
         probe_prefixes=_parse_probe_prefixes(args.probe_prefix, args.probe_prefix_file),
+        owner_in_msg=args.owner_in_msg,
+        sv_summary=args.sv_summary,
     )
 
     print("装载 Excel: %s ..." % args.excel)
@@ -538,11 +546,11 @@ def main(argv=None):
         pos_res = generator.build(wb, pos_opts)
         _write(out, generator.render(pos_res, comments=opts.comments))
         _report(pos_res, out)
-        # 负向文件：只含被选信号、仅负向
+        # 负向文件：真·仅负向(每信号只留负向向量，无负向的信号不出现)；
+        # 汇总命名块加 _neg 后缀 → 与主文件贴进同一作用域也不重名
         neg_path = _neg_path(out)
-        neg_res = generator.build(wb, _copy_opts(opts, neg_which=opts.neg_which))
-        neg_only = _filter_negative_only(neg_res)
-        _write(neg_path, generator.render(neg_only, comments=opts.comments))
+        neg_res = generator.build(wb, _copy_opts(opts, negative_vectors_only=True))
+        _write(neg_path, generator.render(neg_res, comments=opts.comments, block_suffix="_neg"))
         print("负向用例已单独写入: %s" % neg_path)
         return 0
 
@@ -559,14 +567,6 @@ def _copy_opts(opts, **overrides):
     for k, v in overrides.items():
         setattr(o, k, v)
     return o
-
-
-def _filter_negative_only(res):
-    """只保留含负向用例的信号块，并在渲染前删除其中的正常向量行——
-    简化处理：直接复用块（含正常+负向），实际项目里如需纯负向可再细化。"""
-    blocks = [(l, s) for (l, s) in res["blocks"] if s["n_negative"] > 0]
-    return {"blocks": blocks, "selected": res["selected"],
-            "errors": res["errors"], "summary": res["summary"]}
 
 
 def _neg_path(out):

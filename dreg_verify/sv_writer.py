@@ -6,12 +6,18 @@ sv_writer.py — 把 logic 信号 + 测试向量渲染为 wr_rf_tc.sv 的过程�
   - RO 输入 → force `ENV_RF.<wire> = 16'h<值>;
   - 同地址 RW 输入合并一条 `RF_WRITE(10'h<addr>, 16'h<寄存器值>);  寄存器值=OR(字段值<<lsb)
   - 每条驱动后跟 uvm_report_info(函数式)；全部驱动后 #1ps；
-  - 断言对齐 for_test 模板（无标号，id 作字符串进 $sformatf）：
+  - 正向断言对齐 for_test 模板（id 作字符串进 $sformatf）：
       assert (`ENV_RF.<输出K原文> == <宽>'b<二进制>) begin
         uvm_report_info("write assert rf_test",
           $sformatf("assert_%s: %s, sim out:0x%0h, you set:0x%0h", "<R>_T<n>", "<out>", `ENV_RF.<out>, <exp>), UVM_LOW);
       end else begin uvm_report_error(... 同上 ...); end
-  - 负向用例 id 加 _NEG，期望值故意填错，注释说明。
+  - 负向用例（干净日志风格，2026-06-02 用户拍板）：断言条件反写为 !=，
+      按设计 mismatch → info(NEG-OK 标签，不产生 UVM_ERROR)；
+      输出真等于故意填错值 → error(NEG-BROKEN 标签)。
+      这样 log 的 UVM_ERROR 总数 = 真问题数，回归脚本不会被反例污染。id 仍带 _NEG 后缀。
+  - 可选追加（前半段格式不变，新信息全部追加在消息尾部，纯英文）：
+      owner_in_msg → 消息尾部加 ", owner:<P列>"（半夜看 log 直接知道是谁的信号）
+      counters     → fail 分支里加计数器++，配合 render_file(summary=True) 出末尾汇总
 
 UVM 消息字符串集中在下方常量，按需调整以贴合你们的脚手架。
 """
@@ -31,6 +37,28 @@ ASSERT_ID = "write assert rf_test"    # uvm id for assert messages
 DRIVE_WIRE_MSG = "input wire name:%s, wire data:%0h"
 DRIVE_REG_MSG = "input reg addr:%0h, reg data:%0h"
 ASSERT_MSG = "assert_%s: %s, sim out:0x%0h, you set:0x%0h"
+# ── 消息尾部追加段（前半段 ASSERT_MSG 保持与 VBA 格式一字不差，便于已有 log 解析脚本继续工作） ──
+OWNER_FMT = ", owner:%s"                                              # owner 追加段(作 %s 实参传入)
+NEG_OK_TAIL = ", NEG-OK(intentional wrong value, mismatch expected)"  # 反例按设计工作
+NEG_BROKEN_TAIL = ", NEG-BROKEN(output equals the wrong value)"       # 反例出真问题
+# ── 末尾汇总（render_file(summary=True) 时把语句体包进命名块 + 计数器） ──
+SUMMARY_ID = "rf_test summary"        # uvm id for the end-of-test summary line
+SUMMARY_BLOCK = "dreg_rf_test"        # named begin/end block wrapping the whole body
+CNT_REAL_FAIL = "dreg_n_real_fail"    # counter: positive asserts that really failed
+CNT_NEG_BROKEN = "dreg_n_neg_broken"  # counter: negative asserts whose output == wrong value
+
+
+def _ascii(s):
+    """产物必须纯 ASCII 英文，且不能破坏 SV 字符串字面量(否则 elaboration 失败)：
+    - 非 ASCII → ?
+    - 换行/回车/制表等空白折叠成单空格(Excel 单元格 Alt+Enter 换行很常见，SV 字符串不能跨行)
+    - 其余控制字符 → ?
+    - 反斜杠 → /(尾部 \\ 会把收尾引号转义掉)；双引号 → 单引号(防字符串提前断裂)
+    """
+    txt = str(s).encode("ascii", "replace").decode()
+    txt = " ".join(txt.split())                                   # 折叠 \n\r\t 与连续空格
+    txt = "".join(c if c.isprintable() else "?" for c in txt)     # 残余控制字符
+    return txt.replace("\\", "/").replace('"', "'")
 
 
 # ───────────────────────────── 值格式化（最小位数、大写，不补零） ─────────────────────────────
@@ -148,12 +176,15 @@ def _s(v):
 
 # ───────────────────────────── 单个信号块 ─────────────────────────────
 def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
-                        probe_prefix=""):
+                        probe_prefix="", owner_in_msg=False, counters=False):
     """
     返回 (lines:list[str], stats:dict)。comments=True 时每信号加 1 行 // <名> 便于导航(默认零注释)。
     node: 已解析(或 cone 展开后)的表达式 AST；None 则从 sig.expr 解析。
     probe_prefix: 探针层级前缀(如 "U_BT_LP_PLL_DIG")——输出网不在 ENV_RF 顶层、
                   而在其子模块里时用：`ENV_RF.<prefix>.<rtl_name>。
+    owner_in_msg: True 时断言消息尾部追加 ", owner:<logic P列>"（前半段格式不变）。
+    counters: True 时 fail 分支里加计数器++（须配合 render_file(summary=True) 包裹声明，
+              否则产物里是未声明变量；generator.build 保证两者同开同关）。
     """
     lines = []
     used_vars = E.collect_vars(node if node is not None else E.parse(sig.expr))
@@ -166,6 +197,12 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
 
     if comments:
         lines.append("// %s" % sig.out_name)
+
+    # owner 作 $sformatf 的 %s 实参追加在最后（不嵌进格式串，防 owner 含 % 触发格式转义）
+    owner_fmt, owner_arg = "", ""
+    if owner_in_msg:
+        owner_fmt = OWNER_FMT
+        owner_arg = ',"%s"' % _ascii(sig.owner or "NA")
 
     block_unresolved = set()
     n_neg = 0
@@ -180,17 +217,30 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
         exp = fmt_bin(vec.asserted_value, vec.exp_width)
         # 断言 id = <R>_<测试名>；测试名见 test_label(自定义名/T<index>，负向带 _NEG)
         aid_str = "%s_%s" % (aid, test_label(vec))   # e.g. 8_T0 / 8_T1_NEG / 8_my_case
-        if comments and vec.is_negative:
-            lines.append("// NEG: 故意填错期望值，此断言预期应 FAIL(用于自检 checker 能抓错)")
         lines.append("assert_%s:" % aid_str)
         lines.append("")
-        msg = ('$sformatf("%s","%s","%s",%s, %s)'
-               % (ASSERT_MSG, aid_str, rtl_name, lhs, exp))
-        lines.append("assert (%s==%s)begin" % (lhs, exp))
-        lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_INFO, ASSERT_ID, msg))
+        if vec.is_negative:
+            # 反例（干净日志风格）：exp 是故意填错的值 → 断言反写 !=。
+            #   mismatch(条件为真) = 按设计工作 → info NEG-OK，不产生 UVM_ERROR；
+            #   输出真等于错值(条件为假) = 真问题(探针/RTL/checker) → error NEG-BROKEN。
+            if comments:
+                lines.append("// NEG: wrong value set on purpose; mismatch (NEG-OK) is the designed result")
+            cond, info_tail, err_tail = "!=", NEG_OK_TAIL, NEG_BROKEN_TAIL
+            err_cnt = CNT_NEG_BROKEN
+        else:
+            cond, info_tail, err_tail = "==", "", ""
+            err_cnt = CNT_REAL_FAIL
+        msg_info = ('$sformatf("%s","%s","%s",%s, %s%s)'
+                    % (ASSERT_MSG + info_tail + owner_fmt, aid_str, rtl_name, lhs, exp, owner_arg))
+        msg_err = ('$sformatf("%s","%s","%s",%s, %s%s)'
+                   % (ASSERT_MSG + err_tail + owner_fmt, aid_str, rtl_name, lhs, exp, owner_arg))
+        lines.append("assert (%s%s%s)begin" % (lhs, cond, exp))
+        lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_INFO, ASSERT_ID, msg_info))
         lines.append("end")
         lines.append("else begin")
-        lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_ERROR, ASSERT_ID, msg))
+        lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_ERROR, ASSERT_ID, msg_err))
+        if counters:
+            lines.append("%s%s++;" % (BODY_INDENT, err_cnt))
         lines.append("end")
         lines.append("")
 
@@ -204,16 +254,60 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
 
 
 # ───────────────────────────── 整个文件 ─────────────────────────────
-def render_file(blocks, header_info=None, comments=False):
-    """blocks: list[(lines, stats)]。comments=True 才加文件头注释(默认无，纯语句体)。"""
+def render_file(blocks, header_info=None, comments=False, summary=False, block_suffix=""):
+    """blocks: list[(lines, stats)]。comments=True 才加文件头注释(默认无，纯语句体)。
+
+    summary=True 时把整个语句体包进命名 begin/end 块：块首声明计数变量、
+    末尾打一行汇总(信号数/断言数/正反例数 + 运行时真 FAIL 数)。
+    须与 render_signal_block(counters=True) 配套使用（generator.build 保证一致）。
+    block_suffix: 命名块后缀(如 "_pos"/"_neg")——『仅正向』『仅负向』两份产物若被贴进
+    同一个 task/initial 作用域，同名兄弟命名块是 elaboration 重名错误，后缀让它们可共存。
+    """
     out = ["// auto-generated by Dreg_verify -- do not edit", ""] if comments else []
+    body = []
     total_unresolved = []
     for lines, stats in blocks:
-        out.extend(lines)
+        body.extend(lines)
         if stats["unresolved"]:
             total_unresolved.append((stats["out_name"], stats["unresolved"]))
     if total_unresolved:
-        out.append("// unresolved inputs (check name/type/addr or use --force-signals/--rfwrite-signals):")
+        body.append("// unresolved inputs (check name/type/addr or use --force-signals/--rfwrite-signals):")
         for name, us in total_unresolved:
-            out.append("//   %s: %s" % (name, "; ".join(us)))
+            body.append("//   %s: %s" % (name, "; ".join(us)))
+    if summary:
+        body = _wrap_with_summary(blocks, body, block_suffix)
+    out.extend(body)
     return "\n".join(out) + "\n"
+
+
+def _wrap_with_summary(blocks, body, block_suffix=""):
+    """汇总模式：命名 begin/end 块 + 计数变量 + 末尾汇总行。
+
+    声明与赋 0 分开写——SV 规定静态作用域(如 module 的 initial 块)里带初始化的
+    块内声明必须显式 static/automatic 限定；分开写则贴进 task 体或 initial 块都合法。
+    信号数/断言数/正反例数是生成时已知的常量，直接写进格式串；
+    真 FAIL 数是运行时计数器，作 $sformatf 实参。
+    计数变量声明在命名块内部(作用域随块)，块名不同即可在同一父作用域共存。
+    """
+    n_signals = len(blocks)
+    n_asserts = sum(st["n_vectors"] for _, st in blocks)
+    n_neg = sum(st["n_negative"] for _, st in blocks)
+    n_pos = n_asserts - n_neg
+    block_name = SUMMARY_BLOCK + (block_suffix or "")
+    head = [
+        "begin : %s" % block_name,
+        "%sint unsigned %s;" % (BODY_INDENT, CNT_REAL_FAIL),
+        "%sint unsigned %s;" % (BODY_INDENT, CNT_NEG_BROKEN),
+        "%s%s = 0;" % (BODY_INDENT, CNT_REAL_FAIL),
+        "%s%s = 0;" % (BODY_INDENT, CNT_NEG_BROKEN),
+        "",
+    ]
+    fmt = ("signals:%d asserts:%d (positive:%d, negative:%d), REAL FAIL:%%0d, NEG broken:%%0d"
+           % (n_signals, n_asserts, n_pos, n_neg))
+    tail = [
+        "",
+        '%s%s("%s",$sformatf("%s",%s,%s),UVM_LOW);'
+        % (BODY_INDENT, UVM_INFO, SUMMARY_ID, fmt, CNT_REAL_FAIL, CNT_NEG_BROKEN),
+        "end : %s" % block_name,
+    ]
+    return head + body + tail

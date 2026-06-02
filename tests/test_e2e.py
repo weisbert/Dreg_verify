@@ -147,8 +147,11 @@ def test_negative_cases(wb):
     res = generator.build(wb, opts)
     assert res["summary"]["n_negative"] == 1
     text = generator.render(res)
-    # 负向用例顺序编号(无 _NEG 后缀，对齐真实 VBA)；功能 1 条 + 负向 1 条 → 2 个断言标号
-    assert text.count("assert (`ENV_RF.d_logic_bt_lp_reserve==") >= 2
+    # 正例断言 == ；反例断言(干净日志风格，2026-06-02)反写成 != ——
+    # 按设计 mismatch 时报 info(NEG-OK)不产生 UVM_ERROR，输出真等于错值才报 error(NEG-BROKEN)
+    assert "assert (`ENV_RF.d_logic_bt_lp_reserve==" in text
+    assert "assert (`ENV_RF.d_logic_bt_lp_reserve!=" in text
+    assert "NEG-OK" in text and "NEG-BROKEN" in text
 
 
 # ───────────── UVM 宏正确性（uvm_info 是宏，uvm_report_info 是函数不能加反引号）─────────────
