@@ -406,7 +406,7 @@ def report(wb, opts):
             table["tests"].append({
                 "name": W.test_label(vec),
                 "neg": vec.is_negative,
-                "values": [_fmt_cell(bv.get(g["base"].lower(), 0), g["width"]) for g in groups],
+                "values": [_fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups],
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
                 "correct": _fmt_cell(vec.exp_value, vec.exp_width),
                 "force": force_str, "rfwrite": write_str,

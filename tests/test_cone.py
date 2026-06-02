@@ -159,33 +159,33 @@ def test_internal_signals_still_skipped_by_default(wb):
 
 
 # ───────────── 同名信号多 bit 切片（A=[1] + B=[0]） ─────────────
-def test_multi_slice_inputs_not_collapsed(wb, resolver):
-    """回归(2026-06-02 严重 bug)：d_pfd_en_lnmode 的 A=[1]、B=[0] 是同一寄存器的两个 bit，
-    分组宽度必须是切片并集 [1:0]（2 bit），不能坍塌成 [1:1]（1 bit）。"""
+def test_multi_slice_inputs_expanded_as_rows(wb, resolver):
+    """回归(2026-06-02 严重 bug + 用户拍板展示方式)：d_pfd_en_lnmode 的 A=[1]、B=[0] 是同一
+    寄存器的两个 bit —— 各自独立成行（A→[1]、B→[0]），取值互相独立，不许坍塌共享。"""
     sig = next(s for s in wb.logic if s.out_base == "d_pfd_en_lnmode")
     node = E.parse(sig.expr)
     bindings = resolver.resolve_signal_inputs(sig)
     groups = V.input_groups(node, bindings)
-    g = {x["base"]: x for x in groups}["d_pfd_en_lnmode"]
-    assert g["width"] == 2                                  # [1]+[0] → 2 bit
-    assert g["label"] == "d_pfd_en_lnmode[1:0]"             # 不是 [1:1]
-    assert g["letter_lsbs"] == {"A": 1, "B": 0}             # 字母→bit 位置
+    by_label = {g["label"]: g for g in groups}
+    # A、B 分开两行，各 1bit，标注各自切片
+    assert "d_pfd_en_lnmode[1]" in by_label and "d_pfd_en_lnmode[0]" in by_label
+    assert by_label["d_pfd_en_lnmode[1]"]["letters"] == ["A"]
+    assert by_label["d_pfd_en_lnmode[0]"]["letters"] == ["B"]
+    assert by_label["d_pfd_en_lnmode[1]"]["width"] == 1
 
-    # 物理值 0b10 → A(bit1)=1, B(bit0)=0 —— 修复前 A、B 错误地共享同一个值
-    bv = {"d_pfd_en_lnmode": 0b10, "mon_active": 0, "d_bt_lp_pll_dig_dft_iddq_mode": 0}
+    # A=1(bit1), B=0(bit0)：互相独立 —— 修复前 A、B 被坍塌成共享一个值
+    bv = {by_label["d_pfd_en_lnmode[1]"]["key"]: 1,
+          by_label["d_pfd_en_lnmode[0]"]["key"]: 0,
+          "mon_active": 0, "d_bt_lp_pll_dig_dft_iddq_mode": 0}
     vec = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
     assert vec.assignments["A"] == 1 and vec.assignments["B"] == 0
-    # (A?B:C)&(~F) = (1?0:0)&1 = 0
-    assert vec.exp_value == 0
-    # 0b11 → A=1,B=1 → 期望 1；0b01+C=1 → A=0→C=1 → 期望 1
-    vec2 = V.make_vector_from_base_values(node, bindings, groups,
-                                          dict(bv, d_pfd_en_lnmode=0b11), sig.out_width)
-    assert vec2.exp_value == 1
-    vec3 = V.make_vector_from_base_values(node, bindings, groups,
-                                          dict(bv, d_pfd_en_lnmode=0b01, mon_active=1), sig.out_width)
-    assert vec3.exp_value == 1
-    # 往返无损：letters → base_values
-    assert V.vector_to_base_values(vec, groups)["d_pfd_en_lnmode"] == 0b10
+    assert vec.exp_value == 0                               # (1?0:0)&~0 = 0
+    # A=0, C=1 → 期望 1
+    bv2 = dict(bv, **{by_label["d_pfd_en_lnmode[1]"]["key"]: 0, "mon_active": 1})
+    assert V.make_vector_from_base_values(node, bindings, groups, bv2, sig.out_width).exp_value == 1
+    # 自动向量：A、B 各自独立取值 → 存在 A != B 的用例（坍塌时不可能）
+    vecs, _meta = V.generate_vectors(node, bindings, sig.out_width, mode="min")
+    assert any(v.assignments["A"] != v.assignments["B"] for v in vecs)
 
 
 def test_multi_slice_rf_write_combines_field(wb):
@@ -196,7 +196,10 @@ def test_multi_slice_rf_write_combines_field(wb):
     node = E.parse(sig.expr)
     bindings = res.resolve_signal_inputs(sig)
     groups = V.input_groups(node, bindings)
-    bv = {"d_pfd_en_lnmode": 0b10, "mon_active": 1, "d_bt_lp_pll_dig_dft_iddq_mode": 0}
+    by_label = {g["label"]: g for g in groups}
+    bv = {by_label["d_pfd_en_lnmode[1]"]["key"]: 1,
+          by_label["d_pfd_en_lnmode[0]"]["key"]: 0,
+          "mon_active": 1, "d_bt_lp_pll_dig_dft_iddq_mode": 0}
     vec = V.make_vector_from_base_values(node, bindings, groups, bv, sig.out_width)
     from dreg_verify import sv_writer as W
     forces, writes, unres = W.compute_drives(vec, bindings, E.collect_vars(node))

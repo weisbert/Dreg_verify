@@ -1324,7 +1324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_loading = True
         try:
             for i, g in enumerate(self._ti_groups):
-                val = rd["base_values"].get(g["base"].lower(), 0)
+                val = rd["base_values"].get(g["key"], 0)
                 it = self._mk_item(self._cell_text(val, g["width"]), True)
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)   # 右对齐→低位对齐，列间差异一眼看出
                 self.ti_table.setItem(i, c, it)
@@ -1410,7 +1410,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if 0 <= r < len(self._ti_groups):
                 g = self._ti_groups[r]
                 val = self._parse_int(item.text()) & E.mask(g["width"])
-                rd["base_values"][g["base"].lower()] = val
+                rd["base_values"][g["key"]] = val
                 self._ti_recompute(rd)        # 正向→期望自动重算；负向→错值随之重算
             elif r == self.R_EXP:
                 if rd.get("kind") != "neg":   # 正向期望只读，不接受手改(防御)
@@ -1428,7 +1428,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
-        rd = {"base_values": {g["base"].lower(): 0 for g in self._ti_groups},
+        rd = {"base_values": {g["key"]: 0 for g in self._ti_groups},
               "kind": "pos", "note": "", "user_added": True}   # 用户新增正向列(可改名)
         self._ti_recompute(rd)
         self._ti_rows.append(rd)
@@ -1643,7 +1643,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 wr = csv.writer(f)
                 wr.writerow(["信号\\测试"] + [self._ti_label(rd, i) for i, rd in enumerate(rows)])
                 for g in self._ti_groups:
-                    bk = g["base"].lower()
+                    bk = g["key"]
                     wr.writerow([self._vheader_label(g)] + [self._fmt_val(rd["base_values"].get(bk, 0), g["width"])
                                                             for rd in rows])
                 out_w = self._ti_sig.out_width or 1
