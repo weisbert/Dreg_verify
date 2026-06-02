@@ -107,6 +107,10 @@ def build_argparser():
                     help="复刻 for_test 覆盖面: = --include-internal + --include-risky, 不跳过任何信号"
                          "(含 top_output=0 内部信号、含 close_ready_flag 等不可驱动 wire 的信号)。"
                          "用于和 for_test 逐信号对照；产物可能 CUVUNF 跑不起来(预期内)。")
+    g4.add_argument("--cascade-mode", choices=["cone", "force"], default="cone",
+                    help="级联(输入引用上游 logic 计算网)的驱动模式，详见 级联模式说明.md："
+                         "cone(默认)=展开上游表达式、驱动其源头寄存器(纯 Excel，不需要探针前缀)；"
+                         "force=直接 force 字面 _to_logic 网(每行 logic 隔离验证；需要 scan_rtl 前缀)")
     g4.add_argument("--probe-prefix", action="append", default=[], metavar="信号=层级路径",
                     help="信号网在 ENV_RF 子模块里时的探针前缀，可多次。"
                          "如 --probe-prefix pll_n=U_BT_LP_PLL_DIG → 断言写 "
@@ -507,6 +511,7 @@ def main(argv=None):
         probe_prefixes=_parse_probe_prefixes(args.probe_prefix, args.probe_prefix_file),
         owner_in_msg=args.owner_in_msg,
         sv_summary=args.sv_summary,
+        cascade_mode=args.cascade_mode,
     )
 
     print("装载 Excel: %s ..." % args.excel)

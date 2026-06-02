@@ -289,12 +289,13 @@ def test_cascade_to_logic_upstream_self_ref_forces_base():
     assert "前级" in b.note
 
 
-def test_cascade_to_logic_upstream_computed_forces_literal_net():
+def test_cascade_computed_two_modes_resolver():
     """⭐级联输入原文带 _to_logic、但上游行不自引用(d_ndiv_n←mode_sel 形态，2026-06-02 仿真实证)：
 
     上游 X 不自引用 ⟹ RTL 是 assign X_to_logic = <X 的表达式>；基名 X / X_ls 只是下游拷贝。
-    force 基名钉不住源头(仿真 T6-T9 实证: mux 永远选另一边) → 必须 force 字面 X_to_logic 网。
-    该网在 sig_logic 模块内 → 没配前缀时标 needs-prefix(默认跳过保 elaborate)，配了前缀正常生成。"""
+    force 基名钉不住源头(仿真 T6-T9 实证: mux 永远选另一边)。两种级联模式(见 级联模式说明.md)：
+      cone(默认)：标 logic-computed → cone 把上游表达式代入，驱动其源头寄存器（纯 Excel）
+      force：force 字面 X_to_logic 网 → 没配前缀标 needs-prefix(跳过保 elaborate)，配前缀正常生成"""
     s1 = _logic("d_en_refbuf", 1, "A",
                 {"A": {"raw": "d_en_refbuf_cfg_to_logic", "base": "d_en_refbuf_cfg",   # 不自引用
                        "width": 1, "msb": None, "lsb": None}},
@@ -304,24 +305,31 @@ def test_cascade_to_logic_upstream_computed_forces_literal_net():
                        "width": 1, "msb": None, "lsb": None}},
                 "51", suffix="to_mux", top_output=1)
     wb = DregWorkbook(logic=[s1, s2], regmap={}, tmm={}, sheet_names=[])
-    # 没配前缀: 标 needs-prefix, force 目标是字面 _to_logic 网
-    b = Resolver(wb).resolve_signal_inputs(s2)["A"]
+
+    # ── cone 模式(默认): 标 logic-computed(可展开)，不直接 force ──
+    b_cone = Resolver(wb).resolve_signal_inputs(s2)["A"]
+    assert b_cone.found_in == "logic-computed" and not b_cone.resolved
+    assert "展开" in b_cone.note
+
+    # ── force 模式: force 字面 _to_logic 网 ──
+    b = Resolver(wb, cascade_mode="force").resolve_signal_inputs(s2)["A"]
     assert b.kind == "RO" and b.found_in == "needs-prefix"
     assert b.wire == "d_en_refbuf_to_logic"             # 字面 _to_logic 网(上游表达式的输出)
     assert b.wire not in ("d_en_refbuf", "d_en_refbuf_ls")
     assert "上游" in b.note
-    # 配了前缀(scan_rtl 产物): 升级为 prefixed-wire, 路径带前缀
-    res2 = Resolver(wb, wire_prefixes={"d_en_refbuf_to_logic": "U_DREG.U_SIG_LOGIC"})
+    # force 模式 + 配了前缀(scan_rtl 产物): 升级为 prefixed-wire, 路径带前缀
+    res2 = Resolver(wb, cascade_mode="force",
+                    wire_prefixes={"d_en_refbuf_to_logic": "U_DREG.U_SIG_LOGIC"})
     b2 = res2.resolve_signal_inputs(s2)["A"]
     assert b2.found_in == "prefixed-wire"
     assert b2.wire == "U_DREG.U_SIG_LOGIC.d_en_refbuf_to_logic"
 
 
-def test_d_ndiv_n_cascade_computed_to_logic_e2e():
-    """真实信号 d_ndiv_n[13:0]（2026-06-02 仿真 T6-T9 失败实证）全链路。
+def _d_ndiv_n_workbook():
+    """真实信号 d_ndiv_n[13:0]（2026-06-02 仿真 T6-T9 失败实证）的镜像工作簿。
 
     logic 行 42: L=A?{5'b00000,C}:B
-      A=d_wl_wur_bt_pll_mode_sel_to_logic  ← 上游 logic 算出来的网(上游行不自引用)
+      A=d_wl_wur_bt_pll_mode_sel_to_logic  ← 上游 logic 算出来的网(上游行 41 不自引用)
       B=d_ndiv_n_to_logic[13:0]            ← 自引用 RW 寄存器(0x17) → RF_WRITE
       C=ndiv_ls_to_logic[8:0]              ← RO 读回(to_logicro_reg_60) → force 基名
     RTL:
@@ -358,10 +366,45 @@ def test_d_ndiv_n_cascade_computed_to_logic_e2e():
         "d_bt_lp_pll_dig_dft_iddq_mode":
             TmmField("d_bt_lp_pll_dig_dft_iddq_mode", 2, 2, 0x29, "RO", "Y", "R"),
     }
-    wb = DregWorkbook(logic=[s_mode, s_ndiv], regmap={}, tmm=tmm, sheet_names=[])
+    return s_mode, s_ndiv, DregWorkbook(logic=[s_mode, s_ndiv], regmap={}, tmm=tmm,
+                                        sheet_names=[])
 
-    # ── 解析层 ──
-    bindings = Resolver(wb).resolve_signal_inputs(s_ndiv)
+
+def test_d_ndiv_n_cone_mode_default_e2e():
+    """⭐d_ndiv_n 默认(cone 展开上游)模式全链路：纯 Excel、不需要任何探针前缀。
+
+    上游 mode_sel 的表达式被代入 → 驱动的是它的源头(line_ctrl/bt_mode/wurx/iddq 寄存器与管脚)，
+    级联信号本身(基名/_to_logic/_ls)完全不出现在驱动里。"""
+    _s_mode, s_ndiv, wb = _d_ndiv_n_workbook()
+
+    # 解析层: A 标 logic-computed(可展开)
+    a = Resolver(wb).resolve_signal_inputs(s_ndiv)["A"]
+    assert a.found_in == "logic-computed"
+
+    # e2e: 默认选项即可生成，不需要前缀、不跳过
+    res = G.build(wb, G.GenOptions(signals=["d_ndiv_n"]))
+    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+    assert res["blocks"][0][1]["cone_expanded"] is True
+    text = G.render(res)
+    # 驱动 = 上游的源头寄存器/管脚 + 本行自己的 B/C
+    assert "`RF_WRITE(10'h17," in text                              # d_ndiv_n + line_ctrl 同址合并
+    assert "force `ENV_RF.d_bt_lp_bt_mode_sel=" in text             # 上游叶子(RO 管脚)
+    assert "force `ENV_RF.d_bt_lp_pll_dig_dft_iddq_mode=" in text   # 上游叶子(RO 管脚)
+    assert "force `ENV_RF.ndiv_ls[8:0]=" in text                    # 本行 C(RO 读回)
+    # 级联信号本身不出现在任何驱动里(被表达式代入消掉了)
+    assert "d_wl_wur_bt_pll_mode_sel" not in text
+    assert "_to_logic" not in text
+    # 断言仍探本行输出网
+    assert "assert (`ENV_RF.d_ndiv_n_ls[13:0]==" in text
+
+
+def test_d_ndiv_n_force_mode_e2e():
+    """d_ndiv_n force 级联网模式全链路：force 字面 _to_logic 网(需前缀)；
+    没配前缀时跳过(给原因)保证产物能 elaborate。"""
+    _s_mode, s_ndiv, wb = _d_ndiv_n_workbook()
+
+    # ── 解析层(force 模式) ──
+    bindings = Resolver(wb, cascade_mode="force").resolve_signal_inputs(s_ndiv)
     a, b, c = bindings["A"], bindings["B"], bindings["C"]
     assert a.kind == "RO" and a.found_in == "needs-prefix"
     assert a.wire == "d_wl_wur_bt_pll_mode_sel_to_logic"
@@ -369,14 +412,14 @@ def test_d_ndiv_n_cascade_computed_to_logic_e2e():
     assert c.kind == "RO" and c.wire == "ndiv_ls"        # RO 读回 → force 基名
 
     # ── 没配前缀: 跳过(给原因)，保证产物能 elaborate ──
-    res = G.build(wb, G.GenOptions(signals=["d_ndiv_n"]))
+    res = G.build(wb, G.GenOptions(signals=["d_ndiv_n"], cascade_mode="force"))
     assert res["summary"]["n_generated"] == 0 and res["summary"]["n_skipped"] == 1
     assert "需要探针前缀" in str(res["skipped"][0][2])
 
     # ── 配了前缀(scan_rtl 产物): 正常生成 ──
     prefix = "U_BT_LP_PLL_DIG.U_BT_LP_DREG.U_SIG_LOGIC"
     res2 = G.build(wb, G.GenOptions(
-        signals=["d_ndiv_n"],
+        signals=["d_ndiv_n"], cascade_mode="force",
         probe_prefixes={"d_wl_wur_bt_pll_mode_sel_to_logic": prefix}))
     assert res2["summary"]["n_generated"] == 1 and res2["summary"]["n_skipped"] == 0
     text = G.render(res2)

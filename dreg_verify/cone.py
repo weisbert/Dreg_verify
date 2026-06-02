@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-cone.py — Cone 展开：当一个 logic 输出的输入引用其它 logic 内部信号(top_output=0)时，
-递归把内部信号的表达式代入(AST 级)，直到所有叶子输入都是真实寄存器/可驱动信号。
+cone.py — Cone 展开：当一个 logic 输出的输入引用其它 logic 行的输出时，
+递归把那个行的表达式代入(AST 级)，直到所有叶子输入都是真实寄存器/可驱动信号。
+
+两类输入会被展开（统称"可展开输入"）：
+  ① logic-internal  内部信号(top_output=0)，如 pll_n1/pll_n2——没有输出端口，不展开就没法验
+  ② logic-computed  上游计算网(top_output=1 但不自引用)，如 d_wl_wur_bt_pll_mode_sel_to_logic——
+                     『展开上游』级联模式(默认)下展开；『force级联网』模式下改为直接 force 该网
 
 实证依据（2026-06-02，Hi1108 真表 pll_n）：for_test(VBA) 对 pll_n[31:0] 的做法——
     pll_n  = en_dig_clk_div4 ? pll_n2<<1 : pll_n2          (logic row5)
@@ -12,7 +17,7 @@ cone.py — Cone 展开：当一个 logic 输出的输入引用其它 logic 内�
 （同地址字段合并 RF_WRITE），断言顶层输出 pll_n。
 
 展开结果：
-  node     — 复合 AST（内部信号已代入；切片用 expr.Part 表达）
+  node     — 复合 AST（被展开信号已代入；切片用 expr.Part 表达）
   bindings — {叶子大写基名: InputBinding}（驱动叶子寄存器；同寄存器多切片共享一个叶子）
 之后向量生成/.sv 渲染照常使用，无需感知 cone。
 """
@@ -26,11 +31,14 @@ class ConeError(Exception):
 
 MAX_DEPTH = 8
 
+# 会被 cone 展开的输入来源标记（见模块头注释）
+EXPANDABLE = ("logic-internal", "logic-computed")
+
 
 def find_internal_inputs(node, bindings):
-    """返回表达式里指向"内部 logic 输出"(top_output=0)的变量字母列表。空 = 不需要 cone 展开。"""
+    """返回表达式里"可展开输入"(内部信号/上游计算网)的变量字母列表。空 = 不需要 cone 展开。"""
     return [ltr for ltr in E.collect_vars(node)
-            if bindings.get(ltr) is not None and bindings[ltr].found_in == "logic-internal"]
+            if bindings.get(ltr) is not None and bindings[ltr].found_in in EXPANDABLE]
 
 
 def expand(sig, wb, resolver, _depth=0, _stack=None):
@@ -65,7 +73,7 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
         b = bindings.get(letter)
         if b is None:
             continue
-        if b.found_in == "logic-internal":
+        if b.found_in in EXPANDABLE:
             child = _find_logic(wb, b.base)
             if child is None:
                 raise ConeError("内部信号 %r 在 logic 页找不到定义行" % b.base)

@@ -29,28 +29,36 @@ def collect_excel_nets(wb):
          top_output=0 → K 列名 + _to_logic（在 sig_logic 模块内部，需要探针前缀才能验）
     ② 它们的 force 输入（RO/wire 兜底/级联）—— force 路径
     RW 寄存器输入走 RF_WRITE，不需要层级。返回 {网名: 用途说明}。
+
+    ⭐ 两种级联模式(cone 展开上游 / force 级联网)需要的网都导出——
+    一次 RTL 扫描同时覆盖两种模式，之后在 GUI/CLI 里切换模式不用重新扫。
     """
     from . import expr as E
     from . import generator
     from . import resolver as R
 
-    resolver = R.Resolver(wb)
     nets = {}
     for sig in wb.logic:
         kind = "" if sig.is_top else "（内部信号）"
         nets.setdefault(sig.rtl_base, "输出 %s 的 assert 探针%s" % (sig.out_name, kind))
-        try:
-            node, bindings, _ = generator.expand_signal(wb, resolver, sig)
-        except Exception:  # noqa: BLE001  cone 失败时退回原始绑定
+    # 两种级联模式各跑一遍解析，导出网取并集
+    for mode in ("cone", "force"):
+        resolver = R.Resolver(wb, cascade_mode=mode)
+        tag = "" if mode == "cone" else "（force级联网模式）"
+        for sig in wb.logic:
             try:
-                node = E.parse(sig.expr)
-                bindings = resolver.resolve_signal_inputs(sig)
-            except Exception:  # noqa: BLE001
-                continue
-        for b in bindings.values():
-            if b.kind == "RO":
-                base = b.wire.split(".")[-1]
-                nets.setdefault(base, "输出 %s 的输入 %s (force)" % (sig.out_name, b.base))
+                node, bindings, _ = generator.expand_signal(wb, resolver, sig)
+            except Exception:  # noqa: BLE001  cone 失败时退回原始绑定
+                try:
+                    node = E.parse(sig.expr)
+                    bindings = resolver.resolve_signal_inputs(sig)
+                except Exception:  # noqa: BLE001
+                    continue
+            for b in bindings.values():
+                if b.kind == "RO":
+                    base = b.wire.split(".")[-1]
+                    nets.setdefault(base, "输出 %s 的输入 %s (force)%s"
+                                    % (sig.out_name, b.base, tag))
     return nets
 
 

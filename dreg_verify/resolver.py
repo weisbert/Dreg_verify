@@ -81,7 +81,8 @@ class InputBinding:
 
 class Resolver:
     def __init__(self, wb, force_overrides=None, rfwrite_overrides=None,
-                 default_kind=None, wire_fallback=True, wire_prefixes=None):
+                 default_kind=None, wire_fallback=True, wire_prefixes=None,
+                 cascade_mode="cone"):
         """
         wb: DregWorkbook
         force_overrides / rfwrite_overrides: 基名集合(小写比较)，强制 RO / RW。
@@ -92,6 +93,10 @@ class Resolver:
         wire_prefixes: {信号名(小写): 层级前缀} —— 该 wire 不在 ENV_RF 顶层而在子模块里时，
                        force 路径写 ENV_RF.<前缀>.<名>（如 mon_active 在 U_BT_LP_PLL_DIG 内部）。
                        命中映射的 wire 视为"用户确认存在"，不再算 wire 兜底风险。
+        cascade_mode: 输入引用"上游计算网"(级联到不自引用的 top 输出，如 d_ndiv_n 的
+                       d_wl_wur_bt_pll_mode_sel_to_logic)时怎么驱动——详见 级联模式说明.md：
+            "cone"(默认) → 展开上游表达式，驱动它的源头寄存器/管脚（纯 Excel，不需要探针前缀）
+            "force"      → 直接 force 字面 _to_logic 网（每行 logic 隔离验证；需要 scan_rtl 前缀）
         """
         self.wb = wb
         self.force_overrides = {s.lower() for s in (force_overrides or [])}
@@ -99,6 +104,7 @@ class Resolver:
         self.default_kind = default_kind
         self.wire_fallback = wire_fallback
         self.wire_prefixes = {k.lower(): v for k, v in (wire_prefixes or {}).items()}
+        self.cascade_mode = cascade_mode if cascade_mode in ("cone", "force") else "cone"
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}
@@ -233,16 +239,28 @@ class Resolver:
                     # ⭐ 级联、原文带 _to_logic、但上游 X 不自引用（2026-06-02 d_ndiv_n 仿真实证：
                     # 输入 A=d_wl_wur_bt_pll_mode_sel_to_logic）：
                     # RTL 是 assign X_to_logic = <上游表达式>；基名 X / X_ls 只是它的下游拷贝。
-                    # force 基名/X_ls 都钉不住 X_to_logic（assign 方向相反）→ 必须 force 字面 _to_logic 网。
-                    # 该网在 sig_logic 模块内部 → 需要探针前缀(scan_rtl)；没配前缀时标 needs-prefix
-                    # （build 默认跳过并给原因，保证产物能 elaborate）。
-                    kind = "RO"
-                    wire_name = _WIDTH_TAIL.sub("", str(raw)).strip()
-                    found_in = "needs-prefix"
-                    note = ("级联(上游计算网)：输入 %s 由上游 logic 行 %r 的表达式驱动"
-                            "(RTL: assign %s = <表达式>)，基名/%s 只是它的下游拷贝、force 不生效；"
-                            "必须 force 字面网 %s（在 sig_logic 模块内，需探针前缀——跑 scan_rtl 获取）"
-                            % (wire_name, base, wire_name, chained_rtl, wire_name))
+                    # force 基名/X_ls 都钉不住 X_to_logic（assign 方向相反）。两种驱动模式：
+                    net = _WIDTH_TAIL.sub("", str(raw)).strip()
+                    if self.cascade_mode == "cone":
+                        # 模式 B"展开上游"(默认)：标记为可展开 → cone 把上游表达式代入，
+                        # 改为驱动上游的源头寄存器/管脚。纯 Excel，不需要探针前缀。
+                        kind = "UNKNOWN"
+                        found_in = "logic-computed"
+                        note = ("级联(上游计算网)：%s 由上游 logic 行 %r 的表达式驱动；"
+                                "已按『展开上游』模式处理——把上游表达式代入，驱动其源头寄存器"
+                                "（切换到『force级联网』模式可改为直接 force 该网，见 级联模式说明.md）"
+                                % (net, base))
+                    else:
+                        # 模式 A"force级联网"：直接 force 字面 _to_logic 网（每行 logic 隔离验证）。
+                        # 该网在 sig_logic 模块内部 → 需要探针前缀(scan_rtl)；没配前缀时标 needs-prefix
+                        # （build 默认跳过并给原因，保证产物能 elaborate）。
+                        kind = "RO"
+                        wire_name = net
+                        found_in = "needs-prefix"
+                        note = ("级联(上游计算网)：输入 %s 由上游 logic 行 %r 的表达式驱动"
+                                "(RTL: assign %s = <表达式>)，基名/%s 只是它的下游拷贝、force 不生效；"
+                                "必须 force 字面网 %s（在 sig_logic 模块内，需探针前缀——跑 scan_rtl 获取）"
+                                % (net, base, net, chained_rtl, net))
                 else:
                     # 级联且原文不带 _to_logic（Excel 直接写上游输出名）→ force 其 RTL 网名(ls 行带 _ls)
                     kind = "RO"

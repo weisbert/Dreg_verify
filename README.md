@@ -72,6 +72,7 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 | `--neg-which first\|all` | 每信号造 1 个还是每向量都造 |
 | `--neg-file inline\|separate` | 负向放同文件还是单独 `*_neg.sv` |
 | `--force-signals` / `--rfwrite-signals` | 手动指定 RO/RW（修正名称/类型判定） |
+| `--cascade-mode cone\|force` | **级联驱动模式**（输入引用上游 logic 计算网时）：cone(默认)=展开上游表达式驱动其源头寄存器（纯 Excel）；force=直接 force 字面 `_to_logic` 网（隔离验证，需 scan_rtl 前缀）。**图解见 [级联模式说明.md](级联模式说明.md)** |
 | `--no-wire-fallback` | 关闭 wire 兜底：非 RW 寄存器且查不到的输入不再默认 force，而是标 UNKNOWN |
 | `--include-risky` | 强制生成含'不可驱动输入'(wire兜底/未解析)的信号。**默认跳过**这类信号（force 不存在的 net 会让 elaboration 失败；与 VBA 一致跳过） |
 | `--diagnose` | 覆盖诊断：类型列原文分布 + 输入归类(RF_WRITE/force-RO/force-级联/force-wire/UNKNOWN)覆盖率 |
@@ -82,6 +83,10 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 其余都是 **wire** → `force`（按信号名），包括 RO 管脚、**级联中间信号**（某输入其实是另一个 logic 的输出，
 位宽自动取该输出的真实位宽）、以及表中查不到的信号（wire 兜底）。`--diagnose` 会把这几类分开列出，
 其中"wire 兜底"是你需要重点确认"是否真是 wire、还是命名没匹配上的寄存器"的部分。
+
+**级联（输入引用另一个 logic 行的输出）** 按上游行结构自动分流（背后的 RTL 知识与图解见
+[级联模式说明.md](级联模式说明.md)）：上游**自引用** → `_to_logic` 是 regfile 前级 → force 基名；
+上游**不自引用** → `_to_logic` 是上游表达式算的 → 按 `--cascade-mode` 选择展开上游（默认）或 force 该网。
 
 ## 图形界面（PySide6）
 

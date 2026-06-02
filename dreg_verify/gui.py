@@ -93,7 +93,8 @@ STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE
 FOUND_IN_LABEL = {"tmm": "tmm命中", "regmap": "regmap命中", "logic": "级联前级",
                   "logic-internal": "内部信号", "wire": "wire兜底",
                   "prefixed-wire": "前缀wire", "self-input": "自引用前级",
-                  "needs-prefix": "需探针前缀(跑scan_rtl)"}
+                  "needs-prefix": "需探针前缀(跑scan_rtl)",
+                  "logic-computed": "上游计算网(展开驱动)"}
 # 「输入信号」表(真值表上方)：把字母→信号/角色/驱动 集中成一张可读的小表(取代头部那行难读的图例)
 INPUT_COLS = ["字母", "信号(位宽)", "角色", "类型", "驱动"]
 # 负向用 琥珀，刻意区别于"状态列红=信号坏掉/会 elaboration 失败"；红只留给真正的故障
@@ -327,8 +328,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.max_tests = QtWidgets.QSpinBox(); self.max_tests.setRange(1, 100000); self.max_tests.setValue(256)
         self.max_tests.setToolTip("用例数上限(安全阀，防止穷举/全面产生过多用例)")
         self.max_tests.valueChanged.connect(self.on_coverage_changed)
+        # 级联模式：输入引用"上游 logic 计算网"(如 d_ndiv_n 的 mode_sel_to_logic)时怎么驱动
+        self.cascade_combo = QtWidgets.QComboBox()
+        self.cascade_combo.addItems(["展开上游(推荐)", "force级联网"])
+        self.cascade_combo.setToolTip(
+            "输入引用『上游 logic 算出来的网』(级联)时怎么驱动，两种模式图解见 级联模式说明.md：\n\n"
+            "  展开上游(默认)：把上游表达式代入，改为驱动它的源头寄存器/管脚。\n"
+            "      优点=纯 Excel、不需要探针前缀；代价=上游逻辑跟本行一起验，上游有 bug 会连带本行 fail\n\n"
+            "  force级联网：直接 force 那根 _to_logic 网。\n"
+            "      优点=每行 logic 隔离验证、fail 定位准；代价=该网在 sig_logic 模块内部，\n"
+            "      必须先跑 scan_rtl 拿到层级前缀，否则该信号会被跳过")
+        if _load_settings().get("cascade_mode") == "force":
+            self.cascade_combo.setCurrentIndex(1)
+        self.cascade_combo.currentIndexChanged.connect(self.on_cascade_mode_changed)
+        cascade_help = QtWidgets.QPushButton("?")
+        cascade_help.setFixedWidth(24)
+        cascade_help.setToolTip("打开『级联模式说明.md』(两种模式的图解与选择建议)")
+        cascade_help.clicked.connect(self._open_cascade_doc)
         for w in (QtWidgets.QLabel("覆盖度:"), self.coverage, self.cov_hint,
-                  QtWidgets.QLabel("   上限"), self.max_tests):
+                  QtWidgets.QLabel("   上限"), self.max_tests,
+                  QtWidgets.QLabel("   级联:"), self.cascade_combo, cascade_help):
             opt.addWidget(w)
         opt.addStretch(1)
         root.addLayout(opt)
@@ -438,6 +457,36 @@ class MainWindow(QtWidgets.QMainWindow):
             return ("max", False)
         return ("min", False)       # 精简
 
+    # ───────────── 级联模式（展开上游 / force级联网） ─────────────
+    def _cascade_mode(self):
+        """级联模式下拉 → GenOptions/Resolver 的 cascade_mode 字符串。"""
+        if not hasattr(self, "cascade_combo"):
+            return "cone"
+        return "force" if self.cascade_combo.currentIndex() == 1 else "cone"
+
+    def on_cascade_mode_changed(self, *args):
+        """级联模式切换 → 持久化 + 重建 Resolver 重析全表 + 重算当前编辑器信号(未自定义的)。"""
+        st = _load_settings()
+        st["cascade_mode"] = self._cascade_mode()
+        _save_settings(st)
+        if not self.wb:
+            return
+        self._reanalyze_all()
+        if (self._ti_sig is not None and self._ti_name_low is not None
+                and self._ti_name_low not in self._customized):
+            self._load_test_items(self._ti_sig)
+        self.status.showMessage("级联模式已切换为『%s』——含级联输入的信号已按新模式重新解析"
+                                % self.cascade_combo.currentText())
+
+    def _open_cascade_doc(self):
+        """打开仓库根目录的『级联模式说明.md』。"""
+        doc = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "级联模式说明.md")
+        if os.path.isfile(doc):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(doc))
+        else:
+            QtWidgets.QMessageBox.information(self, "提示", "找不到 级联模式说明.md（应在仓库根目录）")
+
     def on_coverage_changed(self, *args):
         """覆盖度/上限变化 → 即时重算当前信号的测试项：
         · 纯自动信号：直接按新覆盖度重算；
@@ -494,7 +543,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 探针前缀按 Excel 路径持久化：换表自动恢复上次配置（须在建 Resolver 前加载——wire 前缀要传进去）
         self._probe_prefixes = dict(_load_settings().get("probe_prefixes", {}).get(path, {}))
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
-        self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes)
+        self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
+                                    cascade_mode=self._cascade_mode())
         self._analysis = {}
         # 切换工作簿，清空旧的测试项编辑状态
         self._edited = {}
@@ -870,8 +920,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                 "（见蓝色『探针前缀』列；状态列应变 clean）" % (len(mapping), affected))
 
     def _reanalyze_all(self):
-        """探针前缀变更后重建 Resolver（wire 前缀影响所有信号的输入解析）并刷新全表。"""
-        self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes)
+        """探针前缀/级联模式变更后重建 Resolver（两者都影响所有信号的输入解析）并刷新全表。"""
+        self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
+                                    cascade_mode=self._cascade_mode())
         for i, s in enumerate(self.signals):
             try:
                 self._analysis[i] = generator.analyze_signal(
@@ -1730,6 +1781,7 @@ class MainWindow(QtWidgets.QMainWindow):
             probe_prefixes=dict(self._probe_prefixes),
             owner_in_msg=owner_in_msg,
             sv_summary=sv_summary,
+            cascade_mode=self._cascade_mode(),
             vector_overrides=self._vector_overrides(positive_only=positive_only,
                                                     negative_only=negative_only))
 

@@ -21,7 +21,8 @@ class GenOptions:
                  top_output_only=False, types=None, wire_fallback=True,
                  exclude=None, exclude_regex=None, comments=False, include_risky=False,
                  vector_overrides=None, probe_prefixes=None,
-                 owner_in_msg=False, sv_summary=False, negative_vectors_only=False):
+                 owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
+                 cascade_mode="cone"):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -61,6 +62,10 @@ class GenOptions:
         # 无负向的信号整个跳过。CLI --neg-file separate 的负向文件用——
         # 之前是块级过滤(负向文件里混着正例)，汇总/REAL FAIL 统计会误导。
         self.negative_vectors_only = bool(negative_vectors_only)
+        # 级联模式：输入引用"上游计算网"(级联到不自引用的 top 输出)时怎么驱动，见 级联模式说明.md：
+        #   "cone"(默认) = 展开上游表达式驱动其源头寄存器（纯 Excel，不需要探针前缀）
+        #   "force"      = 直接 force 字面 _to_logic 网（隔离验证每行；需要 scan_rtl 前缀）
+        self.cascade_mode = cascade_mode if cascade_mode in ("cone", "force") else "cone"
 
 
 def _norm_set(x):
@@ -189,7 +194,8 @@ def build(wb, opts):
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
                           wire_fallback=opts.wire_fallback,
-                          wire_prefixes=opts.probe_prefixes)
+                          wire_prefixes=opts.probe_prefixes,
+                          cascade_mode=opts.cascade_mode)
     selected = select_signals(wb, opts)
     blocks = []
     errors = []
@@ -387,7 +393,8 @@ def report(wb, opts):
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
                           wire_fallback=opts.wire_fallback,
-                          wire_prefixes=opts.probe_prefixes)
+                          wire_prefixes=opts.probe_prefixes,
+                          cascade_mode=opts.cascade_mode)
     sigs = select_signals(wb, opts)
     summary, detail, tables = [], [], []
     for sig in sigs:
@@ -500,7 +507,8 @@ def diagnose(wb, opts=None):
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
                           wire_fallback=opts.wire_fallback,
-                          wire_prefixes=opts.probe_prefixes)
+                          wire_prefixes=opts.probe_prefixes,
+                          cascade_mode=opts.cascade_mode)
     sigs = select_signals(wb, opts)
 
     # 1) 类型列原文分布（tmm H / regmap F）

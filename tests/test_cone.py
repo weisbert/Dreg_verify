@@ -613,11 +613,9 @@ def test_cone_leaf_cascade_self_ref_upstream_forces_base():
     assert "前级" in leaf.note
 
 
-def test_cone_leaf_cascade_computed_upstream_forces_to_logic_net():
-    """⭐cone 叶子原文带 _to_logic、上游行不自引用(d_ndiv_n←mode_sel 形态，2026-06-02 仿真实证)：
-
-    X_to_logic 是上游表达式算出来的网 → force 基名/X_ls 都钉不住 → force 字面 _to_logic 网。
-    没配前缀 → needs-prefix(整个信号默认跳过保 elaborate)；配前缀 → 正常生成。"""
+def _computed_upstream_chain():
+    """d_top → d_mid(内部) → d_up(top 输出、不自引用=计算网) 三层链，
+    且 d_up 的源头 cfg 是 RW 寄存器（两种级联模式都能驱动到底）。"""
     s_up = _mk_logic("d_up", 1, "A",
                      {"A": {"raw": "cfg_to_logic", "base": "cfg", "width": 1,     # 不自引用
                             "msb": None, "lsb": None}},
@@ -630,20 +628,52 @@ def test_cone_leaf_cascade_computed_upstream_forces_to_logic_net():
                       {"A": {"raw": "d_mid_to_logic", "base": "d_mid", "width": 1,
                              "msb": None, "lsb": None}},
                       "232", suffix="ls", top_output=1)
-    wb2 = excel_model.DregWorkbook(logic=[s_up, s_mid, s_top], regmap={}, tmm={}, sheet_names=[])
+    tmm = {"cfg": excel_model.TmmField("cfg", 0, 0, 0x10, "RW", "N", "R")}
+    return excel_model.DregWorkbook(logic=[s_up, s_mid, s_top], regmap={}, tmm=tmm,
+                                    sheet_names=[])
+
+
+def test_cone_leaf_computed_upstream_cone_mode_default():
+    """⭐cone 模式(默认)：上游计算网继续展开到底 → 叶子是 cfg 寄存器 → 纯 RF_WRITE，无需前缀。
+
+    d_top → d_mid(内部,展开) → d_up(计算网,继续展开) → cfg(RW 叶子)"""
+    wb2 = _computed_upstream_chain()
+    _node, leaves = cone.expand(next(s for s in wb2.logic if s.out_base == "d_top"),
+                                wb2, R.Resolver(wb2))
+    # 一路展开到底：唯一叶子 = cfg 寄存器
+    assert set(leaves) == {"CFG"}
+    assert leaves["CFG"].kind == "RW" and leaves["CFG"].address == 0x10
+    # e2e: 默认选项即可生成，驱动全是 RF_WRITE，级联网/上游名完全不出现
+    res = generator.build(wb2, generator.GenOptions(signals=["d_top"]))
+    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+    text = generator.render(res)
+    assert "`RF_WRITE(10'h10," in text
+    assert "d_up" not in text          # 上游信号(基名/_ls/_to_logic)被代入消掉，完全不出现
+    assert "d_mid" not in text         # 内部信号同样消掉
+    assert "force" not in text         # 叶子只有 RW 寄存器 → 全 RF_WRITE 无 force
+    assert "assert (`ENV_RF.d_top_ls==" in text
+
+
+def test_cone_leaf_computed_upstream_force_mode():
+    """force 级联网模式：上游计算网不展开 → force 字面 _to_logic 网(需前缀)。
+
+    没配前缀 → needs-prefix(整个信号默认跳过保 elaborate)；配前缀 → 正常生成。"""
+    wb2 = _computed_upstream_chain()
+    s_top = next(s for s in wb2.logic if s.out_base == "d_top")
     # 没配前缀: 叶子标 needs-prefix, force 目标 = 字面 _to_logic 网
-    _node, leaves = cone.expand(s_top, wb2, R.Resolver(wb2))
+    _node, leaves = cone.expand(s_top, wb2, R.Resolver(wb2, cascade_mode="force"))
     leaf = leaves["D_UP"]
     assert leaf.kind == "RO" and leaf.found_in == "needs-prefix"
     assert leaf.wire == "d_up_to_logic"
     assert leaf.wire not in ("d_up", "d_up_ls")
     # build 默认跳过(给原因)，不会产出 CUVUNF 的 .sv
-    res = generator.build(wb2, generator.GenOptions(signals=["d_top"]))
+    res = generator.build(wb2, generator.GenOptions(signals=["d_top"], cascade_mode="force"))
     assert res["summary"]["n_generated"] == 0 and res["summary"]["n_skipped"] == 1
     assert "需要探针前缀" in str(res["skipped"][0][2])
     # 配前缀(scan_rtl 产物)后正常生成
     res2 = generator.build(wb2, generator.GenOptions(
-        signals=["d_top"], probe_prefixes={"d_up_to_logic": "U_DREG.U_SIG_LOGIC"}))
+        signals=["d_top"], cascade_mode="force",
+        probe_prefixes={"d_up_to_logic": "U_DREG.U_SIG_LOGIC"}))
     assert res2["summary"]["n_generated"] == 1
     text = generator.render(res2)
     assert "force `ENV_RF.U_DREG.U_SIG_LOGIC.d_up_to_logic=" in text
