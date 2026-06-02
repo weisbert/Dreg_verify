@@ -167,7 +167,7 @@ def cmd_diagnose(wb, opts):
     print("\n[输入驱动方式分类]")
     print("   RF_WRITE (RW 寄存器)       : %d" % c["rfwrite"])
     print("   force - RO 寄存器/管脚      : %d" % c["force_ro"])
-    print("   force - 级联中间信号(logic 输出): %d" % c["force_chained"])
+    print("   force - 级联/自引用前级信号(logic 输出): %d" % c["force_chained"])
     print("   force - wire 兜底(表中查无)  : %d  ← 需你确认这些确实是 wire" % c["force_wire"])
     print("   UNKNOWN (仍无法处理)        : %d" % c["unknown"])
     if total:

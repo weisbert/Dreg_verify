@@ -547,3 +547,84 @@ def test_gui_prefix_mapping_covers_input_wire(tmp_path_factory):
     # 导出路径同样生效
     text = generator.render(generator.build(w.wb, w._opts([sig.out_name])))
     assert "force `ENV_RF.U_BT_LP_PLL_DIG.mon_active=" in text
+
+
+# ───────────── 自引用 × cone 组合（2026-06-02 对抗式审查确证的 high bug）─────────────
+def _mk_logic(out_name, out_width, expr, inputs, aid, suffix="ls", top_output=1):
+    return excel_model.LogicSignal(row=1, out_name=out_name, out_width=out_width, expr=expr,
+                                   suffix=suffix, top_output=top_output, notes="", owner="T",
+                                   assert_id=aid, inputs=inputs)
+
+
+def test_cone_self_ref_leaf_forces_base_not_ls():
+    """自引用(原文不带 _to_logic 简写) + 同信号引用内部信号(触发 cone)：
+
+    叶子重解析(_full_binding)必须保持自引用语义(self_base 透传) → force 基名，
+    绝不能 force 被断言的输出网 _ls。审查实证：不透传 self_base 时 cone 路径会让原 d2a bug 复活。"""
+    s_x = _mk_logic("d_x", 1, "A&B",
+                    {"A": {"raw": "d_x", "base": "d_x", "width": 1, "msb": None, "lsb": None},
+                     "B": {"raw": "d_y_to_logic", "base": "d_y", "width": 1,
+                           "msb": None, "lsb": None}},
+                    "200", suffix="ls", top_output=1)
+    s_y = _mk_logic("d_y", 1, "A",
+                    {"A": {"raw": "cfg_to_logic", "base": "cfg", "width": 1,
+                           "msb": None, "lsb": None}},
+                    "201", suffix="to_logic", top_output=0)
+    tmm = {"cfg": excel_model.TmmField("cfg", 0, 0, 0x10, "RW", "N", "R"),
+           "d_x": excel_model.TmmField("d_x", 1, 1, 0x3B, "RO", None, "R")}
+    wb2 = excel_model.DregWorkbook(logic=[s_x, s_y], regmap={}, tmm=tmm, sheet_names=[])
+    res = R.Resolver(wb2)
+    _node, leaves = cone.expand(s_x, wb2, res)
+    leaf = leaves["D_X"]
+    assert leaf.kind == "RO"
+    assert leaf.wire == "d_x"               # force 基名(前级原始信号)
+    assert leaf.wire != "d_x_ls"            # 绝不能 force 被断言的输出网
+    # e2e: .sv 里 force 基名 + assert 输出网，绝无 force 输出网
+    text = generator.render(generator.build(wb2, generator.GenOptions()))
+    assert "force `ENV_RF.d_x=" in text
+    assert "force `ENV_RF.d_x_ls" not in text
+    assert "assert (`ENV_RF.d_x_ls==" in text
+
+
+def test_cone_leaf_cascade_forces_base_not_ls():
+    """cone 叶子是『前级级联』(原文带 _to_logic 引用另一 top 输出)：force 基名，不是 _ls。
+
+    锁定 _full_binding 的 raw=b.raw 传递——mutation 审查确认改回 b.base 会让此叶子塌成 d_up_ls。"""
+    s_up = _mk_logic("d_up", 1, "A",
+                     {"A": {"raw": "cfg_to_logic", "base": "cfg", "width": 1,
+                            "msb": None, "lsb": None}},
+                     "210", suffix="ls", top_output=1)
+    s_mid = _mk_logic("d_mid", 1, "A",
+                      {"A": {"raw": "d_up_to_logic", "base": "d_up", "width": 1,
+                             "msb": None, "lsb": None}},
+                      "211", suffix="to_logic", top_output=0)
+    s_top = _mk_logic("d_top", 1, "A",
+                      {"A": {"raw": "d_mid_to_logic", "base": "d_mid", "width": 1,
+                             "msb": None, "lsb": None}},
+                      "212", suffix="ls", top_output=1)
+    wb2 = excel_model.DregWorkbook(logic=[s_up, s_mid, s_top], regmap={}, tmm={}, sheet_names=[])
+    _node, leaves = cone.expand(s_top, wb2, R.Resolver(wb2))
+    leaf = leaves["D_UP"]
+    assert leaf.kind == "RO" and leaf.found_in == "logic"
+    assert leaf.wire == "d_up"              # 前级信号基名
+    assert leaf.wire != "d_up_ls"
+    assert "前级" in leaf.note
+
+
+def test_cone_leaf_shorthand_cascade_still_forces_ls():
+    """对照: cone 叶子原文『直接写上游输出名』(无 _to_logic) → 仍 force 上游 RTL 网名(_ls)。"""
+    s_up = _mk_logic("d_up", 1, "A",
+                     {"A": {"raw": "cfg_to_logic", "base": "cfg", "width": 1,
+                            "msb": None, "lsb": None}},
+                     "220", suffix="ls", top_output=1)
+    s_mid = _mk_logic("d_mid", 1, "A",
+                      {"A": {"raw": "d_up", "base": "d_up", "width": 1,
+                             "msb": None, "lsb": None}},
+                      "221", suffix="to_logic", top_output=0)
+    s_top = _mk_logic("d_top", 1, "A",
+                      {"A": {"raw": "d_mid_to_logic", "base": "d_mid", "width": 1,
+                             "msb": None, "lsb": None}},
+                      "222", suffix="ls", top_output=1)
+    wb2 = excel_model.DregWorkbook(logic=[s_up, s_mid, s_top], regmap={}, tmm={}, sheet_names=[])
+    _node, leaves = cone.expand(s_top, wb2, R.Resolver(wb2))
+    assert leaves["D_UP"].wire == "d_up_ls"

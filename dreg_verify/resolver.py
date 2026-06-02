@@ -8,9 +8,32 @@ resolver.py — 把 logic 输入信号解析为驱动方式（force / RF_WRITE�
   3. 地址+bit：去 _to_logic → total_memory_map 按 Field Name 找 → 地址=F, bit=B。
   4. 同地址多 RW 字段合并一条 RF_WRITE（在 sv_writer 里完成）。
 
+⭐ _to_logic 网的物理含义（2026-06-02 d2a_cnt_sclk 实证，BT_LP_DREG.v）：
+  输入列原文带 _to_logic 后缀的网是 **regfile 导出的前级信号**（Excel Q 列 export_from_regmap）：
+      顶层端口 X → regfile → X_to_logic → sig_logic → 输出网 X_ls(/X)
+  X_to_logic 与 logic 输出网 X_ls 是两根不同的 wire。因此当输入与某个 logic 输出
+  同名（自引用，如 d2a_cnt_sclk；或引用另一个 top 输出）时，force 目标是前级原始
+  信号 X（顶层信号名，与 VBA/for_test 一致），绝不能 force 输出网 X_ls——
+  那等于把被验证的输出钉死，断言全部失真。
+
 因拿不到真表，名称匹配用多策略，解析不到不静默猜——标记 UNRESOLVED，由 CLI 汇总报告；
 并支持手动覆盖：force_overrides / rfwrite_overrides（基名集合）。
 """
+
+import re
+
+# 输入单元格原文的位宽尾巴，如 d2a_cnt_sclk_to_logic[3:0] → [3:0]
+_WIDTH_TAIL = re.compile(r"\[[^\]]*\]\s*$")
+
+
+def _raw_has_to_logic(raw):
+    """输入单元格原文(去位宽)是否带 _to_logic 后缀。
+
+    带 → 该网是 regfile 导出的前级信号(X_to_logic)，不是任何 logic 输出网；
+    不带 → 原文就是要 force 的网名（引用另一 logic 输出时用其 RTL 网名，ls 行带 _ls）。
+    """
+    name = _WIDTH_TAIL.sub("", str(raw or "")).strip()
+    return name.lower().endswith("_to_logic")
 
 
 class InputBinding:
@@ -76,8 +99,9 @@ class Resolver:
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}
-        # logic 输出名(去位宽,小写) → (位宽, 是否 top_output, RTL 网名)：识别"输入其实是另一个 logic 输出"(级联)
-        # RTL 网名：ls 行的真实端口名带 _ls 后缀（见 excel_model.rtl_net_name），force 时必须用它
+        # logic 输出名(去位宽,小写) → (位宽, 是否 top_output, RTL 网名)：识别"输入其实是另一个 logic 输出"(级联/自引用)
+        # RTL 网名(ls 行带 _ls 后缀)仅当输入原文"直接写输出名"时才做 force 目标；
+        # 原文带 _to_logic 的输入读的是 regfile 导出的前级信号，force 基名（见 resolve 内注释）
         self._logic_outputs = {}
         for s in wb.logic:
             is_top = str(s.top_output).strip() in ("1", "1.0", "True", "true")
@@ -107,7 +131,9 @@ class Resolver:
         return self._match(base, self._regmap_lower, "regmap")
 
     # ───────────── 主解析 ─────────────
-    def resolve(self, letter, info):
+    def resolve(self, letter, info, self_base=None):
+        """解析一个输入。self_base = 当前被验证信号自己的输出基名(小写)，
+        用于识别自引用输入（K=X 且输入=X_to_logic，如 d2a_cnt_sclk）。"""
         base = info["base"]
         width = info["width"]
         raw = info["raw"]
@@ -147,21 +173,55 @@ class Resolver:
         wire_name = base
         if not clean_rw and not overridden and not amb_note:
             chained = self._logic_outputs.get(low)
+            # 自引用：输入基名 = 本行输出基名（如 K=d2a_cnt_sclk, A=d2a_cnt_sclk_to_logic）
+            is_self = self_base is not None and low == self_base
+            # 原文带 _to_logic → 该网是 regfile 导出的前级信号，不是任何 logic 输出网
+            from_regfile = _raw_has_to_logic(raw)
             if chained is not None:
                 chained_w, chained_top, chained_rtl = chained
-                width = max(width, chained_w)
-                if chained_top:
-                    # 输入是另一个 top_output logic 输出（可见 wire）→ 直接 force RTL 网名(ls 行带 _ls)
+                # 位宽推断：仅当输入单元格没写显式切片时，才用上游/本行输出的全宽。
+                # 显式切片(如 d_x_to_logic[1:0])的求值位宽就是切片自身宽度，不能被输出全宽覆盖——
+                # 否则枚举值越界(force 2bit 切片却生成 4bit 值)，断言期望与实际驱动不一致。
+                if info.get("msb") is None and info.get("lsb") is None:
+                    width = max(width, chained_w)
+                if is_self and chained_top:
+                    # ⭐ 自引用(2026-06-02 真实 bug d2a_cnt_sclk)：输入是本行输出的前级原始信号
+                    # （RTL: 顶层端口 X → regfile → X_to_logic → sig_logic → X_ls）。
+                    # force 前级信号名 X；绝不能 force 本行输出网 X_ls——那是把被验证的输出钉死。
                     kind = "RO"
-                    found_in = "logic"
-                    wire_name = chained_rtl
-                    note = "级联：输入是另一个 top_output 输出 %r（%dbit），按中间 wire force" % (base, width)
-                else:
-                    # 输入是内部信号(top_output=0)：RTL/ENV_RF 层探不到，force 会层级查找失败
+                    if found_in is None:
+                        found_in = "self-input"
+                    wire_name = base
+                    note = ("自引用：输入是本行输出 %r 的前级原始信号(RTL 端口 %s → regfile → "
+                            "%s_to_logic)，force 前级信号名 %r；不能 force 输出网 %r"
+                            % (base, base, base, base, chained_rtl))
+                elif not chained_top:
+                    # 输入是内部信号(top_output=0)：RTL/ENV_RF 层探不到，force 会层级查找失败。
+                    # 注意内部信号"自引用"(is_self 且 top_output=0)也落在这里：它没有顶层端口可
+                    # force，按内部信号交 cone 展开 → cone 会报"循环引用"错误(组合环，表本身有问题)。
                     kind = "UNKNOWN"
                     found_in = "logic-internal"
                     note = ("⚠ 输入 %r 是内部信号(top_output=0)，RTL/ENV_RF 层探不到，无法 force；"
                             "该输出需改为驱动其底层寄存器(cone 展开)或一并排除" % base)
+                    if is_self:
+                        note = ("⚠ 内部信号(top_output=0) %r 自引用——组合环，表本身可能有问题；"
+                                "且内部信号没有顶层端口可 force，无法验证" % base)
+                elif from_regfile:
+                    # 级联但原文带 _to_logic：读的是 regfile 导出的前级信号 X_to_logic
+                    # （= 顶层信号 X 的透传），不是上游 logic 输出网 X_ls → force 前级信号名
+                    kind = "RO"
+                    if found_in is None:
+                        found_in = "logic"
+                    wire_name = base
+                    note = ("级联(前级)：输入原文 %s 是 regfile 导出的前级信号(顶层信号 %r 的透传，"
+                            "%dbit)，force 前级信号名；它与上游 logic 输出网 %r 是两根不同的 wire"
+                            % (raw, base, width, chained_rtl))
+                else:
+                    # 级联且原文不带 _to_logic（Excel 直接写上游输出名）→ force 其 RTL 网名(ls 行带 _ls)
+                    kind = "RO"
+                    found_in = "logic"
+                    wire_name = chained_rtl
+                    note = "级联：输入是另一个 top_output 输出 %r（%dbit），按中间 wire force" % (base, width)
             elif found_in is None and self.wire_fallback and kind != "RW":
                 # tmm/regmap 都查不到 → 视作普通 wire（顶层管脚/中间信号）→ force 信号名
                 kind = "RO"
@@ -206,8 +266,12 @@ class Resolver:
         return self.default_kind or "UNKNOWN"
 
     def resolve_signal_inputs(self, sig):
-        """对一个 LogicSignal 解析它表达式实际引用到的输入。返回 dict 字母->InputBinding。"""
+        """对一个 LogicSignal 解析它表达式实际引用到的输入。返回 dict 字母->InputBinding。
+
+        传 self_base 让 resolve() 能识别自引用输入（输入=本行输出的前级原始信号，
+        如 d2a_cnt_sclk：K=X 且 A=X_to_logic）。"""
         bindings = {}
+        self_base = sig.out_base.lower()
         for letter, info in sig.inputs.items():
-            bindings[letter] = self.resolve(letter, info)
+            bindings[letter] = self.resolve(letter, info, self_base=self_base)
         return bindings

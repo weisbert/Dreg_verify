@@ -160,7 +160,10 @@ def test_chained_and_wire_fallback():
 
 
 def test_chained_ls_output_forces_rtl_name():
-    # ls 输出的 RTL 网名 = K 列名 + _ls（lpbt_dig_top.v 实证）；级联输入 force 时必须用 RTL 网名
+    # ls 输出的 RTL 网名 = K 列名 + _ls（lpbt_dig_top.v 实证）。
+    # 本例输入原文"直接写上游输出名"(d_pllen, 无 _to_logic 后缀) → 读的就是上游输出网
+    # → force RTL 网名(_ls)。若原文带 _to_logic 则是 regfile 前级信号，force 基名
+    # （见 test_cascade_via_to_logic_forces_base_not_ls / test_self_ref_*）。
     s1 = _logic("d_pllen[1:0]", 2, "A",
                 {"A": {"raw": "cfg_to_logic", "base": "cfg", "width": 2, "msb": 1, "lsb": 0}},
                 "70", suffix="ls", top_output=1)
@@ -189,6 +192,99 @@ def test_chained_to_internal_flagged():
     b = Resolver(wb).resolve_signal_inputs(s2)["A"]
     assert b.kind == "UNKNOWN" and b.found_in == "logic-internal" and not b.resolved
     assert "内部信号" in b.note
+
+
+# ── 追加(2026-06-02 真实 bug d2a_cnt_sclk): RO 自引用输入不能 force 本行输出网 ──
+# RTL 实证(BT_LP_DREG.v / BT_LP_DREG_sig_logic.v):
+#   input  d2a_cnt_sclk;                  ← 顶层输入端口(RO, to_logicro_reg 可读回)
+#   wire   d2a_cnt_sclk_to_logic;         ← regfile 导出的前级信号
+#   output d2a_cnt_sclk_ls;               ← sig_logic 输出
+#   assign d2a_cnt_sclk_ls = d_bt_lp_pll_dig_dft_iddq_mode_to_logic ? 1'b0 : d2a_cnt_sclk_to_logic;
+# 旧 bug: 输入 A=d2a_cnt_sclk_to_logic 去后缀得基名 d2a_cnt_sclk → 命中"它自己"的 logic 输出行
+# → 被当级联 force 输出网 d2a_cnt_sclk_ls → 把被验证的输出钉死，断言全部失真。
+def _d2a_logic_row():
+    return _logic("d2a_cnt_sclk", 1, "B?1'b0:A",
+                  {"A": {"raw": "d2a_cnt_sclk_to_logic", "base": "d2a_cnt_sclk",
+                         "width": 1, "msb": None, "lsb": None},
+                   "B": {"raw": "d_bt_lp_pll_dig_dft_iddq_mode_to_logic",
+                         "base": "d_bt_lp_pll_dig_dft_iddq_mode",
+                         "width": 1, "msb": None, "lsb": None}},
+                  "100", owner="Yao Wang", suffix="ls", top_output=1)
+
+
+def _d2a_tmm():
+    # 镜像真表: d2a_cnt_sclk 在 to_logicro_reg_59(h3B) bit7 (RO 读回)；iddq_mode 在 readro_reg_41(h29) bit2
+    return {"d2a_cnt_sclk": TmmField("d2a_cnt_sclk", 7, 7, 0x3B, "RO", None, "to_logicro_reg_59"),
+            "d_bt_lp_pll_dig_dft_iddq_mode":
+                TmmField("d_bt_lp_pll_dig_dft_iddq_mode", 2, 2, 0x29, "RO", "Y", "readro_reg_41")}
+
+
+def test_self_ref_ro_input_forces_base_not_own_output():
+    sig = _d2a_logic_row()
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=_d2a_tmm(), sheet_names=[])
+    bindings = Resolver(wb).resolve_signal_inputs(sig)
+    a, b = bindings["A"], bindings["B"]
+    # 输出探针仍是 RTL 网名(带 _ls)——这部分本来就对
+    assert sig.rtl_name == "d2a_cnt_sclk_ls"
+    # ⭐ 输入 A 必须 force 前级原始信号(顶层端口名)，绝不能是本行输出网 _ls
+    assert a.kind == "RO" and a.resolved
+    assert a.wire == "d2a_cnt_sclk"
+    assert a.wire_lhs == "d2a_cnt_sclk"
+    # B(iddq, RO 管脚) 照常 force 基名
+    assert b.kind == "RO" and b.wire == "d_bt_lp_pll_dig_dft_iddq_mode"
+
+
+def test_self_ref_ro_input_e2e_sv():
+    """全链路: build → render，.sv 里 force 前级信号、assert 输出网，且绝无 force 输出网。"""
+    sig = _d2a_logic_row()
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=_d2a_tmm(), sheet_names=[])
+    res = G.build(wb, G.GenOptions())
+    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+    text = G.render(res)
+    # 驱动: force 前级原始信号
+    assert "force `ENV_RF.d2a_cnt_sclk=" in text
+    assert "force `ENV_RF.d_bt_lp_pll_dig_dft_iddq_mode=" in text
+    # 断言: 探输出网(_ls)
+    assert "assert (`ENV_RF.d2a_cnt_sclk_ls==" in text
+    # ⭐ 绝不能 force 输出网(把被验证输出钉死)
+    assert "force `ENV_RF.d2a_cnt_sclk_ls" not in text
+
+
+def test_self_ref_input_not_in_tmm_still_generates():
+    """自引用输入即使 tmm/regmap 查无(found_in=self-input)，也不算 wire 兜底风险——
+    RTL 结构(端口→regfile→_to_logic→logic)由 logic 行本身证明存在，默认照常生成。"""
+    sig = _d2a_logic_row()
+    tmm = {"d_bt_lp_pll_dig_dft_iddq_mode":
+           TmmField("d_bt_lp_pll_dig_dft_iddq_mode", 2, 2, 0x29, "RO", "Y", "readro_reg_41")}
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=tmm, sheet_names=[])
+    b = Resolver(wb).resolve_signal_inputs(sig)["A"]
+    assert b.kind == "RO" and b.found_in == "self-input" and b.resolved
+    assert b.wire == "d2a_cnt_sclk"
+    assert "自引用" in b.note
+    # 默认(非 include-risky)也能生成，不被当 wire 兜底跳过
+    res = G.build(wb, G.GenOptions())
+    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+
+
+def test_cascade_via_to_logic_forces_base_not_ls():
+    """级联输入原文带 _to_logic(如 d_en_refbuf_to_logic)：读的是 regfile 导出的前级信号，
+    force 基名 d_en_refbuf；不能 force 上游输出网 d_en_refbuf_ls(两根不同的 wire)。
+    与 test_chained_ls_output_forces_rtl_name 对照——那个原文直接写输出名(无 _to_logic)，
+    才 force RTL 网名(_ls)。"""
+    s1 = _logic("d_en_refbuf", 1, "A",
+                {"A": {"raw": "d_en_refbuf_cfg_to_logic", "base": "d_en_refbuf_cfg",
+                       "width": 1, "msb": None, "lsb": None}},
+                "50", suffix="ls", top_output=1)
+    s2 = _logic("d_downstream", 1, "A",
+                {"A": {"raw": "d_en_refbuf_to_logic", "base": "d_en_refbuf",
+                       "width": 1, "msb": None, "lsb": None}},
+                "51", suffix="to_mux", top_output=1)
+    wb = DregWorkbook(logic=[s1, s2], regmap={}, tmm={}, sheet_names=[])
+    b = Resolver(wb).resolve_signal_inputs(s2)["A"]
+    assert b.kind == "RO" and b.found_in == "logic"
+    assert b.wire == "d_en_refbuf"                      # 前级信号基名
+    assert b.wire != "d_en_refbuf_ls"                   # 不是上游输出网
+    assert "前级" in b.note
 
 
 def test_multibit_force_wire_has_slice():
@@ -334,3 +430,136 @@ def test_repeat_count_not_truncated():
     assert E.eval_expr("{A{B}}", {"A": 1, "B": 1}, {"A": 2, "B": 1}, 4)[0] == 0b11
     # 字面量次数不受影响
     assert E.eval_expr("{3{C}}", {"C": 1}, {"C": 1}, 3)[0] == 0b111
+
+
+# ── 追加(2026-06-02 对抗式审查): 自引用的边界路径 —— 内部自引用 / 切片位宽 / 前缀 / 报告 / 负向 ──
+def test_internal_self_ref_flagged_logic_internal():
+    """内部信号(top_output=0)自引用：没有顶层端口可 force → 必须标 logic-internal，
+    不能按『自引用前级』force 基名(那个网在顶层不存在 → CUVUNF)。
+    build 时 cone 会报循环引用错误(组合环，fail-loud)，绝不产出错误 .sv。"""
+    sig = _logic("d_int", 1, "A&B",
+                 {"A": {"raw": "d_int_to_logic", "base": "d_int", "width": 1,
+                        "msb": None, "lsb": None},
+                  "B": {"raw": "cfg_to_logic", "base": "cfg", "width": 1,
+                        "msb": None, "lsb": None}},
+                 "300", suffix="to_logic", top_output=0)
+    tmm = {"cfg": TmmField("cfg", 0, 0, 0x10, "RW", "N", "R")}
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=tmm, sheet_names=[])
+    b = Resolver(wb).resolve_signal_inputs(sig)["A"]
+    assert b.kind == "UNKNOWN" and b.found_in == "logic-internal" and not b.resolved
+    assert "组合环" in b.note
+    # build: cone 循环引用 → errors，不产出(也不静默 force 不存在的网)
+    res = G.build(wb, G.GenOptions(top_output_only=False))
+    assert res["summary"]["n_generated"] == 0
+    assert len(res["errors"]) == 1 and "循环引用" in res["errors"][0][2]
+
+
+def test_self_ref_slice_width_not_overwidened():
+    """自引用输入带显式切片(如 [1:0])：求值位宽=切片宽度，不能被输出全宽覆盖
+    (否则枚举值越界 → force 进切片被截断 → 断言期望永不成立)。"""
+    sig = _logic("d_xbus[3:0]", 4, "B?4'b0:A",
+                 {"A": {"raw": "d_xbus_to_logic[1:0]", "base": "d_xbus", "width": 2,
+                        "msb": 1, "lsb": 0},
+                  "B": {"raw": "d_iddq_to_logic", "base": "d_iddq", "width": 1,
+                        "msb": None, "lsb": None}},
+                 "301", suffix="ls", top_output=1)
+    tmm = {"d_xbus": TmmField("d_xbus", 3, 0, 0x3B, "RO", None, "R"),
+           "d_iddq": TmmField("d_iddq", 2, 2, 0x29, "RO", "Y", "R")}
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=tmm, sheet_names=[])
+    a = Resolver(wb).resolve_signal_inputs(sig)["A"]
+    assert a.width == 2                      # 切片自身宽度，不是输出全宽 4
+    assert a.wire_lhs == "d_xbus[1:0]"       # force LHS 带切片
+    # 无显式切片的自引用：位宽推断仍取输出全宽(原行为保留)
+    sig2 = _logic("d_ybus[3:0]", 4, "A",
+                  {"A": {"raw": "d_ybus_to_logic", "base": "d_ybus", "width": 1,
+                         "msb": None, "lsb": None}},
+                  "302", suffix="ls", top_output=1)
+    wb2 = DregWorkbook(logic=[sig2], regmap={}, tmm={}, sheet_names=[])
+    a2 = Resolver(wb2).resolve_signal_inputs(sig2)["A"]
+    assert a2.width == 4
+
+
+def test_self_ref_multibit_force_lhs_has_slice():
+    """多 bit 自引用：force LHS 带 [msb:lsb] 切片；绝不出现标量形式或输出网。"""
+    sig = _logic("d2a_bus[2:0]", 3, "B?3'b0:A",
+                 {"A": {"raw": "d2a_bus_to_logic[2:0]", "base": "d2a_bus", "width": 3,
+                        "msb": 2, "lsb": 0},
+                  "B": {"raw": "d_iddq_to_logic", "base": "d_iddq", "width": 1,
+                        "msb": None, "lsb": None}},
+                 "303", suffix="ls", top_output=1)
+    tmm = {"d2a_bus": TmmField("d2a_bus", 2, 0, 0x3B, "RO", None, "R"),
+           "d_iddq": TmmField("d_iddq", 2, 2, 0x29, "RO", "Y", "R")}
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=tmm, sheet_names=[])
+    a = Resolver(wb).resolve_signal_inputs(sig)["A"]
+    assert a.kind == "RO" and a.wire == "d2a_bus" and a.width == 3
+    assert a.wire_lhs == "d2a_bus[2:0]"
+    text = G.render(G.build(wb, G.GenOptions()))
+    assert "force `ENV_RF.d2a_bus[2:0]=" in text
+    assert "force `ENV_RF.d2a_bus=" not in text       # 不能丢切片变标量
+    assert "force `ENV_RF.d2a_bus_ls" not in text     # 不能是输出网
+    assert "assert (`ENV_RF.d2a_bus_ls[2:0]==" in text
+
+
+def test_self_ref_input_honors_wire_prefix():
+    """自引用输入 + 探针前缀映射：force 路径带前缀、found_in 保持 tmm(不被改写)。"""
+    sig = _d2a_logic_row()
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=_d2a_tmm(), sheet_names=[])
+    a = Resolver(wb, wire_prefixes={"d2a_cnt_sclk": "U_BT_LP_DREG"}).resolve_signal_inputs(sig)["A"]
+    assert a.kind == "RO"
+    assert a.wire == "U_BT_LP_DREG.d2a_cnt_sclk"
+    assert a.found_in == "tmm"
+    assert "自引用" in a.note and "探针前缀" in a.note
+
+
+def test_self_ref_prefix_e2e_sv():
+    """e2e: 同一信号名同时是输入 wire 与输出探针，前缀对两者都生效，且绝不 force 任何 _ls 网。"""
+    sig = _d2a_logic_row()
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=_d2a_tmm(), sheet_names=[])
+    text = G.render(G.build(wb, G.GenOptions(
+        probe_prefixes={"d2a_cnt_sclk": "U_BT_LP_DREG"})))
+    assert "force `ENV_RF.U_BT_LP_DREG.d2a_cnt_sclk=" in text
+    assert "assert (`ENV_RF.U_BT_LP_DREG.d2a_cnt_sclk_ls==" in text
+    assert "force `ENV_RF.U_BT_LP_DREG.d2a_cnt_sclk_ls" not in text
+    assert "force `ENV_RF.d2a_cnt_sclk_ls" not in text
+
+
+def test_analyze_signal_self_input_clean():
+    """analyze_signal: 自引用信号状态=clean，输入 net 显示 force 基名(无 _ls)。"""
+    sig = _d2a_logic_row()
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=_d2a_tmm(), sheet_names=[])
+    a = G.analyze_signal(Resolver(wb), sig, wb=wb)
+    assert a["status"] == "clean"
+    inp_a = next(i for i in a["inputs"] if i["letter"] == "A")
+    assert inp_a["found_in"] == "tmm"            # 真表里 d2a 在 tmm(to_logicro RO 读回)
+    assert inp_a["net"] == "force `ENV_RF.d2a_cnt_sclk"
+    assert "_ls" not in inp_a["net"]
+    assert inp_a["resolved"]
+
+
+def test_diagnose_self_input_categories():
+    """diagnose 分类: 自引用字段在 tmm → force_ro；不在 tmm(self-input) → force_chained。
+    两条 found_in 路径都不能落进 force_wire/unknown。"""
+    sig = _d2a_logic_row()
+    wb1 = DregWorkbook(logic=[sig], regmap={}, tmm=_d2a_tmm(), sheet_names=[])
+    d1 = G.diagnose(wb1, G.GenOptions(top_output_only=False))
+    assert d1["cats"]["force_ro"] == 2 and d1["cats"]["force_chained"] == 0
+    assert d1["cats"]["force_wire"] == 0 and d1["cats"]["unknown"] == 0
+    # 不在 tmm → self-input → 计入级联/自引用
+    tmm2 = {"d_bt_lp_pll_dig_dft_iddq_mode":
+            TmmField("d_bt_lp_pll_dig_dft_iddq_mode", 2, 2, 0x29, "RO", "Y", "R")}
+    wb2 = DregWorkbook(logic=[_d2a_logic_row()], regmap={}, tmm=tmm2, sheet_names=[])
+    d2 = G.diagnose(wb2, G.GenOptions(top_output_only=False))
+    assert d2["cats"]["force_chained"] == 1 and d2["cats"]["force_ro"] == 1
+    assert d2["cats"]["force_wire"] == 0 and d2["cats"]["unknown"] == 0
+
+
+def test_negative_self_ref_e2e():
+    """负向用例 + 自引用：断言侧翻转(_NEG)，驱动侧不变(force 基名，绝不 force 输出网)。"""
+    sig = _d2a_logic_row()
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm=_d2a_tmm(), sheet_names=[])
+    res = G.build(wb, G.GenOptions(neg_all=True))
+    assert res["summary"]["n_negative"] >= 1
+    text = G.render(res)
+    assert "_NEG" in text
+    assert "force `ENV_RF.d2a_cnt_sclk=" in text
+    assert "force `ENV_RF.d2a_cnt_sclk_ls" not in text

@@ -55,6 +55,10 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
         raise ConeError("信号 %r 表达式解析失败: %s" % (sig.out_name, ex))
     bindings = resolver.resolve_signal_inputs(sig)
 
+    # 整个 cone 的根信号(stack[0] = 最外层被断言的输出)。叶子的"自引用"判定相对它：
+    # 任何层级的叶子若引用根信号，都绝不能 force 根的输出网(那正是要断言的网)。
+    root_base = stack[0]
+
     mapping = {}      # 原表达式变量字母 -> 替换 AST
     leaves = {}       # 叶子大写基名 -> InputBinding
     for letter in E.collect_vars(node):
@@ -75,8 +79,11 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
                 mapping[letter] = child_node
         else:
             # 叶子输入：变量名 = 大写基名；同一寄存器的多个切片共享同一个叶子 binding
+            # self_base=root_base：叶子重解析时保持自引用语义
+            # （否则自引用叶子会被误判级联 → force 被断言的输出网 → 原 d2a bug 在 cone 路径复活）
             key = b.base.upper()
-            leaves[key] = _wider(leaves.get(key), _full_binding(key, b, resolver))
+            leaves[key] = _wider(leaves.get(key),
+                                 _full_binding(key, b, resolver, self_base=root_base))
             mapping[letter] = E.Var(key, b.slice_msb, b.slice_lsb)
 
     return _substitute(node, mapping), leaves
@@ -91,19 +98,24 @@ def _find_logic(wb, base):
     return None
 
 
-def _full_binding(key, b, resolver):
+def _full_binding(key, b, resolver, self_base=None):
     """以"整个寄存器字段"为单位重建叶子 binding（切片在表达式 Part/Var 层处理）。
 
     例: frac_n_lsb[15:1] 与 frac_n_lsb[0] 是同一个 16bit 字段的两个切片，
     叶子 = frac_n_lsb 全 16bit，RF_WRITE 写全宽度；表达式分别取 [15:1] 与 [0]。
+
+    self_base: 正在展开的根信号基名(小写)。必须透传给 resolve()，否则自引用叶子
+    在二次解析时丢失 self 语义 → 被误判级联 → force 被验证的输出网(原 d2a bug 复活)。
     """
     width = b.width
     if b.reg_msb is not None and b.reg_lsb is not None:
         width = max(width, b.reg_msb - b.reg_lsb + 1)
-    info = {"raw": b.base, "base": b.base, "width": width,
+    # raw 保留原始单元格文本（不能用 base）：resolver 靠"原文是否带 _to_logic 后缀"区分
+    # regfile 导出的前级信号(force 基名) vs 直接引用上游 logic 输出网(force RTL 网名)。
+    info = {"raw": b.raw, "base": b.base, "width": width,
             "msb": width - 1 if width > 1 else None,
             "lsb": 0 if width > 1 else None}
-    return resolver.resolve(key, info)
+    return resolver.resolve(key, info, self_base=self_base)
 
 
 def _wider(old, new):

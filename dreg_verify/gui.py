@@ -89,6 +89,10 @@ STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE
                "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
                "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
                "parse-err": "表达式或输入解析出错"}
+# 输入来源(found_in)的中文标签——明细面板用；未映射的原样显示
+FOUND_IN_LABEL = {"tmm": "tmm命中", "regmap": "regmap命中", "logic": "级联前级",
+                  "logic-internal": "内部信号", "wire": "wire兜底",
+                  "prefixed-wire": "前缀wire", "self-input": "自引用前级"}
 # 「输入信号」表(真值表上方)：把字母→信号/角色/驱动 集中成一张可读的小表(取代头部那行难读的图例)
 INPUT_COLS = ["字母", "信号(位宽)", "角色", "类型", "驱动"]
 # 负向用 琥珀，刻意区别于"状态列红=信号坏掉/会 elaboration 失败"；红只留给真正的故障
@@ -1019,8 +1023,9 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append("解析错误: %s" % a["error"])
         for inp in a["inputs"]:
             flag = "" if inp["resolved"] else "  ✗"
+            src = FOUND_IN_LABEL.get(inp["found_in"], inp["found_in"])
             lines.append("  %s=%s  [%s/%s]%s  ->  %s"
-                         % (inp["letter"], inp["base"], inp["kind"], inp["found_in"], flag, inp["net"]))
+                         % (inp["letter"], inp["base"], inp["kind"], src, flag, inp["net"]))
             if inp["note"]:
                 lines.append("        note: %s" % inp["note"])
         lines.append("")

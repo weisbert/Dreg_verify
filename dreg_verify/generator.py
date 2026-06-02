@@ -532,7 +532,7 @@ def diagnose(wb, opts=None):
                 cats["rfwrite"] += 1
             elif b.kind == "RO" and b.found_in in ("tmm", "regmap"):
                 cats["force_ro"] += 1
-            elif b.kind == "RO" and b.found_in == "logic":
+            elif b.kind == "RO" and b.found_in in ("logic", "self-input"):
                 cats["force_chained"] += 1
             elif b.kind == "RO" and b.found_in == "wire":
                 cats["force_wire"] += 1
