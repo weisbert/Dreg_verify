@@ -396,6 +396,13 @@ def run_expr_forms(args):
 #   ④ regmap / total_memory_map 抠出"目标 + 各输入"的定义行。
 _SIG_INPUT_COLS = list("ABCDEFGHIJ")
 
+# --lite 精简模式参数: 只看这些页 / 行列上限（交叉验证 cone 展开够用，输出可控）
+LITE_SHEET_KEYS = ("logic", "for_test", "fortest", "memory_map", "regmap", "_tc")
+LITE_COLS = 20          # 块状页(for_test)只保留前 20 列: 输入名/地址/类型 + 前几个 T 向量
+LITE_BLOCK_TAIL = 40
+LITE_FIND_MAX = 30
+LITE_MAXLEN = 50
+
 
 def _cell_by_letter(row, letter):
     """按列字母从 values_only 的 row(tuple) 取值；越界返回 None。"""
@@ -425,7 +432,7 @@ def _has_row2_header(sheet_name):
 
 
 def _header_map_line(ws, args, header_row=2):
-    """轻量读第 header_row 行，渲染成 '字母=表头' 列映射，帮助解读列。"""
+    """轻量读第 header_row 行，渲染成 '字母=表头' 列映射，帮助解读列。--lite 只保留前 LITE_COLS 列。"""
     hdr = None
     for ri, row in enumerate(ws.iter_rows(min_row=1, max_row=header_row, values_only=True), start=1):
         if ri == header_row:
@@ -433,7 +440,7 @@ def _header_map_line(ws, args, header_row=2):
     if not hdr:
         return None
     parts = []
-    for c in range(len(hdr)):
+    for c in range(_row_cols(hdr, args)):
         h = hdr[c]
         if h is None or (isinstance(h, str) and h.strip() == ""):
             continue
@@ -478,6 +485,11 @@ def _render_cell(letter, raw, ri, c, fdict, args, no_trunc=False):
     return "%s=%s%s" % (letter, cell_str(raw, args.maxlen, no_trunc), suf)
 
 
+def _row_cols(row, args):
+    """精简模式下普通行/块行只渲染前 LITE_COLS 列(块状页右侧 T 向量太多)。"""
+    return min(len(row), LITE_COLS) if getattr(args, "lite", False) else len(row)
+
+
 def _dump_matching_rows(out, ws, sn, keywords, args, fdict=None):
     """普通页(regmap/tmm/mux/…)：抠出任意单元格含关键词的行(含目标信号及其各输入)。"""
     out.append("")
@@ -495,7 +507,7 @@ def _dump_matching_rows(out, ws, sn, keywords, args, fdict=None):
             continue   # 跳过表头行(仅对有统一表头的页；tmm 无表头, 行 1-2 是真数据)
         if _row_contains(row, keywords):
             cells = []
-            for c in range(len(row)):
+            for c in range(_row_cols(row, args)):
                 cell = _render_cell(get_column_letter(c + 1), row[c], ri, c, fdict, args)
                 if cell is not None:
                     cells.append(cell)
@@ -545,7 +557,7 @@ def _dump_fortest_blocks(out, ws, sn, keywords, args, fdict=None):
         for k in range(start_idx, min(end_idx, n)):
             ri2, row2 = rows[k]
             cells = []
-            for c in range(len(row2)):
+            for c in range(_row_cols(row2, args)):
                 cell = _render_cell(get_column_letter(c + 1), row2[c], ri2, c, fdict, args)
                 if cell is not None:
                     cells.append(cell)
@@ -565,6 +577,12 @@ def _is_block_sheet(sheet_name):
 
 
 def run_signal(args):
+    # --lite: 收紧各项上限（只为 cone 展开/交叉验证抠核心信息，输出尽量短）
+    if args.lite:
+        args.block_tail = min(args.block_tail, LITE_BLOCK_TAIL)
+        args.find_max = min(args.find_max, LITE_FIND_MAX)
+        args.maxlen = min(args.maxlen, LITE_MAXLEN)
+
     wb = openpyxl.load_workbook(args.excel, data_only=True, read_only=True)
     # 第二遍按 data_only=False 读"公式"——诊断 #VALUE! 等公式错误必须看到公式本身。
     wbf = None
@@ -635,13 +653,19 @@ def run_signal(args):
     if args.sheets:
         want = [s.strip() for s in args.sheets.split(",") if s.strip()]
         sheets = [s for s in all_sheets if s in want]
+    elif args.lite:
+        # 精简模式只看核心页: logic / for_test / total_memory_map / regmap / *_tc
+        sheets = [s for s in all_sheets
+                  if any(k in s.lower() for k in LITE_SHEET_KEYS)]
     else:
         sheets = list(all_sheets)
     for sn in sheets:
         if logic_name and sn == logic_name:
             continue
         ws = wb[sn]
-        fdict = _formula_rows(wbf, sn)
+        # 精简模式公式只保留块状页(for_test 的 VLOOKUP 是交叉验证关键)，其它页省掉
+        keep_formula = (not args.lite) or _is_block_sheet(sn)
+        fdict = _formula_rows(wbf, sn) if keep_formula else None
         if _is_block_sheet(sn):
             _dump_fortest_blocks(out, ws, sn, expanded, args, fdict)
         else:
@@ -684,6 +708,9 @@ def main():
     ap.add_argument("--signal-expand", type=int, default=1,
                     help="--signal 时自动展开 logic 输入的层数(默认 1: 连同 testmode 等输入一起抠)。"
                          "设 0 则只抠目标信号本身。")
+    ap.add_argument("--lite", action="store_true",
+                    help="--signal 配套精简: 只导 logic/for_test/tmm/regmap 页; 块状页只保留前 %d 列"
+                         "(输入名/地址/类型+前几个T向量); 公式只保留 for_test; 输出大幅缩短" % LITE_COLS)
     ap.add_argument("--block-tail", type=int, default=120,
                     help="--signal 抠 for_test 类整块时, 块头后最多带多少行(默认 120)。")
     ap.add_argument("--no-formulas", action="store_true",
