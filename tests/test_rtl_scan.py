@@ -138,6 +138,48 @@ def test_render_prefix_file_round_trip(wb, modules):
     assert "d_logic_bt_lp_lna_agc" in text          # 缺失信号也在注释里
 
 
+def test_nets_export_import_round_trip(wb):
+    """两段式工作流：Windows 导出 nets.txt → 服务器解析 → 与直接用 Excel 一致。"""
+    from dreg_verify import rtl_scan as rs
+    import scan_rtl
+    nets = rs.collect_excel_nets(wb)
+    text = scan_rtl.render_nets_text(nets)
+    parsed = scan_rtl.parse_nets_text(text)
+    assert parsed == nets                              # 导出→解析 无损
+    assert "pll_n" in parsed and "mon_active" in parsed
+    # 注释/空行被跳过；网名后描述可省略
+    assert scan_rtl.parse_nets_text("# 注释\n\npll_n\nmon_active  monitor 信号\n") == {
+        "pll_n": "", "mon_active": "monitor 信号"}
+
+
+def test_nets_mode_matches_excel_mode(wb, modules):
+    """--nets 模式（服务器零依赖）与 --excel 模式（单机）产出完全一致的映射。"""
+    import scan_rtl
+    sigmap = rtl_scan.build_signal_map(modules, "LPBT_DIG_TOP")
+    # excel 模式
+    p1, t1, m1 = rtl_scan.match_excel(wb, sigmap)
+    # nets 模式（经文本中转）
+    nets = scan_rtl.parse_nets_text(scan_rtl.render_nets_text(rtl_scan.collect_excel_nets(wb)))
+    p2, t2, m2 = scan_rtl.match_nets(nets, sigmap)
+    assert p1 == p2 and t1 == t2 and m1 == m2
+
+
+def test_scan_rtl_is_stdlib_only():
+    """scan_rtl.py 必须保持零第三方依赖（要能直接拷到无 openpyxl 的服务器上跑）。"""
+    import ast
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scan_rtl.py")
+    with open(path, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    # 顶层 import 只允许标准库
+    allowed = {"argparse", "os", "re", "sys"}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                assert a.name.split(".")[0] in allowed, "顶层 import %s 破坏零依赖" % a.name
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module.split(".")[0] in allowed, "顶层 from %s import 破坏零依赖" % node.module
+
+
 def test_end_to_end_scan_to_sv(wb, modules, tmp_path):
     """端到端：扫描 RTL → 写映射文件 → CLI --probe-prefix-file → .sv 探针/force 全部带正确路径。"""
     from dreg_verify import generator
