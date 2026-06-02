@@ -80,8 +80,9 @@ def _skipped_detail_text(skipped):
             "如需强制生成请用 CLI --include-risky。\n\n" + "\n\n".join(parts))
 
 
-COL_SEL, COL_NEG, COL_R, COL_K, COL_OWNER, COL_TYPE, COL_TOP, COL_STATUS, COL_EXPR = range(9)
-HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "表达式"]
+(COL_SEL, COL_NEG, COL_R, COL_K, COL_OWNER, COL_TYPE, COL_TOP, COL_STATUS,
+ COL_PREFIX, COL_EXPR) = range(10)
+HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "unresolved": "✗未解析", "parse-err": "✗解析错"}
 STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE 驱动",
@@ -191,6 +192,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_hl_col = -1      # 当前高亮(选中)的测试列；-1=无
         self._ti_loading = False  # 程序化填表时屏蔽 itemChanged，防递归
         self._sig_loading = False # 程序化改信号表(含左侧负向勾选)时屏蔽其 itemChanged
+        # 探针前缀 {信号名小写: 层级前缀}：输出网在 ENV_RF 的子模块里时（如 pll_n 在
+        # U_BT_LP_PLL_DIG 内部），断言探针写 `ENV_RF.<前缀>.<网名>。按 Excel 路径持久化。
+        self._probe_prefixes = {}
         self._build_ui()
 
     # ───────────── UI ─────────────
@@ -259,11 +263,16 @@ class MainWindow(QtWidgets.QMainWindow):
         b_negnone = QtWidgets.QPushButton("清除负向")
         b_negnone.setToolTip("清除目标信号的负向(有勾选→只清已勾选，否则清全部可见)。含命名/手填错值会先确认。")
         b_negnone.clicked.connect(lambda: self.on_all_signals_neg(False))
+        b_prefix = QtWidgets.QPushButton("设置探针前缀")
+        b_prefix.setToolTip("输出网不在 ENV_RF 顶层、而在子模块里时（如 pll_n 在 U_BT_LP_PLL_DIG 内部），\n"
+                            "给勾选/选中的信号设置层级前缀 → 断言写 `ENV_RF.<前缀>.<信号名>。留空清除。")
+        b_prefix.clicked.connect(self.on_set_probe_prefix)
         for b in (b_check, b_selall, b_selnone):
             bulk.addWidget(b)
         bulk.addWidget(QtWidgets.QLabel(" 负向:"))
         for b in (b_negall, b_negnone):
             bulk.addWidget(b)
+        bulk.addWidget(b_prefix)
         tv.addWidget(bulk_box)
         left.addWidget(top_box)
         self.detail = QtWidgets.QPlainTextEdit(); self.detail.setReadOnly(True)
@@ -482,10 +491,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._neg_only = {}
         self._ti_loaded_idx = None
         self._clear_test_items("加载完成，点左侧信号查看测试项。")
+        # 探针前缀按 Excel 路径持久化：换表自动恢复上次配置
+        self._probe_prefixes = dict(_load_settings().get("probe_prefixes", {}).get(path, {}))
         errs = []
         for i, s in enumerate(self.signals):
             try:
-                self._analysis[i] = generator.analyze_signal(self._resolver, s, wb=self.wb)
+                self._analysis[i] = generator.analyze_signal(
+                    self._resolver, s, wb=self.wb, probe_prefix=self._prefix_of(s))
             except Exception as ex:  # noqa: BLE001
                 self._analysis[i] = {"status": "解析异常", "inputs": [], "out_net": "",
                                      "error": repr(ex)}
@@ -529,6 +541,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     it.setForeground(QtGui.QColor("red"))
                 it.setToolTip(STATUS_HELP.get(st, st))
                 self.table.setItem(r, COL_STATUS, it)
+                self._set_text(r, COL_PREFIX, self._prefix_of(sig))
                 self._set_text(r, COL_EXPR, sig.expr)
                 self.table.item(r, COL_R).setData(QtCore.Qt.UserRole, r)
             except Exception:  # noqa: BLE001  单行异常不连累整表
@@ -559,6 +572,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         "  clean = 输入都解析到 net\n"
                         "  ⚠wire兜底 = 输入回退成 wire，elaboration 可能找不到\n"
                         "  ✗未解析/解析错 = 输入在 ENV_RF 层探不到（CUVUNF）",
+            COL_PREFIX: "探针层级前缀：输出网不在 ENV_RF 顶层、而在子模块里时填写。\n"
+                        "例如 pll_n 在 U_BT_LP_PLL_DIG 内部 → 断言写 `ENV_RF.U_BT_LP_PLL_DIG.pll_n。\n"
+                        "设置方法：勾选/选中信号后点下方『设置探针前缀』。",
         }
         for c, t in tips.items():
             it = self.table.horizontalHeaderItem(c)
@@ -693,6 +709,56 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._idx_of_row(r) == self._ti_loaded_idx:    # 正在编辑该信号→刷新右表
             self._load_test_items(sig)
         self.status.showMessage(msg)
+
+    def _prefix_of(self, sig):
+        """该信号配置的探针前缀（无则空串）。"""
+        return (self._probe_prefixes.get(sig.out_name.lower())
+                or self._probe_prefixes.get(sig.out_base.lower()) or "")
+
+    def _save_probe_prefixes(self):
+        """探针前缀按 Excel 路径写入 settings（pytest 下 no-op，与其它持久化策略一致）。"""
+        st = _load_settings()
+        all_maps = st.get("probe_prefixes", {})
+        path = self.path_edit.text().strip()
+        if self._probe_prefixes:
+            all_maps[path] = dict(self._probe_prefixes)
+        else:
+            all_maps.pop(path, None)
+        st["probe_prefixes"] = all_maps
+        _save_settings(st)
+
+    def on_set_probe_prefix(self):
+        """给勾选(优先)/选中的信号设置探针层级前缀。
+
+        用途：输出网不在 ENV_RF 顶层、而在子模块里（如 pll_n 在 U_BT_LP_PLL_DIG 内部）时，
+        断言要写 `ENV_RF.U_BT_LP_PLL_DIG.pll_n。留空 = 清除前缀。
+        """
+        rows = self._scope_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(self, "提示", "请先勾选或选中至少一个信号")
+            return
+        cur = self._prefix_of(self._sig_of_row(rows[0]))
+        text, ok = QtWidgets.QInputDialog.getText(
+            self, "设置探针前缀",
+            "层级前缀（输出网在 ENV_RF 的子模块里时填写，如 U_BT_LP_PLL_DIG；留空=清除）：\n"
+            "断言将写成 `ENV_RF.<前缀>.<信号名>",
+            QtWidgets.QLineEdit.Normal, cur)
+        if not ok:
+            return
+        prefix = text.strip().strip(".")
+        for r in rows:
+            sig = self._sig_of_row(r)
+            idx = self._idx_of_row(r)
+            if prefix:
+                self._probe_prefixes[sig.out_name.lower()] = prefix
+            else:
+                self._probe_prefixes.pop(sig.out_name.lower(), None)
+                self._probe_prefixes.pop(sig.out_base.lower(), None)
+            self._analysis[idx] = generator.analyze_signal(
+                self._resolver, sig, wb=self.wb, probe_prefix=prefix)
+        self._save_probe_prefixes()
+        self._populate_table()
+        self.status.showMessage("已为 %d 个信号设置探针前缀：%s" % (len(rows), prefix or "(已清除)"))
 
     def _expand_sig(self, sig):
         """解析 + 按需 cone 展开 + 输入分组。返回 (node, bindings, groups, err)；失败时 node=None。"""
@@ -1509,6 +1575,7 @@ class MainWindow(QtWidgets.QMainWindow):
             signals=signals or None, neg_signals=neg_signals or None,
             mode=mode, max_tests=self.max_tests.value(), exhaustive=exhaustive,
             top_output_only=False,   # GUI 已按表勾选，不再二次过滤
+            probe_prefixes=dict(self._probe_prefixes),
             vector_overrides=self._vector_overrides(positive_only=positive_only,
                                                     negative_only=negative_only))
 

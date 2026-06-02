@@ -144,16 +144,21 @@ def _s(v):
 
 
 # ───────────────────────────── 单个信号块 ─────────────────────────────
-def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None):
+def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
+                        probe_prefix=""):
     """
     返回 (lines:list[str], stats:dict)。comments=True 时每信号加 1 行 // <名> 便于导航(默认零注释)。
     node: 已解析(或 cone 展开后)的表达式 AST；None 则从 sig.expr 解析。
+    probe_prefix: 探针层级前缀(如 "U_BT_LP_PLL_DIG")——输出网不在 ENV_RF 顶层、
+                  而在其子模块里时用：`ENV_RF.<prefix>.<rtl_name>。
     """
     lines = []
     used_vars = E.collect_vars(node if node is not None else E.parse(sig.expr))
     aid = sig.assert_id or "X"
     # 探针名用 RTL 真实网名（ls 行 = K 列名 + "_ls" 后缀），不是 K 列原文
     rtl_name = getattr(sig, "rtl_name", sig.out_name)
+    if probe_prefix:
+        rtl_name = "%s.%s" % (probe_prefix.strip("."), rtl_name)
     lhs = "`%s.%s" % (ENV, rtl_name)
 
     if comments:

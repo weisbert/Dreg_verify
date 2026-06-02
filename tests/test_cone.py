@@ -158,6 +158,43 @@ def test_internal_signals_still_skipped_by_default(wb):
     assert "pll_n1[31:0]" not in names and "pll_n2[31:0]" not in names
 
 
+# ───────────── 探针前缀（输出网在 ENV_RF 子模块里） ─────────────
+def test_probe_prefix_in_sv(wb):
+    """pll_n 实际在 U_BT_LP_PLL_DIG 内部 → 探针 = `ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]。"""
+    opts = generator.GenOptions(signals=["pll_n"], mode="min",
+                                probe_prefixes={"pll_n": "U_BT_LP_PLL_DIG"})
+    text = generator.render(generator.build(wb, opts))
+    assert "assert (`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==32'b" in text
+    assert "`ENV_RF.pll_n[31:0]==" not in text
+    # 驱动(RF_WRITE)不受前缀影响
+    assert "`RF_WRITE(10'h1," in text
+
+
+def test_probe_prefix_only_for_named_signal(wb):
+    """前缀只作用于映射里的信号，其它信号探针不变。"""
+    opts = generator.GenOptions(signals=["pll_n", "d_en_refbuf"],
+                                probe_prefixes={"pll_n": "U_BT_LP_PLL_DIG"})
+    text = generator.render(generator.build(wb, opts))
+    assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in text
+    assert "`ENV_RF.d_en_refbuf_ls==" in text          # 不带前缀(且带 _ls 后缀)
+
+
+def test_probe_prefix_cli_parse():
+    from dreg_verify.cli import _parse_probe_prefixes
+    assert _parse_probe_prefixes(["pll_n=U_BT_LP_PLL_DIG", "x=A.B"]) == {
+        "pll_n": "U_BT_LP_PLL_DIG", "x": "A.B"}
+    assert _parse_probe_prefixes([]) == {}
+    with pytest.raises(SystemExit):
+        _parse_probe_prefixes(["no_equal_sign"])
+
+
+def test_probe_prefix_analyze_signal(wb, resolver):
+    sig = next(s for s in wb.logic if s.out_base == "pll_n")
+    a = generator.analyze_signal(resolver, sig, wb=wb, probe_prefix="U_BT_LP_PLL_DIG")
+    assert a["out_net"] == "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]"
+    assert a["status"] == "clean"
+
+
 # ───────────── GUI 冒烟（离屏） ─────────────
 def test_gui_cone_signal_editor(tmp_path_factory):
     """GUI 点 pll_n → 测试项编辑器显示 6 个叶子寄存器列；状态=clean；生成不抛异常。"""
@@ -182,3 +219,30 @@ def test_gui_cone_signal_editor(tmp_path_factory):
     # 全选导出（全部范围）能产出 pll_n 的块
     res = generator.build(w.wb, w._opts(["pll_n"]))
     assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+
+
+def test_gui_probe_prefix_flows_to_sv(tmp_path_factory):
+    """GUI 设置探针前缀 → 状态列 out_net 带前缀 → 生成的 .sv 探针带前缀 → 持久化结构正确。"""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("gui_pfx") / "synthetic_pll.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path)); w.on_load()
+    sig = next(s for s in w.signals if s.out_base == "pll_n")
+    idx = w.signals.index(sig)
+    # 模拟『设置探针前缀』(绕过输入对话框直接走数据路径)
+    w._probe_prefixes[sig.out_name.lower()] = "U_BT_LP_PLL_DIG"
+    w._analysis[idx] = gui.generator.analyze_signal(w._resolver, sig, wb=w.wb,
+                                                    probe_prefix=w._prefix_of(sig))
+    w._populate_table()
+    assert w._analysis[idx]["out_net"].startswith("`ENV_RF.U_BT_LP_PLL_DIG.")
+    # 前缀列显示
+    row = next(r for r in range(w.table.rowCount()) if w._sig_of_row(r).out_base == "pll_n")
+    assert w.table.item(row, gui.COL_PREFIX).text() == "U_BT_LP_PLL_DIG"
+    # 生成走 _opts → .sv 探针带前缀
+    res = generator.build(w.wb, w._opts(["pll_n"]))
+    text = generator.render(res)
+    assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in text

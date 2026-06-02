@@ -20,7 +20,7 @@ class GenOptions:
                  force_overrides=None, rfwrite_overrides=None, default_kind=None,
                  top_output_only=False, types=None, wire_fallback=True,
                  exclude=None, exclude_regex=None, comments=False, include_risky=False,
-                 vector_overrides=None):
+                 vector_overrides=None, probe_prefixes=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -45,6 +45,11 @@ class GenOptions:
         # {out_name(小写): [TestVector,...]} —— GUI 手工定制/编辑的测试项。某信号有 override 时
         # 用它替代自动向量生成，并跳过自动负向追加与 risky 跳过(用户已显式定制即视为有意为之)。
         self.vector_overrides = vector_overrides or None
+        # {信号名(小写): 层级前缀}——输出网不在 ENV_RF 顶层而在子模块里时的探针前缀。
+        # 实证(2026-06-02)：pll_n 在 U_BT_LP_PLL_DIG 子模块内部，探针须写
+        # `ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]，否则 CUVUNF。
+        self.probe_prefixes = {k.strip().lower(): v.strip() for k, v in
+                               (probe_prefixes or {}).items() if v and v.strip()}
 
 
 def _norm_set(x):
@@ -111,6 +116,12 @@ def _neg_enabled_for(sig, opts):
     if opts.neg_signals is None:
         return False
     return sig.out_name.lower() in opts.neg_signals or sig.out_base.lower() in opts.neg_signals
+
+
+def probe_prefix_for(sig, opts):
+    """该信号的探针层级前缀（信号名或基名命中映射即生效），没有则空串。"""
+    p = opts.probe_prefixes or {}
+    return p.get(sig.out_name.lower()) or p.get(sig.out_base.lower()) or ""
 
 
 def expand_signal(wb, resolver, sig):
@@ -221,7 +232,8 @@ def build(wb, opts):
                 seen_labels[lbl] = sig.out_name
 
         lines, stats = W.render_signal_block(sig, bindings, vecs, meta,
-                                             comments=opts.comments, node=node)
+                                             comments=opts.comments, node=node,
+                                             probe_prefix=probe_prefix_for(sig, opts))
         stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
@@ -250,12 +262,16 @@ def render(result, header_info=None, comments=False):
     return W.render_file(result["blocks"], header_info=header_info, comments=comments)
 
 
-def analyze_signal(resolver, sig, wb=None):
+def analyze_signal(resolver, sig, wb=None, probe_prefix=""):
     """单信号解析画像（GUI debug 用）：返回 status + 每输入的 force/RF_WRITE net + 输出 net。
     status: clean / wire-fallback / unresolved / parse-err —— 用于挑出可能导致 elaboration 失败的信号。
     传入 wb 时对内部信号输入做 cone 展开（展开成功 → 按叶子寄存器评估状态，cone=True）。
+    probe_prefix: 探针层级前缀（输出网在 ENV_RF 子模块里时），显示在 out_net。
     """
-    out_net = "`%s.%s" % (W.ENV, getattr(sig, "rtl_name", sig.out_name))
+    rtl = getattr(sig, "rtl_name", sig.out_name)
+    if probe_prefix:
+        rtl = "%s.%s" % (probe_prefix.strip("."), rtl)
+    out_net = "`%s.%s" % (W.ENV, rtl)
     expanded = False
     try:
         if wb is not None:
