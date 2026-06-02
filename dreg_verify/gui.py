@@ -195,6 +195,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 探针前缀 {信号名小写: 层级前缀}：输出网在 ENV_RF 的子模块里时（如 pll_n 在
         # U_BT_LP_PLL_DIG 内部），断言探针写 `ENV_RF.<前缀>.<网名>。按 Excel 路径持久化。
         self._probe_prefixes = {}
+        self._preview_source = None   # 预览页内容来源: None/"all"/"signal" —— 配置变更后联动刷新
         self._build_ui()
 
     # ───────────── UI ─────────────
@@ -495,6 +496,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._customized = set()
         self._neg_only = {}
         self._ti_loaded_idx = None
+        self._preview_source = None        # 换表后旧预览作废，不参与联动刷新
         self._clear_test_items("加载完成，点左侧信号查看测试项。")
         errs = []
         for i, s in enumerate(self.signals):
@@ -873,6 +875,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._analysis[i] = {"status": "解析异常", "inputs": [], "out_net": "",
                                      "error": repr(ex)}
         self._populate_table()
+        # 右侧编辑器/预览页联动刷新：旧内容是按旧前缀算的，留着会误导（"导出有前缀但预览没有"）
+        if self._ti_sig is not None:
+            self._load_test_items(self._ti_sig)
+        self._refresh_preview()
+
+    def _refresh_preview(self):
+        """按当前配置重算 .sv 预览页（仅当预览页有内容时；不抢标签页焦点）。"""
+        src = self._preview_source
+        if src == "all" and self._collect():
+            self.on_preview(switch_tab=False)
+        elif src == "signal" and self._ti_sig is not None:
+            self.on_ti_preview_signal(switch_tab=False)
 
     def _expand_sig(self, sig):
         """解析 + 按需 cone 展开 + 输入分组。返回 (node, bindings, groups, err)；失败时 node=None。"""
@@ -1593,17 +1607,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("已从表达式重新生成 %s 的测试项（丢弃自定义）" % self._ti_sig.out_name
                                 if self._ti_sig else "")
 
-    def on_ti_preview_signal(self):
+    def on_ti_preview_signal(self, switch_tab=True):
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
         sig = self._ti_sig
         vecs = self._rows_to_vectors(self._ti_node, self._ti_bindings, self._ti_groups,
                                      sig.out_width, self._ti_rows)
+        # node/probe_prefix 必须传：cone 信号的驱动用叶子变量名；前缀信号探针带层级路径
         lines, _stats = W.render_signal_block(sig, self._ti_bindings, vecs,
-                                              {"truncated": False}, comments=True)
+                                              {"truncated": False}, comments=True,
+                                              node=self._ti_node,
+                                              probe_prefix=self._prefix_of(sig))
         self.preview.setPlainText("\n".join(lines))
-        self.tabs.setCurrentWidget(self.preview_tab)
+        self._preview_source = "signal"
+        if switch_tab:
+            self.tabs.setCurrentWidget(self.preview_tab)
         self.status.showMessage("已预览信号 %s 的 .sv 片段（%d 用例）" % (sig.out_name, len(vecs)))
 
     def on_ti_export_csv(self):
@@ -1709,7 +1728,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return [low2name[k] for k in ovneg if k in low2name]
 
     # ───────────── 预览 / 生成 ─────────────
-    def on_preview(self):
+    def on_preview(self, switch_tab=True):
         if not self.wb:
             return
         sel = self._collect()
@@ -1721,7 +1740,9 @@ class MainWindow(QtWidgets.QMainWindow):
         lines = text.splitlines()
         self.preview.setPlainText("\n".join(lines[:600])
                                   + ("\n... (预览截断，共 %d 行)" % len(lines) if len(lines) > 600 else ""))
-        self.tabs.setCurrentWidget(self.preview_tab)
+        self._preview_source = "all"
+        if switch_tab:
+            self.tabs.setCurrentWidget(self.preview_tab)
         s = res["summary"]
         msg = "预览: 生成 %d，向量 %d（负向 %d）" % (s["n_generated"], s["n_vectors"], s["n_negative"])
         if self._customized:

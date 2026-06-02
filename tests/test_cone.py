@@ -411,6 +411,38 @@ def test_gui_prefix_update_keeps_checked_signals(tmp_path_factory):
     assert "d_logic_bt_lp_reserve" in w._neg_only
 
 
+def test_gui_preview_refreshes_after_prefix_change(tmp_path_factory):
+    """回归(2026-06-02)：改探针前缀后，已打开的 .sv 预览必须自动按新前缀重算——
+    之前预览是旧快照，导致『导出有前缀、预览没有』的困惑。"""
+    from PySide6 import QtCore
+    gui, w = _pll_window(tmp_path_factory, "gui_preview_sync")
+    # 勾选 pll_n + 打开预览（此时无前缀）
+    row = next(r for r in range(w.table.rowCount()) if w._sig_of_row(r).out_base == "pll_n")
+    w.table.item(row, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
+    w.on_preview()
+    assert "`ENV_RF.pll_n[31:0]==" in w.preview.toPlainText()
+    # 配置前缀（模拟映射编辑器点 OK 的数据路径）→ 预览自动刷新为带前缀
+    w._probe_prefixes = {"pll_n": "U_BT_LP_PLL_DIG"}
+    w._save_probe_prefixes()
+    w._reanalyze_all()
+    assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in w.preview.toPlainText()
+    assert "`ENV_RF.pll_n[31:0]==" not in w.preview.toPlainText()
+
+
+def test_gui_single_signal_preview_has_prefix(tmp_path_factory):
+    """回归(2026-06-02)：编辑器『预览本信号.sv』漏传 probe_prefix/node → 单信号预览无前缀。"""
+    gui, w = _pll_window(tmp_path_factory, "gui_ti_preview")
+    w._probe_prefixes = {"pll_n": "U_BT_LP_PLL_DIG"}
+    w._reanalyze_all()
+    sig = next(s for s in w.signals if s.out_base == "pll_n")
+    w._load_test_items(sig)
+    w.on_ti_preview_signal()
+    text = w.preview.toPlainText()
+    assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in text
+    # cone 信号的驱动也要正常（RF_WRITE 不能因漏传 node 而缺失）
+    assert "`RF_WRITE(10'h1," in text
+
+
 def test_gui_prefix_mapping_covers_input_wire(tmp_path_factory):
     """GUI 映射编辑器数据路径：配置 mon_active 前缀 → _reanalyze_all → 信号变 clean，force 带前缀。"""
     pytest.importorskip("PySide6")
