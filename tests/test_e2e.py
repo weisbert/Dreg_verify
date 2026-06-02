@@ -110,9 +110,23 @@ def test_ls_passthrough_name(wb):
     opts = generator.GenOptions(signals=["d_en_refbuf"], mode="min")
     res = generator.build(wb, opts)
     text = generator.render(res)
-    # ls 信号输出名无 d_logic_ 前缀，原样
-    assert "`ENV_RF.d_en_refbuf==" in text
+    # ls 信号：RTL 顶层端口名 = K 列名 + _ls 后缀（2026-06-02 lpbt_dig_top.v 实证），
+    # 探针/消息都必须用带后缀的名字，否则 elaboration CUVUNF
+    assert "`ENV_RF.d_en_refbuf_ls==" in text
+    assert "`ENV_RF.d_en_refbuf==" not in text
+    assert '"d_en_refbuf_ls"' in text          # uvm 消息里也用 RTL 网名
     assert "assert_50_T0:" in text
+
+
+def test_ls_suffix_not_doubled():
+    # K 列已写 _ls 后缀时不重复追加
+    from dreg_verify.excel_model import rtl_net_name
+    assert rtl_net_name("d_en_refbuf", "ls") == "d_en_refbuf_ls"
+    assert rtl_net_name("d_en_refbuf_ls", "ls") == "d_en_refbuf_ls"
+    assert rtl_net_name("d_en_refbuf", "LS") == "d_en_refbuf_ls"
+    # 非 ls 类型原样
+    assert rtl_net_name("d_logic_bt_lp_reserve", "to_logic") == "d_logic_bt_lp_reserve"
+    assert rtl_net_name("d_logic_bt_lp_lna_agc", "to_mux") == "d_logic_bt_lp_lna_agc"
 
 
 # ───────────── owner 筛选 ─────────────

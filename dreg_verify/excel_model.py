@@ -27,7 +27,7 @@ class LogicSignal:
     def __init__(self, row, out_name, out_width, expr, suffix, top_output,
                  notes, owner, assert_id, inputs):
         self.row = row                  # Excel 行号（便于回查）
-        self.out_name = out_name        # K 列原文（assert LHS 直接用，含位宽如 [2:0]）
+        self.out_name = out_name        # K 列原文（含位宽如 [2:0]）
         self.out_base = _strip_width(out_name)[0]
         self.out_width = out_width       # 解析出的输出位宽
         self.expr = expr                 # L 列表达式
@@ -38,6 +38,16 @@ class LogicSignal:
         self.assert_id = assert_id       # R 列序号
         # inputs: dict 字母 -> {'raw','base','width','msb','lsb'}
         self.inputs = inputs
+
+    @property
+    def rtl_base(self):
+        """RTL 真实网名(去位宽)。ls 行的 RTL 顶层端口带 _ls 后缀，K 列原文没写。"""
+        return rtl_net_name(self.out_base, self.suffix)
+
+    @property
+    def rtl_name(self):
+        """RTL 真实网名(含位宽切片)。assert 探针 LHS 用它，不能直接用 K 列原文。"""
+        return self.rtl_base + self.out_name[len(self.out_base):]
 
     def __repr__(self):
         return "LogicSignal(R=%s, %s, expr=%r)" % (self.assert_id, self.out_name, self.expr)
@@ -103,6 +113,19 @@ def strip_to_logic(name):
         if name.endswith(suf):
             return name[: -len(suf)]
     return name
+
+
+def rtl_net_name(base, suffix):
+    """K 列名 → RTL 真实网名。
+
+    实证（2026-06-02 公司 lpbt_dig_top.v）：M=ls 行的 RTL 顶层端口带 _ls 后缀
+    （logic K 列 d_en_refbuf → RTL 端口 d_en_refbuf_ls），K 列原文没写后缀；
+    直接用 K 列名探针会 elaboration CUVUNF。to_logic/to_mux 行 K 列已是全名，原样用。
+    """
+    sfx = _s(suffix).lower()
+    if sfx == "ls" and not base.lower().endswith("_ls"):
+        return base + "_ls"
+    return base
 
 
 def parse_hex_addr(text):

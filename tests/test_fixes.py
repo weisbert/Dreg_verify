@@ -159,6 +159,24 @@ def test_chained_and_wire_fallback():
     assert b2.kind == "RO" and b2.found_in == "logic" and b2.width == 32
 
 
+def test_chained_ls_output_forces_rtl_name():
+    # ls 输出的 RTL 网名 = K 列名 + _ls（lpbt_dig_top.v 实证）；级联输入 force 时必须用 RTL 网名
+    s1 = _logic("d_pllen[1:0]", 2, "A",
+                {"A": {"raw": "cfg_to_logic", "base": "cfg", "width": 2, "msb": 1, "lsb": 0}},
+                "70", suffix="ls", top_output=1)
+    s2 = _logic("d_chained", 1, "A",
+                {"A": {"raw": "d_pllen", "base": "d_pllen", "width": 2, "msb": 1, "lsb": 0}},
+                "71", suffix="to_mux", top_output=1)
+    wb = DregWorkbook(logic=[s1, s2], regmap={}, tmm={}, sheet_names=[])
+    # rtl_name: 后缀插在基名之后、位宽切片之前
+    assert s1.rtl_name == "d_pllen_ls[1:0]"
+    assert s2.rtl_name == "d_chained"                  # 非 ls 原样
+    b = Resolver(wb).resolve_signal_inputs(s2)["A"]
+    assert b.kind == "RO" and b.found_in == "logic"
+    assert b.wire == "d_pllen_ls"                      # force 用 RTL 网名
+    assert b.wire_lhs == "d_pllen_ls[1:0]"
+
+
 def test_chained_to_internal_flagged():
     # 输入是内部信号(top_output=0) → 探不到，应标 UNKNOWN/logic-internal 而非 force
     s1 = _logic("pll_n1[31:0]", 32, "A",

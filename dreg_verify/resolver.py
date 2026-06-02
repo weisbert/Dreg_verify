@@ -72,11 +72,13 @@ class Resolver:
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}
-        # logic 输出名(去位宽,小写) → (位宽, 是否 top_output)：识别"输入其实是另一个 logic 输出"(级联)
+        # logic 输出名(去位宽,小写) → (位宽, 是否 top_output, RTL 网名)：识别"输入其实是另一个 logic 输出"(级联)
+        # RTL 网名：ls 行的真实端口名带 _ls 后缀（见 excel_model.rtl_net_name），force 时必须用它
         self._logic_outputs = {}
         for s in wb.logic:
             is_top = str(s.top_output).strip() in ("1", "1.0", "True", "true")
-            self._logic_outputs.setdefault(s.out_base.lower(), (s.out_width, is_top))
+            self._logic_outputs.setdefault(s.out_base.lower(),
+                                           (s.out_width, is_top, s.rtl_base))
 
     # ───────────── 名称匹配（多策略，歧义不静默猜） ─────────────
     def _match(self, base, table_lower, tag):
@@ -138,15 +140,17 @@ class Resolver:
         # ── 不是干净的 RW 寄存器时，按 for_test 规则把它当 wire → force（按信号名）──
         # 但"歧义匹配"不走兜底：它很可能是某个寄存器，应交人工，而非当 wire 强行 force。
         clean_rw = (kind == "RW" and address is not None)
+        wire_name = base
         if not clean_rw and not overridden and not amb_note:
             chained = self._logic_outputs.get(low)
             if chained is not None:
-                chained_w, chained_top = chained
+                chained_w, chained_top, chained_rtl = chained
                 width = max(width, chained_w)
                 if chained_top:
-                    # 输入是另一个 top_output logic 输出（可见 wire）→ 直接 force
+                    # 输入是另一个 top_output logic 输出（可见 wire）→ 直接 force RTL 网名(ls 行带 _ls)
                     kind = "RO"
                     found_in = "logic"
+                    wire_name = chained_rtl
                     note = "级联：输入是另一个 top_output 输出 %r（%dbit），按中间 wire force" % (base, width)
                 else:
                     # 输入是内部信号(top_output=0)：RTL/ENV_RF 层探不到，force 会层级查找失败
@@ -163,7 +167,7 @@ class Resolver:
         return InputBinding(
             letter=letter, raw=raw, base=base, width=width, kind=kind,
             address=address, reg_lsb=reg_lsb, reg_msb=reg_msb,
-            wire=base, found_in=found_in, reg_name=reg_name, note=note,
+            wire=wire_name, found_in=found_in, reg_name=reg_name, note=note,
             slice_msb=info.get("msb"), slice_lsb=info.get("lsb"),
         )
 

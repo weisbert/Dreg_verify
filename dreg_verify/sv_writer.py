@@ -151,7 +151,9 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False):
     lines = []
     used_vars = E.collect_vars(E.parse(sig.expr))
     aid = sig.assert_id or "X"
-    lhs = "`%s.%s" % (ENV, sig.out_name)
+    # 探针名用 RTL 真实网名（ls 行 = K 列名 + "_ls" 后缀），不是 K 列原文
+    rtl_name = getattr(sig, "rtl_name", sig.out_name)
+    lhs = "`%s.%s" % (ENV, rtl_name)
 
     if comments:
         lines.append("// %s" % sig.out_name)
@@ -174,7 +176,7 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False):
         lines.append("assert_%s:" % aid_str)
         lines.append("")
         msg = ('$sformatf("%s","%s","%s",%s, %s)'
-               % (ASSERT_MSG, aid_str, sig.out_name, lhs, exp))
+               % (ASSERT_MSG, aid_str, rtl_name, lhs, exp))
         lines.append("assert (%s==%s)begin" % (lhs, exp))
         lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_INFO, ASSERT_ID, msg))
         lines.append("end")
@@ -184,7 +186,7 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False):
         lines.append("")
 
     stats = {
-        "out_name": sig.out_name, "assert_id": aid, "owner": sig.owner,
+        "out_name": sig.out_name, "rtl_name": rtl_name, "assert_id": aid, "owner": sig.owner,
         "n_vectors": len(vectors), "n_negative": n_neg,
         "unresolved": sorted(block_unresolved),
         "truncated": meta.get("truncated", False),
