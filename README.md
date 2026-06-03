@@ -1,15 +1,16 @@
 # Dreg_verify
 
-从 Dreg 核心 Excel 的 `logic` 页真值表达式**重新推导**、自动生成 Dreg 逻辑信号验证文件
-`wr_rf_tc.sv`（UVM / SystemVerilog）的工具。自带 Excel 结构导出与表达式形态覆盖自检。
+从 Dreg 核心 Excel 的 `logic` 页（真值表达式）与 `mux` 页（N 选 1 选择器）**重新推导**、
+自动生成 Dreg 信号验证文件 `wr_rf_tc.sv`（UVM / SystemVerilog）的工具。
+自带 Excel 结构导出与表达式形态覆盖自检。
 
-> MVP 已可用：CLI 生成器 + 表达式求值器 + 端到端测试。GUI（PySide6 筛选/预览/导出）为后续。
+> CLI + GUI（PySide6）均可用。mux 页验证见 `mux验证说明.md`；级联驱动见 `级联模式说明.md`。
 
 ## 工作原理
 
 不依赖旧 VB 生成的 `for_test` 页，而是：
 
-1. **读 Excel**（`logic` / `regmap` / `total_memory_map` 三页）
+1. **读 Excel**（`logic` / `regmap` / `total_memory_map` / `mux` 四页；无 mux 页则只做 logic）
 2. **解析命名与地址**：输入名去 `_to_logic` → 在 `total_memory_map` 按字段名查地址(F)、位段(B)、
    RO/RW 类型；判 force（RO 管脚/只读）还是 `RF_WRITE`（RW 寄存器）
 3. **求值表达式**：严格按 Verilog 两遍位宽语义实现三元 `?:` / 拼接 `{}` / 重复 `{n{}}` /
@@ -18,6 +19,9 @@
    期望输出 = 在每个向量上对表达式求值
 5. **渲染 .sv**：每信号一块，每 test 先 `force` / `RF_WRITE`（同地址 RW 字段合并成一条），
    `#1ps` 后 `assert_<R>_T<n>: assert(...)` 配 `uvm_report_info/error`
+6. **mux 页**（2026-06 新增）：`G = case(B){F:A;…}` N 选 1——控制信号经 logic 级联驱动
+   （line/local 双路径）+ 数据寄存器写互异值 + `assert_mux<N>_T<n>` 验证选路。
+   CLI `--no-mux` / `--mux-only` 控制范围；详见 `mux验证说明.md`
 
 ## 环境
 

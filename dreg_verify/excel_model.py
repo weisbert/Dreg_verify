@@ -127,9 +127,15 @@ class MuxGroup:
         self.owner = owner              # L 列
         self.top_output = top_output    # I 列
         self.cases = cases              # list[MuxCase]
-        # 与 LogicSignal 对齐的占位字段（mux 无表达式/无 logic 后缀语义）
-        self.expr = ""
+        # 与 LogicSignal 对齐的占位字段（mux 无 logic 后缀语义；expr 是只读属性=case 描述文本）
         self.suffix = "mux"
+
+    @property
+    def expr(self):
+        """人读的 case 描述（GUI 表达式列 / 报告 / 搜索过滤用）。
+        注意这不是可求值表达式——mux 不走 expr.parse 路径。"""
+        items = "; ".join("%s:%s" % (c.case_raw, c.input_base) for c in self.cases)
+        return "case(%s){%s}" % (self.ctrl_base, items)
 
     @property
     def is_top(self):

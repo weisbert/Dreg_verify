@@ -685,8 +685,44 @@ def report(wb, opts):
 
 def _mux_expr_text(grp):
     """mux 组的人读"表达式"：case(控制){case值:输入; ...}（报告/GUI 的表达式列用）。"""
-    items = "; ".join("%s:%s" % (c.case_raw, c.input_base) for c in grp.cases)
-    return "case(%s){%s}" % (grp.ctrl_base, items)
+    return grp.expr
+
+
+def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix=""):
+    """mux 组的解析画像（GUI 状态列/明细面板用），返回与 analyze_signal 同形状的 dict。
+
+    status: clean / unresolved（issues 或互异值碰撞 → 不可验证）。
+    inputs: 控制行输入 + 数据寄存器，每项与 analyze_signal 的 inputs 行同形状。
+    """
+    rtl = grp.rtl_name
+    if probe_prefix:
+        rtl = "%s.%s" % (probe_prefix.strip("."), rtl)
+    out_net = "`%s.%s" % (W.ENV, rtl)
+    exp = mux_gen.expand_mux_group(wb, resolver, grp)
+    rows = []
+    for key in exp["used_vars"]:
+        b = exp["bindings"][key]
+        if b.kind == "RW" and b.address is not None:
+            net = "`%s(10'h%X, ...) bit<<%s" % (W.RF_WRITE, b.address, b.reg_lsb)
+        elif b.kind == "RO":
+            net = "force `%s.%s" % (W.ENV, b.wire_lhs)
+        else:
+            net = "(UNRESOLVED)"
+        rows.append({"letter": key, "base": b.base, "kind": b.kind,
+                     "found_in": b.found_in, "net": net, "resolved": b.resolved,
+                     "note": b.note})
+    if exp["issues"]:
+        return {"status": "unresolved", "inputs": rows, "out_net": out_net,
+                "error": "; ".join(exp["issues"]), "cone": False}
+    vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mode)
+    if meta.get("value_collision"):
+        return {"status": "unresolved", "inputs": rows, "out_net": out_net,
+                "error": "数据寄存器位宽装不下 %d 个 case 的互异值——选路不可验证(假绿)" % len(grp.cases),
+                "cone": False}
+    if not vecs:
+        return {"status": "unresolved", "inputs": rows, "out_net": out_net,
+                "error": "无法生成测试向量（控制信号没有可用的驱动路径）", "cone": False}
+    return {"status": "clean", "inputs": rows, "out_net": out_net, "error": "", "cone": False}
 
 
 def diagnose(wb, opts=None):

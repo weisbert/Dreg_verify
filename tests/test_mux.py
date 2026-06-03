@@ -530,3 +530,72 @@ def test_cli_no_mux_sheet_unchanged(tmp_path):
     out = tmp_path / "out.sv"
     cli.main(["--excel", str(excel), "--out", str(out)])
     assert "assert_mux" not in out.read_text(encoding="utf-8")
+
+
+# ───────────── ⑦ GUI（离屏冒烟）─────────────
+@pytest.fixture(scope="module")
+def gui_app():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    yield app
+
+
+@pytest.fixture()
+def gui_win(gui_app, tmp_path):
+    from dreg_verify import gui as G
+    excel = tmp_path / "gui_mux.xlsx"
+    fixtures.build_workbook(str(excel), with_mux=True)
+    w = G.MainWindow()
+    w.path_edit.setText(str(excel))
+    w.on_load()
+    yield w
+    w.close()
+
+
+def test_gui_mux_in_signal_table(gui_win):
+    """mux 信号混排进信号表：type=mux、R 列=mux<N>、表达式列=case 文本、状态=可验证。"""
+    w = gui_win
+    assert len(w.signals) == 5                            # 3 logic + 2 mux
+    mux_rows = [i for i, s in enumerate(w.signals)
+                if getattr(s, "suffix", "") == "mux"]
+    assert len(mux_rows) == 2
+    grp = w.signals[mux_rows[0]]
+    assert grp.assert_id == "mux1"
+    assert "case(" in grp.expr
+    # 状态分析: mux 组应为 clean（fixture 数据完整可解析）
+    assert w._analysis[mux_rows[0]]["status"] == "clean"
+
+
+def test_gui_mux_test_items_readonly(gui_win):
+    """点击 mux 信号 → 只读 case 表（_ti_sig=None 屏蔽编辑，_ti_mux_sig 记录当前 mux）。"""
+    w = gui_win
+    grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
+    w._load_test_items(grp)
+    assert w._ti_sig is None                              # 编辑路径安全屏蔽
+    assert w._ti_mux_sig is grp
+    assert w.ti_table.columnCount() == 4                  # 3 case(min) + 1 local 路径
+    assert w.ti_table.rowCount() == 7                     # 3 控制输入 + 3 数据寄存器 + 期望
+    assert "mux" in w.ti_header.text()
+
+
+def test_gui_mux_generate(gui_win, tmp_path):
+    """GUI 勾选 mux 信号 → build 产出 mux 块（名字匹配路径）+ 负向勾选经 neg_signals 生效。"""
+    w = gui_win
+    from PySide6 import QtCore
+    G_COL_SEL, G_COL_NEG = 0, 1
+    # 勾选全部行（含 mux）+ 给 mux 行勾负向
+    for r in range(w.table.rowCount()):
+        w.table.item(r, G_COL_SEL).setCheckState(QtCore.Qt.Checked)
+        sig = w._sig_of_row(r)
+        if getattr(sig, "suffix", "") == "mux":
+            w.table.item(r, G_COL_NEG).setCheckState(QtCore.Qt.Checked)
+    sel = w._collect()
+    assert len(sel) == 5
+    assert len(w._mux_neg_checked()) == 2                 # 两个 mux 都勾了负向
+    res = generator.build(w.wb, w._opts(sel))
+    assert res["summary"]["n_mux_generated"] == 2
+    # mux 负向真的生效（每组追加 1 条 _NEG）
+    text = generator.render(res)
+    assert "assert_mux1_T4_NEG:" in text

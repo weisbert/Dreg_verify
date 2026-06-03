@@ -28,10 +28,11 @@ except Exception as ex:  # noqa: BLE001
     raise SystemExit("需要 PySide6：pip install PySide6（原始错误：%s）" % ex)
 
 from dreg_verify import excel_model, generator  # noqa: E402
+from dreg_verify import mux_gen                   # noqa: E402
 from dreg_verify import resolver as R            # noqa: E402
-from dreg_verify import expr as E                # noqa: E402
-from dreg_verify import vectors as V             # noqa: E402
-from dreg_verify import sv_writer as W           # noqa: E402
+from dreg_verify import expr as E                 # noqa: E402
+from dreg_verify import vectors as V              # noqa: E402
+from dreg_verify import sv_writer as W            # noqa: E402
 
 # 记住上次加载的 Excel，下次启动自动加载（省去重复浏览/点击）
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_gui.json")
@@ -544,6 +545,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._load_test_items(sig)
                 self._set_signal_negatives(sig, True, rule)
                 self._load_test_items(sig)
+        elif getattr(self, "_ti_mux_sig", None) is not None:
+            self._load_mux_test_items(self._ti_mux_sig)   # mux：按新覆盖度重算只读展示
         self._update_cov_hint()
 
     def _update_cov_hint(self):
@@ -576,7 +579,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as ex:  # noqa: BLE001
             QtWidgets.QMessageBox.critical(self, "加载失败", str(ex))
             return
-        self.signals = list(self.wb.logic)
+        # logic 信号 + mux 组同表混排（用户拍板；mux 组鸭子兼容信号表所需的全部属性）
+        self.signals = list(self.wb.logic) + list(self.wb.mux)
         # 探针前缀按 Excel 路径持久化：换表自动恢复上次配置（须在建 Resolver 前加载——wire 前缀要传进去）
         self._probe_prefixes = dict(_load_settings().get("probe_prefixes", {}).get(path, {}))
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
@@ -593,8 +597,7 @@ class MainWindow(QtWidgets.QMainWindow):
         errs = []
         for i, s in enumerate(self.signals):
             try:
-                self._analysis[i] = generator.analyze_signal(
-                    self._resolver, s, wb=self.wb, probe_prefix=self._prefix_of(s))
+                self._analysis[i] = self._analyze_one(s)
             except Exception as ex:  # noqa: BLE001
                 self._analysis[i] = {"status": "解析异常", "inputs": [], "out_net": "",
                                      "error": repr(ex)}
@@ -602,8 +605,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._populate_filters()
         self._populate_table()
         nbad = sum(1 for a in self._analysis.values() if a["status"] != "clean")
-        msg = ("已加载 %d 信号（%d 个非 clean）；tmm字段=%d regmap=%d"
-               % (len(self.signals), nbad, len(self.wb.tmm), len(self.wb.regmap)))
+        msg = ("已加载 %d 信号（logic %d + mux %d，%d 个非 clean）；tmm字段=%d regmap=%d"
+               % (len(self.signals), len(self.wb.logic), len(self.wb.mux), nbad,
+                  len(self.wb.tmm), len(self.wb.regmap)))
         if errs:
             msg += "；⚠ %d 个信号分析异常(状态'解析异常',点开看 error)" % len(errs)
             self.preview.setPlainText("分析异常的信号(请把下面发给维护者):\n" +
@@ -809,6 +813,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         r = item.row()
         sig = self._sig_of_row(r)
+        # mux 信号：负向不走编辑器 override（无表达式可编辑），勾选状态在生成时经 neg_signals 生效
+        if isinstance(sig, excel_model.MuxGroup):
+            want_mux = item.checkState() == QtCore.Qt.Checked
+            self.status.showMessage("%s（mux）已%s负向——生成时追加 1 条故意填错的自检断言(_NEG)"
+                                    % (sig.out_name, "标记" if want_mux else "清除"))
+            return
         name_low = sig.out_name.lower()
         want = item.checkState() == QtCore.Qt.Checked
         if want:
@@ -956,14 +966,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("探针前缀映射已更新（共 %d 条），影响 %d 个信号"
                                 "（见蓝色『探针前缀』列；状态列应变 clean）" % (len(mapping), affected))
 
+    def _analyze_one(self, sig):
+        """单信号解析画像：logic 走 analyze_signal，mux 组走 analyze_mux_group（2026-06-03 第九轮）。"""
+        if isinstance(sig, excel_model.MuxGroup):
+            mode, exhaustive = self._coverage()
+            return generator.analyze_mux_group(
+                self._resolver, self.wb, sig,
+                mode=("min" if (mode == "min" and not exhaustive) else "max"),
+                probe_prefix=self._prefix_of(sig))
+        return generator.analyze_signal(self._resolver, sig, wb=self.wb,
+                                        probe_prefix=self._prefix_of(sig))
+
     def _reanalyze_all(self):
         """探针前缀/级联模式变更后重建 Resolver（两者都影响所有信号的输入解析）并刷新全表。"""
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     cascade_mode=self._cascade_mode())
         for i, s in enumerate(self.signals):
             try:
-                self._analysis[i] = generator.analyze_signal(
-                    self._resolver, s, wb=self.wb, probe_prefix=self._prefix_of(s))
+                self._analysis[i] = self._analyze_one(s)
             except Exception as ex:  # noqa: BLE001
                 self._analysis[i] = {"status": "解析异常", "inputs": [], "out_net": "",
                                      "error": repr(ex)}
@@ -1147,6 +1167,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_test_items(self, sig):
         if not self.wb or self._resolver is None or sig is None:
             return
+        self._ti_mux_sig = None
+        # mux 页信号：测试项由 case 结构自动生成 → 只读展示（编辑器的表达式求值模型不适用 N 选 1）
+        if isinstance(sig, excel_model.MuxGroup):
+            self._load_mux_test_items(sig)
+            return
         name_low = sig.out_name.lower()
         node, bindings, groups, err = self._expand_sig(sig)
         if node is None:
@@ -1166,6 +1191,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_ti_header(custom)
         self._populate_inputs()       # 上方『输入信号』表(字母/角色/驱动)，随信号刷新
         self._ti_populate()
+
+    def _load_mux_test_items(self, grp):
+        """mux 信号的测试项展示（只读 case 表，2026-06-03 第九轮）。
+
+        先 _clear_test_items（_ti_sig=None → 所有编辑按钮安全屏蔽），再以只读方式填充：
+        行 = 控制行输入 + 数据寄存器 + 期望；列 = 测试 T。
+        负向勾选 / 生成 / 预览本信号 照常可用（走 neg_signals / build 路径）。"""
+        self._clear_test_items("")
+        self._ti_mux_sig = grp
+        exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
+        if exp["issues"]:
+            self.ti_header.setText("mux 信号 %s：无法生成测试 — %s"
+                                   % (grp.out_name, "；".join(exp["issues"])))
+            return
+        mode, exhaustive = self._coverage()
+        mux_mode = "min" if (mode == "min" and not exhaustive) else "max"
+        vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
+                                              max_tests=self.max_tests.value())
+        if meta.get("value_collision") or not vecs:
+            self.ti_header.setText("mux 信号 %s：互异值分配失败或控制信号无驱动路径（见左表状态列）"
+                                   % grp.out_name)
+            return
+        self.ti_header.setText(
+            "mux 信号: %s = case(%s) %d 选 1　|　测试 %d 个（case 扫描 + 另一条路径验证）　|　"
+            "测试项由 case 结构自动生成（只读）；负向勾选/生成/预览照常可用"
+            % (grp.out_name, grp.ctrl_base, len(grp.cases), len(vecs)))
+        used = exp["used_vars"]
+        self._ti_loading = True
+        try:
+            self.ti_table.clear()
+            self.ti_table.setColumnCount(len(vecs))
+            self.ti_table.setHorizontalHeaderLabels([W.test_label(v) for v in vecs])
+            self.ti_table.setRowCount(len(used) + 1)
+            vlabels = []
+            for ri, key in enumerate(used):
+                b = exp["bindings"][key]
+                role = "控制" if key.startswith("c:") else "数据"
+                vlabels.append("%s (%s)" % (b.base, role))
+                for ci, v in enumerate(vecs):
+                    val = v.assignments.get(key, 0)
+                    txt = ("0x%X" % val) if b.width > 4 else format(val, "0%db" % max(b.width, 1))
+                    it = QtWidgets.QTableWidgetItem(txt)
+                    it.setFlags(QtCore.Qt.ItemIsEnabled)            # 只读
+                    self.ti_table.setItem(ri, ci, it)
+            vlabels.append("期望(out)")
+            for ci, v in enumerate(vecs):
+                it = QtWidgets.QTableWidgetItem(W.fmt_bin(v.asserted_value, v.exp_width))
+                it.setFlags(QtCore.Qt.ItemIsEnabled)
+                f = it.font()
+                f.setBold(True)
+                it.setFont(f)
+                self.ti_table.setItem(len(used), ci, it)
+            self.ti_table.setVerticalHeaderLabels(vlabels)
+            self.ti_table.resizeColumnsToContents()
+        finally:
+            self._ti_loading = False
+        self._update_cov_hint()
 
     def _auto_rows(self, sig, node, bindings, groups):
         """按当前向量选项自动生成测试项 → rowdict 列表。"""
@@ -1703,6 +1785,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_ti_preview_signal(self, switch_tab=True):
         if not self._ti_sig:
+            # mux 信号：测试项只读，但预览照常可用（走完整 build 路径，所见即所得）
+            grp = getattr(self, "_ti_mux_sig", None)
+            if grp is not None and self.wb:
+                res = generator.build(self.wb, self._opts([grp.out_name]))
+                self.preview.setPlainText(generator.render(res, comments=True))
+                self._preview_source = "signal"
+                if switch_tab:
+                    self.tabs.setCurrentWidget(self.preview_tab)
+                self.status.showMessage("已预览 mux 信号 %s 的 .sv 片段" % grp.out_name)
+                return
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
         sig = self._ti_sig
@@ -1802,6 +1894,10 @@ class MainWindow(QtWidgets.QMainWindow):
               owner_in_msg=None, sv_summary=None):
         # 注意：GUI 的负向统一走 vector_overrides(左侧"负向"列与右侧编辑器是同一套)，
         # 故这里默认不传 neg_signals，避免与 override 里的负向重复追加。
+        # 例外：mux 信号的负向走 neg_signals（mux 不经 override——其期望由 case 结构决定）。
+        mux_neg = self._mux_neg_checked()
+        if mux_neg:
+            neg_signals = list(neg_signals or []) + mux_neg
         mode, exhaustive = self._coverage()
         # owner/汇总选项：on_generate 直接传对话框的返回值(当次导出以对话框为准，
         # 不依赖"先写盘再读回"的往返——写盘失败/测试环境下会静默丢失)；
@@ -1830,6 +1926,18 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.table.item(r, COL_SEL).checkState() == QtCore.Qt.Checked:
                 sel.append(self._sig_of_row(r).out_name)
         return sel
+
+    def _mux_neg_checked(self):
+        """勾了"负向"列的 mux 信号名（mux 负向经 neg_signals 在生成时追加，不走 override）。"""
+        out = []
+        for r in range(self.table.rowCount()):
+            neg_it = self.table.item(r, COL_NEG)
+            if neg_it is None or neg_it.checkState() != QtCore.Qt.Checked:
+                continue
+            sig = self._sig_of_row(r)
+            if isinstance(sig, excel_model.MuxGroup):
+                out.append(sig.out_name)
+        return out
 
     def _negative_signal_names(self, sel):
         """从勾选信号 sel 里挑出"含负向测试"的原始信号名(用于'仅负向'导出)。"""
