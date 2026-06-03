@@ -133,6 +133,71 @@ def mask(width):
     return (1 << width) - 1 if width > 0 else 0
 
 
+# ───────────────────────────── mux case 字面量（含 don't-care 位） ─────────────────────────────
+def parse_case_literal(text):
+    """解析 mux 页 case 值（F 列），**保留 don't-care 位信息**。
+
+    返回 (value:int, width:int, dontcare_mask:int)：
+        "3'b010"  → (0b010,  3, 0b000)
+        "4'b000x" → (0b0000, 4, 0b0001)    x 位在 value 里记 0，位置记进 mask
+        "4'b1x0x" → (0b1000, 4, 0b0101)
+
+    ⚠ 不要用 parse_based_literal 解析 case 值——它把 x 无声当 0，丢掉 don't-care 语义，
+    会导致"每 x 位各取值"的覆盖度无法实现、且与其它 case 的具体值撞车。
+    x 的每位语义只在二进制下有意义；八/十/十六进制含 x/z 的 case 直接报错。
+    """
+    m = re.match(r"(?P<size>\d+)?'(?P<sign>[sS]?)(?P<base>[bBoOdDhH])(?P<val>.+)$", text.strip())
+    if not m:
+        raise ExprError("非法 case 字面量: %r" % text)
+    if m.group("sign"):
+        raise ExprError("case 值不支持有符号字面量: %r" % text)
+    base = m.group("base").lower()
+    raw = m.group("val").replace("_", "")
+    if base != "b":
+        if re.search(r"[xXzZ\?]", raw):
+            raise ExprError("含 don't-care 位的 case 值只支持二进制形态: %r" % text)
+        value, width = parse_based_literal(text)
+        return value, width, 0
+    # 二进制：逐位解析，x/z/? = don't-care
+    value = 0
+    dontcare = 0
+    for ch in raw:
+        value <<= 1
+        dontcare <<= 1
+        if ch in "01":
+            value |= int(ch)
+        elif ch in "xXzZ?":
+            dontcare |= 1
+        else:
+            raise ExprError("case 二进制值含非法字符 %r: %r" % (ch, text))
+    width = int(m.group("size")) if m.group("size") else len(raw)
+    return value & mask(width), width, dontcare & mask(width)
+
+
+def expand_case_values(value, width, dontcare_mask):
+    """don't-care 位展开：返回该 case 覆盖的全部具体控制值（x 位 0/1 笛卡尔积，升序）。
+
+    (0b0000, 4, 0b0001) → [0b0000, 0b0001]      # 4'b000x
+    (0b010,  3, 0)      → [0b010]                # 无 x 位
+    覆盖度档位用法：精简=取首个（x 全 0，用户拍板）；全面/穷举=全部。
+    """
+    xbits = [i for i in range(width) if (dontcare_mask >> i) & 1]
+    out = []
+    for combo in range(1 << len(xbits)):
+        v = value
+        for j, bit in enumerate(xbits):
+            if (combo >> j) & 1:
+                v |= (1 << bit)
+        out.append(v)
+    return sorted(out)
+
+
+def case_matches(case_value, case_width, dontcare_mask, ctrl_value):
+    """判断控制信号取值 ctrl_value 是否命中该 case（don't-care 位忽略比较）。"""
+    care = mask(case_width) & ~dontcare_mask
+    return (ctrl_value & care) == (case_value & care)
+
+
 # ───────────────────────────── AST ─────────────────────────────
 class Node:
     pass

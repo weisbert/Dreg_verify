@@ -87,6 +87,73 @@ class TmmField:
         self.reg_name = reg_name        # 所属寄存器名（B 列里寄存器行给出）
 
 
+class MuxCase:
+    """mux 页的一行：一个 case 值 → 数据输入 的映射。"""
+
+    def __init__(self, row, case_raw, input_raw, input_base, input_width,
+                 input_msb, input_lsb):
+        self.row = row                  # Excel 行号（便于回查）
+        self.case_raw = case_raw        # F 列原文（如 3'b010 / 4'b000x，x=don't care 位）
+        self.input_raw = input_raw      # A 列原文（含 _to_mux 后缀与位宽）
+        self.input_base = input_base    # 剥位宽+_to_mux 后的基名 = 查 regmap/tmm 的 key
+        self.input_width = input_width
+        self.input_msb = input_msb
+        self.input_lsb = input_lsb
+
+    def __repr__(self):
+        return "MuxCase(%s -> %s)" % (self.case_raw, self.input_base)
+
+
+class MuxGroup:
+    """mux 页的一组（同一个被验证输出）：G = case(B) { F行: A行; ... }
+
+    与 LogicSignal 的本质区别：N 选 1 的 case 结构化列表，不是表达式 AST。
+    属性接口尽量与 LogicSignal 对齐（out_name/out_base/out_width/owner/assert_id/
+    rtl_base/rtl_name/is_top），方便 GUI/报告复用。
+    """
+
+    def __init__(self, group_no, out_name, out_width, ctrl_raw, ctrl_base, ctrl_width,
+                 owner, top_output, cases):
+        self.group_no = group_no        # N 列组号（assert_mux<N>_T<n> 的 N，用户拍板方案 A）
+        self.out_name = out_name        # G 列原文（含位宽；顶层网名，直接探）
+        self.out_base = _strip_width(out_name)[0]
+        self.out_width = out_width
+        self.ctrl_raw = ctrl_raw        # B 列原文（logic to_mux 行 K 名 + _to_mux + 位宽）
+        self.ctrl_base = ctrl_base      # 剥位宽+_to_mux 的基名 = logic 页 to_mux 行的 K 基名
+        self.ctrl_width = ctrl_width
+        self.owner = owner              # L 列
+        self.top_output = top_output    # I 列
+        self.cases = cases              # list[MuxCase]
+        # 与 LogicSignal 对齐的占位字段（mux 无表达式/无 logic 后缀语义）
+        self.expr = ""
+        self.suffix = "mux"
+
+    @property
+    def is_top(self):
+        """I 列 top_out==1（真表全 1）。"""
+        return str(self.top_output).strip() in ("1", "1.0", "True", "true")
+
+    @property
+    def assert_id(self):
+        """assert 标签前缀：assert_mux<N>_T<n>（mux 前缀防与 logic R 号撞号）。"""
+        return "mux%s" % self.group_no
+
+    @property
+    def rtl_base(self):
+        """mux 输出 RTL 网名 = G 列基名原样（2026-06-03 真表 scan_rtl 实证：7 个输出全在 DUT 顶层）。
+        不走 logic 的 rtl_net_name 后缀变换（_ls/_to_logic）——套了反而 CUVUNF。"""
+        return self.out_base
+
+    @property
+    def rtl_name(self):
+        """含位宽切片的探针 LHS（assert 用）。"""
+        return self.rtl_base + self.out_name[len(self.out_base):]
+
+    def __repr__(self):
+        return "MuxGroup(mux%s, %s, ctrl=%s, %d cases)" % (
+            self.group_no, self.out_name, self.ctrl_base, len(self.cases))
+
+
 # ───────────────────────────── 工具 ─────────────────────────────
 def _s(v):
     if v is None:
@@ -118,6 +185,16 @@ def strip_to_logic(name):
     """去掉 _to_logic 后缀（rule 2：输入 wire 名 = 输入名去 _to_logic）。"""
     name = name.strip()
     for suf in ("_to_logic", "_TO_LOGIC"):
+        if name.endswith(suf):
+            return name[: -len(suf)]
+    return name
+
+
+def strip_to_mux(name):
+    """去掉 _to_mux 后缀（mux 页 A/B 列都带；剥掉后才能查 regmap/tmm/logic K 名）。
+    注意 strip_to_logic 不剥 _to_mux —— 两个后缀语义不同，分开两个函数。"""
+    name = name.strip()
+    for suf in ("_to_mux", "_TO_MUX"):
         if name.endswith(suf):
             return name[: -len(suf)]
     return name
@@ -234,6 +311,71 @@ def read_logic(ws, header_row=2):
     return signals
 
 
+# ───────────────────────────── 读取 mux 页 ─────────────────────────────
+MUX_CTRL_LETTERS = list("BCDE")     # 控制信号 1..4（真表只用 B，C/D/E 预留全空）
+
+
+def read_mux(ws, header_row=2):
+    """读 mux 页 → list[MuxGroup]。
+
+    真表排版（2026-06-03 inspect_mux 实证，54行×232列，表头第2行）：
+      A=mux_input（寄存器字段+_to_mux）   B=mux_ctrl_sig1（logic to_mux 行 K 名+_to_mux）
+      C/D/E=ctrl_sig2~4（预留全空）       F=case（控制值，可含 don't-care 位 x，如 4'b000x）
+      G=mux_out（被验证输出，顶层网名）    I=top_out（全1）  L=Owner  N=组号
+    语义：G = case(B) { F行: A行; ... }
+
+    只保留 A/F/G 同时非空的行（'(reserved)' 行 F 为空被自然过滤）。
+    分组按 **G 列值变化** 判定（与真表 N 列公式 IF(G=G上行,N,N+1) 同语义）——
+    不依赖 N 列本身，防 read_only 模式下行尾留空导致 N 列读丢（232 列宽表的真实风险）。
+    组号优先用 N 列值；N 列缺失/非法时顺延（上一组+1）。
+    """
+    groups = []
+    cur_g = None        # 当前组的 G 基名（小写）
+    for ri, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True),
+                             start=header_row + 1):
+        in_raw = _s(_col(row, "A"))
+        case_raw = _s(_col(row, "F"))
+        out_raw = _s(_col(row, "G"))
+        if in_raw == "" or case_raw == "" or out_raw == "":
+            continue
+
+        in_base_tm, in_width, in_msb, in_lsb = _strip_width(in_raw)
+        case = MuxCase(
+            row=ri, case_raw=case_raw, input_raw=in_raw,
+            input_base=strip_to_mux(in_base_tm),
+            input_width=in_width, input_msb=in_msb, input_lsb=in_lsb,
+        )
+
+        out_base, out_width, _, _ = _strip_width(out_raw)
+        if groups and out_base.lower() == cur_g:
+            groups[-1].cases.append(case)
+            continue
+
+        # ── 新组 ──
+        ctrl_raw = ""
+        for letter in MUX_CTRL_LETTERS:         # 取第一个非空控制列（真表只有 B）
+            v = _s(_col(row, letter))
+            if v:
+                ctrl_raw = v
+                break
+        ctrl_base_tm, ctrl_width, _, _ = _strip_width(ctrl_raw)
+        n_raw = _s(_col(row, "N"))
+        try:
+            group_no = int(float(n_raw))
+        except (ValueError, TypeError):
+            group_no = groups[-1].group_no + 1 if groups else 1
+        groups.append(MuxGroup(
+            group_no=group_no,
+            out_name=out_raw, out_width=out_width,
+            ctrl_raw=ctrl_raw, ctrl_base=strip_to_mux(ctrl_base_tm), ctrl_width=ctrl_width,
+            owner=_s(_col(row, "L")),
+            top_output=_s(_col(row, "I")),
+            cases=[case],
+        ))
+        cur_g = out_base.lower()
+    return groups
+
+
 # ───────────────────────────── 读取 regmap 页 ─────────────────────────────
 def read_regmap(ws, header_row=2):
     """返回 dict: signal_name -> RegmapEntry。bit 位置由 J..Y(=bit15..bit0) 哪列非空推出。"""
@@ -332,11 +474,12 @@ def _normalize_type(v):
 
 # ───────────────────────────── 顶层装载 ─────────────────────────────
 class DregWorkbook:
-    def __init__(self, logic, regmap, tmm, sheet_names):
+    def __init__(self, logic, regmap, tmm, sheet_names, mux=None):
         self.logic = logic              # list[LogicSignal]
         self.regmap = regmap            # dict
         self.tmm = tmm                  # dict
         self.sheet_names = sheet_names
+        self.mux = mux if mux is not None else []   # list[MuxGroup]（无 mux 页 = 空列表）
 
 
 def _find_sheet(wb, *candidates):
@@ -355,10 +498,12 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
         raise SystemExit("Excel 中找不到 'logic' 页；现有页：%s" % wb.sheetnames)
     ws_regmap = _find_sheet(wb, "regmap")
     ws_tmm = _find_sheet(wb, "total_memory_map", "total memory map", "memory_map")
+    ws_mux = _find_sheet(wb, "mux")
 
     logic = read_logic(ws_logic, logic_header_row)
     regmap = read_regmap(ws_regmap, regmap_header_row) if ws_regmap is not None else {}
     tmm = read_tmm(ws_tmm) if ws_tmm is not None else {}
+    mux = read_mux(ws_mux) if ws_mux is not None else []
     names = list(wb.sheetnames)
     wb.close()
-    return DregWorkbook(logic, regmap, tmm, names)
+    return DregWorkbook(logic, regmap, tmm, names, mux=mux)

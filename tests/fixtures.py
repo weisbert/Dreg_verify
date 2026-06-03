@@ -16,9 +16,11 @@ def _set_row(ws, rownum, mapping):
         ws.cell(row=rownum, column=column_index_from_string(col), value=val)
 
 
-def build_workbook(path, with_pll_chain=False):
+def build_workbook(path, with_pll_chain=False, with_mux=False):
     """with_pll_chain=True 额外加入 pll_n←pll_n2←pll_n1 三层 cone 链
-    （镜像 2026-06-02 真表 Hi1108 的 pll_n 结构，用于 cone 展开测试）。"""
+    （镜像 2026-06-02 真表 Hi1108 的 pll_n 结构，用于 cone 展开测试）。
+    with_mux=True 额外加入 mux 页（镜像 2026-06-03 真表 mux 页排版；默认 False
+    保证现有测试的 sheet/信号计数完全不变）。"""
     wb = openpyxl.Workbook()
 
     # ───────── logic 页 ─────────
@@ -151,8 +153,53 @@ def build_workbook(path, with_pll_chain=False):
         r = _tmm_reg(tmm, r, "IDDQ_REG", "h29")
         r = _tmm_field(tmm, r, "d_bt_lp_pll_dig_dft_iddq_mode", "2", addr="h29", dig="Y", typ="RO")
 
+    # ───────── mux 页（with_mux=True 才生成）─────────
+    # 镜像真表排版：A=mux_input B=ctrl_sig1 C/D/E=预留 F=case G=mux_out I=top_out L=Owner N=组号
+    # 控制信号 = logic 页已有的 to_mux 行 d_logic_bt_lp_lna_agc（行4）→ logic↔mux 衔接真实成立：
+    #   line 路径: force d_bt_lp_lna_agc_line[2:0] + RF_WRITE h31 bit0=0
+    #   local 路径: RF_WRITE h32(lna_agc_local) + RF_WRITE h31 bit0=1
+    if with_mux:
+        # mux 数据寄存器入 tmm（g1/g2 同地址不同字段 = 镜像真表 t1..t4 同住一个 16bit 寄存器）
+        r = _tmm_reg(tmm, r, "RCCAL_I_A", "h40")
+        r = _tmm_field(tmm, r, "d_bt_lp_rccal_i_g1[3:0]", "3:0", addr="h40", dig="N", typ="RW")
+        r = _tmm_field(tmm, r, "d_bt_lp_rccal_i_g2[3:0]", "7:4", addr="h40", dig="N", typ="RW")
+        r = _tmm_reg(tmm, r, "RCCAL_I_B", "h41")
+        r = _tmm_field(tmm, r, "d_bt_lp_rccal_i_g3[3:0]", "3:0", addr="h41", dig="N", typ="RW")
+        r = _tmm_reg(tmm, r, "BIAS_Q", "h42")
+        r = _tmm_field(tmm, r, "d_bt_lp_bias_q_t1[1:0]", "1:0", addr="h42", dig="N", typ="RW")
+        r = _tmm_field(tmm, r, "d_bt_lp_bias_q_t2[1:0]", "3:2", addr="h42", dig="N", typ="RW")
+
+        mx = wb.create_sheet("mux")
+        _set_row(mx, 1, {"O": "There is No error in the selected rows."})
+        _set_row(mx, 2, {
+            "A": "mux_input", "B": "mux_ctrl_sig1", "C": "mux_ctrl_sig2",
+            "D": "mux_ctrl_sig3", "E": "mux_ctrl_sig4", "F": "case", "G": "mux_out",
+            "H": "suffix", "I": "top_out", "J": "Notes", "L": "Owner", "N": 0,
+        })
+        # 组1: rccal_i = case(lna_agc) 三选一, 含一个 don't-care case (3'b10x)
+        _mux_row(mx, 3, "d_bt_lp_rccal_i_g1_to_mux[3:0]", "3'b010",
+                 "d_bt_lp_rccal_i[3:0]", owner="Alice", n=1)
+        _mux_row(mx, 4, "d_bt_lp_rccal_i_g2_to_mux[3:0]", "3'b011",
+                 "d_bt_lp_rccal_i[3:0]", owner="Alice", n=1)
+        _mux_row(mx, 5, "d_bt_lp_rccal_i_g3_to_mux[3:0]", "3'b10x",
+                 "d_bt_lp_rccal_i[3:0]", owner="Alice", n=1)
+        # (reserved) 行: F 列空 → read_mux 应过滤
+        _set_row(mx, 6, {"A": "(reserved)", "G": "(reserved)", "I": 0})
+        # 组2: bias_q = case(lna_agc) 二选一
+        _mux_row(mx, 7, "d_bt_lp_bias_q_t1_to_mux[1:0]", "3'b000",
+                 "d_bt_lp_bias_q[1:0]", owner="Bob", n=2)
+        _mux_row(mx, 8, "d_bt_lp_bias_q_t2_to_mux[1:0]", "3'b001",
+                 "d_bt_lp_bias_q[1:0]", owner="Bob", n=2)
+
     wb.save(path)
     return path
+
+
+def _mux_row(ws, row, mux_input, case, mux_out, owner="", n=None,
+             ctrl="d_logic_bt_lp_lna_agc_to_mux[2:0]"):
+    """mux 页数据行（列语义与真表一致）。"""
+    _set_row(ws, row, {"A": mux_input, "B": ctrl, "F": case, "G": mux_out,
+                       "I": 1, "J": mux_out, "L": owner, "N": n})
 
 
 def _regmap_row(ws, row, reg, typ, signal, bit0=False, bit1=False):
