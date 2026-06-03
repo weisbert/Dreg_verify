@@ -23,7 +23,7 @@ class GenOptions:
                  exclude=None, exclude_regex=None, comments=False, include_risky=False,
                  vector_overrides=None, probe_prefixes=None,
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
-                 cascade_mode="cone", gen_mux=True):
+                 cascade_mode="cone", gen_mux=True, mux_expected=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -70,6 +70,11 @@ class GenOptions:
         # mux 页验证（2026-06-03 第九轮）：默认开（用户拍板"logic+mux 都生成"）。
         # Excel 没有 mux 页时自然为空，不影响纯 logic 表。
         self.gen_mux = bool(gen_mux)
+        # {mux信号名(小写): {输入取值键: int}} —— mux 测试的 designer 手填期望（第十一轮续）。
+        # mux 向量由 case 结构自动生成、不走 vector_overrides，手填期望按 mux_assign_key
+        # （输入取值的稳定序列化）对号入座；覆盖度切换后对不上键的期望宁可丢弃也不张冠李戴。
+        self.mux_expected = {str(k).lower(): dict(v) for k, v in
+                             (mux_expected or {}).items() if v}
 
 
 def _norm_set(x):
@@ -168,6 +173,28 @@ def _neg_enabled_for(sig, opts):
     if opts.neg_signals is None:
         return False
     return sig.out_name.lower() in opts.neg_signals or sig.out_base.lower() in opts.neg_signals
+
+
+def mux_assign_key(assignments):
+    """mux 测试向量的稳定键：输入取值的有序序列化（"c:A=1;d:0=5;…"）。
+
+    designer 手填的 mux 期望按它对号入座——用输入取值做键(而非 T 编号)，
+    覆盖度切换/向量集变化后对不上键的期望自然丢弃(安全)，绝不会张冠李戴到别的测试上。"""
+    return ";".join("%s=%d" % (k, v) for k, v in sorted(assignments.items()))
+
+
+def apply_mux_expected(vecs, exp_map):
+    """把 designer 手填期望写到 mux 向量上（按输入取值键匹配；负向不碰）。
+
+    须在 add_negatives 之前调用——make_negative 的错值防撞需要看到 designer_expected。"""
+    if not exp_map:
+        return
+    for v in vecs:
+        if v.is_negative:
+            continue
+        de = exp_map.get(mux_assign_key(v.assignments))
+        if de is not None:
+            v.designer_expected = int(de) & E.mask(v.exp_width)
 
 
 def probe_prefix_for(sig, opts):
@@ -369,6 +396,11 @@ def build(wb, opts):
                             [("mux", grp.ctrl_base,
                               "无法生成测试向量（控制信号没有可用的驱动路径）")]))
             continue
+
+        # designer 手填期望（mux，第十一轮续）：按输入取值键对号入座。须在反例之前——
+        # make_negative 的错值防撞要看到 designer_expected。
+        apply_mux_expected(vecs, opts.mux_expected.get(grp.out_name.lower())
+                           or opts.mux_expected.get(grp.out_base.lower()))
 
         # 反例（自检式==，错值=被选中寄存器值取反——用户拍板与 logic 一致）
         if _neg_enabled_for(grp, opts):
@@ -631,11 +663,15 @@ def report(wb, opts):
                 vecs = []
             elif not vecs:
                 skip_reason = "无法生成测试向量（控制信号没有可用的驱动路径）"
-            elif _neg_enabled_for(grp, opts):
-                vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
-                                       fixed_value=opts.neg_value)
-                for i, v in enumerate(vecs):
-                    v.index = i
+            else:
+                # designer 手填期望（与 build() 双轨同步——报告必须反映 .sv 真实断言值）
+                apply_mux_expected(vecs, opts.mux_expected.get(grp.out_name.lower())
+                                   or opts.mux_expected.get(grp.out_base.lower()))
+                if _neg_enabled_for(grp, opts):
+                    vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
+                                           fixed_value=opts.neg_value)
+                    for i, v in enumerate(vecs):
+                        v.index = i
 
         summary.append(dict(base_row, n_tests=len(vecs),
                             n_neg=sum(1 for v in vecs if v.is_negative),

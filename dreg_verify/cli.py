@@ -321,8 +321,9 @@ pre.chain{background:#f4f8ff;border:1px solid #d4e0f5;border-radius:4px;padding:
 #chkscore{font-size:13px;color:#333}
 #chkscore b.ok{color:#1a7f37} #chkscore b.bad{color:#c00}
 .chkhint{font-size:12px;color:#666;flex-basis:100%}
-.tt td.masked{color:transparent;background:#e3e3e3 !important;text-shadow:none;user-select:none}
-.tt td.masked::before{content:"?";color:#aaa;float:left;width:100%;margin-right:-100%}
+/* 遮盖格：文本由 JS 换成 "?"（不靠 CSS 透明——会被 tr.autorow 的颜色规则按优先级盖回去），
+   这里只负责底色与禁选 */
+.tt td.masked{background:#e3e3e3 !important;color:#999 !important;font-style:normal;user-select:none}
 .cin{width:76px;font-family:Consolas,monospace;font-size:12px;padding:2px 5px;
  border:1px solid #1558d6;border-radius:3px;text-align:right}
 .cin.okin{border-color:#1a7f37;background:#e2f4e2}
@@ -384,19 +385,31 @@ _REPORT_JS = """
     var total=document.querySelectorAll('#chk td.cquiz').length;
     chkscore.innerHTML='已检查 '+answered+'/'+total+' · <b class="ok">一致 '+okn+'</b> · <b class="bad">不一致 '+badn+'</b>';
   }
+  /* 遮盖/揭示 = 直接换单元格文本（CSS 透明会被 tr.autorow 的颜色规则按优先级盖回去，靠不住）。
+     原文存在 data-t 里，揭示时取回。 */
+  function maskCell(cell){
+    if(cell.getAttribute('data-t')===null)cell.setAttribute('data-t',cell.textContent);
+    cell.textContent='?';
+    cell.classList.add('masked');
+  }
+  function unmaskCell(cell){
+    var t=cell.getAttribute('data-t');
+    if(t!==null)cell.textContent=t;
+    cell.classList.remove('masked');
+  }
   function setChk(on){
     chkon=on;okn=0;badn=0;answered=0;
     chkbtn.textContent=on?'结束检查（显示全部 auto_out）':'开始检查（遮盖所有 auto_out）';
     chkbtn.classList.toggle('off',on);
     var autos=document.querySelectorAll('#chk td.cauto'),i;
-    for(i=0;i<autos.length;i++)autos[i].classList.toggle('masked',on);
+    for(i=0;i<autos.length;i++){if(on)maskCell(autos[i]);else unmaskCell(autos[i]);}
     var qz=document.querySelectorAll('#chk td.cquiz');
     for(i=0;i<qz.length;i++){
       var sp=qz[i].querySelector('.cval'),inp=qz[i].querySelector('.cin');
       sp.style.display=on?'none':'';
       inp.style.display=on?'':'none';
-      inp.value='';inp.className='cin';inp.readOnly=false;
-      inp.removeAttribute('data-done');
+      inp.value='';inp.className='cin';
+      inp.removeAttribute('data-hit');
     }
     /* 清掉上次的判定颜色（先收集再删，避免边遍历边改 classList 影响 NodeList） */
     var marked=document.querySelectorAll('#chk .okc,#chk .badc,#chk .okh,#chk .badh'),mlist=[],k;
@@ -409,24 +422,29 @@ _REPORT_JS = """
     document.addEventListener('keydown',function(ev){
       if(!chkon||ev.key!=='Enter'||!ev.target.classList||!ev.target.classList.contains('cin'))return;
       var inp=ev.target,td=inp.parentNode;
-      if(inp.getAttribute('data-done'))return;          /* 已判定的列不重答（auto_out 已揭晓） */
       var v=parseVal(inp.value);
       if(v===null)return;                               /* 空着回车不判 */
       var want=parseInt(td.getAttribute('data-v'),10);
       var hit=!isNaN(v)&&v===want;
-      /* 揭示同列 auto_out + 整列染色 + 列头染色 */
+      /* 揭示同列 auto_out + 整列染色 + 列头染色（重答时先清旧色再上新色） */
       var table=td.closest('table'),ci=td.cellIndex,rows=table.tBodies[0].rows,j;
       for(j=0;j<rows.length;j++){
         var cell=rows[j].cells[ci];
         if(!cell)continue;
-        if(cell.classList.contains('cauto'))cell.classList.remove('masked');
+        if(cell.classList.contains('cauto'))unmaskCell(cell);
+        cell.classList.remove('okc','badc');
         cell.classList.add(hit?'okc':'badc');
       }
       var hdr=table.tHead.rows[0].cells[ci];
-      if(hdr)hdr.classList.add(hit?'okh':'badh');
-      inp.setAttribute('data-done','1');inp.readOnly=true;
+      if(hdr){hdr.classList.remove('okh','badh');hdr.classList.add(hit?'okh':'badh');}
+      /* 计分：首答 answered++；重答(允许改答案)则把旧结果从计数里挪走 */
+      var prev=inp.getAttribute('data-hit');
+      if(prev===null)answered++;
+      else if(prev==='1')okn--;
+      else badn--;
+      if(hit)okn++;else badn++;
+      inp.setAttribute('data-hit',hit?'1':'0');
       inp.className='cin '+(hit?'okin':'badin');
-      answered++;if(hit)okn++;else badn++;
       updScore();
     });
   }
@@ -609,10 +627,11 @@ def _write_report_html(path, rep, excel):
         '<button id="chkbtn">开始检查（遮盖所有 auto_out）</button>'
         '<span id="chkscore"></span>'
         '<span class="chkhint">这是 designer 的防自证自测：auto_out 是表达式算出来的——用它当期望验证表达式'
-        '等于自己证明自己。点「开始检查」后 auto_out 全部遮住、期望变成空格：只看上面的输入，'
+        '等于自己证明自己。点「开始检查」后 auto_out 全部遮住(显示 ?)、期望变成空格：只看上面的输入，'
         '自己算输出填进去按回车 → 立即揭晓 auto_out 并比对。'
         '<b style="color:#1a7f37">绿=一致</b>；<b style="color:#c00">红=不一致</b>'
         '（要么你算错了，要么表达式有 bug——后者正是 Dreg 要抓的）。'
+        '答完可以改值再回车重判（计分随之修正）。'
         '检查结果只在本页面，不回写 .sv；负向列(_NEG)是故意填错的自检用例，不参与检查。</span>'
         '</div>'
     ) + truth_tables(rep.get("tables", []), check=True)

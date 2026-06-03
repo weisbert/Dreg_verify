@@ -233,6 +233,25 @@ def test_html_report_has_check_tab(wb, tmp_path):
     assert "parseVal" in html and "okc" in html and "badc" in html
 
 
+def test_html_check_tab_mask_and_reanswer(wb, tmp_path):
+    """⭐用户反馈回归(2026-06-03)：①遮盖必须 JS 换文本(CSS transparent 会被 tr.autorow
+    颜色规则按优先级盖回去，原值看得见)；②答完必须允许改值重判(不锁定)。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    html = path.read_text(encoding="utf-8")
+    # ① 遮盖 = JS 换文本（原值存 data-t、显示 ?），不再用 CSS 透明
+    assert "function maskCell" in html and "function unmaskCell" in html
+    assert "data-t" in html
+    assert "color:transparent" not in html             # 根因：被 autorow 颜色规则盖掉
+    # ② 允许重答：无 readOnly 锁定/data-done 单次限制；重答时计分修正
+    assert "readOnly=true" not in html and "data-done" not in html
+    assert "okn--" in html and "badn--" in html        # 重答把旧结果从计数挪走
+    # 判定时先清旧色再上新色（重答列颜色能翻转）
+    assert "classList.remove('okc','badc')" in html
+
+
 def test_html_report_truth_table_two_rows(wb, tmp_path):
     """HTML 真值表 tab：auto_out 与 期望 拆成两行（autorow + exprow）。"""
     from dreg_verify import cli
@@ -396,7 +415,7 @@ def test_gui_copy_column_carries_designer_expected(qapp, wb, tmp_path_factory):
 
 
 def test_gui_mux_readonly_two_rows(qapp, tmp_path_factory):
-    """mux 只读表也拆 auto_out / 期望 两行（v1 同值，排版与 logic 编辑器一致）。"""
+    """mux 表也拆 auto_out / 期望 两行（排版与 logic 编辑器一致；期望行可手填见后面的专项测试）。"""
     from dreg_verify import gui
     path = tmp_path_factory.mktemp("de_mux") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path), with_mux=True)
@@ -528,3 +547,221 @@ def test_set_negatives_preserves_designer_expected(qapp, wb, tmp_path_factory):
     w._load_test_items(sig)
     pos0 = next(rd for rd in w._ti_rows if rd.get("kind") != "neg")
     assert pos0["designer_expected"] == hand_val           # 手填期望没丢
+
+
+# ═════════════════ mux 信号的 designer 手填期望（第十一轮续，用户反馈#1） ═════════════════
+@pytest.fixture(scope="module")
+def wb_mux(tmp_path_factory):
+    path = tmp_path_factory.mktemp("xl_demux") / "synthetic_mux.xlsx"
+    fixtures.build_workbook(str(path), with_mux=True)
+    return excel_model.load_workbook(str(path))
+
+
+def test_mux_assign_key_stable():
+    """mux 取值键：与字典插入顺序无关、值变即键变。"""
+    k1 = generator.mux_assign_key({"c:A": 1, "d:0": 5, "c:B": 2})
+    k2 = generator.mux_assign_key({"d:0": 5, "c:B": 2, "c:A": 1})   # 乱序同值
+    k3 = generator.mux_assign_key({"c:A": 1, "d:0": 6, "c:B": 2})   # 值不同
+    assert k1 == k2 and k1 != k3
+
+
+def test_apply_mux_expected():
+    """apply_mux_expected：按键对号入座、负向不碰、对不上的键丢弃。"""
+    v_pos = V.TestVector(0, {"c:A": 1, "d:0": 5}, exp_value=5, exp_width=4)
+    v_neg = V.TestVector(1, {"c:A": 1, "d:0": 5}, exp_value=5, exp_width=4,
+                         is_negative=True, neg_value=10)
+    key = generator.mux_assign_key(v_pos.assignments)
+    generator.apply_mux_expected([v_pos, v_neg],
+                                 {key: 7, "no:such=key": 9})
+    assert v_pos.designer_expected == 7 and v_pos.asserted_value == 7
+    assert v_neg.designer_expected is None                  # 负向不碰
+    # 空 map / None 安全
+    generator.apply_mux_expected([v_pos], None)
+    generator.apply_mux_expected([v_pos], {})
+
+
+def test_mux_expected_flows_to_sv(wb_mux):
+    """⭐GenOptions.mux_expected → build：mux 断言用 designer 手填期望（≠auto_out 也不算负向）。"""
+    grp = wb_mux.mux[0]
+    resolver = R.Resolver(wb_mux)
+    from dreg_verify import mux_gen
+    exp = mux_gen.expand_mux_group(wb_mux, resolver, grp)
+    vecs, _meta = mux_gen.make_mux_vectors(grp, exp, mode="min")
+    v0 = vecs[0]
+    wrong = (v0.exp_value + 1) & E.mask(v0.exp_width)
+    key = generator.mux_assign_key(v0.assignments)
+    res = generator.build(wb_mux, generator.GenOptions(
+        signals=[grp.out_name], top_output_only=False,
+        mux_expected={grp.out_name: {key: wrong}}))
+    blk = next((lines, st) for lines, st in res["blocks"] if st.get("is_mux"))
+    text = "\n".join(blk[0])
+    assert ("==%s)begin" % W.fmt_bin(wrong, v0.exp_width)) in text   # 用手填值
+    assert blk[1]["n_designer"] == 1
+    assert "T0_NEG" not in text                                       # 不是负向
+
+
+def test_mux_expected_in_report(wb_mux):
+    """report() 的 mux 真值表反映手填期望（与 build 双轨同步）。"""
+    grp = wb_mux.mux[0]
+    resolver = R.Resolver(wb_mux)
+    from dreg_verify import mux_gen
+    exp = mux_gen.expand_mux_group(wb_mux, resolver, grp)
+    vecs, _meta = mux_gen.make_mux_vectors(grp, exp, mode="min")
+    v0 = vecs[0]
+    wrong = (v0.exp_value + 1) & E.mask(v0.exp_width)
+    rep = generator.report(wb_mux, generator.GenOptions(
+        signals=[grp.out_name], top_output_only=False,
+        mux_expected={grp.out_name: {generator.mux_assign_key(v0.assignments): wrong}}))
+    t = next(x for x in rep["tables"] if x.get("kind") == "mux")
+    tc0 = t["tests"][0]
+    assert tc0["designer_filled"] is True
+    assert tc0["expected"] != tc0["auto_out"]
+    d0 = next(r for r in rep["detail"] if r["type"] == "mux")
+    assert d0["exp_src"] == "designer手填"
+
+
+def test_mux_expected_stale_key_dropped(wb_mux):
+    """键对不上(如覆盖度切换后向量变了) → 期望丢弃(兜底 auto_out)，绝不张冠李戴。"""
+    grp = wb_mux.mux[0]
+    res = generator.build(wb_mux, generator.GenOptions(
+        signals=[grp.out_name], top_output_only=False,
+        mux_expected={grp.out_name: {"c:A=999;d:0=999": 5}}))    # 不存在的键
+    blk = next((lines, st) for lines, st in res["blocks"] if st.get("is_mux"))
+    assert blk[1]["n_designer"] == 0                              # 没有任何测试被它影响
+
+
+def _mux_window(tmp_path_factory, sub):
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp(sub) / "synthetic_mux.xlsx"
+    fixtures.build_workbook(str(path), with_mux=True)
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path)); w.on_load()
+    grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
+    return gui, w, grp
+
+
+def test_gui_mux_expected_editable(qapp, tmp_path_factory):
+    """⭐GUI mux 期望行可手填（用户反馈#1）：编辑 → 存进 _mux_expected → .sv 断言用它；清空恢复兜底。"""
+    from PySide6 import QtCore
+    gui, w, grp = _mux_window(tmp_path_factory, "demux1")
+    w._load_test_items(grp)
+    exp_row = w._ti_mux_exp_row
+    exp_it = w.ti_table.item(exp_row, 0)
+    assert exp_it.flags() & QtCore.Qt.ItemIsEditable          # 可编辑(不再只读)
+    assert exp_it.text() == ""                                # 未填=空白
+    v0 = w._ti_mux_vecs[0]
+    wrong = (v0.exp_value + 1) & E.mask(v0.exp_width)
+    exp_it.setText("0x%X" % wrong)
+    # 存进 _mux_expected + 向量已更新
+    assert w._ti_mux_vecs[0].designer_expected == wrong
+    name_low = grp.out_name.lower()
+    assert generator.mux_assign_key(v0.assignments) in w._mux_expected[name_low]
+    # .sv 用手填值
+    res = generator.build(w.wb, w._opts([grp.out_name]))
+    text = generator.render(res)
+    assert ("==%s)begin" % W.fmt_bin(wrong, v0.exp_width)) in text
+    # 头部进度
+    assert "期望已手填 1/" in w.ti_header.text()
+    # 清空 → 恢复兜底
+    w.ti_table.item(exp_row, 0).setText("")
+    assert w._ti_mux_vecs[0].designer_expected is None
+    assert not w._mux_expected                                # map 清空
+
+
+def test_gui_mux_cov_hint_shows_count(qapp, tmp_path_factory):
+    """⭐用户反馈回归(2026-06-03)：选中 mux 信号后，工具栏「覆盖度」旁也要显示当前信号的测试条数
+    （之前只有 logic 信号显示，mux 是空白）。手填期望后计数同步更新。"""
+    gui, w, grp = _mux_window(tmp_path_factory, "demux_hint")
+    w._load_test_items(grp)
+    n = len(w._ti_mux_vecs)
+    assert ("当前信号 %d 条" % n) in w.cov_hint.text()       # 与 logic 一致的条数提示
+    # 手填一个期望 → 提示带手填进度
+    v0 = w._ti_mux_vecs[0]
+    w.ti_table.item(w._ti_mux_exp_row, 0).setText("0x%X" % v0.exp_value)
+    assert "期望已手填 1" in w.cov_hint.text()
+    # 切到 logic 信号 → 提示切换为 logic 的格式；切回 mux → 恢复
+    sig = next(s for s in w.wb.logic if s.out_name == "d_logic_bt_lp_reserve")
+    w._load_test_items(sig)
+    assert "当前信号" in w.cov_hint.text()
+    w._load_test_items(grp)
+    assert ("当前信号 %d 条" % n) in w.cov_hint.text()
+
+
+def test_gui_mux_auto_fill_button(qapp, tmp_path_factory, monkeypatch):
+    """「auto→期望」按钮对 mux 信号也生效（只填未填的列）。"""
+    from PySide6 import QtWidgets
+    gui, w, grp = _mux_window(tmp_path_factory, "demux2")
+    w._load_test_items(grp)
+    n = len(w._ti_mux_vecs)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    w.on_ti_fill_expected()
+    assert all(v.designer_expected is not None for v in w._ti_mux_vecs)
+    assert ("期望已手填 %d/%d" % (n, n)) in w.ti_header.text()
+    name_low = grp.out_name.lower()
+    assert len(w._mux_expected[name_low]) == n
+
+
+def test_gui_mux_expected_persists(qapp, tmp_path_factory, monkeypatch):
+    """mux 手填期望持久化：关 GUI 重开自动恢复 + .sv 用恢复值。"""
+    from dreg_verify import gui
+    monkeypatch.setattr(gui, "EDITS_PATH",
+                        str(tmp_path_factory.mktemp("demux_p") / "edits.json"))
+    path = tmp_path_factory.mktemp("demux3") / "synthetic_mux.xlsx"
+    fixtures.build_workbook(str(path), with_mux=True)
+    w1 = gui.MainWindow()
+    w1.path_edit.setText(str(path)); w1.on_load()
+    grp = next(s for s in w1.signals if getattr(s, "suffix", "") == "mux")
+    w1._load_test_items(grp)
+    v0 = w1._ti_mux_vecs[0]
+    wrong = (v0.exp_value + 1) & E.mask(v0.exp_width)
+    w1.ti_table.item(w1._ti_mux_exp_row, 0).setText("0x%X" % wrong)
+    # 重开
+    w2 = gui.MainWindow()
+    w2.path_edit.setText(str(path)); w2.on_load()
+    assert w2._mux_expected                                   # 已恢复
+    grp2 = next(s for s in w2.signals if getattr(s, "suffix", "") == "mux")
+    w2._load_test_items(grp2)
+    assert w2._ti_mux_vecs[0].designer_expected == wrong
+    res = generator.build(w2.wb, w2._opts([grp2.out_name]))
+    text = generator.render(res)
+    assert ("==%s)begin" % W.fmt_bin(wrong, v0.exp_width)) in text
+
+
+# ═════════════════ 真值表列宽可拖动（用户反馈#2） ═════════════════
+def test_gui_column_width_preserved_after_repopulate(qapp, wb, tmp_path_factory):
+    """用户手动拖列宽 → 重建表格(编辑/加列等触发)后宽度保留；换信号 → 恢复自动适应。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "colw1")
+    w._load_test_items(sig)
+    assert not w._ti_user_widths                              # 初始=自动
+    # 模拟用户拖列宽(非程序化路径：不在 _ti_loading/_ti_auto_resizing 保护内)
+    w.ti_table.setColumnWidth(0, 222)
+    assert w._ti_user_widths                                  # 已记住"手动调过"
+    # 重建表格(如编辑触发 _ti_populate) → 宽度保留
+    w._ti_populate()
+    assert w.ti_table.columnWidth(0) == 222
+    # 编辑单元格也不弹回
+    w.ti_table.item(0, 0).setText("0x1")
+    assert w.ti_table.columnWidth(0) == 222
+    # 换信号 → 标志复位、恢复自动适应
+    other = next(s for s in w.wb.logic if s.out_name != sig.out_name)
+    w._load_test_items(other)
+    assert not w._ti_user_widths
+
+
+def test_gui_column_width_min_size(qapp, wb, tmp_path_factory):
+    """列有最小宽度(好抓拖动边界)。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "colw2")
+    w._load_test_items(sig)
+    assert w.ti_table.horizontalHeader().minimumSectionSize() >= 44
+    assert all(w.ti_table.columnWidth(c) >= 44 for c in range(w.ti_table.columnCount()))
+
+
+def test_gui_mux_column_width_preserved(qapp, tmp_path_factory):
+    """mux 表同样保留手动列宽（重新加载同一 mux 信号时）。"""
+    gui, w, grp = _mux_window(tmp_path_factory, "colw3")
+    w._load_test_items(grp)
+    w.ti_table.setColumnWidth(0, 200)
+    assert w._ti_user_widths
+    w._load_mux_test_items(grp)                               # 同一信号重载(如手填期望后)
+    assert w.ti_table.columnWidth(0) == 200

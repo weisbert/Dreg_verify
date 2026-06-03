@@ -627,7 +627,8 @@ def test_gui_mux_in_signal_table(gui_win):
 
 
 def test_gui_mux_test_items_readonly(gui_win):
-    """点击 mux 信号 → 只读 case 表（_ti_sig=None 屏蔽编辑，_ti_mux_sig 记录当前 mux）。"""
+    """点击 mux 信号 → case 表（_ti_sig=None 屏蔽列编辑按钮，_ti_mux_sig 记录当前 mux；
+    输入行只读，期望行可手填——见 test_designer_expected.py 的 mux 专项测试）。"""
     w = gui_win
     grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
     w._load_test_items(grp)

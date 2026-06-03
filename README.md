@@ -113,6 +113,24 @@ python -m dreg_verify.gui
 elaboration 失败；**点信号**看它 force/RF_WRITE 哪些 net 的明细（对比 `ENV_RF` 层是否真有该 net）；
 **覆盖诊断**按钮列出所有 wire兜底/未解析输入；**状态筛选**可只看有问题的信号，用来二分定位"跑不出结果"。
 
+## RTL 层级扫描与探针前缀（`scan_rtl.py`）
+
+`.sv` 里 force / assert 的网如果不在 DUT 顶层，必须带层级前缀（如 `` `ENV_RF.U_BT_LP_PLL_DIG.pll_n ``），
+否则仿真报 **CUVUNF（找不到 net）**。`scan_rtl.py`（单文件零依赖，可直接拷到仿真服务器）
+静态扫描 RTL，把 Excel 里每个信号的层级**一次找全**，不再"仿真→报错→grep→重生成"逐个试错：
+
+```bat
+:: ① Windows: 从 Excel 导出需要定位的网
+python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
+:: ② 把 scan_rtl.py + nets.txt 上传仿真服务器
+:: ③ 服务器(source 过 dreg 环境后)零参数全自动:
+::      python3 scan_rtl.py
+:: ④ 生成的 probe_prefixes.txt 拷回 Windows:
+::      GUI「设置探针前缀 → 导入…」 或 CLI --probe-prefix-file probe_prefixes.txt
+```
+
+什么时候要跑 / 输出三段怎么看 / 全部参数 / 单机用法：见 **[scan_rtl使用说明.md](scan_rtl使用说明.md)**。
+
 ## auto_out 与「期望」分离（防自证验证）
 
 Dreg 验证的对象是 **designer 写的逻辑表达式本身**。工具按表达式算出的输出值（`auto_out`）
@@ -164,6 +182,28 @@ python inspect_excel.py 核心文件.xlsx --compact --mask-owners --rows 10 `
     --sheets logic,regmap,total_memory_map
 ```
 
+## mux 页排版探查（`inspect_mux.py`）
+
+新设计 / 新表第一次做 mux 验证前，先探查 mux 页的真实排版（列结构 / case 值形态 / 与 logic·regmap
+页的衔接关系），确认与工具的解析假设一致：
+
+```powershell
+python inspect_mux.py 核心文件.xlsx --mask-owners
+```
+
+导出 `<名字>_mux_inspect.txt`。LPBT 真表已探查过（结果固化进 `excel_model.read_mux`）；
+换设计（如 WUR）时重跑一次，排版不同就把 txt 发给维护者适配。
+
+## 演示 Excel（`make_sample_excel.py`）
+
+没有真表也能体验完整流程——生成一个覆盖典型场景（直通 / mux / 门控 / 多位总线 / 同地址合并 /
+RO·RW 混合）的示例表：
+
+```powershell
+python make_sample_excel.py demo.xlsx
+python -m dreg_verify.gui demo.xlsx
+```
+
 ## 测试
 
 ```powershell
@@ -175,17 +215,32 @@ python -m pytest -q
 ## 目录
 
 ```
-dreg_verify/        生成器后端（CLI 与未来 GUI 共用）
-  expr.py           表达式词法/解析/两遍位宽求值/变量角色分类
-  excel_model.py    读 logic/regmap/total_memory_map
-  resolver.py       命名→RO/RW + 地址 + 位段（多策略匹配，失败清晰标注）
-  vectors.py        测试向量生成 + 负向用例
-  sv_writer.py      渲染 .sv（含同地址 RW 合并、负向标记）
-  generator.py      编排 + 筛选
-  cli.py            命令行入口
-  gui.py            PySide6 图形界面（筛选/多选/预览/导出）
-inspect_excel.py    Excel 结构导出 + 表达式形态覆盖报告(--expr-forms)
-tests/              单元 + 端到端测试（含合成 Excel 夹具）
+dreg_verify/            生成器后端（CLI 与 GUI 共用）
+  expr.py               表达式词法/解析/两遍位宽求值/变量角色分类/case 字面量(x 位)
+  excel_model.py        读 logic/regmap/total_memory_map/mux 四页
+  resolver.py           命名→RO/RW + 地址 + 位段（多策略匹配，失败清晰标注）
+  cone.py               cone 展开：内部信号/上游计算网的表达式代入 + 展开链记录
+  vectors.py            logic 测试向量生成 + 负向用例 + designer 手填期望
+  mux_gen.py            mux 测试生成：控制路径发现/互异值/覆盖度三档
+  sv_writer.py          渲染 .sv（含同地址 RW 合并、负向标记、汇总块）
+  generator.py          编排 + 筛选 + 报告（build/report 双轨）
+  rtl_scan.py           Excel→需定位网清单（scan_rtl.py 的 Excel 侧配套）
+  cli.py                命令行入口
+  gui.py                PySide6 图形界面（筛选/测试项编辑/探针前缀/预览/导出）
+
+scan_rtl.py             RTL 层级扫描 → 探针前缀映射（单文件零依赖，可拷到仿真服务器）
+inspect_excel.py        Excel 结构导出 + 表达式形态覆盖报告(--expr-forms)
+inspect_mux.py          mux 页排版探查（新设计首次做 mux 验证前跑）
+inspect_vba.py          .xlsm 的 VBA 宏源码抽取
+make_sample_excel.py    生成演示用示例 Excel
+tests/                  单元 + 端到端 + GUI 离屏冒烟测试（含合成 Excel 夹具）
+
+README.md               本文档（核心用法）
+scan_rtl使用说明.md      RTL 扫描与探针前缀：何时跑/两段式工作流/输出怎么看
+级联模式说明.md          级联驱动两种模式（展开上游 vs force级联网）图解
+mux验证说明.md           mux 页验证：语义/测试配方/覆盖度三档/log 解读
+mux环境验证.md           mux 网名 RTL 环境核查步骤（scan_rtl 实例）
+mux功能影响面分析.md      mux 功能实现蓝本（开发参考）
 ```
 
 ## 注意

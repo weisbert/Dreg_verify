@@ -289,6 +289,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_loading = False  # 程序化填表时屏蔽 itemChanged，防递归
         self._sig_loading = False # 程序化改信号表(含左侧负向勾选)时屏蔽其 itemChanged
         self._persist_suspended = False  # 批量操作时暂停逐次存盘，结束后统一存一次
+        # mux 信号的 designer 手填期望：{信号名小写: {输入取值键(generator.mux_assign_key): int}}
+        # mux 向量由 case 结构自动生成、不走 vector_overrides → 期望单独按取值键存（覆盖度切换不串号）
+        self._mux_expected = {}
+        self._ti_mux_vecs = []    # 当前 mux 信号的向量（期望行编辑时对号入座）
+        self._ti_mux_exp_row = -1 # 当前 mux 表里"期望"行的行号
+        # 真值表列宽：用户手动拖过 → 重建表格时保留手动宽度(换信号才恢复自动)
+        self._ti_user_widths = False
+        self._ti_auto_resizing = False
         # 探针前缀 {信号名小写: 层级前缀}：输出网在 ENV_RF 的子模块里时（如 pll_n 在
         # U_BT_LP_PLL_DIG 内部），断言探针写 `ENV_RF.<前缀>.<网名>。按 Excel 路径持久化。
         self._probe_prefixes = {}
@@ -558,6 +566,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_table.setAlternatingRowColors(True)
         self.ti_table.itemChanged.connect(self.on_ti_item_changed)
         self.ti_table.horizontalHeader().sectionDoubleClicked.connect(self.on_ti_rename_col)
+        # 列宽可拖动：给个好抓的最小宽度；用户手动拖过后，重建表格不再重置回自动宽度
+        self.ti_table.horizontalHeader().setMinimumSectionSize(44)
+        self.ti_table.horizontalHeader().sectionResized.connect(self._on_ti_section_resized)
         # Ctrl+D 复制列：用 WidgetShortcut 挂在真值表上——仅当表本身有焦点时触发；
         # 单元格正在编辑时焦点在子 QLineEdit 上，快捷键不会触发，避免打断/丢失编辑(对抗式审查 #1)
         copy_sc = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+D"), self.ti_table)
@@ -659,14 +670,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._set_signal_negatives(sig, True, rule)
                 self._load_test_items(sig)
         elif getattr(self, "_ti_mux_sig", None) is not None:
-            self._load_mux_test_items(self._ti_mux_sig)   # mux：按新覆盖度重算只读展示
+            self._load_mux_test_items(self._ti_mux_sig)   # mux：按新覆盖度重算(手填期望按取值键自动回填)
         self._update_cov_hint()
 
     def _update_cov_hint(self):
-        """工具栏「覆盖度」旁实时显示当前信号的用例条数，把抽象档位变具体。"""
+        """工具栏「覆盖度」旁实时显示当前信号的用例条数，把抽象档位变具体。logic 与 mux 信号都显示。"""
         if not hasattr(self, "cov_hint"):
             return
-        if self._ti_sig is None or not self._ti_rows:
+        # mux 信号：_ti_sig=None 但 _ti_mux_vecs 有向量 → 同样显示条数(与 logic 一致，用户反馈)
+        if self._ti_sig is None:
+            vecs = getattr(self, "_ti_mux_vecs", None) or []
+            if getattr(self, "_ti_mux_sig", None) is None or not vecs:
+                self.cov_hint.setText("")
+                return
+            n_filled = sum(1 for v in vecs if not v.is_negative and v.designer_expected is not None)
+            extra = "，期望已手填 %d" % n_filled if n_filled else ""
+            self.cov_hint.setText("→ 当前信号 %d 条%s" % (len(vecs), extra))
+            return
+        if not self._ti_rows:
             self.cov_hint.setText("")
             return
         n = len(self._ti_rows)
@@ -704,6 +725,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._edited = {}
         self._customized = set()
         self._neg_only = {}
+        self._mux_expected = {}
         # 编辑持久化按"已加载"的 Excel 路径分桶（不能用 path_edit 实时文本——
         # 用户改了路径还没点加载时，编辑仍属于旧表）
         self._loaded_excel_path = path
@@ -1284,6 +1306,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_chain = []
         self._ti_name_low = None
         self._ti_hl_col = -1
+        self._ti_mux_vecs = []; self._ti_mux_exp_row = -1   # mux 期望编辑状态一并清(防陈旧引用)
         self.ti_header.setText(header_text)
         self._ti_loading = True
         try:
@@ -1301,11 +1324,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.wb or self._resolver is None or sig is None:
             return
         self._ti_mux_sig = None
-        # mux 页信号：测试项由 case 结构自动生成 → 只读展示（编辑器的表达式求值模型不适用 N 选 1）
+        # mux 页信号：输入由 case 结构自动生成（只读），期望行可由 designer 手填
         if isinstance(sig, excel_model.MuxGroup):
             self._load_mux_test_items(sig)
             return
         name_low = sig.out_name.lower()
+        if name_low != self._ti_name_low:
+            self._ti_user_widths = False     # 换信号 → 列宽恢复自动适应(手动宽度只在同一信号内保留)
         node, bindings, groups, chain, err = self._expand_sig(sig)
         if node is None:
             self._clear_test_items("信号: %s — %s（无法生成测试项）" % (sig.out_name, err))
@@ -1329,11 +1354,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_populate()
 
     def _load_mux_test_items(self, grp):
-        """mux 信号的测试项展示（只读 case 表，2026-06-03 第九轮）。
+        """mux 信号的测试项展示（2026-06-03 第九轮只读 → 第十一轮续：期望行可手填）。
 
-        先 _clear_test_items（_ti_sig=None → 所有编辑按钮安全屏蔽），再以只读方式填充：
-        行 = 控制行输入 + 数据寄存器 + 期望；列 = 测试 T。
+        先 _clear_test_items（_ti_sig=None → 列编辑按钮安全屏蔽），再填充：
+        行 = 控制行输入 + 数据寄存器（只读，由 case 结构决定）+ auto_out（只读）+ 期望（可手填）。
+        手填期望按"输入取值键"存进 _mux_expected → 生成/报告经 GenOptions.mux_expected 生效；
         负向勾选 / 生成 / 预览本信号 照常可用（走 neg_signals / build 路径）。"""
+        if getattr(self, "_ti_mux_sig", None) is not grp:
+            self._ti_user_widths = False     # 换信号 → 列宽恢复自动适应
+        # 重建前记下现有列宽(必须在 _clear_test_items 之前——clear 会把列数清零)
+        old_widths = [self.ti_table.columnWidth(c) for c in range(self.ti_table.columnCount())]
         self._clear_test_items("")
         self._ti_mux_sig = grp
         exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
@@ -1351,16 +1381,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_header.setText("mux 信号 %s：互异值分配失败或控制信号无驱动路径（见左表状态列）"
                                    % grp.out_name)
             return
-        # 覆盖度档位说明：写明"当前档生成了什么"，三档差别一眼可见
-        cov_desc = {"min": "每 case 1 条 + 另一路径抽测",
-                    "max": "每 case×x位展开 + 反码数据轮 + 另一路径抽测",
-                    "exhaustive": "每 case×x位展开 + 反码数据轮 + 另一条控制路径全扫"}[mux_mode]
-        self.ti_header.setText(
-            "mux 信号: %s = case(%s) %d 选 1　|　覆盖度=%s → 测试 %d 个（%s）　|　"
-            "测试项由 case 结构自动生成（只读）；负向勾选/生成/预览照常可用"
-            % (grp.out_name, grp.ctrl_base, len(grp.cases),
-               self.coverage.currentText(), len(vecs), cov_desc))
+        # 已手填的期望按输入取值键回填到向量（与生成/报告同一逻辑）
+        generator.apply_mux_expected(vecs, self._mux_expected.get(grp.out_name.lower()))
+        self._ti_mux_vecs = vecs
         used = exp["used_vars"]
+        self._ti_mux_exp_row = len(used) + 1
+        self._update_mux_header(grp, vecs, mux_mode)
         self._ti_loading = True
         try:
             self.ti_table.clear()
@@ -1376,31 +1402,65 @@ class MainWindow(QtWidgets.QMainWindow):
                     val = v.assignments.get(key, 0)
                     txt = ("0x%X" % val) if b.width > 4 else format(val, "0%db" % max(b.width, 1))
                     it = QtWidgets.QTableWidgetItem(txt)
-                    it.setFlags(QtCore.Qt.ItemIsEnabled)            # 只读
+                    it.setFlags(QtCore.Qt.ItemIsEnabled)            # 只读(输入由 case 结构决定)
                     self.ti_table.setItem(ri, ci, it)
-            # mux 测试项 v1 只读：auto_out 与 期望 两行同值(期望未手填→auto_out 兜底)，与 logic 编辑器排版一致
+            # auto_out 行(只读) + 期望 行(可手填)——与 logic 编辑器同语义/同配色
             vlabels.append("auto_out")
-            for ci, v in enumerate(vecs):
-                it = QtWidgets.QTableWidgetItem(W.fmt_bin(v.exp_value, v.exp_width))
-                it.setFlags(QtCore.Qt.ItemIsEnabled)
-                f = it.font(); f.setItalic(True); it.setFont(f)
-                it.setForeground(QtGui.QColor("#555555"))
-                it.setToolTip("auto_out：程序按 case 结构算出的值(mux 测试项 v1 只读，期望不可手填)")
-                self.ti_table.setItem(len(used), ci, it)
             vlabels.append("期望(进.sv)")
-            for ci, v in enumerate(vecs):
-                it = QtWidgets.QTableWidgetItem(W.fmt_bin(v.asserted_value, v.exp_width))
-                it.setFlags(QtCore.Qt.ItemIsEnabled)
-                f = it.font()
-                f.setBold(True)
-                it.setFont(f)
-                it.setToolTip("mux 信号的期望由 case 结构决定(v1 不可手填)，生成 .sv 用 auto_out")
-                self.ti_table.setItem(len(used) + 1, ci, it)
+            for ci in range(len(vecs)):
+                self._render_mux_exp_col(ci, len(used))
             self.ti_table.setVerticalHeaderLabels(vlabels)
-            self.ti_table.resizeColumnsToContents()
+            self._ti_fit_columns(old_widths)
         finally:
             self._ti_loading = False
         self._update_cov_hint()
+
+    def _update_mux_header(self, grp, vecs, mux_mode):
+        """mux 编辑器头部：case 结构 + 覆盖度说明 + 期望手填进度。"""
+        cov_desc = {"min": "每 case 1 条 + 另一路径抽测",
+                    "max": "每 case×x位展开 + 反码数据轮 + 另一路径抽测",
+                    "exhaustive": "每 case×x位展开 + 反码数据轮 + 另一条控制路径全扫"}[mux_mode]
+        pos = [v for v in vecs if not v.is_negative]
+        n_filled = sum(1 for v in pos if v.designer_expected is not None)
+        self.ti_header.setText(
+            "mux 信号: %s = case(%s) %d 选 1　|　覆盖度=%s → 测试 %d 个（%s）　|　"
+            "期望已手填 %d/%d　|　输入由 case 结构自动生成（只读）；期望行可手填，负向勾选/生成/预览照常可用"
+            % (grp.out_name, grp.ctrl_base, len(grp.cases),
+               self.coverage.currentText(), len(vecs), cov_desc, n_filled, len(pos)))
+
+    def _render_mux_exp_col(self, ci, n_inputs):
+        """渲染 mux 表第 ci 列的 auto_out + 期望 两格（手填状态变化时单列重绘）。"""
+        v = self._ti_mux_vecs[ci]
+        de = v.designer_expected
+        # auto_out 格（只读）
+        autoit = QtWidgets.QTableWidgetItem(W.fmt_bin(v.exp_value, v.exp_width))
+        autoit.setFlags(QtCore.Qt.ItemIsEnabled)
+        fa = autoit.font(); fa.setItalic(True); autoit.setFont(fa)
+        autoit.setForeground(QtGui.QColor("#555555"))
+        autoit.setToolTip("auto_out：程序按 case 结构算出的值（只读参考）。\n"
+                          ".sv 断言对比的是下面 designer 手填的「期望」(未填→兜底用此值)。")
+        self.ti_table.setItem(n_inputs, ci, autoit)
+        # 期望 格（可手填；显示语义与 logic 编辑器一致：未填=空白灰、一致=绿、不一致=红）
+        exp_text = "" if de is None else W.fmt_bin(de, v.exp_width)
+        expit = QtWidgets.QTableWidgetItem(exp_text)
+        expit.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEditable)
+        ff = expit.font(); ff.setBold(de is not None); expit.setFont(ff)
+        if de is None:
+            expit.setForeground(FB_FG)
+            expit.setToolTip("未手填——生成 .sv 时用 auto_out=%s 兜底。\n"
+                             "双击填入你认为的输出值(按 case 结构应选中的寄存器值)。"
+                             % W.fmt_bin(v.exp_value, v.exp_width))
+        elif de == v.exp_value:
+            expit.setBackground(DSGN_BG)
+            expit.setToolTip("designer 手填期望 = %s，与 auto_out 一致 ✓\n清空单元格可恢复未填(兜底)。"
+                             % W.fmt_bin(de, v.exp_width))
+        else:
+            expit.setBackground(DIFF_BG)
+            expit.setToolTip("⚠ designer 手填期望 = %s，但 case 结构算出 auto_out = %s！\n"
+                             "若你确认期望没填错，则 mux 配置与你的意图不符(仿真该测试会 FAIL)。\n"
+                             ".sv 断言用你手填的期望；清空单元格可恢复未填(兜底)。"
+                             % (W.fmt_bin(de, v.exp_width), W.fmt_bin(v.exp_value, v.exp_width)))
+        self.ti_table.setItem(n_inputs + 1, ci, expit)
 
     def _auto_rows(self, sig, node, bindings, groups):
         """按当前向量选项自动生成测试项 → rowdict 列表。"""
@@ -1525,10 +1585,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         allbuckets = _load_edits_file()
-        if self._edited:
+        if self._edited or self._mux_expected:
             allbuckets[path] = {
                 "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
                 "neg_only": dict(self._neg_only),
+                # mux 手填期望：{信号名: {输入取值键: int}}（mux 不走 rows 编辑模型，单独一段）
+                "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
             }
         else:
             allbuckets.pop(path, None)        # 编辑全清空 → 桶也删掉
@@ -1566,7 +1628,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sig_loading = False
 
     def _apply_edits_bucket(self, bucket):
-        """把一个编辑桶({"edits":{...},"neg_only":{...}})应用到当前工作簿。
+        """把一个编辑桶({"edits":{...},"neg_only":{...},"mux_expected":{...}})应用到当前工作簿。
         返回 (恢复个数, 找不到的信号名列表)。供恢复与导入共用。"""
         by_name = {s.out_name.lower(): s for s in self.wb.logic} if self.wb else {}
         n_restored, missing = 0, []
@@ -1589,11 +1651,22 @@ class MainWindow(QtWidgets.QMainWindow):
             if name_low in self._edited:
                 self._neg_only[name_low] = rule if rule in ("first", "all") else "first"
                 self._customized.add(name_low)
+        # mux 手填期望：信号在当前表的 mux 页里找不到 → 跳过并列名字
+        mux_by_name = ({g.out_name.lower(): g for g in self.wb.mux} if self.wb else {})
+        for name_low, exp_map in (bucket.get("mux_expected") or {}).items():
+            if name_low not in mux_by_name:
+                missing.append(name_low + "（mux 页不存在）")
+                continue
+            if not isinstance(exp_map, dict) or not exp_map:
+                continue
+            merged = self._mux_expected.setdefault(name_low, {})
+            merged.update({str(k): int(v) for k, v in exp_map.items()})
+            n_restored += 1
         return n_restored, missing
 
     def on_export_edits(self):
-        """把当前 Excel 的全部测试项编辑导出为 .json（给同事/版本库/跨机器）。"""
-        if not self._edited:
+        """把当前 Excel 的全部测试项编辑(logic 行编辑 + mux 手填期望)导出为 .json（给同事/版本库/跨机器）。"""
+        if not self._edited and not self._mux_expected:
             QtWidgets.QMessageBox.information(self, "提示", "当前没有任何测试项编辑可导出。\n"
                                               "(手填期望/加负向/自定义列之后再导出)")
             return
@@ -1608,6 +1681,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "excel": os.path.basename(excel),
             "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
             "neg_only": dict(self._neg_only),
+            "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
         }
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -1617,9 +1691,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         n_de = sum(1 for ed in self._edited.values()
                    for rd in ed["rows"] if rd.get("designer_expected") is not None)
+        n_mux = sum(len(m) for m in self._mux_expected.values())
         QtWidgets.QMessageBox.information(
-            self, "完成", "已导出 %d 个信号的测试项编辑（其中手填期望 %d 条）：\n%s"
-            % (len(self._edited), n_de, path))
+            self, "完成", "已导出 %d 个信号的测试项编辑（logic 手填期望 %d 条，mux 手填期望 %d 条）：\n%s"
+            % (len(self._edited) + len(self._mux_expected), n_de, n_mux, path))
 
     def on_import_edits(self):
         """从 .json 导入测试项编辑，与现有合并（同名信号以导入为准）。跳过的信号列名字+原因。"""
@@ -1636,15 +1711,17 @@ class MainWindow(QtWidgets.QMainWindow):
         except (OSError, ValueError) as ex:
             QtWidgets.QMessageBox.critical(self, "导入失败", "无法读取/解析 %s：\n%s" % (path, ex))
             return
-        if not isinstance(payload, dict) or "edits" not in payload:
+        if not isinstance(payload, dict) or ("edits" not in payload and "mux_expected" not in payload):
             QtWidgets.QMessageBox.critical(self, "导入失败",
-                                           "%s 不是测试项编辑文件(缺少 edits 段)。" % path)
+                                           "%s 不是测试项编辑文件(缺少 edits/mux_expected 段)。" % path)
             return
         n_restored, missing = self._apply_edits_bucket(payload)
         self._sync_neg_checks_from_edits()
         self._persist_edits()                      # 导入的编辑也进入自动存盘
         if self._ti_sig is not None:               # 当前编辑器里的信号若被导入覆盖 → 刷新显示
             self._load_test_items(self._ti_sig)
+        elif getattr(self, "_ti_mux_sig", None) is not None:   # mux 信号同理
+            self._load_mux_test_items(self._ti_mux_sig)
         msg = "已导入 %d 个信号的测试项编辑。" % n_restored
         if missing:
             msg += "\n\n以下信号在文件里有编辑、但当前 Excel 里找不到(已跳过)：\n" + \
@@ -1831,6 +1908,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _ti_populate(self):
         self._ti_hl_col = -1          # 列集变了，旧高亮作废(下次选中再亮)
+        # 重建前记下现有列宽：用户手动拖过的宽度在重建后恢复（修"列宽拖了又弹回去"）
+        old_widths = [self.ti_table.columnWidth(c) for c in range(self.ti_table.columnCount())]
         self._ti_loading = True
         try:
             self.ti_table.clear()
@@ -1875,8 +1954,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ti_loading = False
         for c in range(len(self._ti_rows)):
             self._ti_render_col(c)
-        self.ti_table.resizeColumnsToContents()
+        self._ti_fit_columns(old_widths)
         self._update_cov_hint()
+
+    # ───────────── 真值表列宽（可拖动 + 手动宽度不被重建冲掉） ─────────────
+    def _on_ti_section_resized(self, *args):
+        """用户手动拖列宽 → 记住"手动调过"；之后重建表格保留手动宽度(换信号才恢复自动)。"""
+        if not self._ti_loading and not self._ti_auto_resizing:
+            self._ti_user_widths = True
+
+    def _ti_fit_columns(self, old_widths=None):
+        """列宽策略：用户手动调过 → 沿用重建前的宽度(新列按内容)；否则全部按内容自适应。"""
+        self._ti_auto_resizing = True
+        try:
+            n = self.ti_table.columnCount()
+            if self._ti_user_widths and old_widths:
+                for c in range(min(len(old_widths), n)):
+                    self.ti_table.setColumnWidth(c, old_widths[c])
+                for c in range(len(old_widths), n):          # 新增的列没有旧宽度 → 按内容
+                    self.ti_table.resizeColumnToContents(c)
+            else:
+                self.ti_table.resizeColumnsToContents()
+        finally:
+            self._ti_auto_resizing = False
 
     def _mk_item(self, text, editable):
         it = QtWidgets.QTableWidgetItem(text)
@@ -2006,7 +2106,11 @@ class MainWindow(QtWidgets.QMainWindow):
         raise ValueError("无法识别 %r（用 0x.. 或 16'h.. 或纯数字）" % s)
 
     def on_ti_item_changed(self, item):
-        if self._ti_loading or not self._ti_sig:
+        if self._ti_loading:
+            return
+        if not self._ti_sig:
+            # mux 信号：只有「期望」行可编辑（designer 手填期望，按输入取值键存储）
+            self._on_mux_exp_changed(item)
             return
         r, c = item.row(), item.column()       # 列 c = 第 c 条测试；行 r = 输入/期望/负向
         if c < 0 or c >= len(self._ti_rows):
@@ -2035,6 +2139,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_render_col(c)
         self._ti_mark_customized()
 
+    def _on_mux_exp_changed(self, item):
+        """mux 信号「期望」行编辑：手填期望按输入取值键存进 _mux_expected（持久化 + 生成时生效）。"""
+        grp = getattr(self, "_ti_mux_sig", None)
+        vecs = self._ti_mux_vecs
+        r, c = item.row(), item.column()
+        if grp is None or not vecs or r != self._ti_mux_exp_row or not (0 <= c < len(vecs)):
+            return
+        vec = vecs[c]
+        if vec.is_negative:
+            return                          # 防御：编辑器里的 mux 向量都是正向(负向生成时才追加)
+        name_low = grp.out_name.lower()
+        key = generator.mux_assign_key(vec.assignments)
+        try:
+            txt = item.text().strip()
+            if txt == "":
+                # 清空 = 恢复未填(生成 .sv 时 auto_out 兜底)
+                self._mux_expected.get(name_low, {}).pop(key, None)
+                if not self._mux_expected.get(name_low):
+                    self._mux_expected.pop(name_low, None)
+                vec.designer_expected = None
+            else:
+                val = self._parse_int(txt) & E.mask(vec.exp_width)
+                self._mux_expected.setdefault(name_low, {})[key] = val
+                vec.designer_expected = val
+        except ValueError as ex:
+            self.status.showMessage("数值解析失败: %s（已还原）" % ex)
+        self._persist_edits()               # mux 期望也是劳动成果，即时存盘
+        # 单列重绘 + 头部进度/工具栏条数提示刷新
+        n_inputs = self._ti_mux_exp_row - 1
+        self._ti_loading = True
+        try:
+            self._render_mux_exp_col(c, n_inputs)
+        finally:
+            self._ti_loading = False
+        mode, exhaustive = self._coverage()
+        self._update_mux_header(grp, vecs, mux_gen.coverage_mode(mode, exhaustive))
+        self._update_cov_hint()
+
     def on_ti_add(self):
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
@@ -2051,8 +2193,11 @@ class MainWindow(QtWidgets.QMainWindow):
         """「auto→期望」：把 auto_out 填进期望行（只填未填的列；已手填/负向的不动）。
 
         这是用户要求的便捷功能——designer 核对过表达式后可一键采信 auto_out。
-        填进去之后就算"已手填"(designer_filled=True，报告里区别于 auto_out 兜底)。"""
+        填进去之后就算"已手填"(designer_filled=True，报告里区别于 auto_out 兜底)。
+        logic 与 mux 信号都支持（mux 走 _mux_expected 按取值键存储）。"""
         if not self._ti_sig:
+            if self._fill_mux_expected():    # mux 信号：填 _mux_expected
+                return
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
         targets = [rd for rd in self._ti_rows
@@ -2060,14 +2205,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not targets:
             self.status.showMessage("没有可填的列：期望都已手填(或全是负向列)")
             return
-        if QtWidgets.QMessageBox.question(
-                self, "auto_out → 期望",
-                "把 auto_out(表达式计算值) 填进 %d 列未填的「期望」？\n\n"
-                "⚠ 注意：这等于直接采信表达式算出的值——失去了 designer 独立核对的意义。\n"
-                "更稳妥的做法是自己算一遍再填(或用 HTML 报告的『真值表检查』页自测)。\n"
-                "确认表达式没问题时再用这个快捷方式。" % len(targets),
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+        if not self._confirm_fill_expected(len(targets)):
             return
         for rd in targets:
             rd["designer_expected"] = rd.get("correct", 0)
@@ -2076,6 +2214,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_populate()
         self.status.showMessage("已把 auto_out 填入 %s 的 %d 列「期望」(已手填的未动)"
                                 % (self._ti_sig.out_name, len(targets)))
+
+    def _confirm_fill_expected(self, n):
+        """「auto→期望」确认框（logic/mux 共用）。"""
+        return QtWidgets.QMessageBox.question(
+            self, "auto_out → 期望",
+            "把 auto_out(程序计算值) 填进 %d 列未填的「期望」？\n\n"
+            "⚠ 注意：这等于直接采信程序算出的值——失去了 designer 独立核对的意义。\n"
+            "更稳妥的做法是自己算一遍再填(或用 HTML 报告的『真值表检查』页自测)。\n"
+            "确认无误时再用这个快捷方式。" % n,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
+
+    def _fill_mux_expected(self):
+        """mux 信号的「auto→期望」：未填的列按取值键写进 _mux_expected。返回是否处理（是 mux 信号）。"""
+        grp = getattr(self, "_ti_mux_sig", None)
+        vecs = self._ti_mux_vecs
+        if grp is None or not vecs:
+            return False
+        targets = [v for v in vecs if not v.is_negative and v.designer_expected is None]
+        if not targets:
+            self.status.showMessage("没有可填的列：期望都已手填")
+            return True
+        if not self._confirm_fill_expected(len(targets)):
+            return True
+        name_low = grp.out_name.lower()
+        for v in targets:
+            val = v.exp_value & E.mask(v.exp_width)
+            self._mux_expected.setdefault(name_low, {})[generator.mux_assign_key(v.assignments)] = val
+            v.designer_expected = val
+        self._persist_edits()
+        self._load_mux_test_items(grp)       # 整表重绘（颜色/头部进度）
+        self.status.showMessage("已把 auto_out 填入 %s 的 %d 列「期望」(已手填的未动)"
+                                % (grp.out_name, len(targets)))
+        return True
 
     def on_ti_add_neg_selected(self):
         """给选中的测试列各加一条负向(精确控制)；未选中则取首条正向。正向测试不动。
@@ -2253,7 +2425,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_ti_preview_signal(self, switch_tab=True):
         if not self._ti_sig:
-            # mux 信号：测试项只读，但预览照常可用（走完整 build 路径，所见即所得）
+            # mux 信号：走完整 build 路径预览（含手填期望/负向勾选，所见即所得）
             grp = getattr(self, "_ti_mux_sig", None)
             if grp is not None and self.wb:
                 res = generator.build(self.wb, self._opts([grp.out_name]))
@@ -2393,7 +2565,10 @@ class MainWindow(QtWidgets.QMainWindow):
             sv_summary=sv_summary,
             cascade_mode=self._cascade_mode(),
             vector_overrides=self._vector_overrides(positive_only=positive_only,
-                                                    negative_only=negative_only))
+                                                    negative_only=negative_only),
+            # mux 手填期望：所有导出范围都传——负向的错值防撞要看到它，
+            # 保证"全部"与"仅负向"两份导出的负向错值一致(便于对照)
+            mux_expected={k: dict(v) for k, v in self._mux_expected.items()})
 
     # ───────────── 收集 / 选项 ─────────────
     def _collect(self):
