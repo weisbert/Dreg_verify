@@ -159,8 +159,9 @@ def select_mux_groups(wb, opts):
             continue
         if exrx and (exrx.search(grp.out_name) or exrx.search(grp.out_base)):
             continue
-        if opts.top_output_only and not grp.is_top:
-            continue
+        # 注意：top_output_only 不过滤 mux 组。logic 的 top_output=0 是"内部节点、根本不是端口、
+        # 探不到"；而 mux 的 top_out=0 只是"喂内部、非芯片顶层输出"（WL 全部如此）——它们正是要
+        # 验的信号，只是输出探针可能要前缀（见 mux_output_warning）。按 top_out 滤掉=对 WL 全军覆没。
         if opts.types is not None and grp.suffix.lower() not in opts.types:
             continue
         out.append(grp)
@@ -218,22 +219,19 @@ def _mux_ctrl_desc(grp):
 
 
 def mux_prefix_risks(grp, exp, opts):
-    """WL 形态：必须探针前缀但还没配置的输入/输出清单（build/report/GUI 共用，口径必须一致）。
+    """硬阻断：force 一个【子模块内部网】但没配前缀的输入——没前缀 force 必 CUVUNF，默认跳过。
+    （build/report/GUI 共用，口径必须一致；--include-risky 可强制生成。）
 
-    返回 [(tag, name, reason), ...]；空 = 没有前缀风险。
-    LPBT（输出在顶层 top_out=1、无级联 force 输入）永远返回空——行为不变。
-    没配前缀就生成 → force/assert 一个子模块内部的网 → elaboration CUVUNF 整个 .sv 报废，
-    所以与 logic 的 needs-prefix 同理念：默认跳过并给原因，--include-risky 可强制生成。
+    这里只收【有实证依据确定会坏】的两类 force 输入，**不**包含输出探针的 top_out=0：
+      ① 级联衔接网（needs-prefix / mux-output）——RTL 里是子模块内 assign 目标，force 基名钉不住；
+      ② wire 兜底（tmm/regmap 查无、按裸基名 force）——该名多半 RTL 顶层不存在。
+    输出探针的 top_out=0 是【不确定】的（见 mux_output_warning）——那只是数据流去向，不等于
+    RTL 层级埋深，所以不当硬阻断，而是照常生成裸名 + 警告（2026-06-03 用户拍板）。
+
+    返回 [(tag, name, reason), ...]；空 = 没有 force 阻断。
+    LPBT（无级联 force 输入、数据全 RW）永远返回空——行为不变。
     """
     risks = []
-    # 输出探针：top_out=0 的 mux 输出不在 DUT 顶层（WL 全部如此）
-    if not grp.is_top and not probe_prefix_for(grp, opts):
-        risks.append(("mux", grp.out_base,
-                      "输出 %s 不在 DUT 顶层(top_out=0)，assert 探针需要层级前缀——"
-                      "跑 scan_rtl 生成 probe_prefixes.txt 并导入后才能生成" % grp.out_name))
-    # force 输入风险：① 级联衔接网（needs-prefix / mux-output）没配前缀；
-    # ② wire 兜底（tmm/regmap 查无、按裸基名 force）——与 logic 路径同口径默认跳过，
-    #    否则会 force 一个 RTL 顶层不存在的网（真网是子模块内的 _to_mux），elaboration 必 CUVUNF。
     for k in exp["used_vars"]:
         b = exp["bindings"].get(k)
         if b is None:
@@ -248,6 +246,21 @@ def mux_prefix_risks(grp, exp, opts):
                           "（真网在子模块内），会 elaboration CUVUNF；请核对名称或用 --rfwrite-signals/"
                           "--force-signals 指定" % (b.base, b.wire)))
     return risks
+
+
+def mux_output_warning(grp, opts):
+    """top_out=0 输出没配前缀 → 用裸名探针 `ENV_RF.<名>。这是【警告】不是【阻断】：
+
+    top_out（I 列）= 是不是芯片顶层输出端口（数据流去向）；WL 输出喂 to_logic/to_mux/to_dft
+    所以 top_out=0。但"能不能在 ENV_RF.<名> 直接探到"是 RTL 层级问题——两者常相关但不等价，
+    工具不替用户假设。照常生成裸名探针（和 LPBT 一样）：探得到就过；真 CUVUNF 了再跑 scan_rtl
+    配前缀重生成（2026-06-03 用户拍板）。返回警告文案，或 ''（顶层/已配前缀=无警告）。
+    """
+    if not grp.is_top and not probe_prefix_for(grp, opts):
+        return ("输出 %s top_out=0（喂内部，非芯片顶层输出）→ 当前用裸名探针 `ENV_RF.%s；"
+                "若仿真 elaboration 报 CUVUNF 说明它埋在子模块，跑 scan_rtl 配探针前缀后重生成"
+                % (grp.out_name, grp.rtl_name))
+    return ""
 
 
 def parse_probe_prefix_lines(text):
@@ -306,6 +319,7 @@ def build(wb, opts):
     blocks = []
     errors = []
     skipped = []        # 含不可驱动输入(wire兜底/未解析)的信号，默认跳过(与 VBA 一致)
+    mux_warnings = []   # 照常生成但有提示的 mux 组（如 top_out=0 用裸名探针，可能要前缀）
     n_total_vectors = 0
     n_total_neg = 0
     n_total_designer = 0     # designer 手填期望的用例数（其余正向用 auto_out 兜底）
@@ -424,11 +438,12 @@ def build(wb, opts):
                             [("mux", _mux_ctrl_desc(grp), "; ".join(exp["issues"]))]))
             continue
 
-        # WL 形态：输出不在顶层 / force 级联衔接网，但没配探针前缀 → 跳过给原因
-        # （没前缀生成必 CUVUNF；GUI 真值表照常渲染，这只挡 .sv 产出）
-        prefix_risks = mux_prefix_risks(grp, exp, opts)
-        if prefix_risks and not opts.include_risky:
-            skipped.append((grp.out_name, grp.assert_id, prefix_risks))
+        # force 阻断：要 force 子模块内部网（级联衔接网 / wire 兜底）但没配前缀 → 跳过给原因
+        # （这类没前缀生成必 CUVUNF，有实证依据；GUI 真值表照常渲染，这只挡 .sv 产出）。
+        # 注意：输出探针 top_out=0 不在此列——它照常生成裸名 + 警告（见下 out_warn）。
+        blockers = mux_prefix_risks(grp, exp, opts)
+        if blockers and not opts.include_risky:
+            skipped.append((grp.out_name, grp.assert_id, blockers))
             continue
 
         # 覆盖度三档（2026-06-03 第十一轮）：精简=每case一值；全面=+x位展开+反码数据轮；
@@ -480,6 +495,11 @@ def build(wb, opts):
                                              owner_in_msg=opts.owner_in_msg,
                                              counters=opts.sv_summary,
                                              used_vars=exp["used_vars"])
+        # top_out=0 且没配前缀：照常生成裸名探针，但在块顶留一句警告 + 汇总到 mux_warnings
+        out_warn = mux_output_warning(grp, opts)
+        if out_warn:
+            lines = ["// ⚠ %s" % out_warn] + lines
+            mux_warnings.append((grp.out_name, grp.assert_id, out_warn))
         stats["is_mux"] = True
         stats["scan_path"] = meta.get("scan_path")
         blocks.append((lines, stats))
@@ -507,9 +527,11 @@ def build(wb, opts):
         "n_mux_groups": len(wb.mux),
         "n_mux_selected": len(mux_selected),
         "n_mux_generated": len(blocks) - n_logic_blocks,
+        "n_mux_warnings": len(mux_warnings),
     }
     return {"blocks": blocks, "selected": selected, "errors": errors,
-            "skipped": skipped, "dup_labels": dup_labels, "summary": summary,
+            "skipped": skipped, "mux_warnings": mux_warnings,
+            "dup_labels": dup_labels, "summary": summary,
             # 计数器++已按 opts.sv_summary 写进 blocks，render 必须配套包裹声明/汇总，
             # 否则产物里是未声明变量 → 把标志带在结果里保证两者一致。
             "sv_summary": opts.sv_summary}
@@ -702,12 +724,13 @@ def report(wb, opts):
 
         # 与 build() 同口径的跳过判定（报告里以 error 列呈现原因，不是消失）
         skip_reason = ""
+        out_warn = mux_output_warning(grp, opts)   # top_out=0 裸名探针提示（不阻断，照常生成）
         vecs, meta = [], {}
-        prefix_risks = mux_prefix_risks(grp, exp, opts)
+        blockers = mux_prefix_risks(grp, exp, opts)
         if exp["issues"] and not opts.include_risky:
             skip_reason = "; ".join(exp["issues"])
-        elif prefix_risks and not opts.include_risky:
-            skip_reason = "; ".join(r[2] for r in prefix_risks)
+        elif blockers and not opts.include_risky:
+            skip_reason = "; ".join(r[2] for r in blockers)
         else:
             mux_mode = mux_gen.coverage_mode(opts.mode, opts.exhaustive)
             vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
@@ -728,17 +751,21 @@ def report(wb, opts):
                     for i, v in enumerate(vecs):
                         v.index = i
 
+        # 警告只在【真生成】时显示（被跳过的组用 error 列说明，警告无意义）
+        row_warn = out_warn if not skip_reason else ""
         summary.append(dict(base_row, n_tests=len(vecs),
                             n_neg=sum(1 for v in vecs if v.is_negative),
                             control=",".join(meta.get("control", []) if meta else []),
                             data=",".join(meta.get("data", []) if meta else []),
-                            unresolved="", error=skip_reason))
-        # 可验证性行：issues/碰撞 → unresolved（与现有四档兼容，detail 给具体原因）
+                            unresolved="", error=skip_reason, warning=row_warn))
+        # 可验证性行：issues/碰撞 → unresolved；top_out=0 裸名 → bare-probe（生成了，建议配前缀）；
+        # 其余 clean。（与 GUI analyze_mux_group 同口径）
+        verif_status = "unresolved" if skip_reason else ("bare-probe" if row_warn else "clean")
         mux_verif_rows.append({
             "R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
             "type": "mux", "top": grp.top_output,
-            "status": "unresolved" if skip_reason else "clean",
-            "detail": skip_reason, "out_net": "`%s.%s" % (W.ENV, grp.rtl_name),
+            "status": verif_status,
+            "detail": skip_reason or row_warn, "out_net": "`%s.%s" % (W.ENV, grp.rtl_name),
         })
         if skip_reason:
             continue
@@ -823,8 +850,13 @@ def _mux_expr_text(grp):
 def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None):
     """mux 组的解析画像（GUI 状态列/明细面板用），返回与 analyze_signal 同形状的 dict。
 
-    status: clean / unresolved（issues 或互异值碰撞 → 不可验证）/
-            needs-prefix（结构没问题，但输出/级联网需要 scan_rtl 探针前缀才能出 .sv——WL 形态）。
+    status:
+      clean        —— 解析通、不缺任何前缀，照常生成
+      unresolved   —— issues 或互异值碰撞 → 不可验证（红）
+      needs-prefix —— 两种情况（都能在 GUI 看真值表）：
+                       ① force 子模块内部网（级联衔接网/wire 兜底）缺前缀 → 默认【跳过】.sv（硬阻断）
+                       ② 输出 top_out=0 缺前缀 → 照常【生成】裸名探针，仅【建议】配前缀（软提示）
+                      detail 文案区分两者；GUI 橙色，但 ② 不挡生成。
     inputs: 控制驱动输入 + 数据寄存器，每项与 analyze_signal 的 inputs 行同形状。
     """
     rtl = grp.rtl_name
@@ -855,13 +887,19 @@ def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None)
     if not vecs:
         return {"status": "unresolved", "inputs": rows, "out_net": out_net,
                 "error": "无法生成测试向量（控制信号没有可用的驱动路径）", "cone": False}
-    # WL 形态：结构都解析通了，但缺探针前缀（输出不在顶层/级联衔接网）→ 单独一档状态，
-    # 让 GUI/报告能区分"表有问题"和"还没跑 scan_rtl"
-    risks = mux_prefix_risks(grp, exp, opts or GenOptions(probe_prefixes={
-        grp.out_base.lower(): probe_prefix} if probe_prefix else {}))
-    if risks:
+    # 结构都解析通了。再看前缀：① force 子模块网缺前缀=硬阻断（默认跳过）；② 输出 top_out=0
+    # 缺前缀=软提示（照常生成裸名）。两者都 needs-prefix，detail 区分；GUI 能据此着色+给文案。
+    eff_opts = opts or GenOptions(probe_prefixes={
+        grp.out_base.lower(): probe_prefix} if probe_prefix else {})
+    blockers = mux_prefix_risks(grp, exp, eff_opts)
+    if blockers:
         return {"status": "needs-prefix", "inputs": rows, "out_net": out_net,
-                "error": "; ".join(r[2] for r in risks), "cone": False}
+                "error": "; ".join(r[2] for r in blockers), "blocking": True, "cone": False}
+    out_warn = mux_output_warning(grp, eff_opts)
+    if out_warn:
+        # 软提示：照常生成裸名探针（不是阻断）——单独一档 'bare-probe'，GUI 用信息色而非告警色
+        return {"status": "bare-probe", "inputs": rows, "out_net": out_net,
+                "error": out_warn, "blocking": False, "cone": False}
     return {"status": "clean", "inputs": rows, "out_net": out_net, "error": "", "cone": False}
 
 

@@ -150,15 +150,18 @@ def _skipped_detail_text(skipped):
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "unresolved": "✗未解析", "parse-err": "✗解析错",
-                "needs-prefix": "⚠需探针前缀"}
+                "needs-prefix": "⚠需探针前缀", "bare-probe": "裸名探针"}
 STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE 驱动",
                "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
                "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
                "parse-err": "表达式或输入解析出错",
-               "needs-prefix": "表本身没问题，但输出/级联衔接网不在 DUT 顶层——"
-                               "先跑 scan_rtl 配好探针前缀再生成（否则会 CUVUNF）"}
-# 状态列颜色：红=信号坏掉(会 elaboration 失败)；橙=表 OK 但还没配探针前缀(跑 scan_rtl 即可)
-STATUS_FG = {"needs-prefix": QtGui.QColor("#cc7a00")}
+               "needs-prefix": "要 force 子模块内的衔接网（级联网/wire 兜底）但没配前缀——"
+                               "先跑 scan_rtl 配好探针前缀再生成（否则这组会跳过）",
+               "bare-probe": "输出 top_out=0（喂内部、非芯片顶层输出）——已按裸名探针 `ENV_RF.<名> "
+                             "照常生成；若仿真 elaboration 报 CUVUNF 说明它埋在子模块，"
+                             "再跑 scan_rtl 配前缀重生成即可（不是错误）"}
+# 状态列颜色：红=信号坏掉(会 elaboration 失败)；橙=要前缀否则跳过；蓝=信息(裸名探针已生成,可选配前缀)
+STATUS_FG = {"needs-prefix": QtGui.QColor("#cc7a00"), "bare-probe": QtGui.QColor("#2a7ab0")}
 # 输入来源(found_in)的中文标签——明细面板用；未映射的原样显示
 FOUND_IN_LABEL = {"tmm": "tmm命中", "regmap": "regmap命中", "logic": "级联前级",
                   "logic-internal": "内部信号", "wire": "wire兜底",
@@ -802,12 +805,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 st = self._analysis.get(r, {}).get("status", "?")
                 it = QtWidgets.QTableWidgetItem(STATUS_LABEL.get(st, st))
                 if st != "clean":
-                    # needs-prefix 用橙色（表 OK、只缺探针前缀）；其余故障用红色
+                    # 橙=needs-prefix(要前缀否则跳过)；蓝=bare-probe(裸名已生成,信息)；其余故障红
                     it.setForeground(STATUS_FG.get(st, QtGui.QColor("red")))
                 tip = STATUS_HELP.get(st, st)
                 err = self._analysis.get(r, {}).get("error")
-                if err and st in ("needs-prefix", "unresolved", "parse-err"):
-                    tip = "%s\n\n%s" % (tip, err)        # 缺前缀/坏掉时把后端 error 全文带上
+                if err and st in ("needs-prefix", "bare-probe", "unresolved", "parse-err"):
+                    tip = "%s\n\n%s" % (tip, err)        # 缺前缀/坏掉/裸名提示时把后端 error 全文带上
                 it.setToolTip(tip)
                 self.table.setItem(r, COL_STATUS, it)
                 self.table.setItem(r, COL_PREFIX, self._prefix_cell(sig, self._analysis.get(r, {})))

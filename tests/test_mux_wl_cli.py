@@ -3,12 +3,13 @@
 
 覆盖 cli.py 在 WL 表上的外围表现（核心生成逻辑在 test_mux_wl.py 已测）：
   ① --list 列出 5 个 mux 组，多控制组的控制列显示拼接 {c1,c2}（B 高位）
-  ② 不配探针前缀时，build 把 top_out=0 的 mux 组跳过且原因含 scan_rtl（不硬生成必 CUVUNF 的 .sv）
-  ③ --probe-prefix-file 配前缀后，CLI 全流程产出 5 个组的 .sv（三来源驱动 + 前缀探针）
+  ② 不配探针前缀时，top_out=0 的 mux 组【照常生成】裸名探针 + 警告含 scan_rtl（用户拍板：
+     工具不替用户假设 top_out=0=埋深；探得到就过、真 CUVUNF 再配前缀）
+  ③ --probe-prefix-file 配前缀后，输出探针带层级前缀、无警告
 
-注意：WL mux 输出全部 top_out=0（不在 DUT 顶层），CLI 默认只取 top_output=1，
-所以要带 --include-internal 才把这些非顶层 mux 输出纳入（之后再由 needs-prefix 机制按前缀放行/跳过）。
-LPBT 表（mux 输出 top_out=1）不需要此开关——见 test_mux.py 的 CLI 测试。
+注意：mux 输出的 top_out=0 只是"喂内部、非芯片顶层输出"（WL 全部如此），它们正是要验的信号——
+所以 mux 组【不受】 --include-internal/top_output_only 过滤（与 logic 内部节点不同）。
+不带 --include-internal 也能生成全部 mux。
 """
 
 import os
@@ -47,9 +48,9 @@ def _write_prefix_file(path):
 
 # ───────────── ① --list ─────────────
 def test_wl_cli_list_shows_five_mux_groups(wl_excel, capsys):
-    """--list（含非顶层输出）列出 5 个 mux 组，组号 mux1..mux5，多控制组显示拼接控制。"""
+    """--list 列出 5 个 mux 组（不带 --include-internal 也全在——mux 不受 top_out 过滤）。"""
     from dreg_verify import cli
-    cli.main(["--excel", str(wl_excel), "--list", "--include-internal"])
+    cli.main(["--excel", str(wl_excel), "--list"])
     out = capsys.readouterr().out
     # 5 个组的输出名与组号都在
     for n in range(1, 6):
@@ -62,21 +63,23 @@ def test_wl_cli_list_shows_five_mux_groups(wl_excel, capsys):
     assert "case({d_wl_rf_rc_code_lut_en,d_wl_rf_bwctrl})" in out
 
 
-# ───────────── ② 不配前缀 → 跳过含 scan_rtl 原因 ─────────────
-def test_wl_cli_skip_reason_mentions_scan_rtl(wl_excel, tmp_path, capsys):
-    """没配探针前缀：5 个 top_out=0 的 mux 组被跳过，控制台逐组打印原因含 scan_rtl。"""
+# ───────────── ② 不配前缀 → 照常生成 + 警告 ─────────────
+def test_wl_cli_generates_with_warning_no_prefix(wl_excel, tmp_path, capsys):
+    """没配探针前缀（也不带 --include-internal）：5 个 top_out=0 的 mux 组照常生成裸名探针，
+    控制台打印警告含 scan_rtl（提示真 CUVUNF 再配前缀）。"""
     from dreg_verify import cli
     out_sv = tmp_path / "wl.sv"
-    cli.main(["--excel", str(wl_excel), "--out", str(out_sv), "--include-internal"])
+    cli.main(["--excel", str(wl_excel), "--out", str(out_sv)])
     out = capsys.readouterr().out
-    # 跳过原因里出现 scan_rtl 字样（提示先跑 scan_rtl 拿前缀）
+    # 警告（不是跳过）提示 scan_rtl
     assert "scan_rtl" in out
-    # 5 个组都以 [R=mux<N>] 形式列出
+    # 5 个组都以 [R=mux<N>] 形式列在警告里
     for n in range(1, 6):
         assert "[R=mux%d]" % n in out
-    # 产物不含 mux 断言（跳过 = 不硬生成必 CUVUNF 的 .sv）
+    # 产物【含】mux 断言，且是裸名探针（无层级前缀）
     sv = out_sv.read_text(encoding="utf-8")
-    assert "assert_mux" not in sv
+    assert "assert_mux1_T0:" in sv
+    assert "`ENV_RF.d_wl_rf_lna_gain[2:0]==" in sv
 
 
 # ───────────── ③ 配前缀文件 → 全流程生成 ─────────────
@@ -86,8 +89,7 @@ def test_wl_cli_probe_prefix_file_generates_all(wl_excel, tmp_path):
     from dreg_verify import cli
     pf = _write_prefix_file(str(tmp_path / "probe_prefixes.txt"))
     out_sv = tmp_path / "wl.sv"
-    cli.main(["--excel", str(wl_excel), "--out", str(out_sv),
-              "--probe-prefix-file", pf, "--include-internal"])
+    cli.main(["--excel", str(wl_excel), "--out", str(out_sv), "--probe-prefix-file", pf])
     sv = out_sv.read_text(encoding="utf-8")
     # 5 个组都有断言
     for n in range(1, 6):
@@ -110,18 +112,18 @@ def test_wl_cli_probe_prefix_file_with_negatives(wl_excel, tmp_path):
     pf = _write_prefix_file(str(tmp_path / "probe_prefixes.txt"))
     out_sv = tmp_path / "wl.sv"
     cli.main(["--excel", str(wl_excel), "--out", str(out_sv),
-              "--probe-prefix-file", pf, "--include-internal", "--neg-all"])
+              "--probe-prefix-file", pf, "--neg-all"])
     sv = out_sv.read_text(encoding="utf-8")
     assert "_NEG:" in sv
 
 
 def test_wl_cli_mux_only_isolates_mux(wl_excel, tmp_path):
-    """--mux-only（含非顶层）：只出 mux，不出 logic 行断言。"""
+    """--mux-only：只出 mux，不出 logic 行断言。"""
     from dreg_verify import cli
     pf = _write_prefix_file(str(tmp_path / "probe_prefixes.txt"))
     out_sv = tmp_path / "wl.sv"
     cli.main(["--excel", str(wl_excel), "--out", str(out_sv),
-              "--probe-prefix-file", pf, "--include-internal", "--mux-only"])
+              "--probe-prefix-file", pf, "--mux-only"])
     sv = out_sv.read_text(encoding="utf-8")
     assert "assert_mux1_T0:" in sv
     # logic 行（R=1/R=2）不出现
@@ -132,7 +134,7 @@ def test_wl_cli_html_report_contains_mux(wl_excel, tmp_path):
     """--report HTML：WL mux 组（多控制拼接表达式）出现在报告里。"""
     from dreg_verify import cli
     html_path = tmp_path / "report.html"
-    cli.main(["--excel", str(wl_excel), "--report", str(html_path), "--include-internal"])
+    cli.main(["--excel", str(wl_excel), "--report", str(html_path)])
     html = html_path.read_text(encoding="utf-8")
     assert "d_wl_rf_tx_rc_code[5:0]" in html
     # 多控制拼接表达式（HTML 转义后逗号/花括号仍是字面量）

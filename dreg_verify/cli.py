@@ -838,6 +838,16 @@ def _report(res, out):
         if len(res.get("skipped", [])) > 30:
             print("    ...(共 %d 个)" % len(res["skipped"]))
         print("    如确认这些 net 可驱动，用 --include-risky 强制生成，或 --force-signals/--rfwrite-signals 指定。")
+    if s.get("n_mux_warnings"):
+        # top_out=0 的 mux 输出：已照常生成（裸名探针），仅提示——若仿真 CUVUNF 再配前缀
+        print("  ⚠ %d 个 mux 组用裸名探针生成（输出 top_out=0，非芯片顶层输出）："
+              % s["n_mux_warnings"])
+        for name, aid, why in res.get("mux_warnings", [])[:30]:
+            print("    - [R=%s] %s" % (aid, name))
+        if len(res.get("mux_warnings", [])) > 30:
+            print("    ...(共 %d 个)" % len(res["mux_warnings"]))
+        print("    这些已经生成进 .sv；若仿真 elaboration 报 CUVUNF 说明它们埋在子模块，"
+              "跑 scan_rtl 配 --probe-prefix-file 后重生成即可。")
 
 
 if __name__ == "__main__":

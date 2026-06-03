@@ -4,7 +4,7 @@
 WL 与 LPBT 的 GUI 差异（只测 GUI 层；后端行为由 test_mux_wl.py 把关）：
   ① 控制三来源 → 『输入信号』表角色文案（寄存器直出 / logic 行 / mux 级联）
   ② 多控制 → 头部 case({c1,c2}) + 输入表多控制行 + 上游配方行
-  ③ top_out 全 0 → 左表状态列="需探针前缀"（橙，区别于"未解析"红），真值表照常渲染
+  ③ top_out 全 0 → 左表状态列="裸名探针"（信息蓝，照常生成；区别于"需前缀"橙、"未解析"红），真值表照常渲染
   ④ apply_filter 对 mux 组不再 AttributeError（搜索框输入文本不崩）
 
 LPBT 的 GUI 行为由 test_mux.py 的 gui_win 用例把关（一个都不能动）。
@@ -80,18 +80,19 @@ def test_wl_gui_all_mux_groups_present(wl_win):
                      "d_wl_rf_tx_rc_code", "d_wl_rf_dpd_path"}
 
 
-def test_wl_gui_status_needs_prefix(wl_win):
-    """top_out=0 + 没配探针前缀 → 状态='needs-prefix'（不是 'unresolved'）。"""
+def test_wl_gui_status_bare_probe(wl_win):
+    """top_out=0 + 没配前缀 → 状态='bare-probe'（裸名探针已生成，不是 'unresolved' 也不是阻断）。"""
     w = wl_win
     for base in ("d_wl_rf_lna_gain", "d_wl_rf_bwctrl", "d_wl_rf_tx_bwctrl",
                  "d_wl_rf_tx_rc_code", "d_wl_rf_dpd_path"):
         i = _mux_idx(w, base)
         st = w._analysis[i]["status"]
-        assert st == "needs-prefix", "%s 状态应为 needs-prefix，实际 %s" % (base, st)
+        assert st == "bare-probe", "%s 状态应为 bare-probe，实际 %s" % (base, st)
+        assert w._analysis[i]["blocking"] is False        # 不挡生成
 
 
-def test_wl_gui_status_column_orange_not_red(wl_win):
-    """状态列文本='⚠需探针前缀'、颜色橙（区别于未解析的红），tooltip 含 error 全文。"""
+def test_wl_gui_status_column_info_blue_not_red(wl_win):
+    """状态列文本='裸名探针'、信息色蓝（区别于未解析的红、需前缀的橙），tooltip 含 error 全文。"""
     from PySide6 import QtGui
     from dreg_verify import gui as G
     w = wl_win
@@ -99,8 +100,8 @@ def test_wl_gui_status_column_orange_not_red(wl_win):
     # 找到该信号在表格里的行（排序后行号 ≠ signals 下标）
     row = next(r for r in range(w.table.rowCount()) if w._idx_of_row(r) == i)
     cell = w.table.item(row, G.COL_STATUS)
-    assert cell.text() == "⚠需探针前缀"
-    assert cell.foreground().color() == QtGui.QColor("#cc7a00")    # 橙，不是红
+    assert cell.text() == "裸名探针"
+    assert cell.foreground().color() == QtGui.QColor("#2a7ab0")    # 信息蓝，不是红/橙
     assert "scan_rtl" in cell.toolTip()                            # error 全文带上
 
 

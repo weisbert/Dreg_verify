@@ -92,6 +92,9 @@ python -m dreg_verify.cli --excel 真表.xlsx --report report.html
 | case 值位宽与控制信号位宽不一致 | case 命中会错位 | 修 Excel 的 F 列 |
 | 数据寄存器位宽装不下互异值 | 选路不可验证（假绿） | 拆分组或加宽字段 |
 | 控制信号表达式没有可透传路径 | 无法把控制驱到指定值 | 检查该 logic 行表达式 |
+| 要 force 子模块内衔接网但没配前缀 | 级联 `_to_mux` 网（force 模式）/ wire 兜底，没前缀 force 必 CUVUNF | 跑 scan_rtl 配前缀（见 6.4） |
+
+> 注意：**输出 top_out=0 不在这张表里**——它**不**导致跳过，而是照常生成裸名探针 + 警告（见 6.4）。
 
 ## 五、仿真 log 怎么读（与 logic 一致）
 
@@ -114,7 +117,7 @@ python -m dreg_verify.cli --excel 真表.xlsx --report report.html
 | 控制信号个数 | 1 个（B 列） | 1 ~ 4 个（B/C/D/E 列） |
 | 控制信号来源 | logic 页一行（line/local 二选一） | 多数是**寄存器直出**（RW），也可能是 logic 行或**上游另一个 mux 的输出** |
 | 数据输入来源 | RW 本地寄存器 | RW 本地 / **RO 线控**（linectrl，force 驱动）/ **上游 mux 衔接网** |
-| 输出位置 | 顶层（top_out=1，零前缀直探） | **全部不在顶层**（top_out=0，assert 探针**必须带层级前缀**） |
+| 输出位置 | 芯片顶层输出（top_out=1） | 喂内部（top_out=0）；默认裸名探针照常生成，CUVUNF 时再配前缀（见 6.4） |
 | case 值 | 单段，宽度 = 控制位宽 | 各控制按列序**拼接**，可含 don't-care（x）位 |
 
 ### 6.2 多控制拼接语义：`case = {B,C,D,E}`，B 是高位
@@ -149,25 +152,28 @@ mux 的控制信号要被驱到某个 case 值，按它的来源工具自动选�
 数据输入同理三种：RW 本地寄存器→`RF_WRITE`；RO 线控→`force`（线控本身是顶层 RO 寄存器，无前缀）；
 上游 mux 衔接网→`force` 那根衔接网（在子模块内部，**需要探针前缀**）。
 
-### 6.4 ⭐ WL 表必须先跑 scan_rtl（输出全部不在顶层）
+### 6.4 ⭐ top_out=0 与探针前缀（默认照常生成，前缀可后补）
 
-**这是 WL 形态和 LPBT 最关键的操作差异，也是最容易踩的坑：**
+WL 的 mux 输出**全部 top_out=0**。`top_out`（I 列）= 是不是**芯片顶层输出端口**——WL 的 mux 输出
+喂给 `to_logic`/`to_mux`/`to_dft`（内部），所以 top_out=0。但**「能不能在 `` `ENV_RF.<名> `` 直接探到」
+是 RTL 层级问题**，和 top_out 是两件事（常相关，但不等价）。工具**不替你假设** top_out=0 就一定埋在
+子模块——所以：
 
-WL 的 mux 输出**全部 top_out=0**——它们不在 DUT 顶层，而在某个子模块内部。
-assert 探针 `` `ENV_RF.<输出名> `` 直接写名字会 **CUVUNF（找不到 net）**，必须带层级前缀
-（如 `` `ENV_RF.U_WL_DREG.U_RF_MUX.d_wl_rf_lna_gain ``）。
-
-因此 **没导入探针前缀时，所有 WL mux 组都会被跳过**，跳过原因里写明「输出不在 DUT 顶层、
-需要跑 scan_rtl 拿层级前缀」。**这不是 bug，是设计**——宁可跳过并说清原因，也不硬生成一份
-注定 elaboration 报废的 .sv。
+> **默认照常生成裸名探针 `` `ENV_RF.<输出名> ``（和 LPBT 一样），只在 .sv 块顶留一句 `// ⚠` 警告。**
+> 探得到就过；**万一**仿真 elaboration 报 CUVUNF，说明它确实埋在子模块，这时再跑 scan_rtl 配前缀重生成。
 
 | 现象 | 含义 | 怎么办 |
 |---|---|---|
-| GUI 状态列显示「**需探针前缀(跑scan_rtl)**」 | 该 mux 结构没问题，只是缺层级前缀 | 跑 scan_rtl 导入前缀（真值表 / case 表照常能看，不受影响） |
-| CLI 生成时把 mux 组跳过、原因含 `scan_rtl` | 同上 | 同上 |
-| 导入前缀后状态变 clean、正常生成 | 一切就绪 | 正常生成 .sv |
+| GUI 状态列显示「**裸名探针**」（信息蓝） | 已照常生成，输出用裸名探针，可选配前缀 | 不用管；想稳妥就跑 scan_rtl 配前缀 |
+| CLI 末尾「⚠ N 个 mux 组用裸名探针生成」 | 同上，已写进 .sv | 同上 |
+| 仿真 elaboration 报 CUVUNF（找不到 net） | 这个输出确实埋在子模块 | 跑 scan_rtl 拿前缀，导入后重生成 |
+| 配了探针前缀的组 | 探针自动带层级前缀、无警告 | 正常 |
 
-操作步骤（详见 `scan_rtl使用说明.md`）：
+> 对比：真正会**硬跳过**（默认不生成）的只有「**force 一个子模块内部衔接网**」——级联 `_to_mux` 网
+> （`--cascade-mode force` 下）或 wire 兜底（表里查无的名字）。这俩没前缀 force 必 CUVUNF，有实证依据，
+> 所以宁可跳过给原因（GUI 橙色「需探针前缀」）；而输出探针只是裸名、风险可控，照常生成。
+
+想稳妥、一次到位（推荐做新设计时先跑一遍）——scan_rtl 两段式（详见 `scan_rtl使用说明.md`）：
 
 ```bat
 :: ① 从 Excel 导出需要定位的网（含 mux 输出 / 线控网 / 级联衔接网）
@@ -178,8 +184,8 @@ python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
 ::      GUI「设置探针前缀 → 导入…」 或 CLI --probe-prefix-file probe_prefixes.txt
 ```
 
-> WL 的 mux 输出是非顶层信号，CLI 默认只取顶层输出（top_output=1）。要把这些非顶层 mux 纳入，
-> 命令行加 `--include-internal`（之后仍由探针前缀机制按上表放行/跳过）；GUI 里直接勾选即可。
+> mux 组**不受** `--include-internal` / 顶层过滤影响（top_out=0 的 mux 正是要验的信号，与 logic
+> 的「内部节点探不到」不同）。所以**不带** `--include-internal` 也能生成全部 mux。
 
 带前缀生成的一个 WL mux 测试长这样（组1 lna_gain，控制是寄存器直出、数据是 RO 线控 + RW 本地）：
 
@@ -189,8 +195,11 @@ force `ENV_RF.d_wl_rf_linectrl_lna_gain[2:0]=16'h1;            // ② RO 线控�
 `RF_WRITE(10'h51,16'h2);                                       // ③ RW 本地数据(干扰值，证明走线控)
 #1ps;
 assert_mux1_T0:
-assert (`ENV_RF.U_WL_DREG.U_RF_MUX.d_wl_rf_lna_gain[2:0]==3'b001)  // ④ 输出带层级前缀(top_out=0)
+assert (`ENV_RF.U_WL_DREG.U_RF_MUX.d_wl_rf_lna_gain[2:0]==3'b001)  // ④ 输出带层级前缀(配过前缀)
 ```
+
+没配前缀时，第 ④ 行就是裸名 `` assert (`ENV_RF.d_wl_rf_lna_gain[2:0]==3'b001) ``，块顶多一行
+`` // ⚠ 输出 … top_out=0 … 当前用裸名探针 … 若 CUVUNF 跑 scan_rtl 配前缀 `` —— 照常生成，不阻断。
 
 ### 6.5 通用形态下覆盖度三档的语义
 

@@ -428,13 +428,27 @@ WL_PREFIXES = {
 }
 
 
-def test_wl_build_skips_without_prefix(wl_wb):
-    """没配探针前缀：top_out=0 的 mux 组全部跳过且原因写明 scan_rtl（不生成必 CUVUNF 的 .sv）。"""
+def test_wl_build_generates_without_prefix_with_warning(wl_wb):
+    """没配探针前缀：top_out=0 的 mux 组【照常生成】裸名探针 + 警告（2026-06-03 用户拍板：
+    工具不替用户假设 top_out=0=埋深，探得到就过、真 CUVUNF 再配前缀）。"""
     res = generator.build(wl_wb, generator.GenOptions())
-    assert res["summary"]["n_mux_generated"] == 0
-    mux_skips = [(n, a, r) for n, a, r in res["skipped"] if str(a).startswith("mux")]
-    assert len(mux_skips) == 5
-    assert all("scan_rtl" in str(r) for _n, _a, r in mux_skips)
+    # 5 个组全部生成（不再因 top_out=0 跳过）
+    assert res["summary"]["n_mux_generated"] == 5
+    assert res["summary"]["n_mux_warnings"] == 5
+    # 警告文案提示 scan_rtl（裸名探针，CUVUNF 时配前缀）
+    assert all("scan_rtl" in why for _n, _a, why in res["mux_warnings"])
+    # .sv 里是裸名探针（无前缀），块顶有 ⚠ 警告注释
+    text = "\n".join("\n".join(lines) for lines, _ in res["blocks"])
+    assert "assert_mux1_T0:" in text
+    assert "`ENV_RF.d_wl_rf_lna_gain[2:0]==" in text       # 裸名，无层级前缀
+    assert "// ⚠" in text                                   # 块顶警告注释
+
+
+def test_wl_build_prefix_silences_warning(wl_wb):
+    """配了探针前缀的组：无警告（探针带前缀）。"""
+    res = generator.build(wl_wb, generator.GenOptions(probe_prefixes=WL_PREFIXES))
+    assert res["summary"]["n_mux_generated"] == 5
+    assert res["summary"]["n_mux_warnings"] == 0
 
 
 def test_wl_build_with_prefixes(wl_wb):
@@ -464,12 +478,14 @@ def test_wl_build_include_risky_generates_without_prefix(wl_wb):
 
 
 def test_wl_report_sync_with_build(wl_wb):
-    """report 与 build 双轨同步：同口径跳过/生成；多控制键正确分类。"""
-    # 无前缀：report 的 mux 行 error 列都写前缀原因
+    """report 与 build 双轨同步：同口径生成；多控制键正确分类。"""
+    # 无前缀：top_out=0 组照常生成（error 列空），警告进 warning 列
     rep0 = generator.report(wl_wb, generator.GenOptions())
     mux_rows0 = [r for r in rep0["summary"] if r["type"] == "mux"]
     assert len(mux_rows0) == 5
-    assert all("scan_rtl" in r["error"] for r in mux_rows0)
+    assert all(r["error"] == "" for r in mux_rows0)                 # 不再跳过
+    assert all("scan_rtl" in r.get("warning", "") for r in mux_rows0)  # 警告提示 scan_rtl
+    assert all(r["n_tests"] > 0 for r in mux_rows0)                 # 真生成了向量
     # 有前缀：全部生成，tables 有 5 个 mux 表
     opts = generator.GenOptions(probe_prefixes=WL_PREFIXES)
     rep = generator.report(wl_wb, opts)
@@ -487,13 +503,37 @@ def test_wl_report_sync_with_build(wl_wb):
 
 
 def test_wl_analyze_mux_group_status(wl_wb, wl_resolver):
-    """analyze_mux_group（GUI 状态源）：无前缀 → needs-prefix；有前缀 → clean。"""
+    """analyze_mux_group（GUI 状态源）：top_out=0 无前缀 → bare-probe【非阻断】（照常生成裸名）；
+    有前缀 → clean。"""
     g1 = _grp(wl_wb, "d_wl_rf_lna_gain")
     a0 = generator.analyze_mux_group(wl_resolver, wl_wb, g1)
-    assert a0["status"] == "needs-prefix"
+    assert a0["status"] == "bare-probe"
     assert "scan_rtl" in a0["error"]
+    assert a0["blocking"] is False                  # 软提示，不挡生成（真值表照常）
     a1 = generator.analyze_mux_group(wl_resolver, wl_wb, g1, probe_prefix=WL_PREFIX)
     assert a1["status"] == "clean"
+
+
+def test_wl_analyze_force_net_blocker_is_blocking(tmp_path):
+    """对照：force 子模块衔接网缺前缀（force 级联模式）→ needs-prefix 且 blocking=True（真阻断）。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "blk.xlsx"),
+        tmm_fields=[("D0", "h11", "d_d0[2:0]", "2:0", "Y", "RO"),
+                    ("D1", "h12", "d_d1[2:0]", "2:0", "N", "RW")],
+        mux_rows=[
+            # 控制是别的 mux 的输出，force 级联模式 → force 衔接网需前缀
+            _mrow("d_d0_to_mux[2:0]", "d_up_mux_to_mux", "1'b0", "d_gg[2:0]", 1),
+            _mrow("d_d1_to_mux[2:0]", "d_up_mux_to_mux", "1'b1", "d_gg[2:0]", 1),
+            _mrow("d_x0_to_mux[2:0]", "d_sel_to_mux", "1'b0", "d_up_mux[2:0]", 2),
+            _mrow("d_x1_to_mux[2:0]", "d_sel_to_mux", "1'b1", "d_up_mux[2:0]", 2),
+        ],
+    )
+    r = resolver.Resolver(wb, cascade_mode="force")
+    a = generator.analyze_mux_group(r, wb, _grp(wb, "d_gg"))
+    # 控制衔接网 d_up_mux_to_mux 在子模块内，force 模式没前缀 → 真阻断
+    assert a["status"] in ("needs-prefix", "unresolved")
+    if a["status"] == "needs-prefix":
+        assert a["blocking"] is True
 
 
 def test_wl_negative_vectors(wl_wb):
