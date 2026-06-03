@@ -87,16 +87,27 @@ def _levels(width):
 
 
 # ───────────────────────────── 互异值分配 ─────────────────────────────
-def alloc_distinct_values(group):
+def alloc_distinct_values(group, bindings=None, data_keys=None):
     """给每个数据寄存器分配互异值（designer 风格：4bit+ 从 0xA 递减；窄位宽从 1 递增）。
 
     互异是 mux 选路验证的命门：两条数据路同值时选错路也测不出（假绿）。
     避开 0（RTL mux 坏死输出 0 时不应误判 PASS）。
-    返回 (values, collision)。collision=True 表示位宽太窄装不下这么多互异值。
+
+    ⭐ 位宽口径 = 有效位宽 = min(Excel A 列声明位宽, tmm/regmap 实际字段位宽)：
+    写寄存器时 compute_drives 按实际字段位宽截断（sv_writer fw mask），
+    互异性必须在**截断后**仍成立——按声明位宽分配再被截断会静默撞值。
+    bindings/data_keys 不给时退化为按声明位宽（仅单元测试用）。
+
+    返回 (values, collision)。collision=True 表示有效位宽装不下这么多互异值。
     """
     values, seen, collision = [], {0}, False
     for i, case in enumerate(group.cases):
         w = max(case.input_width, 1)
+        if bindings is not None and data_keys is not None and i < len(data_keys):
+            b = bindings.get(data_keys[i])
+            if b is not None and b.reg_msb is not None and b.reg_lsb is not None:
+                fw = b.reg_msb - b.reg_lsb + 1
+                w = max(min(w, fw), 1)
         m = E.mask(w)
         v = ((0xA - i) & m) if w >= 4 else ((i + 1) & m)
         if v == 0:
@@ -216,7 +227,8 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
     scan_path = line or local
     other_path = local if scan_path is line else line
 
-    data_values, collision = alloc_distinct_values(group)
+    # 互异值按"有效位宽"分配（声明位宽与 tmm/regmap 字段位宽取小），保证截断后仍互异
+    data_values, collision = alloc_distinct_values(group, bindings, data_keys)
 
     meta = {
         "control": [p["key"] for p in (line, local) if p],
@@ -239,6 +251,8 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
     truncated = False
 
     # ── case 扫描 ──
+    scan_key = scan_path["key"]
+    scan_width = widths.get(scan_key, 1)
     for ci, pc in enumerate(parsed):
         if pc is None:
             continue
@@ -250,6 +264,17 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
             if idx >= max_tests:
                 truncated = True
                 break
+            # ⭐ 截断校验：控制值经值寄存器位宽截断后必须仍命中本 case。
+            # case 写得比控制信号宽时(位宽不一致)，截断后会命中别的 case → 期望错 → 误报失败。
+            # 这种"确定错误的向量"直接丢弃并记录（不能静默生成污染仿真 log）。
+            driven = cv & E.mask(scan_width)
+            if not E.case_matches(cval, cw, dc, driven):
+                meta["dropped"] += 1
+                meta["truncated"] = True
+                meta.setdefault("dropped_reasons", []).append(
+                    "case %s: ctrl value 0x%X truncated by %d-bit register no longer hits this case"
+                    % (group.cases[ci].case_raw, cv, scan_width))
+                continue
             assignments = _path_assignments(scan_path, other_path, cv, widths,
                                             data_keys, data_values)
             exp = data_values[ci] & out_mask
@@ -258,7 +283,7 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
                        cv, meta["scan_path"]))
             vectors.append(V.TestVector(idx, assignments, exp, group.out_width, note=note))
             idx += 1
-        if truncated:
+        if truncated and idx >= max_tests:
             break
 
     # ── 另一条路径验证（designer 的 T16：控制级联的两条物理路径都要通）──
@@ -273,7 +298,7 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
                 % (other_kind, group.cases[0].case_raw, group.cases[0].input_base))
         vectors.append(V.TestVector(idx, assignments, exp, group.out_width, note=note))
 
-    meta["truncated"] = truncated
+    meta["truncated"] = meta["truncated"] or truncated   # 丢弃向量(截断校验)与 max_tests 截断都算
     return vectors, meta
 
 

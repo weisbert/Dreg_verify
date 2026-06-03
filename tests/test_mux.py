@@ -347,3 +347,135 @@ def test_mux_sv_summary_counts(wb):
     assert "begin : dreg_rf_test" in text
     # 3 logic 信号 + 2 mux 组 = 5 signals
     assert "signals:5" in text
+
+
+# ───────────── 对抗式审查修复回归（2026-06-03，6 个确认问题）─────────────
+def _mini_mux_group(case_specs, input_width=4):
+    """造一个最小 MuxGroup（不经 Excel），case_specs=[(case_raw, input_base), ...]。"""
+    cases = [excel_model.MuxCase(row=i + 3, case_raw=cr, input_raw=ib + "_to_mux",
+                                 input_base=ib, input_width=input_width,
+                                 input_msb=input_width - 1, input_lsb=0)
+             for i, (cr, ib) in enumerate(case_specs)]
+    return excel_model.MuxGroup(group_no=1, out_name="d_x_out[%d:0]" % (input_width - 1),
+                                out_width=input_width, ctrl_raw="d_logic_ctrl_to_mux[3:0]",
+                                ctrl_base="d_logic_ctrl", ctrl_width=4,
+                                owner="", top_output=1, cases=cases)
+
+
+def test_fix_A_value_collision_skipped(wb):
+    """[审查A] 互异值碰撞 → build 必须跳过(假绿防护)，且原因里写明。"""
+    # 1-bit 数据寄存器 × 3 个 case → 互异值装不下
+    grp = _mini_mux_group([("4'b0000", "d_n1"), ("4'b0001", "d_n2"), ("4'b0010", "d_n3")],
+                          input_width=1)
+    values, collision = mux_gen.alloc_distinct_values(grp)
+    assert collision
+    # 经 build 流程：碰撞组必须落进 skipped（用真实 wb 验证消费路径——把窄位宽组注进 wb.mux）
+    import copy
+    wb2 = copy.copy(wb)
+    wb2.mux = [grp]
+    res = generator.build(wb2, generator.GenOptions(types=["mux"], include_risky=True))
+    assert res["summary"]["n_mux_generated"] == 0
+    assert any("假绿" in str(reasons) for _n, _a, reasons in res["skipped"])
+
+
+def test_fix_B_effective_width_allocation(wb):
+    """[审查B] 互异值按有效位宽分配 = min(声明位宽, tmm 字段位宽)，截断后仍互异。"""
+    resolver = R.Resolver(wb)
+    grp = wb.mux[1]                                     # bias_q: 声明 2bit, tmm 字段 2bit
+    exp = mux_gen.expand_mux_group(wb, resolver, grp)
+    values, collision = mux_gen.alloc_distinct_values(grp, exp["bindings"], exp["data_keys"])
+    assert not collision and len(set(values)) == len(values)
+    # 所有值在字段位宽内（写入不会被截断改变）
+    for i, v in enumerate(values):
+        b = exp["bindings"][exp["data_keys"][i]]
+        fw = b.reg_msb - b.reg_lsb + 1
+        assert v == (v & E.mask(fw)), "互异值必须在字段位宽内"
+
+
+def test_fix_C_case_wider_than_ctrl_dropped(wb):
+    """[审查C] case 比控制信号宽 → 截断后命中错 case 的向量被丢弃(不是静默生成误报)。"""
+    resolver = R.Resolver(wb)
+    grp = wb.mux[0]
+    exp = mux_gen.expand_mux_group(wb, resolver, grp)
+    # 伪造一个比控制(3bit)宽的 case：4'b1010 截断成 3'b010 会命中 case0 而不是它自己
+    exp2 = dict(exp)
+    exp2["parsed_cases"] = list(exp["parsed_cases"])
+    exp2["parsed_cases"][1] = E.parse_case_literal("4'b1010")    # 替换 case1
+    vecs, meta = mux_gen.make_mux_vectors(grp, exp2, mode="min")
+    # case1 的向量被丢弃（截断后不命中），其余照常 + local 测试
+    assert meta["dropped"] >= 1 and meta["truncated"]
+    assert all("4'b1010" not in (v.note or "") for v in vecs)
+
+
+def test_fix_E_noncontiguous_rows_merged(tmp_path):
+    """[审查E] 非连续的同 G 输出行 → 归并进同一组（不劈分 → 不撞号 → 互异值不重启）。"""
+    import openpyxl
+    path = tmp_path / "noncontig.xlsx"
+    wbk = openpyxl.Workbook()
+    ws = wbk.active
+    ws.title = "mux"
+    ws.append([""] * 14)
+    ws.append(["mux_input", "ctrl", "", "", "", "case", "mux_out", "", "top", "", "", "Owner", "", "N"])
+    rows = [
+        ("d_a_g1_to_mux[3:0]", "3'b000", "d_a[3:0]", 1),
+        ("d_b_t1_to_mux[3:0]", "3'b000", "d_b[3:0]", 2),     # 中间插另一组
+        ("d_a_g2_to_mux[3:0]", "3'b001", "d_a[3:0]", 1),     # 同 G 不连续
+    ]
+    for inp, case, out, n in rows:
+        ws.append([inp, "d_logic_c_to_mux[2:0]", "", "", "", case, out, "", 1, "", "", "", "", n])
+    wbk.save(str(path))
+    wbr = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    groups = excel_model.read_mux(wbr["mux"])
+    wbr.close()
+    assert len(groups) == 2                              # 不是 3
+    by_base = {g.out_base: g for g in groups}
+    assert len(by_base["d_a"].cases) == 2                # 非连续行归并
+    # 组号唯一
+    assert len({g.group_no for g in groups}) == 2
+
+
+def test_fix_F_rtl_name_with_space(tmp_path):
+    """[审查F] G 列名含内部空格 → 探针 LHS 用解析的 msb/lsb 重建，不带空格。"""
+    grp = excel_model.MuxGroup(group_no=1, out_name="d_foo [1:0]", out_width=2,
+                               ctrl_raw="", ctrl_base="", ctrl_width=1,
+                               owner="", top_output=1, cases=[])
+    assert grp.rtl_name == "d_foo[1:0]"                  # 无空格
+    # 无位宽的输出
+    grp2 = excel_model.MuxGroup(group_no=2, out_name="d_bar", out_width=1,
+                                ctrl_raw="", ctrl_base="", ctrl_width=1,
+                                owner="", top_output=1, cases=[])
+    assert grp2.rtl_name == "d_bar"
+
+
+def test_fix_D_report_has_mux(wb):
+    """[审查D-critical] report() 必须与 build() 双轨同步：mux 组出现在 summary/tables/可验证性。"""
+    opts = generator.GenOptions()
+    rep = generator.report(wb, opts)
+    res = generator.build(wb, opts)
+    # summary 行数 = logic + mux
+    mux_rows = [r for r in rep["summary"] if r["type"] == "mux"]
+    assert len(mux_rows) == res["summary"]["n_mux_generated"] == 2
+    # 报告的 T 数与 .sv 一致（双轨同步的核心）
+    mux_stats = {st["out_name"]: st for _, st in res["blocks"] if st.get("is_mux")}
+    for r in mux_rows:
+        assert r["n_tests"] == mux_stats[r["signal"]]["n_vectors"]
+        assert r["error"] == ""
+    # tables 段有 kind='mux' 的 case 选择表
+    mux_tables = [t for t in rep["tables"] if t.get("kind") == "mux"]
+    assert len(mux_tables) == 2
+    assert "case(" in mux_tables[0]["expr"]
+    # 可验证性表含 mux 行且为 clean
+    mux_verif = [v for v in rep["verifiability"]["signals"] if v["type"] == "mux"]
+    assert len(mux_verif) == 2 and all(v["status"] == "clean" for v in mux_verif)
+
+
+def test_fix_D_report_mux_skip_reason_visible(wb):
+    """[审查D] 跳过的 mux 组在报告里以 error 原因呈现（不是消失）。"""
+    import copy
+    grp = _mini_mux_group([("4'b0000", "d_n1"), ("4'b0001", "d_n2")], input_width=1)
+    wb2 = copy.copy(wb)
+    wb2.mux = [grp]
+    rep = generator.report(wb2, generator.GenOptions(types=["mux"]))
+    mux_rows = [r for r in rep["summary"] if r["type"] == "mux"]
+    assert len(mux_rows) == 1
+    assert mux_rows[0]["error"] != "" and mux_rows[0]["n_tests"] == 0

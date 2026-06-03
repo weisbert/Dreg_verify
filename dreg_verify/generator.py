@@ -350,6 +350,14 @@ def build(wb, opts):
         # 覆盖度映射（用户拍板）：精简=每case一值(x=0)；全面/穷举=每case×每x取值。
         mux_mode = "min" if (opts.mode == "min" and not opts.exhaustive) else "max"
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode, max_tests=opts.max_tests)
+        # ⭐ 互异值碰撞 = 选路不可验证（两条数据路同值 → 选错路也测不出 = 假绿）。
+        # 这不是"可能 elaboration 失败"的风险而是"确定验证无效"，include_risky 也不放行。
+        if meta.get("value_collision"):
+            skipped.append((grp.out_name, grp.assert_id,
+                            [("mux", grp.ctrl_base,
+                              "数据寄存器位宽装不下 %d 个 case 的互异值——选错路也测不出(假绿)，"
+                              "需加宽数据字段或拆分 mux 组" % len(grp.cases))]))
+            continue
         if not vecs:
             skipped.append((grp.out_name, grp.assert_id,
                             [("mux", grp.ctrl_base,
@@ -567,6 +575,88 @@ def report(wb, opts):
             "unresolved": ";".join(sorted(unresolved_bases)), "error": "",
         })
 
+    # ───────────── mux 组（与 build() 双轨同步——报告里必须能看到 .sv 里的每个 mux 块）─────────────
+    mux_groups = select_mux_groups(wb, opts)
+    mux_verif_rows = []
+    for grp in mux_groups:
+        exp = mux_gen.expand_mux_group(wb, resolver, grp)
+        expr_text = _mux_expr_text(grp)
+        base_row = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
+                    "type": "mux", "top": grp.top_output, "expr": expr_text}
+
+        # 与 build() 同口径的跳过判定（报告里以 error 列呈现原因，不是消失）
+        skip_reason = ""
+        vecs, meta = [], {}
+        if exp["issues"] and not opts.include_risky:
+            skip_reason = "; ".join(exp["issues"])
+        else:
+            mux_mode = "min" if (opts.mode == "min" and not opts.exhaustive) else "max"
+            vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
+                                                  max_tests=opts.max_tests)
+            if meta.get("value_collision"):
+                skip_reason = ("数据寄存器位宽装不下 %d 个 case 的互异值——选错路也测不出(假绿)"
+                               % len(grp.cases))
+                vecs = []
+            elif not vecs:
+                skip_reason = "无法生成测试向量（控制信号没有可用的驱动路径）"
+            elif _neg_enabled_for(grp, opts):
+                vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
+                                       fixed_value=opts.neg_value)
+                for i, v in enumerate(vecs):
+                    v.index = i
+
+        summary.append(dict(base_row, n_tests=len(vecs),
+                            n_neg=sum(1 for v in vecs if v.is_negative),
+                            control=",".join(meta.get("control", []) if meta else []),
+                            data=",".join(meta.get("data", []) if meta else []),
+                            unresolved="", error=skip_reason))
+        # 可验证性行：issues/碰撞 → unresolved（与现有四档兼容，detail 给具体原因）
+        mux_verif_rows.append({
+            "R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
+            "type": "mux", "top": grp.top_output,
+            "status": "unresolved" if skip_reason else "clean",
+            "detail": skip_reason, "out_net": "`%s.%s" % (W.ENV, grp.rtl_name),
+        })
+        if skip_reason:
+            continue
+
+        # ── case 选择表（tables 段，kind='mux'）：行=控制+各数据寄存器，列=测试 T ──
+        used = exp["used_vars"]
+        inp_rows = []
+        for key in used:
+            b = exp["bindings"][key]
+            label = b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
+            tag = "ctrl" if key.startswith("c:") else "data"
+            inp_rows.append({"label": label, "letters": "%s(%s)" % (key, tag)})
+        table = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
+                 "type": "mux", "expr": expr_text, "kind": "mux",
+                 "inputs": inp_rows, "tests": []}
+        for vec in vecs:
+            forces, writes, _unres = W.compute_drives(vec, exp["bindings"], used)
+            table["tests"].append({
+                "name": W.test_label(vec),
+                "neg": vec.is_negative,
+                "values": [_fmt_cell(vec.assignments.get(k, 0), exp["bindings"][k].width)
+                           for k in used],
+                "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
+                "correct": _fmt_cell(vec.exp_value, vec.exp_width),
+                "force": "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces),
+                "rfwrite": "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes),
+            })
+            detail.append({
+                "R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
+                "type": "mux", "expr": expr_text,
+                "test": W.test_label(vec),
+                "neg": "是" if vec.is_negative else "",
+                "expected": W.fmt_bin(vec.asserted_value, vec.exp_width),
+                "correct": W.fmt_bin(vec.exp_value, vec.exp_width) if vec.is_negative else "",
+                "force": table["tests"][-1]["force"], "rfwrite": table["tests"][-1]["rfwrite"],
+                "note": vec.note,
+            })
+        out_w = grp.out_width or 1
+        table["exp_label"] = "期望(out)%s" % ("[%d:0]" % (out_w - 1) if out_w > 1 else "")
+        tables.append(table)
+
     # ── 可验证性（取代旧 GUI"覆盖诊断"按钮）：逐信号给健康度 + 风险输入说明 ──
     verif = {"counts": {"clean": 0, "wire-fallback": 0, "unresolved": 0, "parse-err": 0},
              "signals": []}
@@ -586,7 +676,17 @@ def report(wb, opts):
             "type": sig.suffix, "top": sig.top_output, "status": st,
             "detail": risky_str or a.get("error", ""), "out_net": a.get("out_net", ""),
         })
+    # mux 组的可验证性（与上面 mux 段同口径）
+    for row in mux_verif_rows:
+        verif["counts"][row["status"]] = verif["counts"].get(row["status"], 0) + 1
+        verif["signals"].append(row)
     return {"summary": summary, "detail": detail, "tables": tables, "verifiability": verif}
+
+
+def _mux_expr_text(grp):
+    """mux 组的人读"表达式"：case(控制){case值:输入; ...}（报告/GUI 的表达式列用）。"""
+    items = "; ".join("%s:%s" % (c.case_raw, c.input_base) for c in grp.cases)
+    return "case(%s){%s}" % (grp.ctrl_base, items)
 
 
 def diagnose(wb, opts=None):

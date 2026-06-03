@@ -116,7 +116,10 @@ class MuxGroup:
                  owner, top_output, cases):
         self.group_no = group_no        # N 列组号（assert_mux<N>_T<n> 的 N，用户拍板方案 A）
         self.out_name = out_name        # G 列原文（含位宽；顶层网名，直接探）
-        self.out_base = _strip_width(out_name)[0]
+        out_base, _w, out_msb, out_lsb = _strip_width(out_name)
+        self.out_base = out_base
+        self.out_msb = out_msb          # G 列位宽切片（探针 LHS 重建用，比字符串索引可靠）
+        self.out_lsb = out_lsb
         self.out_width = out_width
         self.ctrl_raw = ctrl_raw        # B 列原文（logic to_mux 行 K 名 + _to_mux + 位宽）
         self.ctrl_base = ctrl_base      # 剥位宽+_to_mux 的基名 = logic 页 to_mux 行的 K 基名
@@ -146,8 +149,13 @@ class MuxGroup:
 
     @property
     def rtl_name(self):
-        """含位宽切片的探针 LHS（assert 用）。"""
-        return self.rtl_base + self.out_name[len(self.out_base):]
+        """含位宽切片的探针 LHS（assert 用）。
+        用解析出的 msb/lsb 重建——不要用字符串索引拼接（G 列名含内部空格时会拼出非法 SV）。"""
+        if self.out_msb is None or self.out_lsb is None:
+            return self.rtl_base
+        if self.out_msb == self.out_lsb:
+            return "%s[%d]" % (self.rtl_base, self.out_msb)
+        return "%s[%d:%d]" % (self.rtl_base, self.out_msb, self.out_lsb)
 
     def __repr__(self):
         return "MuxGroup(mux%s, %s, ctrl=%s, %d cases)" % (
@@ -325,12 +333,13 @@ def read_mux(ws, header_row=2):
     语义：G = case(B) { F行: A行; ... }
 
     只保留 A/F/G 同时非空的行（'(reserved)' 行 F 为空被自然过滤）。
-    分组按 **G 列值变化** 判定（与真表 N 列公式 IF(G=G上行,N,N+1) 同语义）——
+    分组按 **G 列基名全局归并**（同一输出的行即使不连续也归同一组）——
+    劈成多组会导致 assert_id 撞号(非法 SV) + 互异值各自重启(撞值=假绿)。
     不依赖 N 列本身，防 read_only 模式下行尾留空导致 N 列读丢（232 列宽表的真实风险）。
-    组号优先用 N 列值；N 列缺失/非法时顺延（上一组+1）。
+    组号优先用首行 N 列值；N 列缺失/非法时顺延（上一组+1）。
     """
     groups = []
-    cur_g = None        # 当前组的 G 基名（小写）
+    by_base = {}        # G 基名(小写) -> MuxGroup（全局归并，非连续行也并入同一组）
     for ri, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True),
                              start=header_row + 1):
         in_raw = _s(_col(row, "A"))
@@ -347,8 +356,9 @@ def read_mux(ws, header_row=2):
         )
 
         out_base, out_width, _, _ = _strip_width(out_raw)
-        if groups and out_base.lower() == cur_g:
-            groups[-1].cases.append(case)
+        key = out_base.lower()
+        if key in by_base:
+            by_base[key].cases.append(case)
             continue
 
         # ── 新组 ──
@@ -364,15 +374,23 @@ def read_mux(ws, header_row=2):
             group_no = int(float(n_raw))
         except (ValueError, TypeError):
             group_no = groups[-1].group_no + 1 if groups else 1
-        groups.append(MuxGroup(
+        grp = MuxGroup(
             group_no=group_no,
             out_name=out_raw, out_width=out_width,
             ctrl_raw=ctrl_raw, ctrl_base=strip_to_mux(ctrl_base_tm), ctrl_width=ctrl_width,
             owner=_s(_col(row, "L")),
             top_output=_s(_col(row, "I")),
             cases=[case],
-        ))
-        cur_g = out_base.lower()
+        )
+        by_base[key] = grp
+        groups.append(grp)
+
+    # 组号冲突兜底：N 列读丢/重复导致两组同号时，后者顺延到未用号（撞号=非法 SV 标签）
+    seen_no = set()
+    for grp in groups:
+        while grp.group_no in seen_no:
+            grp.group_no += 1
+        seen_no.add(grp.group_no)
     return groups
 
 
