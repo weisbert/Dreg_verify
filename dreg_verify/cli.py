@@ -67,12 +67,17 @@ def build_argparser():
     g.add_argument("--regex", help="按信号名正则筛选")
     g.add_argument("--exclude", help="排除这些信号(逗号分隔，K 全名或去位宽基名)")
     g.add_argument("--exclude-regex", help="按正则排除信号(如 'pll_n|_to_dsm' 排掉 datapath 中间信号)")
-    g.add_argument("--type", help="按 type/suffix(M 列)筛选，如 to_mux,ls")
+    g.add_argument("--type", help="按 type/suffix(M 列)筛选，如 to_mux,ls；mux 页的组类型固定为 mux"
+                                  "（--type mux 即只出 mux 验证）")
     g.add_argument("--include-internal", action="store_true",
                    help="连 top_output=0 的内部信号也生成（默认只生成 top_output=1 的可验证输出；"
                         "内部信号在 RTL/ENV_RF 层探不到，会导致 elaboration 层级查找失败）")
     g.add_argument("--top-output-only", action="store_true",
                    help="（已是默认行为，保留兼容）只取 top_output=1")
+    g.add_argument("--no-mux", action="store_true",
+                   help="不生成 mux 页验证（默认 logic+mux 都生成；Excel 无 mux 页时此开关无意义）")
+    g.add_argument("--mux-only", action="store_true",
+                   help="只生成 mux 页验证（等价 --type mux）；与 --no-mux 互斥")
 
     g2 = p.add_argument_group("测试向量")
     g2.add_argument("--mode", choices=["min", "max"], default="min",
@@ -142,14 +147,21 @@ def _parse_probe_prefixes(items, prefix_file=None):
 
 def cmd_list(wb, opts):
     sigs = generator.select_signals(wb, opts)
-    print("可生成信号 %d / logic 总行 %d (tmm字段=%d, regmap信号=%d)"
-          % (len(sigs), len(wb.logic), len(wb.tmm), len(wb.regmap)))
+    muxes = generator.select_mux_groups(wb, opts)
+    print("可生成信号 %d (logic %d + mux %d) / logic 总行 %d, mux 组 %d (tmm字段=%d, regmap信号=%d)"
+          % (len(sigs) + len(muxes), len(sigs), len(muxes),
+             len(wb.logic), len(wb.mux), len(wb.tmm), len(wb.regmap)))
     print("%-5s %-40s %-12s %-12s %-3s %s" % ("R", "输出名(K)", "owner", "type", "top", "表达式"))
     print("-" * 100)
     for s in sigs:
         print("%-5s %-40s %-12s %-12s %-3s %s"
               % (s.assert_id, s.out_name[:40], (s.owner or "")[:12],
                  (s.suffix or "")[:12], s.top_output, s.expr[:50]))
+    for g in muxes:
+        expr_text = "case(%s) %d 选 1" % (g.ctrl_base, len(g.cases))
+        print("%-5s %-40s %-12s %-12s %-3s %s"
+              % (g.assert_id, g.out_name[:40], (g.owner or "")[:12],
+                 "mux", g.top_output, expr_text[:50]))
 
 
 def cmd_diagnose(wb, opts):
@@ -391,11 +403,14 @@ def _write_report_html(path, rep, excel):
                 body.append("<tr>%s</tr>" % "".join(cells))
             neg_block = any(tc["neg"] for tc in tests)
             text = "%s %s %s" % (t["signal"], t.get("owner", ""), t["expr"])
+            # 标题序号: logic 显示 "R<序号>"; mux 的 R 已是 "mux<N>"，不再加 R 前缀
+            rid = str(t["R"])
+            rlabel = rid if rid.startswith("mux") else ("R" + rid)
             out.append('<div class="filt ttblock"%s>'
-                       '<h3>R%s　<code>%s</code>　<span class="ex">%s</span></h3>'
+                       '<h3>%s　<code>%s</code>　<span class="ex">%s</span></h3>'
                        '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
                        % (attr(t["signal"], t.get("owner", ""), neg_block, text),
-                          esc(t["R"]), esc(t["signal"]), esc(t["expr"]),
+                          esc(rlabel), esc(t["signal"]), esc(t["expr"]),
                           "".join(hdr), "".join(body)))
         return "\n".join(out)
 
@@ -486,14 +501,22 @@ def main(argv=None):
         args.include_internal = True
         args.include_risky = True
 
+    # mux 范围旗标（2026-06-03 第九轮）
+    if args.no_mux and args.mux_only:
+        sys.exit("--no-mux 与 --mux-only 互斥")
+    arg_types = _split(args.type)
+    if args.mux_only:
+        arg_types = {"mux"}
+
     opts = generator.GenOptions(
         owners=_split(args.owner),
         signals=_split(args.signals),
         signal_regex=args.regex,
         exclude=_split(args.exclude),
         exclude_regex=args.exclude_regex,
-        types=_split(args.type),
+        types=arg_types,
         top_output_only=not args.include_internal,   # 默认只生成 top_output=1（可验证输出）
+        gen_mux=not args.no_mux,                     # 默认 logic+mux 都生成（用户拍板）
         mode=args.mode,
         max_tests=args.max_tests,
         exhaustive=args.exhaustive,
@@ -596,8 +619,13 @@ def _write(path, text):
 def _report(res, out):
     s = res["summary"]
     print("已写出: %s" % out)
-    print("  选中信号: %d / logic总行 %d；生成块: %d；跳过: %d；向量: %d（负向 %d）"
-          % (s["n_selected"], s["n_logic_rows"], s["n_generated"],
+    mux_part = ""
+    if s.get("n_mux_groups"):
+        mux_part = ("（logic %d + mux %d，mux 组共 %d 个）"
+                    % (s["n_generated"] - s.get("n_mux_generated", 0),
+                       s.get("n_mux_generated", 0), s["n_mux_groups"]))
+    print("  选中信号: %d / logic总行 %d；生成块: %d%s；跳过: %d；向量: %d（负向 %d）"
+          % (s["n_selected"], s["n_logic_rows"], s["n_generated"], mux_part,
              s.get("n_skipped", 0), s["n_vectors"], s["n_negative"]))
     if s["n_parse_errors"]:
         print("  ⚠ 表达式解析失败 %d 个:" % s["n_parse_errors"])
@@ -608,7 +636,7 @@ def _report(res, out):
               % s["n_dup_labels"])
         for lbl, sig1, sig2 in res.get("dup_labels", [])[:20]:
             print("    - assert_%s: 同时来自 %s 与 %s" % (lbl, sig1, sig2))
-        print("    多因两信号共用同一 R(序号)；请核对 logic R 列唯一性，或改掉自定义测试名。")
+        print("    多因两信号共用同一序号；请核对 logic R 列 / mux 页 N 列唯一性，或改掉自定义测试名。")
     if s.get("n_skipped"):
         print("  ↷ 跳过 %d 个含'不可驱动输入'的信号（force 不存在的 net 会 elaboration 失败；VBA 也跳过这类）:"
               % s["n_skipped"])

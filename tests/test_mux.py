@@ -479,3 +479,54 @@ def test_fix_D_report_mux_skip_reason_visible(wb):
     mux_rows = [r for r in rep["summary"] if r["type"] == "mux"]
     assert len(mux_rows) == 1
     assert mux_rows[0]["error"] != "" and mux_rows[0]["n_tests"] == 0
+
+
+# ───────────── ⑥ CLI ─────────────
+def test_cli_mux_flags(wb, tmp_path):
+    """CLI: --no-mux / --mux-only / 默认都生成（用户拍板）。"""
+    from dreg_verify import cli
+    excel = tmp_path / "mux_cli.xlsx"
+    fixtures.build_workbook(str(excel), with_mux=True)
+
+    # 默认: logic+mux 都生成
+    out1 = tmp_path / "all.sv"
+    cli.main(["--excel", str(excel), "--out", str(out1)])
+    text1 = out1.read_text(encoding="utf-8")
+    assert "assert_mux1_T0:" in text1 and "assert_108_T0:" in text1
+
+    # --no-mux: 仅 logic
+    out2 = tmp_path / "logic_only.sv"
+    cli.main(["--excel", str(excel), "--out", str(out2), "--no-mux"])
+    text2 = out2.read_text(encoding="utf-8")
+    assert "assert_mux" not in text2 and "assert_108_T0:" in text2
+
+    # --mux-only: 仅 mux
+    out3 = tmp_path / "mux_only.sv"
+    cli.main(["--excel", str(excel), "--out", str(out3), "--mux-only"])
+    text3 = out3.read_text(encoding="utf-8")
+    assert "assert_mux1_T0:" in text3 and "assert_108_T0:" not in text3
+
+
+def test_cli_html_report_contains_mux(wb, tmp_path):
+    """CLI HTML 报告: mux 组出现在汇总/真值表(case 选择表)/可验证性。"""
+    from dreg_verify import cli
+    excel = tmp_path / "mux_rep.xlsx"
+    fixtures.build_workbook(str(excel), with_mux=True)
+    html_path = tmp_path / "report.html"
+    cli.main(["--excel", str(excel), "--report", str(html_path)])
+    html = html_path.read_text(encoding="utf-8")
+    assert "d_bt_lp_rccal_i[3:0]" in html              # mux 信号在报告里
+    assert "case(d_logic_bt_lp_lna_agc)" in html       # case 选择表达式
+    assert "mux1" in html                              # assert id
+    # mux 真值表块标题不带 R 前缀（Rmux1 → mux1）
+    assert "Rmux1" not in html
+
+
+def test_cli_no_mux_sheet_unchanged(tmp_path):
+    """CLI: 无 mux 页的 Excel + 新旗标不崩、行为与旧版一致。"""
+    from dreg_verify import cli
+    excel = tmp_path / "no_mux.xlsx"
+    fixtures.build_workbook(str(excel))
+    out = tmp_path / "out.sv"
+    cli.main(["--excel", str(excel), "--out", str(out)])
+    assert "assert_mux" not in out.read_text(encoding="utf-8")
