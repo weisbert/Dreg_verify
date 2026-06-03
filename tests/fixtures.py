@@ -195,6 +195,157 @@ def build_workbook(path, with_pll_chain=False, with_mux=False):
     return path
 
 
+def build_wl_workbook(path):
+    """构造镜像 WL_RFTRX 真表结构的合成工作簿（2026-06-03 两轮 inspect_mux 实证）。
+
+    与 LPBT（build_workbook）的关键差异，全部按真表 1:1 还原：
+      ① 控制信号大多是寄存器直出（RW，RF_WRITE 直接驱动），不是 logic 页行
+      ② 数据输入分 RO 线控（linectrl_*，force）和 RW 本地/lut（RF_WRITE）
+      ③ mux 套 mux 级联（组2 bwctrl 的输出是组3/组4 的控制信号）
+      ④ 多控制拼接（组4：case = {lut_en(1bit), bwctrl(4bit)}，B 高位，含 don't-care）
+      ⑤ top_out 全 0（输出不在 DUT 顶层，探针需 scan_rtl 前缀）
+      ⑥ mux 输出反过来喂 logic 输入（mux→logic 级联）
+
+    五个 mux 组：
+      组1 lna_gain[2:0]   = case(lna_gain_ctrl_mode)     {0:线控RO; 1:local RW}    ← WL 最常见形态
+      组2 bwctrl[3:0]     = case(bwctrl_mode)            {0:线控RO; 1:local RW}    ← 被组3/4 级联
+      组3 tx_bwctrl[4:0]  = case(bwctrl[3:0])            {0..3: lut0..3}           ← mux 级联控制
+      组4 tx_rc_code[5:0] = case({lut_en,bwctrl[3:0]})   {0xxxx:local; 1NNNN:lutN} ← 多控制+级联+x位
+      组5 dpd_path[1:0]   = case(fb_en)                  {0:dpd_a; 1:dpd_b}        ← logic 行控制(LPBT形态)
+    """
+    wb = openpyxl.Workbook()
+
+    # ───────── logic 页 ─────────
+    ws = wb.active
+    ws.title = "logic"
+    _set_row(ws, 1, {"A": "inputs", "K": "logic"})
+    _set_row(ws, 2, {
+        "A": "in_A", "B": "in_B", "C": "in_C", "J": "in_J",
+        "K": "logic_out_signal_name", "L": "logic expression", "M": "suffix",
+        "N": "top_output", "O": "Notes", "P": "owner", "R": "no",
+    })
+    # 组5 的控制信号：logic 行（LPBT 形态，A?C:B = 模式选 line/local）
+    _set_row(ws, 3, {
+        "A": "d_wl_rf_fb_mode_to_logic",
+        "B": "d_wl_rf_fb_line_to_logic",
+        "C": "d_wl_rf_fb_local_to_logic",
+        "K": "d_wl_rf_fb_en",
+        "L": "A?C:B",
+        "M": "to_mux", "N": 1, "O": "ctrl for dpd_path mux", "P": "Owner1", "R": 1,
+    })
+    # mux→logic 级联：logic 输入 = 组1 mux 的输出（真表 to_logic 去向的还原）
+    _set_row(ws, 4, {
+        "A": "d_wl_rf_lna_gain_to_logic[2:0]",
+        "K": "d_wl_rf_lna_gain_dly[2:0]",
+        "L": "A",
+        "M": "ls", "N": 1, "O": "downstream of mux", "P": "Owner1", "R": 2,
+    })
+
+    # ───────── regmap 页（最小化，类型以 tmm 为准）─────────
+    rm = wb.create_sheet("regmap")
+    _set_row(rm, 2, {
+        "D": "Reg_Name", "F": "Reg Type", "G": "Signal_Name", "I": "default",
+        "J": "b15", "Y": "b0", "Z": "suffix", "AE": "owner",
+    })
+
+    # ───────── total_memory_map 页 ─────────
+    tmm = wb.create_sheet("total_memory_map")
+    r = 1
+    # 模式寄存器（控制信号寄存器直出，RW）
+    r = _tmm_reg(tmm, r, "WL_MODE_CTRL", "h50")
+    r = _tmm_field(tmm, r, "d_wl_rf_lna_gain_ctrl_mode", "0", addr="h50", dig="N", typ="RW")
+    r = _tmm_field(tmm, r, "d_wl_rf_bwctrl_mode", "1", addr="h50", dig="N", typ="RW")
+    r = _tmm_field(tmm, r, "d_wl_rf_rc_code_lut_en", "2", addr="h50", dig="N", typ="RW")
+    # 组1 数据：local（RW）+ 线控（RO）
+    r = _tmm_reg(tmm, r, "WL_LNA_GAIN", "h51")
+    r = _tmm_field(tmm, r, "d_wl_rf_lna_gain_local[2:0]", "2:0", addr="h51", dig="N", typ="RW")
+    r = _tmm_reg(tmm, r, "WL_LNA_LINE", "h52")
+    r = _tmm_field(tmm, r, "d_wl_rf_linectrl_lna_gain[2:0]", "2:0", addr="h52", dig="Y", typ="RO")
+    # 组2 数据
+    r = _tmm_reg(tmm, r, "WL_BWCTRL", "h53")
+    r = _tmm_field(tmm, r, "d_wl_rf_bwctrl_local[3:0]", "3:0", addr="h53", dig="N", typ="RW")
+    r = _tmm_reg(tmm, r, "WL_BW_LINE", "h54")
+    r = _tmm_field(tmm, r, "d_wl_rf_linectrl_bwctrl[3:0]", "3:0", addr="h54", dig="Y", typ="RO")
+    # 组3 数据：lut0..3（RW，两两同住一个寄存器 = 真表排布）
+    r = _tmm_reg(tmm, r, "WL_TX_BW_LUT01", "h55")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_bw_lut0[4:0]", "4:0", addr="h55", dig="N", typ="RW")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_bw_lut1[4:0]", "9:5", addr="h55", dig="N", typ="RW")
+    r = _tmm_reg(tmm, r, "WL_TX_BW_LUT23", "h56")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_bw_lut2[4:0]", "4:0", addr="h56", dig="N", typ="RW")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_bw_lut3[4:0]", "9:5", addr="h56", dig="N", typ="RW")
+    # 组4 数据：local + lut0..3
+    r = _tmm_reg(tmm, r, "WL_RC_LOCAL", "h57")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_rc_local[5:0]", "5:0", addr="h57", dig="N", typ="RW")
+    r = _tmm_reg(tmm, r, "WL_RC_LUT01", "h58")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_rc_lut0[5:0]", "5:0", addr="h58", dig="N", typ="RW")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_rc_lut1[5:0]", "11:6", addr="h58", dig="N", typ="RW")
+    r = _tmm_reg(tmm, r, "WL_RC_LUT23", "h59")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_rc_lut2[5:0]", "5:0", addr="h59", dig="N", typ="RW")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_rc_lut3[5:0]", "11:6", addr="h59", dig="N", typ="RW")
+    # 组5（logic 控制）数据 + fb_en 的 logic 输入寄存器
+    r = _tmm_reg(tmm, r, "WL_DPD_PATH", "h5A")
+    r = _tmm_field(tmm, r, "d_wl_rf_dpd_a[1:0]", "1:0", addr="h5A", dig="N", typ="RW")
+    r = _tmm_field(tmm, r, "d_wl_rf_dpd_b[1:0]", "3:2", addr="h5A", dig="N", typ="RW")
+    r = _tmm_reg(tmm, r, "WL_FB_CTRL", "h5B")
+    r = _tmm_field(tmm, r, "d_wl_rf_fb_mode", "0", addr="h5B", dig="N", typ="RW")
+    r = _tmm_field(tmm, r, "d_wl_rf_fb_local", "1", addr="h5B", dig="N", typ="RW")
+    r = _tmm_reg(tmm, r, "WL_FB_LINE", "h5C")
+    r = _tmm_field(tmm, r, "d_wl_rf_fb_line", "0", addr="h5C", dig="Y", typ="RO")
+
+    # ───────── mux 页（top_out 全 0 = 真表实况）─────────
+    mx = wb.create_sheet("mux")
+    _set_row(mx, 1, {"O": "There is No error in the selected rows."})
+    _set_row(mx, 2, {
+        "A": "mux_input", "B": "mux_ctrl_sig1", "C": "mux_ctrl_sig2",
+        "D": "mux_ctrl_sig3", "E": "mux_ctrl_sig4", "F": "case", "G": "mux_out",
+        "H": "to_logic", "I": "top_out", "J": "Notes", "L": "Owner", "N": 0,
+    })
+    # 组1: lna_gain = case(ctrl_mode) {0:线控RO; 1:local RW}   ← H=to_logic(喂 logic 页行4)
+    _wl_mux_row(mx, 3, "d_wl_rf_linectrl_lna_gain_to_mux[2:0]",
+                {"B": "d_wl_rf_lna_gain_ctrl_mode_to_mux"}, "1'b0",
+                "d_wl_rf_lna_gain[2:0]", h="to_logic", n=1)
+    _wl_mux_row(mx, 4, "d_wl_rf_lna_gain_local_to_mux[2:0]",
+                {"B": "d_wl_rf_lna_gain_ctrl_mode_to_mux"}, "1'b1",
+                "d_wl_rf_lna_gain[2:0]", h="to_logic", n=1)
+    # 组2: bwctrl = case(bwctrl_mode) {0:线控; 1:local}   ← H=to_mux(输出喂组3/4 的控制)
+    _wl_mux_row(mx, 5, "d_wl_rf_linectrl_bwctrl_to_mux[3:0]",
+                {"B": "d_wl_rf_bwctrl_mode_to_mux"}, "1'b0",
+                "d_wl_rf_bwctrl[3:0]", h="to_mux", n=2)
+    _wl_mux_row(mx, 6, "d_wl_rf_bwctrl_local_to_mux[3:0]",
+                {"B": "d_wl_rf_bwctrl_mode_to_mux"}, "1'b1",
+                "d_wl_rf_bwctrl[3:0]", h="to_mux", n=2)
+    # 组3: tx_bwctrl = case(bwctrl[3:0]) {0..3: lut0..3}   ← 控制信号是组2 的输出（mux 级联）
+    for i in range(4):
+        _wl_mux_row(mx, 7 + i, "d_wl_rf_tx_bw_lut%d_to_mux[4:0]" % i,
+                    {"B": "d_wl_rf_bwctrl_to_mux[3:0]"}, "4'b%s" % format(i, "04b"),
+                    "d_wl_rf_tx_bwctrl[4:0]", h="to_dft", n=3)
+    # 组4: tx_rc_code = case({lut_en, bwctrl}) {0xxxx:local; 1NNNN:lutN}   ← 多控制拼接(B 高位)
+    _wl_mux_row(mx, 11, "d_wl_rf_tx_rc_local_to_mux[5:0]",
+                {"B": "d_wl_rf_rc_code_lut_en_to_mux", "C": "d_wl_rf_bwctrl_to_mux[3:0]"},
+                "5'b0xxxx", "d_wl_rf_tx_rc_code[5:0]", h="to_dft", n=4)
+    for i in range(4):
+        _wl_mux_row(mx, 12 + i, "d_wl_rf_tx_rc_lut%d_to_mux[5:0]" % i,
+                    {"B": "d_wl_rf_rc_code_lut_en_to_mux", "C": "d_wl_rf_bwctrl_to_mux[3:0]"},
+                    "5'b1%s" % format(i, "04b"), "d_wl_rf_tx_rc_code[5:0]", h="to_dft", n=4)
+    # 组5: dpd_path = case(fb_en) {0:dpd_a; 1:dpd_b}   ← 控制信号是 logic 行（LPBT 形态）
+    _wl_mux_row(mx, 16, "d_wl_rf_dpd_a_to_mux[1:0]",
+                {"B": "d_wl_rf_fb_en_to_mux"}, "1'b0",
+                "d_wl_rf_dpd_path[1:0]", h="to_dft", n=5)
+    _wl_mux_row(mx, 17, "d_wl_rf_dpd_b_to_mux[1:0]",
+                {"B": "d_wl_rf_fb_en_to_mux"}, "1'b1",
+                "d_wl_rf_dpd_path[1:0]", h="to_dft", n=5)
+
+    wb.save(path)
+    return path
+
+
+def _wl_mux_row(ws, row, mux_input, ctrls, case, mux_out, h="to_logic", owner="Owner1", n=None):
+    """WL mux 页数据行：ctrls={"B": 控制1, "C": 控制2, ...}，top_out 固定 0（真表实况）。"""
+    cells = {"A": mux_input, "F": case, "G": mux_out, "H": h, "I": 0, "L": owner, "N": n}
+    cells.update(ctrls)
+    _set_row(ws, row, cells)
+
+
 def _mux_row(ws, row, mux_input, case, mux_out, owner="", n=None,
              ctrl="d_logic_bt_lp_lna_agc_to_mux[2:0]"):
     """mux 页数据行（列语义与真表一致）。"""

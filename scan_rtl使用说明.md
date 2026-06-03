@@ -29,6 +29,7 @@ elaboration 直接失败。
 | 仿真报 CUVUNF / elaboration 找不到 net | ✅ 跑一次，比逐个 grep 快 |
 | 要切 force 级联模式（`--cascade-mode force`） | ✅ 必须（`_to_logic` 网都在 sig_logic 模块内部） |
 | Excel 加了 mux 页、第一次生成 mux 测试 | ✅ 建议（核对 mux 输出 / 线控网的层级，见 `mux环境验证.md`） |
+| WL_RFTRX 形态的表（mux 输出全部不在顶层 top_out=0） | ✅ 必须（没前缀时所有 mux 组都会被跳过，见 `mux验证说明.md` 6.4） |
 | 日常用 cone 模式（默认）重新生成 | ❌ 不用（cone 模式纯 Excel；已配过的前缀继续生效） |
 | RTL 改版（信号搬了模块） | ✅ 重跑，新文件覆盖旧映射 |
 

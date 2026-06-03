@@ -149,11 +149,16 @@ def _skipped_detail_text(skipped):
  COL_PREFIX, COL_EXPR) = range(10)
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
-                "unresolved": "✗未解析", "parse-err": "✗解析错"}
+                "unresolved": "✗未解析", "parse-err": "✗解析错",
+                "needs-prefix": "⚠需探针前缀"}
 STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE 驱动",
                "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
                "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
-               "parse-err": "表达式或输入解析出错"}
+               "parse-err": "表达式或输入解析出错",
+               "needs-prefix": "表本身没问题，但输出/级联衔接网不在 DUT 顶层——"
+                               "先跑 scan_rtl 配好探针前缀再生成（否则会 CUVUNF）"}
+# 状态列颜色：红=信号坏掉(会 elaboration 失败)；橙=表 OK 但还没配探针前缀(跑 scan_rtl 即可)
+STATUS_FG = {"needs-prefix": QtGui.QColor("#cc7a00")}
 # 输入来源(found_in)的中文标签——明细面板用；未映射的原样显示
 FOUND_IN_LABEL = {"tmm": "tmm命中", "regmap": "regmap命中", "logic": "级联前级",
                   "logic-internal": "内部信号", "wire": "wire兜底",
@@ -434,10 +439,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "  精简 = 每种控制位组合各取 1 组代表数据(最少用例)\n"
             "  全面 = 每种控制位组合再扫多组数据(全0/全1/反码/走步/区分)\n"
             "  穷举 = 所有输入的全部组合(仅当总输入位≤10，否则自动退化为'全面')\n"
-            "【mux 信号】\n"
+            "【mux 信号·单控制 logic 行(line/local 双路径)】\n"
             "  精简 = 每 case 1 条(x位取0) + 1 条另一路径抽测\n"
             "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据(抓数据通路位坏死)\n"
-            "  穷举 = 全面 + 另一条控制路径全扫每 case(两条物理驱动路径全验)")
+            "  穷举 = 全面 + 另一条控制路径全扫每 case(两条物理驱动路径全验)\n"
+            "【mux 信号·多控制 / 寄存器直出 / mux 级联(直接驱动控制)】\n"
+            "  精简 = 每 case 1 条(x位取0)\n"
+            "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据(抓数据通路位坏死)\n"
+            "  穷举 = 同全面(没有另一条物理控制路径可扫)")
         self.coverage.currentIndexChanged.connect(self.on_coverage_changed)
         self.cov_hint = QtWidgets.QLabel("")            # 实时显示当前信号的用例条数
         self.cov_hint.setStyleSheet("color:#1558d6;")
@@ -793,8 +802,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 st = self._analysis.get(r, {}).get("status", "?")
                 it = QtWidgets.QTableWidgetItem(STATUS_LABEL.get(st, st))
                 if st != "clean":
-                    it.setForeground(QtGui.QColor("red"))
-                it.setToolTip(STATUS_HELP.get(st, st))
+                    # needs-prefix 用橙色（表 OK、只缺探针前缀）；其余故障用红色
+                    it.setForeground(STATUS_FG.get(st, QtGui.QColor("red")))
+                tip = STATUS_HELP.get(st, st)
+                err = self._analysis.get(r, {}).get("error")
+                if err and st in ("needs-prefix", "unresolved", "parse-err"):
+                    tip = "%s\n\n%s" % (tip, err)        # 缺前缀/坏掉时把后端 error 全文带上
+                it.setToolTip(tip)
                 self.table.setItem(r, COL_STATUS, it)
                 self.table.setItem(r, COL_PREFIX, self._prefix_cell(sig, self._analysis.get(r, {})))
                 self._set_text(r, COL_EXPR, sig.expr)
@@ -867,7 +881,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 show = False
             # 名字搜索：输出名 / 表达式 / 输入信号名（如搜 mon_active → 列出所有用它做输入的输出）
             if pat:
-                inputs = [i["base"] for i in sig.inputs.values() if i.get("base")]
+                # mux 组没有 inputs 属性（鸭子兼容 logic 时缺这一个）——只按输出名/表达式匹配，
+                # 输入名命中交给 _analysis 的 inputs 行（控制信号/数据寄存器都在那里）
+                ana_inputs = self._analysis.get(self._idx_of_row(r), {}).get("inputs", [])
+                if isinstance(sig, excel_model.MuxGroup):
+                    inputs = [i.get("base") for i in ana_inputs if i.get("base")]
+                else:
+                    inputs = [i["base"] for i in sig.inputs.values() if i.get("base")]
                 if rx:
                     out_hit = rx.search(sig.out_name) or rx.search(sig.expr)
                     in_hit = any(rx.search(b) for b in inputs)
@@ -1113,10 +1133,13 @@ class MainWindow(QtWidgets.QMainWindow):
         """单信号解析画像：logic 走 analyze_signal，mux 组走 analyze_mux_group（2026-06-03 第九轮）。"""
         if isinstance(sig, excel_model.MuxGroup):
             mode, exhaustive = self._coverage()
+            # 传全部已配置探针前缀（不只本信号的）——级联衔接网的前缀也要能命中，
+            # mux_prefix_risks 才能正确区分"还缺前缀"和"已配好可生成"
+            opts = generator.GenOptions(probe_prefixes=self._probe_prefixes)
             return generator.analyze_mux_group(
                 self._resolver, self.wb, sig,
                 mode=mux_gen.coverage_mode(mode, exhaustive),
-                probe_prefix=self._prefix_of(sig))
+                probe_prefix=self._prefix_of(sig), opts=opts)
         return generator.analyze_signal(self._resolver, sig, wb=self.wb,
                                         probe_prefix=self._prefix_of(sig))
 
@@ -1387,7 +1410,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_mux_vecs = vecs
         used = exp["used_vars"]
         self._ti_mux_exp_row = len(used) + 1
-        self._update_mux_header(grp, vecs, mux_mode)
+        self._update_mux_header(grp, vecs, mux_mode, meta)
         self._ti_loading = True
         try:
             self.ti_table.clear()
@@ -1416,17 +1439,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ti_loading = False
         self._update_cov_hint()
 
-    def _update_mux_header(self, grp, vecs, mux_mode):
-        """mux 编辑器头部：case 结构 + 覆盖度说明 + 期望手填进度。"""
-        cov_desc = {"min": "每 case 1 条 + 另一路径抽测",
-                    "max": "每 case×x位展开 + 反码数据轮 + 另一路径抽测",
-                    "exhaustive": "每 case×x位展开 + 反码数据轮 + 另一条控制路径全扫"}[mux_mode]
+    def _update_mux_header(self, grp, vecs, mux_mode, meta=None):
+        """mux 编辑器头部：case 结构 + 覆盖度说明 + 期望手填进度。
+
+        两种形态覆盖度文案不同（meta['scan_path']=='direct' 为通用形态：多控制/寄存器直出/级联）：
+          LPBT（单控制 logic 行，line/local 双路径）= 历史三档文案不变；
+          通用形态没有"另一条物理控制路径"概念，三档按 x 位展开 + 反码数据轮描述。
+        """
+        if (meta or {}).get("scan_path") == "direct":
+            cov_desc = {"min": "每 case 1 条（x位取0）",
+                        "max": "每 case×x位展开 + 反码数据轮",
+                        "exhaustive": "同全面（无另一条控制路径概念）"}[mux_mode]
+        else:
+            cov_desc = {"min": "每 case 1 条 + 另一路径抽测",
+                        "max": "每 case×x位展开 + 反码数据轮 + 另一路径抽测",
+                        "exhaustive": "每 case×x位展开 + 反码数据轮 + 另一条控制路径全扫"}[mux_mode]
         pos = [v for v in vecs if not v.is_negative]
         n_filled = sum(1 for v in pos if v.designer_expected is not None)
         self.ti_header.setText(
             "mux 信号: %s = case(%s) %d 选 1　|　覆盖度=%s → 测试 %d 个（%s）　|　"
             "期望已手填 %d/%d　|　输入由 case 结构自动生成（只读）；期望行可手填，负向勾选/生成/预览照常可用"
-            % (grp.out_name, grp.ctrl_base, len(grp.cases),
+            % (grp.out_name, generator._mux_ctrl_desc(grp), len(grp.cases),
                self.coverage.currentText(), len(vecs), cov_desc, n_filled, len(pos)))
 
     def _render_mux_exp_col(self, ci, n_inputs):
@@ -1810,47 +1843,118 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._binding_meta(b)
 
     def _populate_mux_inputs(self, grp, exp):
-        """mux 信号的『输入信号』表（修"mux 点开输入信号框空白"，2026-06-03 第十一轮）。
+        """mux 信号的『输入信号』表（修"mux 点开输入信号框空白"，2026-06-03 第十一轮；
+        第十四轮按控制三来源/数据三来源重排——WL 多控制·寄存器直出·mux 级联）。
 
-        行 = 控制行输入(c:*) + 数据寄存器(d:*)，与 expand_mux_group 的 used_vars 一一对应：
-          『字母』列：控制输入显示控制行表达式的字母；数据寄存器显示它对应的 case 值
-          『角色』列：控制输入细分 line路径/local路径/模式位；数据寄存器标"被哪个 case 选中"
+        行 = 各控制信号的驱动输入（按 exp['ctrl_drivers'] 三来源细分角色）+ 数据寄存器（d:*）：
+          『字母』列：寄存器直出控制显示 Excel 控制列字母(B/C/D/E)；logic 控制显示其表达式字母；
+                      mux 级联控制显示"经 mux<N>"；数据寄存器显示它对应的 case 值
+          『角色』列：寄存器直出=控制(寄存器直出)；logic=line路径/local路径/模式位(LPBT 不变)；
+                      mux 级联=控制(经上游mux驱动)，并把上游载体/上游控制各加一行(上游mux配方)；
+                      数据寄存器标"被哪个 case 选中"，RO 线控数据标"数据(线控,force)"
         """
         if not hasattr(self, "ti_inputs"):
             return
         tbl = self.ti_inputs
-        used = exp["used_vars"]
-        line_key = exp["line"]["key"] if exp.get("line") else None
-        local_key = exp["local"]["key"] if exp.get("local") else None
-        tbl.setRowCount(len(used))
-        di = 0          # 数据寄存器序号（与 grp.cases 对齐）
-        for i, key in enumerate(used):
-            b = exp["bindings"][key]
+        rows = []       # 每行 = {letter, label, role, kind, drive, bold}
+        # ── 控制信号：按 ctrl_drivers 三来源渲染 ──
+        for drv in exp.get("ctrl_drivers", []):
+            rows.extend(self._mux_ctrl_rows(drv, exp))
+        # ── 数据寄存器：与 grp.cases 一一对应 ──
+        for di, key in enumerate(exp.get("data_keys", [])):
+            b = exp["bindings"].get(key)
+            if b is None:
+                continue
             kind, drive = self._binding_meta(b)
-            is_ctrl = key.startswith("c:")
-            if is_ctrl:
-                letter = key[2:]                      # 控制行 logic 表达式的变量字母
-                if key == line_key:
-                    role = "控制·line路径(force线控)"
-                elif key == local_key:
-                    role = "控制·local路径(本地寄存器)"
-                else:
-                    role = "控制·模式位/门控"
+            case_raw = grp.cases[di].case_raw if di < len(grp.cases) else "?"
+            # RO 线控数据走 force（线控寄存器），其余是被该 case 选中的本地/lut 寄存器
+            if (b.kind or "") == "RO":
+                role = "数据(线控,force)"
             else:
-                case_raw = grp.cases[di].case_raw if di < len(grp.cases) else "?"
-                letter = "case %s" % case_raw
                 role = "数据寄存器(被该case选中)"
-                di += 1
-            label = b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
-            for c, v in enumerate([letter, label, role, kind, drive]):
+            rows.append({"letter": "case %s" % case_raw, "label": self._mux_label(b),
+                         "role": role, "kind": kind, "drive": drive, "bold": False})
+        tbl.setRowCount(len(rows))
+        for i, rd in enumerate(rows):
+            for c, v in enumerate([rd["letter"], rd["label"], rd["role"],
+                                   rd["kind"], rd["drive"]]):
                 it = QtWidgets.QTableWidgetItem(v)
-                if is_ctrl and c == 0:                # 控制输入字母加粗（与 logic 行为呼应）
+                if rd.get("bold") and c == 0:         # 控制输入字母加粗（与 logic 行为呼应）
                     f = it.font(); f.setBold(True); it.setFont(f)
                 if c == 4 and "未解析" in v:
                     it.setForeground(QtGui.QColor("red"))
                 tbl.setItem(i, c, it)
         tbl.resizeColumnsToContents()
         self._fit_inputs_height()
+
+    @staticmethod
+    def _mux_label(b):
+        """绑定 → 『信号(位宽)』列文本。"""
+        return b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
+
+    def _mux_ctrl_rows(self, drv, exp):
+        """一个控制信号的驱动器 → 『输入信号』表的若干行（按三来源给角色文案）。"""
+        out = []
+        src = drv.get("source")
+        if src == "logic":
+            # LPBT 形态：保持 line路径/local路径/模式位 三分角色（文案与历史一致）
+            line_key = drv["line"]["key"] if drv.get("line") else None
+            local_key = drv["local"]["key"] if drv.get("local") else None
+            for key in drv.get("keys", []):
+                b = exp["bindings"].get(key) or drv["bindings"].get(key)
+                kind, drive = self._binding_meta(b)
+                if key == line_key:
+                    role = "控制·line路径(force线控)"
+                elif key == local_key:
+                    role = "控制·local路径(本地寄存器)"
+                else:
+                    role = "控制·模式位/门控"
+                out.append({"letter": key.split(":")[-1], "label": self._mux_label(b),
+                            "role": role, "kind": kind, "drive": drive, "bold": True})
+            return out
+        if src in ("reg", "mux-force"):
+            key = drv.get("key")
+            b = exp["bindings"].get(key) or drv["bindings"].get(key)
+            kind, drive = self._binding_meta(b)
+            role = ("控制(寄存器直出)" if src == "reg"
+                    else "控制(force上游mux衔接网)")
+            out.append({"letter": drv.get("letter") or "?", "label": self._mux_label(b),
+                        "role": role, "kind": kind, "drive": drive, "bold": True})
+            return out
+        if src == "mux":
+            # mux 级联控制：本控制行 + 上游配方（载体寄存器 + 上游各控制）
+            upstream = drv.get("upstream")
+            up_no = getattr(upstream, "group_no", "?")
+            out.append({"letter": drv.get("letter") or "?",
+                        "label": drv.get("base") or "?",
+                        "role": "控制(经上游mux%s驱动)" % up_no,
+                        "kind": "mux", "drive": "经上游 mux%s 输出选路" % up_no, "bold": True})
+            recipe = drv.get("recipe") or {}
+            carrier_key = recipe.get("carrier_key")
+            if carrier_key is not None:
+                b = exp["bindings"].get(carrier_key) or recipe.get("bindings", {}).get(carrier_key)
+                if b is not None:
+                    kind, drive = self._binding_meta(b)
+                    out.append({"letter": "经 mux%s" % up_no, "label": self._mux_label(b),
+                                "role": "上游mux配方(载体寄存器写目标值)",
+                                "kind": kind, "drive": drive, "bold": False})
+            for ud in recipe.get("ctrl_drivers", []):
+                for key in ud.get("keys", []):
+                    b = exp["bindings"].get(key) or ud["bindings"].get(key)
+                    if b is None:
+                        continue
+                    kind, drive = self._binding_meta(b)
+                    out.append({"letter": "经 mux%s" % up_no, "label": self._mux_label(b),
+                                "role": "上游mux配方(上游控制驱到载体case)",
+                                "kind": kind, "drive": drive, "bold": False})
+            return out
+        # unknown：来源没解析出来——照样列出，角色写明"无法驱动"
+        key = drv.get("key")
+        b = (exp["bindings"].get(key) or drv.get("bindings", {}).get(key)) if key else None
+        kind, drive = self._binding_meta(b)
+        out.append({"letter": drv.get("letter") or "?", "label": drv.get("base") or "?",
+                    "role": "控制(来源未知,无法驱动)", "kind": kind, "drive": drive, "bold": True})
+        return out
 
     def _populate_chain(self):
         """『展开链』面板：cone 信号显示展开过程，非 cone 信号隐藏(不占空间)。

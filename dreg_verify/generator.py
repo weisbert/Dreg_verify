@@ -210,6 +210,46 @@ def probe_prefix_for(sig, opts):
             or p.get(rtl_name.lower()) or p.get(rtl_base.lower()) or "")
 
 
+def _mux_ctrl_desc(grp):
+    """mux 组控制信号的人读描述（skipped 诊断用）：单控制=基名，多控制=拼接 {c1,c2}。"""
+    if len(grp.ctrls) > 1:
+        return "{%s}" % ",".join(c.base for c in grp.ctrls)
+    return grp.ctrl_base
+
+
+def mux_prefix_risks(grp, exp, opts):
+    """WL 形态：必须探针前缀但还没配置的输入/输出清单（build/report/GUI 共用，口径必须一致）。
+
+    返回 [(tag, name, reason), ...]；空 = 没有前缀风险。
+    LPBT（输出在顶层 top_out=1、无级联 force 输入）永远返回空——行为不变。
+    没配前缀就生成 → force/assert 一个子模块内部的网 → elaboration CUVUNF 整个 .sv 报废，
+    所以与 logic 的 needs-prefix 同理念：默认跳过并给原因，--include-risky 可强制生成。
+    """
+    risks = []
+    # 输出探针：top_out=0 的 mux 输出不在 DUT 顶层（WL 全部如此）
+    if not grp.is_top and not probe_prefix_for(grp, opts):
+        risks.append(("mux", grp.out_base,
+                      "输出 %s 不在 DUT 顶层(top_out=0)，assert 探针需要层级前缀——"
+                      "跑 scan_rtl 生成 probe_prefixes.txt 并导入后才能生成" % grp.out_name))
+    # force 输入风险：① 级联衔接网（needs-prefix / mux-output）没配前缀；
+    # ② wire 兜底（tmm/regmap 查无、按裸基名 force）——与 logic 路径同口径默认跳过，
+    #    否则会 force 一个 RTL 顶层不存在的网（真网是子模块内的 _to_mux），elaboration 必 CUVUNF。
+    for k in exp["used_vars"]:
+        b = exp["bindings"].get(k)
+        if b is None:
+            continue
+        if b.found_in in ("needs-prefix", "mux-output"):
+            risks.append(("mux", b.base,
+                          "输入 %s 要 force 衔接网 %s（在子模块内部），需要探针前缀——跑 scan_rtl 后才能生成"
+                          % (b.base, b.wire)))
+        elif b.found_in == "wire":
+            risks.append(("mux", b.base,
+                          "输入 %s 表里查无字段，按 wire 兜底 force 裸名 %s——该网在 RTL 顶层多半不存在"
+                          "（真网在子模块内），会 elaboration CUVUNF；请核对名称或用 --rfwrite-signals/"
+                          "--force-signals 指定" % (b.base, b.wire)))
+    return risks
+
+
 def parse_probe_prefix_lines(text):
     """探针前缀映射文本 → dict。GUI 编辑器与映射文件共用同一格式：
 
@@ -305,6 +345,11 @@ def build(wb, opts):
                     risky.append((ltr, b.base,
                                   "需要探针前缀: %s 是上游 logic 计算网(在 sig_logic 模块内)，"
                                   "跑 scan_rtl 或手工配置前缀后才能生成" % b.wire))
+                elif b.found_in == "mux-output":
+                    # 输入是 mux 组的输出（mux→logic 级联，WL 形态）：force 衔接网需要前缀
+                    risky.append((ltr, b.base,
+                                  "需要探针前缀: %s 是上游 mux 组输出的衔接网(在子模块内)，"
+                                  "跑 scan_rtl 或手工配置前缀后才能生成" % b.wire))
             if risky:
                 skipped.append((sig.out_name, sig.assert_id, risky))
                 continue
@@ -376,7 +421,14 @@ def build(wb, opts):
         # 有解析问题 → 跳过并给原因（与 logic risky-skip 同理念：保证产物能 elaborate、跳过必有名字+原因）
         if exp["issues"] and not opts.include_risky:
             skipped.append((grp.out_name, grp.assert_id,
-                            [("mux", grp.ctrl_base, "; ".join(exp["issues"]))]))
+                            [("mux", _mux_ctrl_desc(grp), "; ".join(exp["issues"]))]))
+            continue
+
+        # WL 形态：输出不在顶层 / force 级联衔接网，但没配探针前缀 → 跳过给原因
+        # （没前缀生成必 CUVUNF；GUI 真值表照常渲染，这只挡 .sv 产出）
+        prefix_risks = mux_prefix_risks(grp, exp, opts)
+        if prefix_risks and not opts.include_risky:
+            skipped.append((grp.out_name, grp.assert_id, prefix_risks))
             continue
 
         # 覆盖度三档（2026-06-03 第十一轮）：精简=每case一值；全面=+x位展开+反码数据轮；
@@ -387,13 +439,13 @@ def build(wb, opts):
         # 这不是"可能 elaboration 失败"的风险而是"确定验证无效"，include_risky 也不放行。
         if meta.get("value_collision"):
             skipped.append((grp.out_name, grp.assert_id,
-                            [("mux", grp.ctrl_base,
+                            [("mux", _mux_ctrl_desc(grp),
                               "数据寄存器位宽装不下 %d 个 case 的互异值——选错路也测不出(假绿)，"
                               "需加宽数据字段或拆分 mux 组" % len(grp.cases))]))
             continue
         if not vecs:
             skipped.append((grp.out_name, grp.assert_id,
-                            [("mux", grp.ctrl_base,
+                            [("mux", _mux_ctrl_desc(grp),
                               "无法生成测试向量（控制信号没有可用的驱动路径）")]))
             continue
 
@@ -651,8 +703,11 @@ def report(wb, opts):
         # 与 build() 同口径的跳过判定（报告里以 error 列呈现原因，不是消失）
         skip_reason = ""
         vecs, meta = [], {}
+        prefix_risks = mux_prefix_risks(grp, exp, opts)
         if exp["issues"] and not opts.include_risky:
             skip_reason = "; ".join(exp["issues"])
+        elif prefix_risks and not opts.include_risky:
+            skip_reason = "; ".join(r[2] for r in prefix_risks)
         else:
             mux_mode = mux_gen.coverage_mode(opts.mode, opts.exhaustive)
             vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
@@ -694,7 +749,8 @@ def report(wb, opts):
         for key in used:
             b = exp["bindings"][key]
             label = b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
-            tag = "ctrl" if key.startswith("c:") else "data"
+            # 角色判断统一走 mux_gen.key_role（多控制 c1:/c2:、上游配方 m<N>.* 都认）
+            tag = {"ctrl": "ctrl", "data": "data", "upstream": "上游mux"}[mux_gen.key_role(key)]
             inp_rows.append({"label": label, "letters": "%s(%s)" % (key, tag)})
         table = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
                  "type": "mux", "expr": expr_text, "kind": "mux",
@@ -740,11 +796,12 @@ def report(wb, opts):
         st = a["status"]
         verif["counts"][st] = verif["counts"].get(st, 0) + 1
         risky = [i for i in a["inputs"]
-                 if (not i["resolved"]) or i["found_in"] in ("wire", "needs-prefix")]
+                 if (not i["resolved"]) or i["found_in"] in ("wire", "needs-prefix", "mux-output")]
         risky_str = "; ".join(
             "%s=%s(%s)" % (i["letter"], i["base"],
                            "未解析" if not i["resolved"] else
-                           ("需要探针前缀" if i["found_in"] == "needs-prefix" else "wire兜底"))
+                           ("需要探针前缀" if i["found_in"] in ("needs-prefix", "mux-output")
+                            else "wire兜底"))
             for i in risky)
         verif["signals"].append({
             "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
@@ -763,11 +820,12 @@ def _mux_expr_text(grp):
     return grp.expr
 
 
-def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix=""):
+def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None):
     """mux 组的解析画像（GUI 状态列/明细面板用），返回与 analyze_signal 同形状的 dict。
 
-    status: clean / unresolved（issues 或互异值碰撞 → 不可验证）。
-    inputs: 控制行输入 + 数据寄存器，每项与 analyze_signal 的 inputs 行同形状。
+    status: clean / unresolved（issues 或互异值碰撞 → 不可验证）/
+            needs-prefix（结构没问题，但输出/级联网需要 scan_rtl 探针前缀才能出 .sv——WL 形态）。
+    inputs: 控制驱动输入 + 数据寄存器，每项与 analyze_signal 的 inputs 行同形状。
     """
     rtl = grp.rtl_name
     if probe_prefix:
@@ -797,6 +855,13 @@ def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix=""):
     if not vecs:
         return {"status": "unresolved", "inputs": rows, "out_net": out_net,
                 "error": "无法生成测试向量（控制信号没有可用的驱动路径）", "cone": False}
+    # WL 形态：结构都解析通了，但缺探针前缀（输出不在顶层/级联衔接网）→ 单独一档状态，
+    # 让 GUI/报告能区分"表有问题"和"还没跑 scan_rtl"
+    risks = mux_prefix_risks(grp, exp, opts or GenOptions(probe_prefixes={
+        grp.out_base.lower(): probe_prefix} if probe_prefix else {}))
+    if risks:
+        return {"status": "needs-prefix", "inputs": rows, "out_net": out_net,
+                "error": "; ".join(r[2] for r in risks), "cone": False}
     return {"status": "clean", "inputs": rows, "out_net": out_net, "error": "", "cone": False}
 
 

@@ -19,9 +19,10 @@
    期望输出 = 在每个向量上对表达式求值
 5. **渲染 .sv**：每信号一块，每 test 先 `force` / `RF_WRITE`（同地址 RW 字段合并成一条），
    `#1ps` 后 `assert_<R>_T<n>: assert(...)` 配 `uvm_report_info/error`
-6. **mux 页**（2026-06 新增）：`G = case(B){F:A;…}` N 选 1——控制信号经 logic 级联驱动
-   （line/local 双路径）+ 数据寄存器写互异值 + `assert_mux<N>_T<n>` 验证选路。
-   CLI `--no-mux` / `--mux-only` 控制范围；详见 `mux验证说明.md`
+6. **mux 页**（2026-06 新增）：`G = case(B){F:A;…}` N 选 1——数据寄存器写互异值 +
+   `assert_mux<N>_T<n>` 验证选路。支持**两种表形态**：LPBT（单控制、控制来自 logic 行、输出在顶层）
+   与 WL_RFTRX（多控制拼接 `case={B,C,D,E}` + 控制可寄存器直出/级联上游 mux + 输出非顶层需 scan_rtl 前缀），
+   工具自动适配。CLI `--no-mux` / `--mux-only` 控制范围；细节见 `mux验证说明.md`（含 WL 形态专章）
 
 ## 环境
 

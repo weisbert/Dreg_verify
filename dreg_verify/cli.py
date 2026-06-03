@@ -158,7 +158,8 @@ def cmd_list(wb, opts):
               % (s.assert_id, s.out_name[:40], (s.owner or "")[:12],
                  (s.suffix or "")[:12], s.top_output, s.expr[:50]))
     for g in muxes:
-        expr_text = "case(%s) %d 选 1" % (g.ctrl_base, len(g.cases))
+        # 控制信号描述：单控制=基名；多控制=按列序拼接 {c1,c2}（B 高位），与真值表/报告同口径
+        expr_text = "case(%s) %d 选 1" % (generator._mux_ctrl_desc(g), len(g.cases))
         print("%-5s %-40s %-12s %-12s %-3s %s"
               % (g.assert_id, g.out_name[:40], (g.owner or "")[:12],
                  "mux", g.top_output, expr_text[:50]))

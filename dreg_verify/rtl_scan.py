@@ -11,6 +11,7 @@ RTL 解析的全部实现在仓库根目录的 scan_rtl.py（单文件、零第�
 """
 
 import os
+import re
 import sys
 
 # 仓库根目录加入 path，导入单文件版 scan_rtl 的解析实现
@@ -62,56 +63,63 @@ def collect_excel_nets(wb):
     return nets
 
 
-def collect_mux_nets(excel_path):
-    """mux 页 → 需要在 ENV_RF 层级核对的网（2026-06-03 第九轮：mux 验证环境核查）。
+def collect_mux_nets(wb):
+    """mux 页 → 需要在 ENV_RF 层级核对/定位的网（2026-06-03 第十四轮：WL_RFTRX 多控制 + 非顶层输出）。
 
-    直接读 Excel 的 mux 页（不依赖 excel_model 的 mux 支持——那是后续功能；
-    本函数只为"动手写 mux 功能前先验证 RTL 环境"服务）。导出两类：
-      ① G 列 mux 输出基名 —— assert 探针（designer .sv 实证顶层可探，扫描确认层级）
-      ② B 列控制信号网（_to_mux 名）—— logic→mux 衔接核对（测试不直接 force，仅核对存在）
-    数据输入（A 列）是 RW 寄存器走 RF_WRITE，无需网名核对。
-    控制信号的线控 force 输入（linectrl_*）已由 collect_excel_nets 的 logic 循环导出，不重复。
+    从已装载的工作簿 wb（excel_model.DregWorkbook）的 wb.mux 取数据——不再二次打开 Excel，
+    自动拿到 read_mux 的多控制 / 全局归并能力。导出三类网：
+      ① 每组 G 列输出基名 —— assert 探针（WL 输出全不在顶层，scan_rtl 必须找到它们的层级）
+      ② 每组每个控制信号（B/C/D/E 列）的 _to_mux 衔接网 —— 不管控制来源是什么都导
+         （寄存器直出 / logic 行 / 上游 mux 输出三种来源，force 级联或 scan 核对都用得上）
+      ③ 每组每个 case 数据输入的基名 + _to_mux 衔接网 —— 线控（RO）数据是 force 目标，
+         本地（RW）数据虽走 RF_WRITE 不 force，但衔接网多导无害（scan 找不到只落"顶层直达/找不到"段）
 
-    mux 页不存在 / 读取失败 → 返回空 dict，纯 logic 流程完全不受影响。
+    宁多勿漏：scan_rtl 扫描时找不到的网会落"顶层直达 / 找不到"段，多导一些网完全无副作用，
+    漏导才会导致仿真 force 路径 CUVUNF（且无任何报错提示）。用途说明（dict 的 value）用中文写清
+    每个网的角色（输出探针 / 控制衔接网 / 数据 force 网），方便用户看 nets.txt / probe_prefixes.txt。
+
+    wb.mux 为空（纯 logic 表 / 无 mux 页）→ 返回空 dict；
+    任何异常 try/except 兜底返回空 dict——绝不因 mux 页问题波及 logic 网导出。
     """
-    import re
-    try:
-        import openpyxl
-    except ImportError:
-        return {}
-    try:
-        wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
-    except Exception:  # noqa: BLE001
-        return {}
-    ws = None
-    for s in wb.sheetnames:
-        if "mux" in s.lower():
-            ws = wb[s]
-            break
-    if ws is None:
-        wb.close()
-        return {}
+    from . import excel_model as M
 
-    def base_name(v):
-        """去位宽尾巴；不是合法信号名（如 '(reserved)'）→ None。"""
-        s = re.sub(r"\[[^\]]*\]\s*$", "", str(v).strip())
-        return s if re.match(r"^[A-Za-z_]\w*$", s) else None
+    def strip_width(text):
+        """只去位宽尾巴 [msb:lsb]/[bit]，保留 _to_mux 后缀（衔接网真名带后缀）。"""
+        return M._strip_width(text)[0]
+
+    def valid_net(name):
+        """合法信号名才导出（过滤 '(reserved)' 等占位）。"""
+        return bool(re.match(r"^[A-Za-z_]\w*$", name or ""))
 
     nets = {}
-    upto = min(ws.max_row or 0, 5000)
-    # mux 页表头在第 2 行（与 logic 页同套路），数据从第 3 行起
-    for row in ws.iter_rows(min_row=3, max_row=upto, values_only=True):
-        g = row[6] if len(row) > 6 else None     # G 列 = mux_out（被验证输出）
-        b = row[1] if len(row) > 1 else None     # B 列 = mux_ctrl_sig1（控制信号）
-        if g is not None and str(g).strip():
-            gb = base_name(g)
-            if gb:
-                nets.setdefault(gb, "mux 输出 %s 的 assert 探针" % str(g).strip())
-        if b is not None and str(b).strip():
-            bb = base_name(b)
-            if bb:
-                nets.setdefault(bb, "mux 控制网 %s（logic→mux 衔接核对）" % str(b).strip())
-    wb.close()
+    try:
+        groups = getattr(wb, "mux", None) or []
+        for grp in groups:
+            # ① 输出探针网（G 列基名，已去位宽）——WL 输出不在顶层，靠 scan_rtl 定层级
+            if valid_net(grp.out_base):
+                nets.setdefault(grp.out_base,
+                                "mux 组%s 输出 %s 的 assert 探针（输出不在顶层，需定位层级）"
+                                % (grp.group_no, grp.out_name))
+            # ② 控制衔接网（B/C/D/E 各控制信号的 _to_mux 网，剥位宽，保留后缀）
+            for ctrl in grp.ctrls:
+                net = strip_width(ctrl.raw)
+                if valid_net(net):
+                    nets.setdefault(net,
+                                    "mux 组%s 控制信号 %s 的衔接网（%s 列，控制 mux 选路）"
+                                    % (grp.group_no, ctrl.base, ctrl.letter))
+            # ③ 数据输入网（每个 case：寄存器基名 + _to_mux 衔接网）
+            for case in grp.cases:
+                if valid_net(case.input_base):
+                    nets.setdefault(case.input_base,
+                                    "mux 组%s 数据输入 %s（线控数据=force 目标；本地数据走 RF_WRITE）"
+                                    % (grp.group_no, case.input_base))
+                conn = strip_width(case.input_raw)
+                if conn != case.input_base and valid_net(conn):
+                    nets.setdefault(conn,
+                                    "mux 组%s 数据衔接网 %s（数据→mux 衔接核对）"
+                                    % (grp.group_no, conn))
+    except Exception:  # noqa: BLE001  mux 页任何异常都不得波及 logic 网导出
+        return {}
     return nets
 
 

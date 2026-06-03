@@ -29,7 +29,7 @@ python scan_rtl.py --excel "Hi1108_Pilot_BT_LP_DREG_95P_28May.xlsx" --export-net
 ✅ 确认控制台出现这一行（没有这行 = mux 页没读到，停下来反馈）：
 
 ```
-✓ mux 页: 发现 N 个相关网，新增导出 N 个（输出探针 + 控制衔接网）
+✓ mux 页: 发现 N 个相关网，新增导出 N 个（输出探针 + 控制衔接网 + 数据网）
 ```
 
 ### ② 上传 2 个文件到仿真服务器

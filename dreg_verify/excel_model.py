@@ -104,16 +104,39 @@ class MuxCase:
         return "MuxCase(%s -> %s)" % (self.case_raw, self.input_base)
 
 
+class MuxCtrl:
+    """mux 页 B/C/D/E 列中的一个控制信号。
+
+    WL_RFTRX 真表实证（2026-06-03 第十四轮）：一个 mux 组最多 4 个控制信号联合选择，
+    case 值（F 列）= 各控制信号按列序拼接（**B 在最高位**）。LPBT 真表只用 B 列（单控制）。
+    """
+
+    def __init__(self, letter, raw, base, width, msb=None, lsb=None):
+        self.letter = letter            # Excel 列字母 B/C/D/E
+        self.raw = raw                  # 列原文（含 _to_mux 后缀与位宽）
+        self.base = base                # 剥位宽+_to_mux 的基名（查 regmap/tmm/logic K 名的 key）
+        self.width = width
+        self.msb = msb
+        self.lsb = lsb
+
+    def __repr__(self):
+        return "MuxCtrl(%s=%s[%d])" % (self.letter, self.base, self.width)
+
+
 class MuxGroup:
-    """mux 页的一组（同一个被验证输出）：G = case(B) { F行: A行; ... }
+    """mux 页的一组（同一个被验证输出）：G = case({B,C,D,E}) { F行: A行; ... }
 
     与 LogicSignal 的本质区别：N 选 1 的 case 结构化列表，不是表达式 AST。
     属性接口尽量与 LogicSignal 对齐（out_name/out_base/out_width/owner/assert_id/
     rtl_base/rtl_name/is_top），方便 GUI/报告复用。
+
+    控制信号（2026-06-03 WL 多控制支持）：
+      ctrls = list[MuxCtrl]，按 B/C/D/E 列序，B 在首 = case 值最高位段。
+      ctrl_raw/ctrl_base/ctrl_width 是单控制兼容别名（= ctrls[0]），LPBT 路径/旧调用方零改动。
     """
 
     def __init__(self, group_no, out_name, out_width, ctrl_raw, ctrl_base, ctrl_width,
-                 owner, top_output, cases):
+                 owner, top_output, cases, ctrls=None):
         self.group_no = group_no        # N 列组号（assert_mux<N>_T<n> 的 N，用户拍板方案 A）
         self.out_name = out_name        # G 列原文（含位宽；顶层网名，直接探）
         out_base, _w, out_msb, out_lsb = _strip_width(out_name)
@@ -121,21 +144,42 @@ class MuxGroup:
         self.out_msb = out_msb          # G 列位宽切片（探针 LHS 重建用，比字符串索引可靠）
         self.out_lsb = out_lsb
         self.out_width = out_width
-        self.ctrl_raw = ctrl_raw        # B 列原文（logic to_mux 行 K 名 + _to_mux + 位宽）
-        self.ctrl_base = ctrl_base      # 剥位宽+_to_mux 的基名 = logic 页 to_mux 行的 K 基名
-        self.ctrl_width = ctrl_width
+        # ── 控制信号列表（B 在首 = case 高位）──
+        if ctrls is None:
+            # 兼容旧构造（单控制三标量；ctrl_base 为空 = 无控制信号）
+            ctrls = [MuxCtrl("B", ctrl_raw, ctrl_base, ctrl_width)] if ctrl_base else []
+        self.ctrls = ctrls
+        # 单控制兼容别名（mux_gen/generator/gui/cli/旧测试大量引用；多控制时 = B 列那个）
+        self.ctrl_raw = ctrls[0].raw if ctrls else ctrl_raw
+        self.ctrl_base = ctrls[0].base if ctrls else ctrl_base
+        self.ctrl_width = ctrls[0].width if ctrls else ctrl_width
         self.owner = owner              # L 列
         self.top_output = top_output    # I 列
         self.cases = cases              # list[MuxCase]
+        # 同组各行控制列与首行不一致的行号（read_mux 填；expand_mux_group 转 issue）
+        self.ctrl_mismatch_rows = []
         # 与 LogicSignal 对齐的占位字段（mux 无 logic 后缀语义；expr 是只读属性=case 描述文本）
         self.suffix = "mux"
+
+    @property
+    def ctrl_total_width(self):
+        """case 值（F 列）的总位宽 = 各控制信号位宽之和（多控制拼接）。单控制 = ctrl_width。"""
+        return sum(c.width for c in self.ctrls) if self.ctrls else self.ctrl_width
+
+    @property
+    def is_multi_ctrl(self):
+        return len(self.ctrls) > 1
 
     @property
     def expr(self):
         """人读的 case 描述（GUI 表达式列 / 报告 / 搜索过滤用）。
         注意这不是可求值表达式——mux 不走 expr.parse 路径。"""
         items = "; ".join("%s:%s" % (c.case_raw, c.input_base) for c in self.cases)
-        return "case(%s){%s}" % (self.ctrl_base, items)
+        if len(self.ctrls) > 1:
+            sel = "{%s}" % ",".join(c.base for c in self.ctrls)    # 多控制拼接（B 在高位）
+        else:
+            sel = self.ctrl_base
+        return "case(%s){%s}" % (sel, items)
 
     @property
     def is_top(self):
@@ -326,21 +370,34 @@ def read_logic(ws, header_row=2):
 
 
 # ───────────────────────────── 读取 mux 页 ─────────────────────────────
-MUX_CTRL_LETTERS = list("BCDE")     # 控制信号 1..4（真表只用 B，C/D/E 预留全空）
+MUX_CTRL_LETTERS = list("BCDE")     # 控制信号 1..4（LPBT 只用 B；WL 最多 4 个联合选择）
+
+
+def _row_ctrls(row):
+    """读一行的 B/C/D/E 控制列 → list[MuxCtrl]（按列序，B 在首 = case 高位）。"""
+    ctrls = []
+    for letter in MUX_CTRL_LETTERS:
+        v = _s(_col(row, letter))
+        if v:
+            c_base_tm, c_width, c_msb, c_lsb = _strip_width(v)
+            ctrls.append(MuxCtrl(letter, v, strip_to_mux(c_base_tm), c_width, c_msb, c_lsb))
+    return ctrls
 
 
 def read_mux(ws, header_row=2):
     """读 mux 页 → list[MuxGroup]。
 
-    真表排版（2026-06-03 inspect_mux 实证，54行×232列，表头第2行）：
-      A=mux_input（寄存器字段+_to_mux）   B=mux_ctrl_sig1（logic to_mux 行 K 名+_to_mux）
-      C/D/E=ctrl_sig2~4（预留全空）       F=case（控制值，可含 don't-care 位 x，如 4'b000x）
-      G=mux_out（被验证输出，顶层网名）    I=top_out（全1）  L=Owner  N=组号
-    语义：G = case(B) { F行: A行; ... }
+    真表排版（LPBT 2026-06-03 / WL_RFTRX 2026-06-03 两轮 inspect_mux 实证，表头第2行）：
+      A=mux_input（寄存器字段+_to_mux）   B~E=mux_ctrl_sig1~4（控制信号，LPBT 只用 B）
+      F=case（控制值=各控制按列序拼接，B 高位；可含 don't-care 位 x，如 5'b0xxxx）
+      G=mux_out（被验证输出）  H=去向(to_logic/to_mux/to_dft)  I=top_out  L=Owner  N=组号
+    语义：G = case({B,C,D,E}) { F行: A行; ... }
 
     只保留 A/F/G 同时非空的行（'(reserved)' 行 F 为空被自然过滤）。
     分组按 **G 列基名全局归并**（同一输出的行即使不连续也归同一组）——
     劈成多组会导致 assert_id 撞号(非法 SV) + 互异值各自重启(撞值=假绿)。
+    控制信号取自组的首行；后续行控制列与首行不一致时记入 ctrl_mismatch_rows
+    （expand_mux_group 转 issue，不静默吞掉）。
     不依赖 N 列本身，防 read_only 模式下行尾留空导致 N 列读丢（232 列宽表的真实风险）。
     组号优先用首行 N 列值；N 列缺失/非法时顺延（上一组+1）。
     """
@@ -364,17 +421,18 @@ def read_mux(ws, header_row=2):
         out_base, out_width, _, _ = _strip_width(out_raw)
         key = out_base.lower()
         if key in by_base:
-            by_base[key].cases.append(case)
+            grp = by_base[key]
+            # 同组各行控制列应与首行一致（基名比较）。续行控制列【全空】视为合法——继承首行控制
+            # （Excel 合并单元格 / 控制只写组首行是 spec 表常见排版；read_only 模式下合并续行读到空）。
+            # 只有续行【写了非空但不同】的控制信号才记 mismatch（expand 时转 issue，抓真错误）。
+            row_bases = [c.base.lower() for c in _row_ctrls(row)]
+            if row_bases and row_bases != [c.base.lower() for c in grp.ctrls]:
+                grp.ctrl_mismatch_rows.append(ri)
+            grp.cases.append(case)
             continue
 
         # ── 新组 ──
-        ctrl_raw = ""
-        for letter in MUX_CTRL_LETTERS:         # 取第一个非空控制列（真表只有 B）
-            v = _s(_col(row, letter))
-            if v:
-                ctrl_raw = v
-                break
-        ctrl_base_tm, ctrl_width, _, _ = _strip_width(ctrl_raw)
+        ctrls = _row_ctrls(row)                 # 收集全部非空控制列（B 在首 = case 高位）
         n_raw = _s(_col(row, "N"))
         try:
             group_no = int(float(n_raw))
@@ -383,10 +441,11 @@ def read_mux(ws, header_row=2):
         grp = MuxGroup(
             group_no=group_no,
             out_name=out_raw, out_width=out_width,
-            ctrl_raw=ctrl_raw, ctrl_base=strip_to_mux(ctrl_base_tm), ctrl_width=ctrl_width,
+            ctrl_raw="", ctrl_base="", ctrl_width=1,    # 占位；实际控制来自 ctrls
             owner=_s(_col(row, "L")),
             top_output=_s(_col(row, "I")),
             cases=[case],
+            ctrls=ctrls,
         )
         by_base[key] = grp
         groups.append(grp)

@@ -194,40 +194,75 @@ def test_infer_from_dreg_env(monkeypatch, tmp_path):
 
 
 def test_collect_mux_nets(tmp_path):
-    """mux 环境核查（2026-06-03）：mux 页的输出探针 + 控制衔接网导出；无 mux 页时返回空。"""
-    import openpyxl
-    # 有 mux 页：G 列输出 + B 列控制网被导出；(reserved) 之类非信号名被过滤
+    """mux 环境核查（2026-06-03 第十四轮）：从已装载的 wb 导出 mux 输出探针 + 控制/数据衔接网；
+    无 mux 页时返回空。"""
+    # 有 mux 页（LPBT 形态，单控制）：G 列输出 + 控制衔接网 + 数据网都被导出
     path = tmp_path / "with_mux.xlsx"
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "mux"
-    ws.append(["MUX TABLE"] + [""] * 9)                          # row1 合并标题
-    ws.append(["mux_input", "mux_ctrl_sig1", "c2", "c3", "c4",
-               "case", "mux_out", "suffix", "top_out", "Notes"])  # row2 表头
-    ws.append(["d_x_t1_to_mux[3:0]", "d_logic_x_tsensor_to_mux[3:0]", "", "", "",
-               "4'b000x", "d_x_bias_i[3:0]", "", 1, ""])
-    ws.append(["d_x_t2_to_mux[3:0]", "d_logic_x_tsensor_to_mux[3:0]", "", "", "",
-               "4'b001x", "d_x_bias_i[3:0]", "", 1, ""])
-    ws.append(["(reserved)", "", "", "", "", "", "(reserved)", "", 0, ""])
-    ws.append(["d_y_g1_to_mux[4:0]", "d_logic_x_agc_to_mux[2:0]", "", "", "",
-               "3'b010", "d_y_rccal[4:0]", "", 1, ""])
-    wb.save(str(path))
+    fixtures.build_workbook(str(path), with_mux=True)
+    wb = excel_model.load_workbook(str(path))
 
-    nets = rtl_scan.collect_mux_nets(str(path))
-    assert "d_x_bias_i" in nets and "探针" in nets["d_x_bias_i"]          # G 列输出（去位宽）
-    assert "d_y_rccal" in nets
-    assert "d_logic_x_tsensor_to_mux" in nets                             # B 列控制衔接网
-    assert "d_logic_x_agc_to_mux" in nets
+    nets = rtl_scan.collect_mux_nets(wb)
+    # ① 输出探针（G 列基名，去位宽）
+    assert "d_bt_lp_rccal_i" in nets and "探针" in nets["d_bt_lp_rccal_i"]
+    assert "d_bt_lp_bias_q" in nets
+    # ② 控制衔接网（B 列控制信号的 _to_mux 网，保留后缀）
+    assert "d_logic_bt_lp_lna_agc_to_mux" in nets
+    assert "衔接网" in nets["d_logic_bt_lp_lna_agc_to_mux"]
+    # ③ 数据输入网（寄存器基名 + _to_mux 衔接网）
+    assert "d_bt_lp_rccal_i_g1" in nets and "d_bt_lp_rccal_i_g3" in nets
+    assert "d_bt_lp_rccal_i_g1_to_mux" in nets                            # 数据衔接网
+    assert "d_bt_lp_bias_q_t1" in nets and "d_bt_lp_bias_q_t2" in nets
     assert not any("reserved" in n for n in nets)                         # 非信号名被过滤
-    assert len(nets) == 4
 
     # 无 mux 页：返回空 dict（纯 logic 表完全不受影响）
     path2 = tmp_path / "no_mux.xlsx"
     fixtures.build_workbook(str(path2))
-    assert rtl_scan.collect_mux_nets(str(path2)) == {}
+    wb2 = excel_model.load_workbook(str(path2))
+    assert rtl_scan.collect_mux_nets(wb2) == {}
 
-    # 文件不存在 / 读失败：也返回空（不炸两段式流程）
-    assert rtl_scan.collect_mux_nets(str(tmp_path / "ghost.xlsx")) == {}
+    # wb 没有 mux 属性 / mux 为非法对象：也返回空（异常兜底，不炸两段式流程）
+    class _Bad:
+        mux = object()                      # 不可迭代 → 触发异常分支
+    assert rtl_scan.collect_mux_nets(_Bad()) == {}
+
+
+def test_collect_mux_nets_wl(tmp_path):
+    """WL_RFTRX 多控制 / 非顶层输出 / 级联（2026-06-03 第十四轮）：
+    导出 5 个输出网 + 全部控制衔接网（含组4 的两个控制）+ 线控数据网。"""
+    path = tmp_path / "wl.xlsx"
+    fixtures.build_wl_workbook(str(path))
+    wb = excel_model.load_workbook(str(path))
+
+    nets = rtl_scan.collect_mux_nets(wb)
+
+    # ① 五个 mux 输出探针网（top_out 全 0，不在顶层）
+    for out in ("d_wl_rf_lna_gain", "d_wl_rf_bwctrl", "d_wl_rf_tx_bwctrl",
+                "d_wl_rf_tx_rc_code", "d_wl_rf_dpd_path"):
+        assert out in nets, "缺输出探针网 %s" % out
+        assert "探针" in nets[out]
+
+    # ② 全部控制衔接网（_to_mux 网，剥位宽保留后缀）
+    for ctrl_net in ("d_wl_rf_lna_gain_ctrl_mode_to_mux",   # 组1（寄存器直出）
+                     "d_wl_rf_bwctrl_mode_to_mux",          # 组2（寄存器直出）
+                     "d_wl_rf_bwctrl_to_mux",               # 组3 控制（上游 mux 输出，级联）
+                     "d_wl_rf_fb_en_to_mux"):               # 组5（logic 行）
+        assert ctrl_net in nets, "缺控制衔接网 %s" % ctrl_net
+        assert "控制" in nets[ctrl_net]
+    # 组4 多控制拼接：两个控制都要导（B=lut_en，C=bwctrl，C 列带位宽要剥掉）
+    assert "d_wl_rf_rc_code_lut_en_to_mux" in nets
+    assert "d_wl_rf_bwctrl_to_mux" in nets                  # 组4 的 C 列 d_wl_rf_bwctrl_to_mux[3:0]
+
+    # ③ 线控（RO）数据网 = force 目标，必须导出
+    assert "d_wl_rf_linectrl_lna_gain" in nets              # 组1 线控数据基名
+    assert "d_wl_rf_linectrl_bwctrl" in nets                # 组2 线控数据基名
+    # 本地（RW）数据基名也导（宁多勿漏）
+    assert "d_wl_rf_lna_gain_local" in nets
+    # 数据衔接网（_to_mux）也在
+    assert "d_wl_rf_linectrl_lna_gain_to_mux" in nets
+
+    # 全部用途说明非空、无非法名
+    assert all(v for v in nets.values())
+    assert not any("reserved" in n for n in nets)
 
 
 def test_scan_rtl_is_stdlib_only():

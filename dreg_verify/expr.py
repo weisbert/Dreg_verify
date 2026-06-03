@@ -198,6 +198,36 @@ def case_matches(case_value, case_width, dontcare_mask, ctrl_value):
     return (ctrl_value & care) == (case_value & care)
 
 
+def split_case_value(value, dontcare_mask, widths):
+    """把多控制拼接的 case 值按各控制信号位宽拆分（widths[0] = 第一个控制 = 最高位段）。
+
+    WL_RFTRX 真表语义（2026-06-03 实证）：case = {ctrl_B, ctrl_C, ctrl_D, ctrl_E} 拼接，
+    B 在最高位。返回 [(sub_value, sub_dontcare_mask), ...] 与 widths 一一对应。
+
+        5'b10010 按 [1,4] 拆 → [(1, 0), (0b0010, 0)]      # lut_en=1, bwctrl=2
+        5'b0xxxx 按 [1,4] 拆 → [(0, 0), (0, 0b1111)]      # lut_en=0, bwctrl=don't care
+    """
+    total = sum(widths)
+    parts = []
+    shift = total
+    for w in widths:
+        shift -= w
+        m = mask(w)
+        parts.append(((value >> shift) & m, (dontcare_mask >> shift) & m))
+    return parts
+
+
+def concat_case_parts(parts):
+    """split_case_value 的逆操作：[(value, width, dontcare_mask), ...] → (value, total_width, mask)。
+    parts[0] 在最高位（与 split 同序）。round-trip 测试 / 程序自拼 case 用。"""
+    value, total, dontcare = 0, 0, 0
+    for v, w, dc in parts:
+        value = (value << w) | (v & mask(w))
+        dontcare = (dontcare << w) | (dc & mask(w))
+        total += w
+    return value, total, dontcare
+
+
 # ───────────────────────────── AST ─────────────────────────────
 class Node:
     pass

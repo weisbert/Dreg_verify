@@ -39,6 +39,17 @@ def _raw_has_to_logic(raw):
     return name.lower().endswith("_to_logic")
 
 
+def _raw_has_to_mux(raw):
+    """输入单元格原文(去位宽)是否带 _to_mux 后缀（mux 页 A/B~E 列、或 logic 页引用 mux 衔接网）。
+
+    带 _to_mux 且基名是别的 logic/mux 输出 → 该网由上游表达式/上游 mux 驱动，
+    与基名/输出网是平行拷贝——force 基名钉不住它，必须 force 字面 _to_mux 网（需探针前缀）。
+    （与 _to_logic 的 d_ndiv_n 教训同理，2026-06-03 WL_RFTRX 实证。）
+    """
+    name = _WIDTH_TAIL.sub("", str(raw or "")).strip()
+    return name.lower().endswith("_to_mux")
+
+
 class InputBinding:
     def __init__(self, letter, raw, base, width, kind, address, reg_lsb, reg_msb,
                  wire, found_in, reg_name="", note="", slice_msb=None, slice_lsb=None):
@@ -125,6 +136,15 @@ class Resolver:
                            for info in s.inputs.values())
             self._logic_outputs.setdefault(s.out_base.lower(),
                                            (s.out_width, is_top, s.rtl_base, self_ref))
+        # mux 输出名(去位宽,小写) → (位宽, is_top, rtl_base, 组号)
+        # 识别"输入其实是另一个 mux 组的输出"——WL_RFTRX 实证（2026-06-03 第十四轮）：
+        #   mux→logic 级联（mux 输出喂 logic 输入，H 列=to_logic）
+        #   mux→mux 级联（mux 输出是另一组的控制/数据，H 列=to_mux）
+        # LPBT 无此形态（mux 输出全是顶层终点），该索引对 LPBT 永不命中。
+        self._mux_outputs = {}
+        for g in (getattr(wb, "mux", None) or []):
+            self._mux_outputs.setdefault(g.out_base.lower(),
+                                         (g.out_width, g.is_top, g.rtl_base, g.group_no))
 
     # ───────────── 名称匹配（多策略，歧义不静默猜） ─────────────
     def _match(self, base, table_lower, tag):
@@ -261,12 +281,39 @@ class Resolver:
                                 "(RTL: assign %s = <表达式>)，基名/%s 只是它的下游拷贝、force 不生效；"
                                 "必须 force 字面网 %s（在 sig_logic 模块内，需探针前缀——跑 scan_rtl 获取）"
                                 % (net, base, net, chained_rtl, net))
+                elif _raw_has_to_mux(raw):
+                    # ⭐ 级联且原文带 _to_mux（WL：mux 页输入引用 logic 行输出，如数据/控制 = logic to_mux 行）：
+                    # RTL 是 assign X_to_mux = <上游 logic 表达式>；基名 X / X_ls 只是平行拷贝，
+                    # force 它们钉不住 _to_mux 网（与 d_ndiv_n 的 _to_logic 教训同理）。
+                    # → force 字面 _to_mux 网（在导出模块内部，需 scan_rtl 探针前缀）。
+                    net = _WIDTH_TAIL.sub("", str(raw)).strip()
+                    kind = "RO"
+                    wire_name = net
+                    found_in = "needs-prefix"
+                    note = ("级联(logic→mux 衔接网)：%s 由上游 logic 行 %r 的表达式驱动；"
+                            "force 基名钉不住它，必须 force 字面 %s 网（需探针前缀——跑 scan_rtl 获取）"
+                            % (net, base, net))
                 else:
                     # 级联且原文不带 _to_logic（Excel 直接写上游输出名）→ force 其 RTL 网名(ls 行带 _ls)
                     kind = "RO"
                     found_in = "logic"
                     wire_name = chained_rtl
                     note = "级联：输入是另一个 top_output 输出 %r（%dbit），按中间 wire force" % (base, width)
+            elif low in self._mux_outputs and found_in is None and kind != "RW":
+                # ⭐ 输入是另一个 mux 组的输出（WL mux 级联 / mux→logic 级联，2026-06-03 实证）：
+                # 该网由上游 mux 选路驱动。force 衔接网（原文 _to_mux/_to_logic 网，没有后缀就用基名）
+                # 可以钉住它（force 优先级高于 assign）→ 隔离验证下游；需 scan_rtl 探针前缀。
+                # 注意 expand_mux_group 的『展开上游 mux』(cone 思路) 不走这里——它直接查 wb.mux。
+                mux_w, _mux_top, _mux_rtl, mux_no = self._mux_outputs[low]
+                if info.get("msb") is None and info.get("lsb") is None:
+                    width = max(width, mux_w)
+                net = _WIDTH_TAIL.sub("", str(raw)).strip()
+                kind = "RO"
+                wire_name = net if net else base
+                found_in = "mux-output"
+                note = ("级联(mux 输出)：输入 %s 是 mux 组 %s 的输出 %r——由上游 mux 选路驱动；"
+                        "force 该衔接网可钉住它（mux 输出不在顶层，需 scan_rtl 探针前缀）"
+                        % (raw, mux_no, base))
             elif found_in is None and self.wire_fallback and kind != "RW":
                 # tmm/regmap 都查不到 → 视作普通 wire（顶层管脚/中间信号）→ force 信号名
                 kind = "RO"
@@ -279,7 +326,7 @@ class Resolver:
         prefix = self.wire_prefixes.get(low) or self.wire_prefixes.get(wire_name.lower())
         if prefix and kind != "RW":
             wire_name = "%s.%s" % (prefix.strip("."), wire_name)
-            if found_in in ("wire", "needs-prefix", None):
+            if found_in in ("wire", "needs-prefix", "mux-output", None):
                 found_in = "prefixed-wire"   # 用户/scan_rtl 确认该网存在 → 不再算风险，可生成
             note = (note + "；" if note else "") + "探针前缀: 在 ENV_RF.%s 下" % prefix
 
