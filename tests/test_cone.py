@@ -94,6 +94,57 @@ def test_cone_leaves_carry_excel_sources(wb, resolver):
     assert by_base["int_n"]["letters"] == ["INT_N"]
 
 
+def test_cone_expand_chain(wb, resolver):
+    """⭐展开链(2026-06-03 用户功能)：cone 展开时记录展开过程——本行+逐层代入的上游行，
+    每行带 Excel 原式 + "字母代入真实信号名"的等价形式（GUI/HTML 报告显示）。"""
+    sig = next(s for s in wb.logic if s.out_base == "pll_n")
+    chain = []
+    node, bindings = cone.expand(sig, wb, resolver, chain_out=chain)
+    # 顺序: 本行(根) → pll_n2 → pll_n1 (DFS)；同一上游行被 A/B/C/D 多次到达只记一次
+    assert [c["out"] for c in chain] == ["pll_n", "pll_n2", "pll_n1"]
+    # 原式 = Excel L 列原文
+    assert chain[0]["expr"] == "E?{B,C,D,1'b0}:{A,B,C,D}"
+    assert chain[2]["expr"] == "E?{1'b0,A,B,C}:{A,B,C,D}"
+    # 代入形式: 字母 → 真实信号名(去 _to_logic 的基名 + Excel 单元格切片)
+    assert chain[0]["subst"] == ("en_dig_clk_div4?{pll_n2[30:23],pll_n2[22:16],pll_n2[15:0],1'b0}"
+                                 ":{pll_n2[31],pll_n2[30:23],pll_n2[22:16],pll_n2[15:0]}")
+    assert chain[2]["subst"] == ("d_xo_freq_sel?{1'b0,int_n[8:0],frac_n_msb[6:0],frac_n_lsb[15:1]}"
+                                 ":{int_n[8:0],frac_n_msb[6:0],frac_n_lsb[15:1],frac_n_lsb[0]}")
+    # 不传 chain_out 的现有调用不受影响(返回值/叶子完全一致)
+    _node2, bindings2 = cone.expand(sig, wb, resolver)
+    assert set(bindings2) == set(bindings)
+
+
+def test_expand_signal_chain_out(wb, resolver):
+    """generator.expand_signal 透传 chain_out；非 cone 信号不动它(保持空)。"""
+    sig = next(s for s in wb.logic if s.out_base == "pll_n")
+    chain = []
+    _n, _b, expanded = generator.expand_signal(wb, resolver, sig, chain_out=chain)
+    assert expanded and [c["out"] for c in chain] == ["pll_n", "pll_n2", "pll_n1"]
+    sig2 = next(s for s in wb.logic if s.out_base == "d_en_refbuf")
+    chain2 = []
+    _n, _b, expanded2 = generator.expand_signal(wb, resolver, sig2, chain_out=chain2)
+    assert not expanded2 and chain2 == []
+
+
+def test_report_and_html_carry_chain(wb, tmp_path):
+    """报告数据带 chain；HTML 报告 cone 信号真值表上方渲染展开链。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    by_sig = {t["signal"]: t for t in rep["tables"]}
+    assert [c["out"] for c in by_sig["pll_n[31:0]"]["chain"]] == ["pll_n", "pll_n2", "pll_n1"]
+    assert by_sig["d_en_refbuf"]["chain"] == []          # 非 cone 信号链为空
+    # HTML 渲染（esc 会把 1'b0 的引号转义，断言避开常量）
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    html = path.read_text(encoding="utf-8")
+    assert "展开链" in html
+    assert "① pll_n = E?" in html
+    assert "③ pll_n1 = E?" in html
+    assert "pll_n2[30:23],pll_n2[22:16],pll_n2[15:0]" in html          # 代入形式
+    assert "d_xo_freq_sel?{1" in html
+
+
 def test_non_cone_groups_xl_letters_equal_letters(wb, resolver):
     """非 cone 信号：xl_letters = 表达式字母本身(A/B/C…)，显示与修复前完全一致。"""
     for base in ("d_pfd_en_lnmode", "d_en_refbuf"):
@@ -469,6 +520,34 @@ def test_gui_cone_inputs_table_shows_excel_sources(tmp_path_factory):
     letters = {w.ti_inputs.item(r, 0).text() for r in range(w.ti_inputs.rowCount())}
     assert letters >= {"A", "B", "C"}
     assert "已展开上游" not in w.ti_header.text()
+
+
+def test_gui_cone_chain_panel(tmp_path_factory):
+    """⭐『展开链』面板(2026-06-03 用户功能)：cone 信号显示展开过程，非 cone/mux 隐藏。
+
+    每个链节两行：『① 行名 = Excel 原式』+『(对齐) = 字母代入真实信号名』。"""
+    gui, w = _pll_window(tmp_path_factory, "gui_chain")
+    # ── cone 信号 pll_n：面板可见，链=本行→pll_n2→pll_n1 ──
+    sig = next(s for s in w.signals if s.out_base == "pll_n")
+    w._load_test_items(sig)
+    assert w.ti_chain.isVisibleTo(w) and w.ti_chain_cap.isVisibleTo(w)
+    text = w.ti_chain.toPlainText()
+    lines = text.splitlines()
+    assert len(lines) == 6                                   # 3 链节 × (原式+代入) 2 行
+    assert lines[0] == "① pll_n = E?{B,C,D,1'b0}:{A,B,C,D}"  # Excel 原式
+    assert lines[1].lstrip().startswith("= en_dig_clk_div4?{pll_n2[30:23]")   # 代入信号名
+    assert lines[2].startswith("② pll_n2 = ")
+    assert lines[4].startswith("③ pll_n1 = ")
+    assert "d_xo_freq_sel?{1'b0,int_n[8:0]" in lines[5]
+    # 链数据与 _ti_chain 一致
+    assert [c["out"] for c in w._ti_chain] == ["pll_n", "pll_n2", "pll_n1"]
+    # ── 非 cone 信号：面板隐藏 ──
+    sig2 = next(s for s in w.signals if s.out_base == "d_pfd_en_lnmode")
+    w._load_test_items(sig2)
+    assert not w.ti_chain.isVisibleTo(w) and not w.ti_chain_cap.isVisibleTo(w)
+    # ── 再切回 cone 信号：面板恢复显示(状态切换无残留) ──
+    w._load_test_items(sig)
+    assert w.ti_chain.isVisibleTo(w)
 
 
 def test_gui_probe_prefix_flows_to_sv(tmp_path_factory):

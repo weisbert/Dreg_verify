@@ -215,6 +215,7 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
 
     block_unresolved = set()
     n_neg = 0
+    n_designer = 0
     for vec in vectors:
         drive, unresolved = _build_drive_lines(vec, bindings, used_vars)
         lines.extend(drive)
@@ -222,7 +223,10 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
             block_unresolved.add(u)
         if vec.is_negative:
             n_neg += 1
+        if getattr(vec, "designer_filled", False):
+            n_designer += 1
         lines.append("#1ps;")
+        # 断言对比值 = designer 手填期望 优先；未填 → auto_out(表达式计算值)兜底；负向 → 故意错值
         exp = fmt_bin(vec.asserted_value, vec.exp_width)
         # 断言 id = <R>_<测试名>；测试名见 test_label(自定义名/T<index>，负向带 _NEG)
         aid_str = "%s_%s" % (aid, test_label(vec))   # e.g. 8_T0 / 8_T1_NEG / 8_my_case
@@ -240,6 +244,15 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
             info_tail, err_tail = NEG_BROKEN_TAIL, NEG_EXPECTED_TAIL
             info_cnt, err_cnt = CNT_NEG_BROKEN, None   # 预期内的 FAIL 不计入 REAL FAIL
         else:
+            # 正向：comments 模式下标注期望来源（designer 手填 vs auto_out 兜底）——
+            # 手填期望与表达式计算值不同时，仿真 FAIL 正是要抓的"表达式 != designer 意图"
+            if comments and getattr(vec, "designer_filled", False):
+                src = ("designer-filled expected (differs from expression value %s -- "
+                       "a FAIL here means the expression does not match designer intent)"
+                       % fmt_bin(vec.exp_value, vec.exp_width)
+                       if vec.designer_expected != vec.exp_value
+                       else "designer-filled expected (matches expression value)")
+                lines.append("// %s" % src)
             info_tail, err_tail = "", ""
             info_cnt, err_cnt = None, CNT_REAL_FAIL
         msg_info = ('$sformatf("%s","%s","%s",%s, %s%s)'
@@ -262,6 +275,8 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
     stats = {
         "out_name": sig.out_name, "rtl_name": rtl_name, "assert_id": aid, "owner": sig.owner,
         "n_vectors": len(vectors), "n_negative": n_neg,
+        # designer 手填期望的用例数（其余正向 = auto_out 兜底）——GUI 完成弹窗/汇总用
+        "n_designer": n_designer,
         "unresolved": sorted(block_unresolved),
         "truncated": meta.get("truncated", False),
     }

@@ -222,8 +222,9 @@ SUMMARY_COLS = [("R", "R/序号"), ("signal", "信号(K)"), ("owner", "owner"), 
                 ("control", "控制位"), ("data", "数据位"), ("expr", "表达式"),
                 ("unresolved", "未解析输入"), ("error", "错误")]
 DETAIL_COLS = [("R", "R"), ("signal", "信号(K)"), ("owner", "owner"), ("type", "类型"),
-               ("test", "用例"), ("neg", "负向"), ("expected", "断言期望值"),
-               ("correct", "正确值(负向时)"), ("force", "force 驱动"),
+               ("test", "用例"), ("neg", "负向"), ("auto_out", "auto_out(表达式计算)"),
+               ("expected", "期望(断言对比值)"), ("exp_src", "期望来源"),
+               ("force", "force 驱动"),
                ("rfwrite", "RF_WRITE 驱动"), ("expr", "表达式"), ("note", "备注")]
 VERIF_COLS = [("R", "R"), ("signal", "信号(K)"), ("owner", "owner"), ("type", "类型"),
               ("top", "top_output"), ("status_label", "可验证性"),
@@ -302,7 +303,34 @@ tr.neg{background:#fff3f3} tr.err{background:#ffe9e9}
 .tt tr.exprow th,.tt tr.exprow td{font-weight:600;border-top:2px solid #999}
 .tt td.drv{font-family:Consolas,monospace;font-size:11px;text-align:left;color:#555}
 .ttblock{margin-bottom:6px} .ex{color:#888} code{background:#f5f5f5;padding:0 3px}
+pre.chain{background:#f4f8ff;border:1px solid #d4e0f5;border-radius:4px;padding:8px 10px;
+ font-family:Consolas,monospace;font-size:12px;color:#234;margin:6px 0 2px;overflow-x:auto}
 .empty{color:#999;padding:20px}
+/* auto_out 行(表达式计算值，只读参考) 与 期望 行(进 .sv 的对比值) */
+.tt tr.autorow th,.tt tr.autorow td{color:#666;font-style:italic;border-top:2px solid #999}
+.tt tr.exprow{border-top:none}
+.tt td.dsgn{background:#e2f4e2}        /* designer 手填期望(且非负向) */
+.tt td.fb{color:#999}                  /* 未手填 -> auto_out 兜底(灰) */
+.tt td.dsgndiff{background:#ffd9d9}    /* 手填期望 != auto_out: 表达式可能与 designer 意图不符 */
+/* ── 真值表检查 tab：遮盖/填空/判定 ── */
+.chkbar{display:flex;gap:14px;align-items:center;margin:10px 0;padding:10px;
+ background:#f4f7ff;border:1px solid #c8d6f5;border-radius:6px;flex-wrap:wrap}
+.chkbar button{padding:7px 18px;font-size:13px;cursor:pointer;border:1px solid #1558d6;
+ border-radius:5px;background:#1558d6;color:#fff;font-weight:600}
+.chkbar button.off{background:#fff;color:#1558d6}
+#chkscore{font-size:13px;color:#333}
+#chkscore b.ok{color:#1a7f37} #chkscore b.bad{color:#c00}
+.chkhint{font-size:12px;color:#666;flex-basis:100%}
+.tt td.masked{color:transparent;background:#e3e3e3 !important;text-shadow:none;user-select:none}
+.tt td.masked::before{content:"?";color:#aaa;float:left;width:100%;margin-right:-100%}
+.cin{width:76px;font-family:Consolas,monospace;font-size:12px;padding:2px 5px;
+ border:1px solid #1558d6;border-radius:3px;text-align:right}
+.cin.okin{border-color:#1a7f37;background:#e2f4e2}
+.cin.badin{border-color:#c00;background:#ffd9d9}
+.tt td.okc{background:#d9f0d9 !important}
+.tt td.badc{background:#ffd2d2 !important}
+.tt th.okh{background:#1a7f37;color:#fff}
+.tt th.badh{background:#c00;color:#fff}
 .vstat{font-weight:600;white-space:nowrap}
 .vstat.ok{color:#1a7f37} .vstat.warn{color:#b26a00} .vstat.bad{color:#c00}
 .vsum{margin:10px 0;font-size:13px} .vsum b{margin-right:14px}
@@ -334,6 +362,74 @@ _REPORT_JS = """
     cnt.textContent='匹配信号 '+sig;
   }
   q.oninput=apply;ow.onchange=apply;no.onchange=apply;apply();
+
+  /* ===== 真值表检查（designer 自测：遮 auto_out、期望变填空、回车判定） ===== */
+  var chkbtn=document.getElementById('chkbtn'),chkscore=document.getElementById('chkscore');
+  var chkon=false,okn=0,badn=0,answered=0;
+  /* 宽容解析 designer 输入的数值：0x../0b../16'h../'b../'d../十进制/裸hex（与 GUI 同语义，十进制优先于裸hex） */
+  function parseVal(s){
+    s=String(s||'').trim().toLowerCase().replace(/[_\\s]/g,'');
+    if(!s)return null;
+    var m;
+    if(m=s.match(/^(?:\\d+)?'h([0-9a-f]+)$/))return parseInt(m[1],16);
+    if(m=s.match(/^(?:\\d+)?'b([01]+)$/))return parseInt(m[1],2);
+    if(m=s.match(/^(?:\\d+)?'d(\\d+)$/))return parseInt(m[1],10);
+    if(/^0x[0-9a-f]+$/.test(s))return parseInt(s.slice(2),16);
+    if(/^0b[01]+$/.test(s))return parseInt(s.slice(2),2);
+    if(/^\\d+$/.test(s))return parseInt(s,10);
+    if(/^[0-9a-f]+$/.test(s))return parseInt(s,16);
+    return NaN;
+  }
+  function updScore(){
+    var total=document.querySelectorAll('#chk td.cquiz').length;
+    chkscore.innerHTML='已检查 '+answered+'/'+total+' · <b class="ok">一致 '+okn+'</b> · <b class="bad">不一致 '+badn+'</b>';
+  }
+  function setChk(on){
+    chkon=on;okn=0;badn=0;answered=0;
+    chkbtn.textContent=on?'结束检查（显示全部 auto_out）':'开始检查（遮盖所有 auto_out）';
+    chkbtn.classList.toggle('off',on);
+    var autos=document.querySelectorAll('#chk td.cauto'),i;
+    for(i=0;i<autos.length;i++)autos[i].classList.toggle('masked',on);
+    var qz=document.querySelectorAll('#chk td.cquiz');
+    for(i=0;i<qz.length;i++){
+      var sp=qz[i].querySelector('.cval'),inp=qz[i].querySelector('.cin');
+      sp.style.display=on?'none':'';
+      inp.style.display=on?'':'none';
+      inp.value='';inp.className='cin';inp.readOnly=false;
+      inp.removeAttribute('data-done');
+    }
+    /* 清掉上次的判定颜色（先收集再删，避免边遍历边改 classList 影响 NodeList） */
+    var marked=document.querySelectorAll('#chk .okc,#chk .badc,#chk .okh,#chk .badh'),mlist=[],k;
+    for(i=0;i<marked.length;i++)mlist.push(marked[i]);
+    for(k=0;k<mlist.length;k++)mlist[k].classList.remove('okc','badc','okh','badh');
+    if(on)updScore();else chkscore.textContent='';
+  }
+  if(chkbtn){
+    chkbtn.onclick=function(){setChk(!chkon);};
+    document.addEventListener('keydown',function(ev){
+      if(!chkon||ev.key!=='Enter'||!ev.target.classList||!ev.target.classList.contains('cin'))return;
+      var inp=ev.target,td=inp.parentNode;
+      if(inp.getAttribute('data-done'))return;          /* 已判定的列不重答（auto_out 已揭晓） */
+      var v=parseVal(inp.value);
+      if(v===null)return;                               /* 空着回车不判 */
+      var want=parseInt(td.getAttribute('data-v'),10);
+      var hit=!isNaN(v)&&v===want;
+      /* 揭示同列 auto_out + 整列染色 + 列头染色 */
+      var table=td.closest('table'),ci=td.cellIndex,rows=table.tBodies[0].rows,j;
+      for(j=0;j<rows.length;j++){
+        var cell=rows[j].cells[ci];
+        if(!cell)continue;
+        if(cell.classList.contains('cauto'))cell.classList.remove('masked');
+        cell.classList.add(hit?'okc':'badc');
+      }
+      var hdr=table.tHead.rows[0].cells[ci];
+      if(hdr)hdr.classList.add(hit?'okh':'badh');
+      inp.setAttribute('data-done','1');inp.readOnly=true;
+      inp.className='cin '+(hit?'okin':'badin');
+      answered++;if(hit)okn++;else badn++;
+      updScore();
+    });
+  }
 })();
 """
 
@@ -349,7 +445,7 @@ def _write_report_html(path, rep, excel):
             esc(signal), esc(owner or ""), "1" if neg else "0", esc((text or "").lower()))
 
     def flat_table(rows, cols, rowcls, cls_attr, kind):
-        """① 汇总 / ③ 明细：可过滤的横表。rowcls=srow/drow；每行带 data-* 供 JS 过滤。"""
+        """① 汇总 / ④ 明细：可过滤的横表。rowcls=srow/drow；每行带 data-* 供 JS 过滤。"""
         if not rows:
             return '<p class="empty">（无数据）</p>'
         th = "".join("<th>%s</th>" % esc(h) for _k, h in cols)
@@ -370,8 +466,34 @@ def _write_report_html(path, rep, excel):
         return ('<table class="%s"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
                 % (cls_attr, th, "".join(trs)))
 
-    def truth_tables(tabs):
-        """② 每信号纵向真值表：输入(带位宽)做行、各测试做列；负向列标红 + _NEG。整块可过滤。"""
+    def _exp_cell(tc, check):
+        """期望行单元格：负向=红(错值)；手填=绿/红(与 auto_out 一致/不一致)；未填=灰(auto_out 兜底)。
+        check=True 时正向格变成『可填空自测』结构(span 显示值 + 隐藏的 input，JS 切换)。"""
+        if tc["neg"]:
+            title = ' title="负向：故意填错(预期 FAIL，自检 checker)。正确(auto_out)应为 %s"' % esc(tc["correct"])
+            return '<td class="neg"%s>%s</td>' % (title, esc(tc["expected"]))
+        filled = tc.get("designer_filled")
+        same = tc.get("expected") == tc.get("auto_out", tc.get("correct"))
+        if filled:
+            cls = "dsgn" if same else "dsgndiff"
+            title = (' title="designer 手填期望，与 auto_out 一致"' if same else
+                     ' title="⚠ designer 手填期望与 auto_out 不一致——表达式可能与 designer 意图不符，'
+                     '仿真该测试预期 FAIL(这正是 Dreg 要抓的 bug)"')
+            shown = esc(tc["expected"])
+        else:
+            cls = "fb"
+            title = ' title="期望未手填，生成 .sv 时用 auto_out 兜底(未经 designer 人工核对)"'
+            shown = esc(tc["expected"])
+        if not check:
+            return '<td class="%s"%s>%s</td>' % (cls, title, shown)
+        # 检查模式格：data-v=auto_out 数值(回车后 JS 比对)；input 平时隐藏
+        return ('<td class="cquiz %s" data-v="%d"%s><span class="cval">%s</span>'
+                '<input class="cin" style="display:none" placeholder="?"></td>'
+                % (cls, tc.get("auto_num", 0), title, shown))
+
+    def truth_tables(tabs, check=False):
+        """②真值表 / ③真值表检查：输入(带位宽)做行、各测试做列；auto_out 与 期望 分两行。
+        check=True 时 auto_out 格可被 JS 遮盖、期望格可填空自测(designer 防自证检查)。"""
         if not tabs:
             return '<p class="empty">（无数据）</p>'
         out = []
@@ -389,11 +511,22 @@ def _write_report_html(path, rep, excel):
                     cells.append('<td class="%s">%s</td>'
                                  % ("neg" if tc["neg"] else "", esc(tc["values"][ri])))
                 body.append("<tr>%s</tr>" % "".join(cells))
-            exp_cells = ['<th class="rowhdr">%s</th>' % esc(t.get("exp_label", "期望(out)"))]
+            # ── auto_out 行（表达式计算值，只读参考）。检查模式下负向列不参与遮盖(不是自测对象) ──
+            auto_cells = ['<th class="rowhdr" title="程序按表达式算出的输出值(参考)。'
+                          '用它当期望验证表达式有自证嫌疑，.sv 断言对比的是下面的期望">%s</th>'
+                          % esc(t.get("auto_label", "auto_out"))]
             for tc in tests:
-                title = ' title="正确应为 %s"' % esc(tc["correct"]) if tc["neg"] else ""
-                exp_cells.append('<td class="%s"%s>%s</td>'
-                                 % ("neg" if tc["neg"] else "", title, esc(tc["expected"])))
+                cls = "neg" if tc["neg"] else ("cauto" if check else "")
+                auto_cells.append('<td class="%s" data-v="%d">%s</td>'
+                                  % (cls, tc.get("auto_num", 0),
+                                     esc(tc.get("auto_out", tc.get("correct", "")))))
+            body.append('<tr class="autorow">%s</tr>' % "".join(auto_cells))
+            # ── 期望 行（designer 手填 > auto_out 兜底 > 负向错值；.sv 断言用这一行） ──
+            exp_cells = ['<th class="rowhdr" title="designer 手填的期望，.sv 断言用它对比；'
+                         '未填的列用 auto_out 兜底(灰)。绿=手填且与 auto_out 一致；红=手填但不一致">%s</th>'
+                         % esc(t.get("exp_label", "期望(out)"))]
+            for tc in tests:
+                exp_cells.append(_exp_cell(tc, check))
             body.append('<tr class="exprow">%s</tr>' % "".join(exp_cells))
             for label, key in (("force", "force"), ("RF_WRITE", "rfwrite")):
                 cells = ['<th class="rowhdr">%s</th>' % label]
@@ -403,19 +536,32 @@ def _write_report_html(path, rep, excel):
                 body.append("<tr>%s</tr>" % "".join(cells))
             neg_block = any(tc["neg"] for tc in tests)
             text = "%s %s %s" % (t["signal"], t.get("owner", ""), t["expr"])
+            # cone 展开链：本行 + 逐层代入的上游行（Excel 原式 = 代入信号名的等价形式），真值表上方
+            chain = t.get("chain") or []
+            chain_html = ""
+            if len(chain) >= 2:
+                marks = "①②③④⑤⑥⑦⑧⑨"
+                cl = []
+                for ci, c in enumerate(chain):
+                    mk = marks[ci] if ci < len(marks) else "(%d)" % (ci + 1)
+                    head = "%s %s" % (mk, c["out"])
+                    cl.append("%s = %s" % (esc(head), esc(c["expr"])))
+                    cl.append("%s = %s" % (" " * len(head), esc(c["subst"])))
+                chain_html = ('<pre class="chain">展开链（输入引用内部信号/上游计算网，已展开上游；'
+                              '①=本行，往下逐层代入）:\n%s</pre>' % "\n".join(cl))
             # 标题序号: logic 显示 "R<序号>"; mux 的 R 已是 "mux<N>"，不再加 R 前缀
             rid = str(t["R"])
             rlabel = rid if rid.startswith("mux") else ("R" + rid)
             out.append('<div class="filt ttblock"%s>'
-                       '<h3>%s　<code>%s</code>　<span class="ex">%s</span></h3>'
+                       '<h3>%s　<code>%s</code>　<span class="ex">%s</span></h3>%s'
                        '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
                        % (attr(t["signal"], t.get("owner", ""), neg_block, text),
-                          esc(rlabel), esc(t["signal"]), esc(t["expr"]),
+                          esc(rlabel), esc(t["signal"]), esc(t["expr"]), chain_html,
                           "".join(hdr), "".join(body)))
         return "\n".join(out)
 
     def verif_table(verif):
-        """④ 可验证性：逐信号健康度 + 风险输入说明（取代旧 GUI'覆盖诊断'按钮的整页 dump）。"""
+        """⑤ 可验证性：逐信号健康度 + 风险输入说明（取代旧 GUI'覆盖诊断'按钮的整页 dump）。"""
         if not verif or not verif.get("signals"):
             return '<p class="empty">（无数据）</p>'
         c = verif["counts"]
@@ -452,12 +598,34 @@ def _write_report_html(path, rep, excel):
     n_tc = len(rep["detail"])
     n_neg = sum(1 for r in rep["detail"] if r.get("neg") == "是")
 
+    # 期望来源统计：手填(designer 审过) vs auto_out 兜底(有自证嫌疑)
+    n_designer = sum(1 for t in rep.get("tables", []) for tc in t["tests"]
+                     if tc.get("designer_filled"))
+    n_pos_tc = sum(1 for t in rep.get("tables", []) for tc in t["tests"] if not tc["neg"])
+
+    # 真值表检查 tab：全局按钮(遮盖 auto_out) + 计分 + 使用说明 + 可填空的真值表
+    chk_section = (
+        '<div class="chkbar">'
+        '<button id="chkbtn">开始检查（遮盖所有 auto_out）</button>'
+        '<span id="chkscore"></span>'
+        '<span class="chkhint">这是 designer 的防自证自测：auto_out 是表达式算出来的——用它当期望验证表达式'
+        '等于自己证明自己。点「开始检查」后 auto_out 全部遮住、期望变成空格：只看上面的输入，'
+        '自己算输出填进去按回车 → 立即揭晓 auto_out 并比对。'
+        '<b style="color:#1a7f37">绿=一致</b>；<b style="color:#c00">红=不一致</b>'
+        '（要么你算错了，要么表达式有 bug——后者正是 Dreg 要抓的）。'
+        '检查结果只在本页面，不回写 .sv；负向列(_NEG)是故意填错的自检用例，不参与检查。</span>'
+        '</div>'
+    ) + truth_tables(rep.get("tables", []), check=True)
+
     # 仅对 body 模板做 % 替换；CSS/JS 含字面 % 与 {}，单独拼接(不参与格式化)。
     body = (
         '<header>'
         '<h1>Dreg 测试用例报告</h1>'
         '<p class="sum">源 Excel: <code>%s</code>　信号 %d 个　用例 %d 条（其中负向 %d 条）　'
+        '正向期望: designer 手填 %d / auto_out 兜底 %d　'
         '负向(红/_NEG)=故意填错期望, 预期应 FAIL。</p>'
+        '<p class="sum">auto_out=程序按表达式算的值(参考)；期望=designer 手填、.sv 断言用它对比'
+        '（未填→auto_out 兜底）。用「③ 真值表检查」可自测期望而不被 auto_out 影响。</p>'
         '<div class="toolbar">'
         '<input type="text" id="q" placeholder="搜索 信号名 / owner / 表达式…">'
         '<select id="owner">%s</select>'
@@ -467,19 +635,23 @@ def _write_report_html(path, rep, excel):
         '<div class="tabs">'
         '<button class="tabbtn active" data-tab="sum">① 汇总</button>'
         '<button class="tabbtn" data-tab="tt">② 真值表</button>'
-        '<button class="tabbtn" data-tab="det">③ 明细</button>'
-        '<button class="tabbtn" data-tab="ver">④ 可验证性</button>'
+        '<button class="tabbtn" data-tab="chk">③ 真值表检查</button>'
+        '<button class="tabbtn" data-tab="det">④ 明细</button>'
+        '<button class="tabbtn" data-tab="ver">⑤ 可验证性</button>'
         '</div></header>'
         '<main>'
         '<section id="sum" class="tab active">%s</section>'
         '<section id="tt" class="tab">%s</section>'
+        '<section id="chk" class="tab">%s</section>'
         '<section id="det" class="tab">%s</section>'
         '<section id="ver" class="tab">%s</section>'
         '</main>'
     ) % (
-        esc(os.path.basename(excel)), n_sig, n_tc, n_neg, owner_opts,
+        esc(os.path.basename(excel)), n_sig, n_tc, n_neg, n_designer, n_pos_tc - n_designer,
+        owner_opts,
         flat_table(rep["summary"], SUMMARY_COLS, "srow", "sum", "sum"),
         truth_tables(rep.get("tables", [])),
+        chk_section,
         flat_table(rep["detail"], DETAIL_COLS, "drow", "full", "det"),
         verif_table(rep.get("verifiability")),
     )

@@ -202,19 +202,22 @@ def parse_probe_prefix_lines(text):
     return out
 
 
-def expand_signal(wb, resolver, sig):
+def expand_signal(wb, resolver, sig, chain_out=None):
     """解析表达式并按需做 cone 展开（输入引用内部 logic 信号时递归代入其表达式）。
 
     返回 (node, bindings, expanded)：
       node     — 表达式 AST（cone 信号 = 复合 AST）
       bindings — 输入绑定（cone 信号 = 叶子寄存器绑定，键为大写基名）
       expanded — 是否做了 cone 展开
+    chain_out — 传入 list 时，cone 展开把『展开链』追加进去（非 cone 信号不动它）：
+      [{"out": 行基名, "expr": Excel 原式, "subst": 字母代入真实信号名的等价形式}, ...]
+      首项=本行，之后按代入(DFS)顺序。GUI 测试项页 / HTML 报告显示用。
     表达式解析失败抛 expr.ExprError；cone 展开失败抛 cone.ConeError。
     """
     node = E.parse(sig.expr)
     bindings = resolver.resolve_signal_inputs(sig)
     if cone.find_internal_inputs(node, bindings):
-        node, bindings = cone.expand(sig, wb, resolver)
+        node, bindings = cone.expand(sig, wb, resolver, chain_out=chain_out)
         return node, bindings, True
     return node, bindings, False
 
@@ -238,6 +241,7 @@ def build(wb, opts):
     skipped = []        # 含不可驱动输入(wire兜底/未解析)的信号，默认跳过(与 VBA 一致)
     n_total_vectors = 0
     n_total_neg = 0
+    n_total_designer = 0     # designer 手填期望的用例数（其余正向用 auto_out 兜底）
     n_unresolved_signals = 0
     seen_labels = {}    # assert 标号 -> 首个出现的信号；查全局重复(重复=非法 SV，elaboration 失败)
     dup_labels = []
@@ -333,6 +337,7 @@ def build(wb, opts):
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
+        n_total_designer += stats.get("n_designer", 0)
         if stats["unresolved"]:
             n_unresolved_signals += 1
 
@@ -347,8 +352,9 @@ def build(wb, opts):
                             [("mux", grp.ctrl_base, "; ".join(exp["issues"]))]))
             continue
 
-        # 覆盖度映射（用户拍板）：精简=每case一值(x=0)；全面/穷举=每case×每x取值。
-        mux_mode = "min" if (opts.mode == "min" and not opts.exhaustive) else "max"
+        # 覆盖度三档（2026-06-03 第十一轮）：精简=每case一值；全面=+x位展开+反码数据轮；
+        # 穷举=+另一条控制路径全扫。映射统一走 mux_gen.coverage_mode（与 GUI/report 同口径）。
+        mux_mode = mux_gen.coverage_mode(opts.mode, opts.exhaustive)
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode, max_tests=opts.max_tests)
         # ⭐ 互异值碰撞 = 选路不可验证（两条数据路同值 → 选错路也测不出 = 假绿）。
         # 这不是"可能 elaboration 失败"的风险而是"确定验证无效"，include_risky 也不放行。
@@ -395,6 +401,7 @@ def build(wb, opts):
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
+        n_total_designer += stats.get("n_designer", 0)
         if stats["unresolved"]:
             n_unresolved_signals += 1
 
@@ -405,6 +412,8 @@ def build(wb, opts):
         "n_skipped": len(skipped),
         "n_vectors": n_total_vectors,
         "n_negative": n_total_neg,
+        # designer 手填期望的用例数；正向用例中其余的 = auto_out 兜底(未经 designer 人工审核)
+        "n_designer": n_total_designer,
         "n_parse_errors": len(errors),
         "n_unresolved_signals": n_unresolved_signals,
         "n_dup_labels": len(dup_labels),
@@ -482,6 +491,15 @@ def _fmt_cell(val, width):
     return "0x%X" % val
 
 
+def _exp_src(vec):
+    """期望来源（报告明细列）：designer 手填 / auto_out 兜底 / 负向(故意填错)。"""
+    if vec.is_negative:
+        return "负向(故意填错)"
+    if vec.designer_filled:
+        return "designer手填"
+    return "auto_out兜底"
+
+
 def report(wb, opts):
     """
     生成"给人看"的测试用例清单（结构化），CLI 负责写成 CSV/HTML。
@@ -500,8 +518,9 @@ def report(wb, opts):
     sigs = select_signals(wb, opts)
     summary, detail, tables = [], [], []
     for sig in sigs:
+        chain = []        # cone 信号的展开链(本行+逐层代入的上游行)，HTML 真值表上方显示
         try:
-            node, bindings, _expanded = expand_signal(wb, resolver, sig)
+            node, bindings, _expanded = expand_signal(wb, resolver, sig, chain_out=chain)
         except (E.ExprError, cone.ConeError) as ex:
             summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                             "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
@@ -534,6 +553,8 @@ def report(wb, opts):
         groups = V.input_groups(node, bindings)
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
+                 # chain = cone 展开链：[{"out","expr","subst"},...]，非 cone 信号为空 list
+                 "chain": chain,
                  # letters = 该输入的 Excel 来源坐标(普通信号=A/B/C…；cone 展开叶子=
                  # "上游行名.字母"如 pll_n1.A)，让报告里的真值表能对回表达式/Excel
                  "inputs": [{"label": g["label"],
@@ -551,8 +572,13 @@ def report(wb, opts):
                 "name": W.test_label(vec),
                 "neg": vec.is_negative,
                 "values": [_fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups],
+                # auto_out = 表达式计算值；expected = 进 .sv 的对比值(designer 手填 > auto_out 兜底 > 负向错值)
+                "auto_out": _fmt_cell(vec.exp_value, vec.exp_width),
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
+                "designer_filled": vec.designer_filled,
                 "correct": _fmt_cell(vec.exp_value, vec.exp_width),
+                # 数值/位宽（HTML「真值表检查」tab 的 JS 比对用）
+                "auto_num": vec.exp_value, "width": vec.exp_width,
                 "force": force_str, "rfwrite": write_str,
             })
             detail.append({
@@ -560,14 +586,18 @@ def report(wb, opts):
                 "type": sig.suffix, "expr": sig.expr,
                 "test": W.test_label(vec),
                 "neg": "是" if vec.is_negative else "",
+                "auto_out": W.fmt_bin(vec.exp_value, vec.exp_width),
                 "expected": W.fmt_bin(vec.asserted_value, vec.exp_width),
+                "exp_src": _exp_src(vec),
                 "correct": W.fmt_bin(vec.exp_value, vec.exp_width) if vec.is_negative else "",
                 "force": force_str, "rfwrite": write_str,
                 "note": (vec.note if vec.is_negative else
                          ("; ".join("%s:%s" % (b or l, n) for (l, b, n) in unres) if unres else "")),
             })
         out_w = sig.out_width or 1
-        table["exp_label"] = "期望(out)%s" % ("[%d:0]" % (out_w - 1) if out_w > 1 else "")
+        slice_txt = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+        table["auto_label"] = "auto_out%s" % slice_txt
+        table["exp_label"] = "期望(out)%s" % slice_txt
         tables.append(table)
         summary.append({
             "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
@@ -592,7 +622,7 @@ def report(wb, opts):
         if exp["issues"] and not opts.include_risky:
             skip_reason = "; ".join(exp["issues"])
         else:
-            mux_mode = "min" if (opts.mode == "min" and not opts.exhaustive) else "max"
+            mux_mode = mux_gen.coverage_mode(opts.mode, opts.exhaustive)
             vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                                   max_tests=opts.max_tests)
             if meta.get("value_collision"):
@@ -640,8 +670,11 @@ def report(wb, opts):
                 "neg": vec.is_negative,
                 "values": [_fmt_cell(vec.assignments.get(k, 0), exp["bindings"][k].width)
                            for k in used],
+                "auto_out": _fmt_cell(vec.exp_value, vec.exp_width),
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
+                "designer_filled": vec.designer_filled,
                 "correct": _fmt_cell(vec.exp_value, vec.exp_width),
+                "auto_num": vec.exp_value, "width": vec.exp_width,
                 "force": "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces),
                 "rfwrite": "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes),
             })
@@ -650,13 +683,17 @@ def report(wb, opts):
                 "type": "mux", "expr": expr_text,
                 "test": W.test_label(vec),
                 "neg": "是" if vec.is_negative else "",
+                "auto_out": W.fmt_bin(vec.exp_value, vec.exp_width),
                 "expected": W.fmt_bin(vec.asserted_value, vec.exp_width),
+                "exp_src": _exp_src(vec),
                 "correct": W.fmt_bin(vec.exp_value, vec.exp_width) if vec.is_negative else "",
                 "force": table["tests"][-1]["force"], "rfwrite": table["tests"][-1]["rfwrite"],
                 "note": vec.note,
             })
         out_w = grp.out_width or 1
-        table["exp_label"] = "期望(out)%s" % ("[%d:0]" % (out_w - 1) if out_w > 1 else "")
+        slice_txt = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+        table["auto_label"] = "auto_out%s" % slice_txt
+        table["exp_label"] = "期望(out)%s" % slice_txt
         tables.append(table)
 
     # ── 可验证性（取代旧 GUI"覆盖诊断"按钮）：逐信号给健康度 + 风险输入说明 ──

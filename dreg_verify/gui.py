@@ -3,15 +3,21 @@
 gui.py — Dreg_verify 的 PySide6 图形界面（含 debug 辅助 + 测试项可视化编辑）：
   加载 Excel → 信号表(owner/类型/名字/状态筛选 + 多选 + 负向勾选)
   → 点信号看它 force/RF_WRITE 哪些 net 的明细(查 elaboration 找不到 net 的问题)
-  → 「测试项」标签页：把该信号的全部测试用例列成可编辑表格(逐输入改值/期望自动重算/
-     手填期望即标负向/加删复制行/重新生成/导出CSV/预览本信号.sv)
+  → 「测试项」标签页：把该信号的全部测试用例列成可编辑表格(逐输入改值/auto_out 自动重算/
+     designer 手填期望/加删复制行/重新生成/导出CSV/预览本信号.sv)
   → 「.sv 预览」标签页：预览选中信号的完整 .sv + 覆盖诊断
   → 导出 wr_rf_tc.sv（编辑过的测试项经 vector_overrides 真实回流到产物）。
 后端复用 generator，与 CLI 同一套逻辑。
 
-测试项编辑语义（核心）：一条测试项 = 各物理输入取值 → 表达式自动求出期望。
-  · 改输入值 → 期望自动重算（永远自洽、永远对）。
-  · 改期望值 → 若与算出值不同则该行自动标为负向(故意填错，预期断言应 FAIL)。
+测试项编辑语义（核心，2026-06-03 更新——auto_out 与「期望」分离）：
+  Dreg 验证的对象是 designer 写的逻辑表达式本身；用表达式算出的值去验证表达式有自证嫌疑。
+  所以真值表拆成两行：
+  · auto_out 行（只读）= 程序按表达式算出的输出值（参考）。
+  · 期望 行（可编辑）= designer 手填的期望；.sv 断言用它对比。未填 → 生成时用 auto_out 兜底。
+    手填值 != auto_out 不算负向——仿真 FAIL 恰恰说明表达式与 designer 意图不符（要抓的 bug）。
+  · 改输入值 → auto_out 自动重算；已手填的期望保持不动。
+  · 负向列的期望 = 故意填错值(预期断言 FAIL，自检 checker)，与 designer 期望是两回事。
+  编辑（含手填期望）按 Excel 路径自动存盘，关 GUI 不丢；也可导出/导入编辑文件。
 
 运行: python -m dreg_verify.gui
 """
@@ -36,6 +42,64 @@ from dreg_verify import sv_writer as W            # noqa: E402
 
 # 记住上次加载的 Excel，下次启动自动加载（省去重复浏览/点击）
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_gui.json")
+# 测试项编辑(含 designer 手填期望)的持久化文件：按 Excel 路径分桶，关 GUI 不丢、换表自动恢复。
+# 与 SETTINGS_PATH 分开存——编辑数据可能较大，且语义上是"劳动成果"而非"界面偏好"。
+EDITS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_edits.json")
+_EDITS_PATH_DEFAULT = EDITS_PATH
+# rowdict 里需要持久化的字段（计算字段 correct/expected/_vec 等加载后重算，不落盘）
+_ROW_PERSIST_KEYS = ("kind", "wrong_value", "name", "user_added", "note", "designer_expected")
+
+
+def _load_edits_file():
+    """读取测试项编辑持久化文件。返回 {excel_path: {"edits": {...}, "neg_only": {...}}}。"""
+    try:
+        with open(EDITS_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_edits_file(d):
+    # 测试环境(pytest)下默认不落盘(防污染用户真实编辑)；测试可 monkeypatch EDITS_PATH 到临时文件启用
+    if "pytest" in sys.modules and EDITS_PATH == _EDITS_PATH_DEFAULT:
+        return
+    try:
+        with open(EDITS_PATH, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _serialize_rows(rows):
+    """rowdict 列表 → 可 JSON 化的精简结构（只留输入取值与用户意图，计算字段重算）。"""
+    out = []
+    for rd in rows:
+        d = {"base_values": {k: int(v) for k, v in rd.get("base_values", {}).items()}}
+        for k in _ROW_PERSIST_KEYS:
+            v = rd.get(k)
+            if v is not None and v != "" and v is not False:
+                d[k] = v
+        d.setdefault("kind", "pos")
+        out.append(d)
+    return out
+
+
+def _deserialize_rows(rows_json):
+    """JSON 结构 → rowdict 列表（correct/expected 等由 _recompute_row 重算）。"""
+    out = []
+    for d in rows_json or []:
+        if not isinstance(d, dict):
+            continue
+        rd = {"base_values": {str(k): int(v) for k, v in (d.get("base_values") or {}).items()},
+              "kind": d.get("kind", "pos"), "note": d.get("note", "")}
+        for k in ("wrong_value", "name", "designer_expected"):
+            if d.get(k) is not None:
+                rd[k] = d[k]
+        if d.get("user_added"):
+            rd["user_added"] = True
+        out.append(rd)
+    return out
 
 
 def _load_settings():
@@ -103,6 +167,10 @@ NEG_BG = QtGui.QColor("#fdeccb")        # 负向用例行底色（琥珀，能�
 NEG_FG = QtGui.QColor("#9a5b00")        # 负向列头/标记文字色（深琥珀）
 HL_BG = QtGui.QColor("#dbe8ff")         # 当前选中测试列的高亮底色（淡蓝；列多横滚时不丢"我在哪列"）
 HL_NEG_BG = QtGui.QColor("#ffdca0")     # 负向列又被选中：琥珀+高亮叠加（更深的琥珀）
+# 「期望」行(designer 手填)的状态色：
+DSGN_BG = QtGui.QColor("#e2f2e2")       # 已手填且 == auto_out（绿：designer 审过且与表达式一致）
+DIFF_BG = QtGui.QColor("#ffd9d9")       # 已手填但 != auto_out（红：表达式可能与 designer 意图不符）
+FB_FG = QtGui.QColor("#999999")         # 未手填（灰字显示兜底的 auto_out 值）
 
 # 「级联 ?」内置帮助的兜底内容：仓库根目录的 级联模式说明.md 缺失时显示(正常显示完整 .md)
 CASCADE_DOC_FALLBACK = """\
@@ -213,12 +281,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_bindings = {}
         self._ti_groups = []
         self._ti_cone = False    # 当前信号是否经 cone 展开(输入=叶子寄存器而非本行 A/B/C 列)
+        self._ti_chain = []      # cone 展开链 [{"out","expr","subst"},...]，『展开链』面板显示用
         self._ti_rows = []
         self._ti_name_low = None
         self._ti_loaded_idx = None
         self._ti_hl_col = -1      # 当前高亮(选中)的测试列；-1=无
         self._ti_loading = False  # 程序化填表时屏蔽 itemChanged，防递归
         self._sig_loading = False # 程序化改信号表(含左侧负向勾选)时屏蔽其 itemChanged
+        self._persist_suspended = False  # 批量操作时暂停逐次存盘，结束后统一存一次
         # 探针前缀 {信号名小写: 层级前缀}：输出网在 ENV_RF 的子模块里时（如 pll_n 在
         # U_BT_LP_PLL_DIG 内部），断言探针写 `ENV_RF.<前缀>.<网名>。按 Excel 路径持久化。
         self._probe_prefixes = {}
@@ -298,12 +368,24 @@ class MainWindow(QtWidgets.QMainWindow):
         b_prefix.setToolTip("输出网不在 ENV_RF 顶层、而在子模块里时（如 pll_n 在 U_BT_LP_PLL_DIG 内部），\n"
                             "给勾选/选中的信号设置层级前缀 → 断言写 `ENV_RF.<前缀>.<信号名>。留空清除。")
         b_prefix.clicked.connect(self.on_set_probe_prefix)
+        # 测试项编辑(含 designer 手填期望)的导出/导入：给同事复用、入版本库、跨机器迁移
+        b_exp_edits = QtWidgets.QPushButton("导出编辑…")
+        b_exp_edits.setToolTip("把当前 Excel 的全部测试项编辑(手填期望/负向/自定义列)导出为 .json 文件，\n"
+                               "可给同事导入复用、入版本库存档。编辑本来就会自动存盘(关 GUI 不丢)，导出是为了共享。")
+        b_exp_edits.clicked.connect(self.on_export_edits)
+        b_imp_edits = QtWidgets.QPushButton("导入编辑…")
+        b_imp_edits.setToolTip("从 .json 文件导入测试项编辑(手填期望/负向/自定义列)，与现有编辑合并：\n"
+                               "同名信号以导入为准。文件里有、当前表里没有的信号会列出名字并跳过。")
+        b_imp_edits.clicked.connect(self.on_import_edits)
         for b in (b_check, b_selall, b_selnone):
             bulk.addWidget(b)
         bulk.addWidget(QtWidgets.QLabel(" 负向:"))
         for b in (b_negall, b_negnone):
             bulk.addWidget(b)
         bulk.addWidget(b_prefix)
+        bulk.addWidget(QtWidgets.QLabel(" 编辑:"))
+        bulk.addWidget(b_exp_edits)
+        bulk.addWidget(b_imp_edits)
         tv.addWidget(bulk_box)
         left.addWidget(top_box)
         self.detail = QtWidgets.QPlainTextEdit(); self.detail.setReadOnly(True)
@@ -340,9 +422,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.coverage = QtWidgets.QComboBox(); self.coverage.addItems(["精简", "全面", "穷举"])
         self.coverage.setToolTip(
             "测试用例的覆盖强度(对'未自定义'的信号即时生效)：\n"
+            "【logic 信号】\n"
             "  精简 = 每种控制位组合各取 1 组代表数据(最少用例)\n"
             "  全面 = 每种控制位组合再扫多组数据(全0/全1/反码/走步/区分)\n"
-            "  穷举 = 所有输入的全部组合(仅当总输入位≤10，否则自动退化为'全面')")
+            "  穷举 = 所有输入的全部组合(仅当总输入位≤10，否则自动退化为'全面')\n"
+            "【mux 信号】\n"
+            "  精简 = 每 case 1 条(x位取0) + 1 条另一路径抽测\n"
+            "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据(抓数据通路位坏死)\n"
+            "  穷举 = 全面 + 另一条控制路径全扫每 case(两条物理驱动路径全验)")
         self.coverage.currentIndexChanged.connect(self.on_coverage_changed)
         self.cov_hint = QtWidgets.QLabel("")            # 实时显示当前信号的用例条数
         self.cov_hint.setStyleSheet("color:#1558d6;")
@@ -402,10 +489,13 @@ class MainWindow(QtWidgets.QMainWindow):
         bar_box = QtWidgets.QWidget()
         bar = FlowLayout(bar_box)        # 按钮多，窄屏自动换行，避免给右面板强加大最小宽度
         defs = [("重新生成", self.on_ti_regen, "丢弃本信号自定义，按当前向量选项从表达式重新生成"),
-                ("加正向列", self.on_ti_add, "新增一条正向(真实)测试(输入全 0，期望自动算)"),
+                ("加正向列", self.on_ti_add, "新增一条正向(真实)测试(输入全 0，auto_out 自动算，期望留空待填)"),
                 ("复制列", self.on_ti_copy, "复制当前选中的测试列"),
                 ("删除列", self.on_ti_del, "删除选中的测试列"),
                 ("重命名列…", self.on_ti_rename_current, "给用户新增的测试列改名(双击列头亦可；自动生成的 T0/T1 不可改)"),
+                ("auto→期望", self.on_ti_fill_expected,
+                 "把 auto_out 填进「期望」行（只填未填的列，已手填的不动）。\n"
+                 "⚠ 这等于直接采信表达式计算值——失去了 designer 独立核对的意义，确认表达式无误时再用"),
                 ("加负向(选中)", self.on_ti_add_neg_selected,
                  "给选中的测试列各加一条负向(故意填错期望)；未选中则取首条正向。正向测试不动"),
                 ("全部用例加负向", self.on_ti_add_neg_all,
@@ -420,6 +510,23 @@ class MainWindow(QtWidgets.QMainWindow):
             b.setToolTip(tip)
             bar.addWidget(b)
         lay.addWidget(bar_box)
+
+        # 「展开链」(仅 cone 信号显示)：本行 + 逐层代入的上游行。每行两种形式：
+        #   Excel 原式(L 列原文，字母=该行自己的 A/B/C 列) = 字母代入真实信号名后的等价形式。
+        # 链整体就是展开后的等价表达式——不强行合并成一行(深层 cone 会嵌套爆炸读不了)。
+        self.ti_chain_cap = QtWidgets.QLabel("展开链  （① 本行 → 逐层代入的上游行；每行：Excel 原式 = 代入信号名）")
+        self.ti_chain_cap.setStyleSheet("color:#445;font-weight:bold;")
+        lay.addWidget(self.ti_chain_cap)
+        self.ti_chain = QtWidgets.QPlainTextEdit()
+        self.ti_chain.setReadOnly(True)
+        self._mono(self.ti_chain)
+        self.ti_chain.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self.ti_chain.setToolTip("cone 展开过程：① 是被验证的本行，往下是被代入的上游行。\n"
+                                 "每行第一条 = Excel L 列原文(字母是该行自己的 A~J 列)；\n"
+                                 "第二条 = 字母换成真实信号名的等价形式，最末行的叶子信号\n"
+                                 "与下方『输入信号』表的坐标(如 pll_n1.A)一一对应。")
+        lay.addWidget(self.ti_chain)
+        self.ti_chain_cap.hide(); self.ti_chain.hide()   # 非 cone 信号不占空间
 
         # 「输入信号」表：字母 → 物理信号 / 角色(控制·数据) / 类型(RO·RW) / 驱动机制(force·RF_WRITE)。
         # 取代头部那行难读的小字图例，并把原本只在左下明细里的驱动信息搬到真值表正上方。
@@ -462,8 +569,10 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.ti_table, 1)
 
         hint = QtWidgets.QLabel(
-            "行表头=字母(粗体=控制/选择位，决定逻辑分支、测试穷举其 0/1 组合)，详见上方『输入信号』表；"
-            "改输入值→期望自动重算；改期望值或勾“负向”→该列标为故意填错(预期 FAIL)。编辑会在生成/预览的 .sv 里生效。")
+            "行表头=字母(粗体=控制/选择位，决定逻辑分支、测试穷举其 0/1 组合)，详见上方『输入信号』表。"
+            "auto_out 行=程序按表达式算的值(只读参考)；期望 行=designer 手填、.sv 断言用它对比"
+            "(未填→生成时 auto_out 兜底；绿=与 auto_out 一致，红=不一致=表达式可能有 bug)。"
+            "负向列(琥珀)=故意填错的自检用例。编辑(含手填期望)自动存盘并在生成/预览的 .sv 里生效。")
         hint.setWordWrap(True); hint.setStyleSheet("color:#888;font-size:11px;")
         lay.addWidget(hint)
         return page
@@ -595,6 +704,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._edited = {}
         self._customized = set()
         self._neg_only = {}
+        # 编辑持久化按"已加载"的 Excel 路径分桶（不能用 path_edit 实时文本——
+        # 用户改了路径还没点加载时，编辑仍属于旧表）
+        self._loaded_excel_path = path
         self._ti_loaded_idx = None
         self._preview_source = None        # 换表后旧预览作废，不参与联动刷新
         self._clear_test_items("加载完成，点左侧信号查看测试项。")
@@ -616,6 +728,10 @@ class MainWindow(QtWidgets.QMainWindow):
             msg += "；⚠ %d 个信号分析异常(状态'解析异常',点开看 error)" % len(errs)
             self.preview.setPlainText("分析异常的信号(请把下面发给维护者):\n" +
                                       "\n".join("R=%s %s: %s" % (a, n, e) for n, a, e in errs[:50]))
+        # 恢复上次存盘的测试项编辑（含 designer 手填期望），并把负向勾选同步回左表
+        n_restored = self._restore_edits()
+        if n_restored:
+            msg += "；已恢复 %d 个信号的测试项编辑(含手填期望)" % n_restored
         _save_last_excel(path)         # 记住这次的文件，下次启动自动加载
         self.status.showMessage(msg)
 
@@ -976,7 +1092,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mode, exhaustive = self._coverage()
             return generator.analyze_mux_group(
                 self._resolver, self.wb, sig,
-                mode=("min" if (mode == "min" and not exhaustive) else "max"),
+                mode=mux_gen.coverage_mode(mode, exhaustive),
                 probe_prefix=self._prefix_of(sig))
         return generator.analyze_signal(self._resolver, sig, wb=self.wb,
                                         probe_prefix=self._prefix_of(sig))
@@ -1007,14 +1123,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _expand_sig(self, sig):
         """解析 + 按需 cone 展开 + 输入分组。
-        返回 (node, bindings, groups, cone_expanded, err)；失败时 node=None。"""
+        返回 (node, bindings, groups, chain, err)；失败时 node=None。
+        chain = cone 展开链 [{"out","expr","subst"},...]；非 cone 信号为空 list，
+        故 bool(chain) 即"是否做过 cone 展开"。"""
+        chain = []
         try:
-            node, bindings, expanded = generator.expand_signal(self.wb, self._resolver, sig)
+            node, bindings, _expanded = generator.expand_signal(self.wb, self._resolver, sig,
+                                                                chain_out=chain)
         except E.ExprError as ex:
-            return None, None, None, False, "表达式解析失败: %s" % ex
+            return None, None, None, [], "表达式解析失败: %s" % ex
         except generator.cone.ConeError as ex:
-            return None, None, None, False, "cone 展开失败: %s" % ex
-        return node, bindings, V.input_groups(node, bindings), expanded, None
+            return None, None, None, [], "cone 展开失败: %s" % ex
+        return node, bindings, V.input_groups(node, bindings), chain, None
 
     def _set_signal_negatives(self, sig, want_neg, which):
         """给某信号(重新)设置负向测试：保留全部正向测试，按 first/all 追加正向测试的"故意填错"
@@ -1022,7 +1142,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._resolver is None:
             return
         name_low = sig.out_name.lower()
-        node, bindings, groups, _cone, _err = self._expand_sig(sig)
+        node, bindings, groups, _chain, _err = self._expand_sig(sig)
         if node is None:
             return
         hand_edited = (name_low in self._edited and name_low not in self._neg_only)
@@ -1031,6 +1151,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._edited.pop(name_low, None)
             self._customized.discard(name_low)
             self._neg_only.pop(name_low, None)
+            self._persist_edits()
             return
         rows = (self._edited[name_low]["rows"] if name_low in self._edited
                 else self._auto_rows(sig, node, bindings, groups))
@@ -1067,6 +1188,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._neg_only[name_low] = which   # 正向全自动、仅加了负向；记住规则(first/all)
         else:
             self._neg_only.pop(name_low, None)
+        self._persist_edits()                  # 负向定制也是编辑，存盘
 
     def _sync_left_neg(self):
         """编辑器里负向有变 → 回写左侧"负向"勾选(任一用例为负向则勾上)。"""
@@ -1098,6 +1220,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if protected and not self._confirm_lose_named(protected):
                 return
         self._sig_loading = True
+        self._persist_suspended = True       # 批量操作只在结束后统一存盘一次(避免每信号写一次文件)
         n = 0
         try:
             for r in rows:
@@ -1114,6 +1237,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 n += 1
         finally:
             self._sig_loading = False
+            self._persist_suspended = False
+        self._persist_edits()
         if self._ti_sig is not None and self._ti_loaded_idx is not None:
             self._load_test_items(self._ti_sig)   # 当前编辑器信号若被影响则刷新
         self.status.showMessage("已对 %d 个%s信号%s负向(每信号 1 条自检；已有的保持不动)"
@@ -1156,6 +1281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_sig = None; self._ti_node = None
         self._ti_bindings = {}; self._ti_groups = []; self._ti_rows = []
         self._ti_cone = False
+        self._ti_chain = []
         self._ti_name_low = None
         self._ti_hl_col = -1
         self.ti_header.setText(header_text)
@@ -1166,6 +1292,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_table.setColumnCount(0)
             if hasattr(self, "ti_inputs"):
                 self.ti_inputs.setRowCount(0)
+            self._populate_chain()       # 空链 → 隐藏『展开链』面板
         finally:
             self._ti_loading = False
         self._update_cov_hint()
@@ -1179,13 +1306,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_mux_test_items(sig)
             return
         name_low = sig.out_name.lower()
-        node, bindings, groups, cone_expanded, err = self._expand_sig(sig)
+        node, bindings, groups, chain, err = self._expand_sig(sig)
         if node is None:
             self._clear_test_items("信号: %s — %s（无法生成测试项）" % (sig.out_name, err))
             return
         self._ti_sig = sig; self._ti_node = node
         self._ti_bindings = bindings; self._ti_groups = groups
-        self._ti_cone = cone_expanded     # 头部/输入表据此标注"已展开上游"
+        self._ti_cone = bool(chain)       # 头部/输入表据此标注"已展开上游"
+        self._ti_chain = chain            # 展开链(本行+逐层代入的上游行)，cone 信号显示
         self._ti_name_low = name_low
         if name_low in self._edited:
             self._ti_rows = self._edited[name_low]["rows"]
@@ -1196,6 +1324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for rd in self._ti_rows:
             self._ti_recompute(rd)
         self._update_ti_header(custom)
+        self._populate_chain()        # 『展开链』面板(仅 cone 信号显示)
         self._populate_inputs()       # 上方『输入信号』表(字母/角色/驱动)，随信号刷新
         self._ti_populate()
 
@@ -1208,29 +1337,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self._clear_test_items("")
         self._ti_mux_sig = grp
         exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
+        # 『输入信号』表：解析有问题也照样填（哪个输入坏了一眼看到）——修"mux 点开输入信号框空白"
+        self._populate_mux_inputs(grp, exp)
         if exp["issues"]:
             self.ti_header.setText("mux 信号 %s：无法生成测试 — %s"
                                    % (grp.out_name, "；".join(exp["issues"])))
             return
         mode, exhaustive = self._coverage()
-        mux_mode = "min" if (mode == "min" and not exhaustive) else "max"
+        mux_mode = mux_gen.coverage_mode(mode, exhaustive)
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                               max_tests=self.max_tests.value())
         if meta.get("value_collision") or not vecs:
             self.ti_header.setText("mux 信号 %s：互异值分配失败或控制信号无驱动路径（见左表状态列）"
                                    % grp.out_name)
             return
+        # 覆盖度档位说明：写明"当前档生成了什么"，三档差别一眼可见
+        cov_desc = {"min": "每 case 1 条 + 另一路径抽测",
+                    "max": "每 case×x位展开 + 反码数据轮 + 另一路径抽测",
+                    "exhaustive": "每 case×x位展开 + 反码数据轮 + 另一条控制路径全扫"}[mux_mode]
         self.ti_header.setText(
-            "mux 信号: %s = case(%s) %d 选 1　|　测试 %d 个（case 扫描 + 另一条路径验证）　|　"
+            "mux 信号: %s = case(%s) %d 选 1　|　覆盖度=%s → 测试 %d 个（%s）　|　"
             "测试项由 case 结构自动生成（只读）；负向勾选/生成/预览照常可用"
-            % (grp.out_name, grp.ctrl_base, len(grp.cases), len(vecs)))
+            % (grp.out_name, grp.ctrl_base, len(grp.cases),
+               self.coverage.currentText(), len(vecs), cov_desc))
         used = exp["used_vars"]
         self._ti_loading = True
         try:
             self.ti_table.clear()
             self.ti_table.setColumnCount(len(vecs))
             self.ti_table.setHorizontalHeaderLabels([W.test_label(v) for v in vecs])
-            self.ti_table.setRowCount(len(used) + 1)
+            self.ti_table.setRowCount(len(used) + 2)
             vlabels = []
             for ri, key in enumerate(used):
                 b = exp["bindings"][key]
@@ -1242,14 +1378,24 @@ class MainWindow(QtWidgets.QMainWindow):
                     it = QtWidgets.QTableWidgetItem(txt)
                     it.setFlags(QtCore.Qt.ItemIsEnabled)            # 只读
                     self.ti_table.setItem(ri, ci, it)
-            vlabels.append("期望(out)")
+            # mux 测试项 v1 只读：auto_out 与 期望 两行同值(期望未手填→auto_out 兜底)，与 logic 编辑器排版一致
+            vlabels.append("auto_out")
+            for ci, v in enumerate(vecs):
+                it = QtWidgets.QTableWidgetItem(W.fmt_bin(v.exp_value, v.exp_width))
+                it.setFlags(QtCore.Qt.ItemIsEnabled)
+                f = it.font(); f.setItalic(True); it.setFont(f)
+                it.setForeground(QtGui.QColor("#555555"))
+                it.setToolTip("auto_out：程序按 case 结构算出的值(mux 测试项 v1 只读，期望不可手填)")
+                self.ti_table.setItem(len(used), ci, it)
+            vlabels.append("期望(进.sv)")
             for ci, v in enumerate(vecs):
                 it = QtWidgets.QTableWidgetItem(W.fmt_bin(v.asserted_value, v.exp_width))
                 it.setFlags(QtCore.Qt.ItemIsEnabled)
                 f = it.font()
                 f.setBold(True)
                 it.setFont(f)
-                self.ti_table.setItem(len(used), ci, it)
+                it.setToolTip("mux 信号的期望由 case 结构决定(v1 不可手填)，生成 .sv 用 auto_out")
+                self.ti_table.setItem(len(used) + 1, ci, it)
             self.ti_table.setVerticalHeaderLabels(vlabels)
             self.ti_table.resizeColumnsToContents()
         finally:
@@ -1275,10 +1421,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return rows
 
     def _recompute_row(self, node, bindings, groups, out_width, rd):
-        """重算一行 correct/expected/is_negative，并缓存向量。显式传上下文，可对任意信号重算。
+        """重算一行 correct(auto_out)/expected/is_negative，并缓存向量。显式传上下文，可对任意信号重算。
 
         rd['kind']:
-          'pos' —— 正向(真实)测试：期望永远 = 表达式算出的正确值，不会被改坏；
+          'pos' —— 正向(真实)测试：correct = auto_out(表达式计算值)；
+                   expected = designer 手填期望(rd['designer_expected'])，未填 → auto_out 兜底。
+                   手填值 != auto_out 不算负向：仿真 FAIL 恰恰说明表达式与 designer 意图不符。
           'neg' —— 负向(故意填错)测试：期望 = 错误值(rd['wrong_value'] 手填，或默认取反 correct 派生)。
         """
         try:
@@ -1311,9 +1459,14 @@ class MainWindow(QtWidgets.QMainWindow):
             rd["_vec"] = V.make_vector_from_base_values(
                 node, bindings, groups, rd["base_values"], out_width, expected_override=wrong)
         else:
-            rd["expected"] = correct
+            de = rd.get("designer_expected")
+            if de is not None:
+                de = de & m                          # 手填期望按输出位宽裁剪
+                rd["designer_expected"] = de
+            rd["expected"] = de if de is not None else correct
             rd["is_negative"] = False
-            rd["_vec"] = base_vec
+            rd["_vec"] = V.make_vector_from_base_values(
+                node, bindings, groups, rd["base_values"], out_width, designer_expected=de)
 
     def _ti_recompute(self, rd):
         """对当前编辑器显示信号的行重算（薄封装 _recompute_row）。"""
@@ -1341,11 +1494,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # cone 标记：表达式里引用了内部信号/上游计算网 → 输入已展开成叶子寄存器，
         # 『输入信号』表的字母列显示 Excel 来源坐标("上游行名.字母")而非本行 A/B/C
         cone_tag = "   [已展开上游→输入为叶子寄存器]" if getattr(self, "_ti_cone", False) else ""
+        # 期望手填进度：designer 手填了几条/共几条正向（其余生成时 auto_out 兜底）
+        pos_rows = [rd for rd in self._ti_rows if rd.get("kind") != "neg"]
+        n_filled = sum(1 for rd in pos_rows if rd.get("designer_expected") is not None)
+        fill_tag = ("   期望已手填 %d/%d" % (n_filled, len(pos_rows))) if pos_rows else ""
         # 表达式写成 "输出 = RHS" 等式；字母对照已下移到『输入信号』表，头部保持精简
         self.ti_header.setText(
-            "信号 %s     %s = %s     用例 %d 条%s%s"
+            "信号 %s     %s = %s     用例 %d 条%s%s%s"
             % (self._ti_sig.out_name, self._ti_sig.out_base or "out", self._ti_sig.expr,
-               len(self._ti_rows), tag, cone_tag))
+               len(self._ti_rows), fill_tag, tag, cone_tag))
 
     def _ti_mark_customized(self):
         if not self._ti_sig:
@@ -1355,14 +1512,156 @@ class MainWindow(QtWidgets.QMainWindow):
         self._neg_only.pop(self._ti_name_low, None)   # 有手工编辑 → 不再是"纯负向定制"(冻结，保住编辑)
         self._update_ti_header(True)
         self._sync_left_neg()        # 右表负向变化 → 回写左侧"负向"勾选
+        self._persist_edits()        # 编辑(含手填期望)即时存盘，关 GUI 不丢
+
+    # ───────────── 测试项编辑持久化（designer 手填期望是劳动成果，必须存盘） ─────────────
+    def _persist_edits(self):
+        """把当前 Excel 的全部测试项编辑(含 designer 手填期望/负向/自定义列)写到 EDITS_PATH。
+
+        按"已加载"的 Excel 路径分桶；_persist_suspended=True 时跳过(批量操作中，结束后统一存一次)。"""
+        if getattr(self, "_persist_suspended", False):
+            return
+        path = getattr(self, "_loaded_excel_path", "") or ""
+        if not path:
+            return
+        allbuckets = _load_edits_file()
+        if self._edited:
+            allbuckets[path] = {
+                "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
+                "neg_only": dict(self._neg_only),
+            }
+        else:
+            allbuckets.pop(path, None)        # 编辑全清空 → 桶也删掉
+        _save_edits_file(allbuckets)
+
+    def _restore_edits(self):
+        """加载 Excel 后恢复上次存盘的测试项编辑。信号在新表里找不到 → 跳过并提示(列名字+原因)。
+        返回恢复的信号个数。"""
+        path = getattr(self, "_loaded_excel_path", "") or ""
+        bucket = _load_edits_file().get(path)
+        if not bucket:
+            return 0
+        n_restored, missing = self._apply_edits_bucket(bucket)
+        self._sync_neg_checks_from_edits()
+        if missing:
+            # 追加(不覆盖)——on_load 可能已往预览页写了"分析异常"清单，两份信息都要保留
+            self.preview.appendPlainText(
+                "\n以下信号有上次保存的测试项编辑，但在当前 Excel 里找不到(已跳过)：\n"
+                + "\n".join("  %s — 信号名在 logic 页不存在(表改名/删行?)" % n for n in missing))
+        return n_restored
+
+    def _sync_neg_checks_from_edits(self):
+        """把 _edited 里含负向行的信号在左表勾上"负向"列（恢复/导入编辑后调用）。"""
+        self._sig_loading = True
+        try:
+            for r in range(self.table.rowCount()):
+                sig = self._sig_of_row(r)
+                if sig is None or isinstance(sig, excel_model.MuxGroup):
+                    continue
+                if self._signal_has_negative(sig.out_name.lower()):
+                    cell = self.table.item(r, COL_NEG)
+                    if cell is not None:
+                        cell.setCheckState(QtCore.Qt.Checked)
+        finally:
+            self._sig_loading = False
+
+    def _apply_edits_bucket(self, bucket):
+        """把一个编辑桶({"edits":{...},"neg_only":{...}})应用到当前工作簿。
+        返回 (恢复个数, 找不到的信号名列表)。供恢复与导入共用。"""
+        by_name = {s.out_name.lower(): s for s in self.wb.logic} if self.wb else {}
+        n_restored, missing = 0, []
+        for name_low, rows_json in (bucket.get("edits") or {}).items():
+            sig = by_name.get(name_low)
+            if sig is None:
+                missing.append(name_low)
+                continue
+            node, bindings, groups, _chain, _err = self._expand_sig(sig)
+            if node is None:
+                missing.append(name_low + "（表达式解析失败）")
+                continue
+            rows = _deserialize_rows(rows_json)
+            for rd in rows:
+                self._recompute_row(node, bindings, groups, sig.out_width, rd)
+            self._edited[name_low] = {"sig": sig, "rows": rows}
+            self._customized.add(name_low)
+            n_restored += 1
+        for name_low, rule in (bucket.get("neg_only") or {}).items():
+            if name_low in self._edited:
+                self._neg_only[name_low] = rule if rule in ("first", "all") else "first"
+                self._customized.add(name_low)
+        return n_restored, missing
+
+    def on_export_edits(self):
+        """把当前 Excel 的全部测试项编辑导出为 .json（给同事/版本库/跨机器）。"""
+        if not self._edited:
+            QtWidgets.QMessageBox.information(self, "提示", "当前没有任何测试项编辑可导出。\n"
+                                              "(手填期望/加负向/自定义列之后再导出)")
+            return
+        excel = (self.path_edit.text() or "").strip()
+        default = os.path.splitext(os.path.basename(excel) or "dreg")[0] + "_edits.json"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出测试项编辑", default,
+                                                        "JSON (*.json)")
+        if not path:
+            return
+        payload = {
+            "dreg_verify_edits": 1,
+            "excel": os.path.basename(excel),
+            "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
+            "neg_only": dict(self._neg_only),
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=1)
+        except OSError as ex:
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
+            return
+        n_de = sum(1 for ed in self._edited.values()
+                   for rd in ed["rows"] if rd.get("designer_expected") is not None)
+        QtWidgets.QMessageBox.information(
+            self, "完成", "已导出 %d 个信号的测试项编辑（其中手填期望 %d 条）：\n%s"
+            % (len(self._edited), n_de, path))
+
+    def on_import_edits(self):
+        """从 .json 导入测试项编辑，与现有合并（同名信号以导入为准）。跳过的信号列名字+原因。"""
+        if not self.wb:
+            QtWidgets.QMessageBox.information(self, "提示", "请先加载 Excel")
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "导入测试项编辑", "",
+                                                        "JSON (*.json);;全部文件 (*)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError) as ex:
+            QtWidgets.QMessageBox.critical(self, "导入失败", "无法读取/解析 %s：\n%s" % (path, ex))
+            return
+        if not isinstance(payload, dict) or "edits" not in payload:
+            QtWidgets.QMessageBox.critical(self, "导入失败",
+                                           "%s 不是测试项编辑文件(缺少 edits 段)。" % path)
+            return
+        n_restored, missing = self._apply_edits_bucket(payload)
+        self._sync_neg_checks_from_edits()
+        self._persist_edits()                      # 导入的编辑也进入自动存盘
+        if self._ti_sig is not None:               # 当前编辑器里的信号若被导入覆盖 → 刷新显示
+            self._load_test_items(self._ti_sig)
+        msg = "已导入 %d 个信号的测试项编辑。" % n_restored
+        if missing:
+            msg += "\n\n以下信号在文件里有编辑、但当前 Excel 里找不到(已跳过)：\n" + \
+                   "\n".join("  %s" % n for n in missing[:30])
+            if len(missing) > 30:
+                msg += "\n  …等共 %d 个" % len(missing)
+        QtWidgets.QMessageBox.information(self, "导入完成", msg)
+        self.status.showMessage("已导入测试项编辑：%s（%d 个信号）" % (path, n_restored))
 
     # 纵向(真值表)布局：每个输入/输出一行(纵表头)，每条测试一列 T0/T1...。
-    #   行: 0..G-1 = 各输入(base)；R_EXP = 期望(out)。
+    #   行: 0..G-1 = 各输入(base)；R_AUTO = auto_out(表达式计算，只读)；R_EXP = 期望(designer 手填)。
     #   列: 每列一条测试用例(正向 或 负向；负向列标红、列头带 _NEG)。
     def _ti_dims(self):
         self._ti_G = len(self._ti_groups)
-        self.R_EXP = self._ti_G
-        return self._ti_G + 1     # 总行数 = 输入数 + 1(期望)
+        self.R_AUTO = self._ti_G          # auto_out 行：程序按表达式算出的值(参考，只读)
+        self.R_EXP = self._ti_G + 1       # 期望 行：designer 手填；未填→生成 .sv 时用 auto_out 兜底
+        return self._ti_G + 2     # 总行数 = 输入数 + 2(auto_out + 期望)
 
     @staticmethod
     def _fmt_val(val, width):
@@ -1412,10 +1711,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return g.get("label", g["base"])
         return "%s (控制)" % ltr if g.get("is_control") else ltr
 
-    def _input_meta(self, g):
-        """该输入组的 (类型, 驱动机制) 文本，供『输入信号』表的『类型』『驱动』列：
-        RO→force <net>；RW→RF_WRITE 0x<地址> bit<<<lsb>；未解析→标红提示。"""
-        b = self._ti_bindings.get(g["rep"]) if self._ti_bindings else None
+    @staticmethod
+    def _binding_meta(b):
+        """绑定 → (类型, 驱动机制) 文本：RO→force <net>；RW→RF_WRITE 0x<地址> bit<<<lsb>；
+        未解析→标红提示。logic 的『输入信号』表与 mux 的（_populate_mux_inputs）共用。"""
         if b is None:
             return ("?", "(无绑定)")
         kind = b.kind or "?"
@@ -1427,6 +1726,79 @@ class MainWindow(QtWidgets.QMainWindow):
         if b.kind == "RO":
             return (kind, "force ENV_RF.%s" % b.wire_lhs)
         return (kind, getattr(b, "note", "") or "?")
+
+    def _input_meta(self, g):
+        """该输入组的 (类型, 驱动机制) 文本，供『输入信号』表的『类型』『驱动』列。"""
+        b = self._ti_bindings.get(g["rep"]) if self._ti_bindings else None
+        return self._binding_meta(b)
+
+    def _populate_mux_inputs(self, grp, exp):
+        """mux 信号的『输入信号』表（修"mux 点开输入信号框空白"，2026-06-03 第十一轮）。
+
+        行 = 控制行输入(c:*) + 数据寄存器(d:*)，与 expand_mux_group 的 used_vars 一一对应：
+          『字母』列：控制输入显示控制行表达式的字母；数据寄存器显示它对应的 case 值
+          『角色』列：控制输入细分 line路径/local路径/模式位；数据寄存器标"被哪个 case 选中"
+        """
+        if not hasattr(self, "ti_inputs"):
+            return
+        tbl = self.ti_inputs
+        used = exp["used_vars"]
+        line_key = exp["line"]["key"] if exp.get("line") else None
+        local_key = exp["local"]["key"] if exp.get("local") else None
+        tbl.setRowCount(len(used))
+        di = 0          # 数据寄存器序号（与 grp.cases 对齐）
+        for i, key in enumerate(used):
+            b = exp["bindings"][key]
+            kind, drive = self._binding_meta(b)
+            is_ctrl = key.startswith("c:")
+            if is_ctrl:
+                letter = key[2:]                      # 控制行 logic 表达式的变量字母
+                if key == line_key:
+                    role = "控制·line路径(force线控)"
+                elif key == local_key:
+                    role = "控制·local路径(本地寄存器)"
+                else:
+                    role = "控制·模式位/门控"
+            else:
+                case_raw = grp.cases[di].case_raw if di < len(grp.cases) else "?"
+                letter = "case %s" % case_raw
+                role = "数据寄存器(被该case选中)"
+                di += 1
+            label = b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
+            for c, v in enumerate([letter, label, role, kind, drive]):
+                it = QtWidgets.QTableWidgetItem(v)
+                if is_ctrl and c == 0:                # 控制输入字母加粗（与 logic 行为呼应）
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                if c == 4 and "未解析" in v:
+                    it.setForeground(QtGui.QColor("red"))
+                tbl.setItem(i, c, it)
+        tbl.resizeColumnsToContents()
+        self._fit_inputs_height()
+
+    def _populate_chain(self):
+        """『展开链』面板：cone 信号显示展开过程，非 cone 信号隐藏(不占空间)。
+
+        每个链节两行：『① 行名 = Excel 原式』+『(对齐) = 字母代入真实信号名的等价形式』。
+        链整体 = 展开后的等价表达式(分行摆，不合并成一行——深层 cone 嵌套爆炸读不了)。"""
+        if not hasattr(self, "ti_chain"):
+            return
+        chain = self._ti_chain or []
+        if len(chain) < 2:                    # 非 cone(空) / 异常的单行链 → 隐藏
+            self.ti_chain_cap.hide(); self.ti_chain.hide()
+            return
+        marks = "①②③④⑤⑥⑦⑧⑨"
+        lines = []
+        for i, c in enumerate(chain):
+            mark = marks[i] if i < len(marks) else "(%d)" % (i + 1)
+            head = "%s %s" % (mark, c["out"])
+            lines.append("%s = %s" % (head, c["expr"]))
+            lines.append("%s = %s" % (" " * len(head), c["subst"]))
+        self.ti_chain.setPlainText("\n".join(lines))
+        # 高度贴内容：每链节 2 行，最多显示约 8 行(4 层)，更深内部滚动
+        fm = self.ti_chain.fontMetrics()
+        shown = min(len(lines), 8)
+        self.ti_chain.setFixedHeight(shown * fm.lineSpacing() + 14)
+        self.ti_chain_cap.show(); self.ti_chain.show()
 
     def _populate_inputs(self):
         """填『输入信号』表：每个输入一行(字母/信号(位宽)/角色/类型/驱动)。随信号变化，不随逐格编辑变。"""
@@ -1467,9 +1839,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_table.setRowCount(nrows)
             self.ti_table.setColumnCount(ntests)
             out_w = self._ti_sig.out_width if self._ti_sig else 1
-            exp_label = "out → 期望%s" % ("[%d:0]" % (out_w - 1) if out_w and out_w > 1 else "")
+            wsuf = "[%d:0]" % (out_w - 1) if out_w and out_w > 1 else ""
+            auto_label = "auto_out%s" % wsuf
+            exp_label = "期望(进.sv)%s" % wsuf
             # 行表头精简为字母(+控制标记)；完整信号/角色/驱动在上方『输入信号』表
-            vlabels = [self._vheader_short(g) for g in self._ti_groups] + [exp_label]
+            vlabels = [self._vheader_short(g) for g in self._ti_groups] + [auto_label, exp_label]
             self.ti_table.setVerticalHeaderLabels(vlabels)
             for i, g in enumerate(self._ti_groups):
                 hi = self.ti_table.verticalHeaderItem(i)
@@ -1479,11 +1853,23 @@ class MainWindow(QtWidgets.QMainWindow):
                                      ", 控制位/选择位" if g["is_control"] else ", 数据位"))
                     if g["is_control"]:          # 控制/选择位加粗，提示"看这几行的 0/1 组合"
                         f = hi.font(); f.setBold(True); hi.setFont(f)
-            # 期望行表头：把输出信号名也带上，呼应表达式左边
+            out_name = self._ti_sig.out_name if self._ti_sig else "out"
+            # auto_out 行表头：程序按表达式算出的值(参考，只读)
+            hauto = self.ti_table.verticalHeaderItem(self.R_AUTO)
+            if hauto:
+                hauto.setToolTip("auto_out = 程序按表达式算出的 %s 输出值（只读，参考用）。\n"
+                                 "⚠ 它来自表达式本身——用它当期望去验证表达式有自证嫌疑，\n"
+                                 "所以 .sv 断言对比的是下面 designer 手填的「期望」。" % out_name)
+                fa = hauto.font(); fa.setItalic(True); hauto.setFont(fa)
+            # 期望行表头：designer 手填，.sv 断言用它
             hexp = self.ti_table.verticalHeaderItem(self.R_EXP)
             if hexp:
-                hexp.setToolTip("输出(表达式左边) = %s\n各列是该输入组合下表达式算出的期望值"
-                                % (self._ti_sig.out_name if self._ti_sig else "out"))
+                hexp.setToolTip("期望 = designer 自己手填的 %s 输出值，.sv 断言用它对比。\n"
+                                "· 未填(空白) → 生成 .sv 时用上面的 auto_out 兜底\n"
+                                "· 已填且 == auto_out → 绿色(designer 审过且与表达式一致)\n"
+                                "· 已填但 != auto_out → 红色(表达式可能与你的意图不符——仿真 FAIL 正是要抓的)\n"
+                                "· 负向列 → 故意填错值(琥珀色)，与 designer 期望是两回事" % out_name)
+                fe = hexp.font(); fe.setBold(True); hexp.setFont(fe)
             self.ti_table.setHorizontalHeaderLabels(["T%d" % i for i in range(ntests)])
         finally:
             self._ti_loading = False
@@ -1515,25 +1901,54 @@ class MainWindow(QtWidgets.QMainWindow):
                 it = self._mk_item(self._cell_text(val, g["width"]), True)
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)   # 右对齐→低位对齐，列间差异一眼看出
                 self.ti_table.setItem(i, c, it)
-            # 期望：正向只读(永远=正确值，不可改坏)；负向可编辑(可手填具体错值)
-            expit = self._mk_item(self._cell_text(rd["expected"] & E.mask(w), w), neg)
-            expit.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            tip = "期望 bin: %s" % W.fmt_bin(rd["expected"], w)
+            drv_tip = ("\nforce: %s" % fs if fs else "") + ("\nRF_WRITE: %s" % ws if ws else "")
+            # ── auto_out 行（只读）：程序按表达式算出的值 ──
+            autoit = self._mk_item(self._cell_text(rd["correct"] & E.mask(w), w), False)
+            autoit.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            fa = autoit.font(); fa.setItalic(True); autoit.setFont(fa)
+            autoit.setForeground(QtGui.QColor("#555555"))
+            autoit.setToolTip("auto_out(表达式计算值) bin: %s\n只读参考；.sv 断言对比的是下面的「期望」%s"
+                              % (W.fmt_bin(rd["correct"], w), drv_tip))
+            self.ti_table.setItem(self.R_AUTO, c, autoit)
+            # ── 期望 行（可编辑）：负向=错值；正向=designer 手填(未填→空白，生成时 auto_out 兜底) ──
+            de = rd.get("designer_expected")
             if neg:
-                tip += "\n(负向：故意填错，正确应为 %s；可双击改这个错值)" % self._cell_text(rd["correct"], w)
-            if fs:
-                tip += "\nforce: %s" % fs
-            if ws:
-                tip += "\nRF_WRITE: %s" % ws
-            expit.setToolTip(tip)
+                exp_text = self._cell_text(rd["expected"] & E.mask(w), w)
+            else:
+                exp_text = "" if de is None else self._cell_text(de & E.mask(w), w)
+            expit = self._mk_item(exp_text, True)
+            expit.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            if neg:
+                tip = ("负向：故意填错的期望 = %s(预期断言 FAIL，自检 checker)。\n"
+                       "正确(auto_out)应为 %s；可双击改这个错值。"
+                       % (W.fmt_bin(rd["expected"], w), self._cell_text(rd["correct"], w)))
+            elif de is None:
+                tip = ("未手填——生成 .sv 时用 auto_out=%s 兜底。\n"
+                       "双击填入你认为的输出值(不看上一行自己算，才能验出表达式的错)。"
+                       % self._cell_text(rd["correct"], w))
+            elif de == rd["correct"]:
+                tip = ("designer 手填期望 = %s，与 auto_out 一致 ✓\n.sv 断言用此值；清空单元格可恢复未填(兜底)。"
+                       % W.fmt_bin(de, w))
+            else:
+                tip = ("⚠ designer 手填期望 = %s，但表达式算出 auto_out = %s！\n"
+                       "若你确认期望没填错，则表达式与你的意图不符(仿真该测试会 FAIL——这正是 Dreg 要抓的 bug)。\n"
+                       ".sv 断言用你手填的期望；清空单元格可恢复未填(兜底)。"
+                       % (W.fmt_bin(de, w), W.fmt_bin(rd["correct"], w)))
+            expit.setToolTip(tip + drv_tip)
+            if not neg:
+                ff = expit.font(); ff.setBold(de is not None); expit.setFont(ff)
+                if de is None:
+                    expit.setForeground(FB_FG)
             self.ti_table.setItem(self.R_EXP, c, expit)
             # 列头：自定义名/T<n>(负向带 _NEG，红字)；tooltip 提示可否改名 + 驱动
             hh = self.ti_table.horizontalHeaderItem(c)
             if hh:
                 hh.setText(self._ti_label(rd, c))
                 rename_hint = "双击列头可改名" if rd.get("user_added") else "自动生成，名字不可改"
-                hh.setToolTip("%s · %s\nforce: %s\nRF_WRITE: %s"
-                              % ("负向(故意填错)" if neg else "正向(真实)", rename_hint,
+                exp_state = ("负向(故意填错)" if neg else
+                             ("期望已手填" if de is not None else "期望未填(auto_out兜底)"))
+                hh.setToolTip("%s · %s · %s\nforce: %s\nRF_WRITE: %s"
+                              % ("负向(故意填错)" if neg else "正向(真实)", exp_state, rename_hint,
                                  fs or "(无)", ws or "(无)"))
                 hh.setForeground(NEG_FG if neg else QtGui.QColor("black"))   # 负向=琥珀，不与"状态红=坏掉"撞色
             # 列底色：负向=琥珀；当前选中列=淡蓝高亮；两者叠加=更深琥珀。其余列不设(留给隔行底色)。
@@ -1544,6 +1959,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     cell = self.ti_table.item(r, c)
                     if cell is not None:
                         cell.setBackground(bg)
+            # 期望格状态色(正向)：已填且==auto_out → 绿；已填但!=auto_out → 红(可能是表达式 bug)。
+            # 盖在列底色之上(状态信息优先级最高)；未填不上色(空白+灰字提示已足够)。
+            if not neg and de is not None:
+                expit.setBackground(DSGN_BG if de == rd["correct"] else DIFF_BG)
         finally:
             self._ti_loading = False
 
@@ -1598,14 +2017,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 g = self._ti_groups[r]
                 val = self._parse_int(item.text()) & E.mask(g["width"])
                 rd["base_values"][g["key"]] = val
-                self._ti_recompute(rd)        # 正向→期望自动重算；负向→错值随之重算
+                self._ti_recompute(rd)        # 正向→auto_out 自动重算(手填期望保持不动)；负向→错值随之重算
             elif r == self.R_EXP:
-                if rd.get("kind") != "neg":   # 正向期望只读，不接受手改(防御)
-                    return
-                rd["wrong_value"] = self._parse_int(item.text()) & E.mask(rd.get("correct_width") or 1)
+                w = E.mask(rd.get("correct_width") or 1)
+                if rd.get("kind") == "neg":
+                    # 负向：改的是"故意填错"的错值
+                    rd["wrong_value"] = self._parse_int(item.text()) & w
+                else:
+                    # 正向：designer 手填期望。清空 = 恢复未填(生成 .sv 时 auto_out 兜底)
+                    txt = item.text().strip()
+                    rd["designer_expected"] = None if txt == "" else (self._parse_int(txt) & w)
                 self._ti_recompute(rd)
             else:
-                return
+                return        # auto_out 行只读(无 editable flag，正常不会进来)，防御
         except ValueError as ex:
             self.status.showMessage("数值解析失败: %s（已还原）" % ex)
         self._ti_render_col(c)
@@ -1622,6 +2046,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_mark_customized()
         self._ti_populate()
         self.ti_table.setCurrentCell(0, len(self._ti_rows) - 1)
+
+    def on_ti_fill_expected(self):
+        """「auto→期望」：把 auto_out 填进期望行（只填未填的列；已手填/负向的不动）。
+
+        这是用户要求的便捷功能——designer 核对过表达式后可一键采信 auto_out。
+        填进去之后就算"已手填"(designer_filled=True，报告里区别于 auto_out 兜底)。"""
+        if not self._ti_sig:
+            QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
+            return
+        targets = [rd for rd in self._ti_rows
+                   if rd.get("kind") != "neg" and rd.get("designer_expected") is None]
+        if not targets:
+            self.status.showMessage("没有可填的列：期望都已手填(或全是负向列)")
+            return
+        if QtWidgets.QMessageBox.question(
+                self, "auto_out → 期望",
+                "把 auto_out(表达式计算值) 填进 %d 列未填的「期望」？\n\n"
+                "⚠ 注意：这等于直接采信表达式算出的值——失去了 designer 独立核对的意义。\n"
+                "更稳妥的做法是自己算一遍再填(或用 HTML 报告的『真值表检查』页自测)。\n"
+                "确认表达式没问题时再用这个快捷方式。" % len(targets),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+            return
+        for rd in targets:
+            rd["designer_expected"] = rd.get("correct", 0)
+            self._ti_recompute(rd)
+        self._ti_mark_customized()
+        self._ti_populate()
+        self.status.showMessage("已把 auto_out 填入 %s 的 %d 列「期望」(已手填的未动)"
+                                % (self._ti_sig.out_name, len(targets)))
 
     def on_ti_add_neg_selected(self):
         """给选中的测试列各加一条负向(精确控制)；未选中则取首条正向。正向测试不动。
@@ -1762,6 +2216,8 @@ class MainWindow(QtWidgets.QMainWindow):
               "kind": src.get("kind", "pos"), "note": src.get("note", ""), "user_added": True}
         if src.get("wrong_value") is not None:
             rd["wrong_value"] = src["wrong_value"]
+        if src.get("designer_expected") is not None:        # designer 手填期望随复制带走
+            rd["designer_expected"] = src["designer_expected"]
         self._ti_recompute(rd)
         self._ti_rows.insert(c + 1, rd)
         self._ti_mark_customized()
@@ -1790,6 +2246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._customized.discard(self._ti_name_low)
         self._neg_only.pop(self._ti_name_low, None)
         self._edited.pop(self._ti_name_low, None)
+        self._persist_edits()                  # 丢弃自定义也要同步到盘(否则下次启动又恢复回来)
         self._load_test_items(self._ti_sig)
         self.status.showMessage("已从表达式重新生成 %s 的测试项（丢弃自定义）" % self._ti_sig.out_name
                                 if self._ti_sig else "")
@@ -1848,11 +2305,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     wr.writerow([self._vheader_label(g)] + [self._fmt_val(rd["base_values"].get(bk, 0), g["width"])
                                                             for rd in rows])
                 out_w = self._ti_sig.out_width or 1
-                exp_label = "期望(out)%s" % ("[%d:0]" % (out_w - 1) if out_w > 1 else "")
-                wr.writerow([exp_label] + [self._fmt_val(rd["expected"] & E.mask(rd.get("correct_width") or 1),
-                                                         rd.get("correct_width") or 1) for rd in rows])
+                wsuf = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+                # auto_out(表达式计算) 与 期望(进 .sv 的对比值) 分两行——与编辑器/HTML 报告一致
+                wr.writerow(["auto_out%s" % wsuf] + [self._fmt_val(rd["correct"] & E.mask(rd.get("correct_width") or 1),
+                                                                   rd.get("correct_width") or 1) for rd in rows])
+                wr.writerow(["期望(进.sv)%s" % wsuf] + [self._fmt_val(rd["expected"] & E.mask(rd.get("correct_width") or 1),
+                                                                     rd.get("correct_width") or 1) for rd in rows])
                 wr.writerow(["期望(bin)"] + [W.fmt_bin(rd["expected"], rd.get("correct_width") or 1)
                                             for rd in rows])
+                wr.writerow(["期望来源"] + [("负向(故意填错)" if rd["is_negative"] else
+                                            ("designer手填" if rd.get("designer_expected") is not None
+                                             else "auto_out兜底")) for rd in rows])
                 wr.writerow(["负向?"] + ["是" if rd["is_negative"] else "" for rd in rows])
                 drives = [self._drive_strs(rd) for rd in rows]
                 wr.writerow(["force"] + [fs for fs, _ in drives])
@@ -1865,13 +2328,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("已导出测试项 CSV：%s" % path)
 
     def _rows_to_vectors(self, node, bindings, groups, out_width, rows):
-        """把 rowdict 列表构造成 TestVector 列表（负向行用 expected 作 override 编码；带自定义名）。"""
+        """把 rowdict 列表构造成 TestVector 列表（负向行用 expected 作 override 编码；
+        正向行带 designer 手填期望(未填=None→生成时 auto_out 兜底)；带自定义名）。"""
         vecs = []
         for i, rd in enumerate(rows):
-            exp_override = rd["expected"] if rd.get("is_negative") else None
+            neg = rd.get("is_negative")
+            exp_override = rd["expected"] if neg else None
             vecs.append(V.make_vector_from_base_values(
                 node, bindings, groups, rd["base_values"], out_width,
-                index=i, expected_override=exp_override, name=rd.get("name")))
+                index=i, expected_override=exp_override, name=rd.get("name"),
+                designer_expected=None if neg else rd.get("designer_expected")))
         return vecs
 
     def _vector_overrides(self, positive_only=False, negative_only=False):
@@ -1888,7 +2354,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ed:
                 continue
             sig, rows = ed["sig"], ed["rows"]
-            node, bindings, groups, _cone, _err = self._expand_sig(sig)
+            node, bindings, groups, _chain, _err = self._expand_sig(sig)
             if node is None:
                 continue
             vecs = self._rows_to_vectors(node, bindings, groups, sig.out_width, rows)
@@ -1974,6 +2440,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tabs.setCurrentWidget(self.preview_tab)
         s = res["summary"]
         msg = "预览: 生成 %d，向量 %d（负向 %d）" % (s["n_generated"], s["n_vectors"], s["n_negative"])
+        n_pos = s["n_vectors"] - s["n_negative"]
+        if n_pos:
+            msg += "；期望: 手填 %d / auto_out兜底 %d" % (s.get("n_designer", 0),
+                                                          n_pos - s.get("n_designer", 0))
         if self._customized:
             msg += "；含 %d 个已自定义信号" % len(self._customized)
         if s.get("n_skipped"):
@@ -2115,8 +2585,18 @@ class MainWindow(QtWidgets.QMainWindow):
                      if st.get("out_name", "").lower() in self._customized)
         custmsg = ("\n\n含 %d 个已自定义测试项的信号(编辑已写入产物)。" % n_cust
                    if n_cust else "")
+        # 期望来源统计：designer 手填 vs auto_out 兜底（兜底=未经 designer 人工核对，有自证嫌疑）
+        s = res["summary"]
+        n_pos = s["n_vectors"] - s["n_negative"]
+        n_dsgn = s.get("n_designer", 0)
+        expmsg = ""
+        if n_pos and scope != "neg":
+            expmsg = "\n\n断言期望来源：designer 手填 %d 条，auto_out 兜底 %d 条。" % (n_dsgn, n_pos - n_dsgn)
+            if n_pos - n_dsgn:
+                expmsg += ("\n（兜底 = 期望未手填、直接用表达式计算值对比——有自证嫌疑；"
+                           "\n  建议在右侧编辑器手填期望，或用 HTML 报告『真值表检查』页核对）")
         box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Information, "完成",
-                                    "已写出：%s%s%s%s" % (path, scope_msg, skipmsg, custmsg),
+                                    "已写出：%s%s%s%s%s" % (path, scope_msg, expmsg, skipmsg, custmsg),
                                     QtWidgets.QMessageBox.Ok, self)
         if skipped:
             box.setDetailedText(_skipped_detail_text(skipped))

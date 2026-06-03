@@ -409,6 +409,64 @@ def parse(expr_text):
     return Parser(tokenize(s), s).parse()
 
 
+# ───────────────────────────── 反解析（AST → 文本） ─────────────────────────────
+# cone『展开链』显示用：把一行的 AST 渲染回文本，变量名可替换成真实信号名。
+# 括号按算子优先级最小化添加，保证 parse(to_text(node)) 与原 node 求值等价。
+_TEXT_PREC = {_BINOP_TEXT[k]: v for k, v in _BINOP_PREC.items()}    # 算子文本 → 优先级
+_PREC_MAX = 99       # 一元/位选的"父优先级"：比一切二元算子都紧 → 复合子表达式必须带括号
+
+
+def to_text(node, rename=None):
+    """AST → 表达式文本。rename = {变量名: 显示名}（如 {"A": "pll_n2[30:23]"}），
+    不在映射里的变量按原名输出。"""
+    return _to_text(node, rename or {}, 0)
+
+
+def _to_text(node, rename, parent_prec):
+    """parent_prec = 父算子优先级；当前节点结合更松(优先级更低)时要加括号。"""
+    if isinstance(node, Const):
+        # 短常量按二进制(1'b0 风格)，宽常量按十六进制
+        if node.width <= 4:
+            return "%d'b%s" % (node.width, format(node.value, "0%db" % node.width))
+        return "%d'h%X" % (node.width, node.value)
+    if isinstance(node, Var):
+        return rename.get(node.name, node.name) + _slice_suffix(node.msb, node.lsb)
+    if isinstance(node, Unary):
+        return node.op + _to_text(node.operand, rename, _PREC_MAX)
+    if isinstance(node, Binary):
+        prec = _TEXT_PREC.get(node.op, 1)
+        text = "%s%s%s" % (_to_text(node.left, rename, prec), node.op,
+                           _to_text(node.right, rename, prec + 1))    # 左结合 → 右侧更紧
+        return "(%s)" % text if prec < parent_prec else text
+    if isinstance(node, Ternary):
+        text = "%s?%s:%s" % (_to_text(node.cond, rename, 1),
+                             _to_text(node.then, rename, 0),
+                             _to_text(node.els, rename, 0))           # 右结合 → 嵌套三元不加括号
+        return "(%s)" % text if parent_prec > 0 else text
+    if isinstance(node, Concat):
+        return "{%s}" % ",".join(_to_text(p, rename, 0) for p in node.parts)
+    if isinstance(node, Repeat):
+        return "{%s{%s}}" % (_to_text(node.count_node, rename, 0),
+                             _to_text(node.body, rename, 0))
+    if isinstance(node, Part):
+        # 对子表达式取位段：除"无位选且未改名带位选的裸变量"外都要括号(自己加，子级按无括号渲染)
+        inner = _to_text(node.operand, rename, 0)
+        if not (isinstance(node.operand, Var) and node.operand.msb is None
+                and "[" not in inner and inner.isidentifier()):
+            inner = "(%s)" % inner
+        return inner + _slice_suffix(node.msb, node.lsb)
+    return str(node)
+
+
+def _slice_suffix(msb, lsb):
+    """位选/位段后缀：[7] \\ [7:0]；无位选为空串。"""
+    if msb is None:
+        return ""
+    if lsb is None or msb == lsb:
+        return "[%d]" % msb
+    return "[%d:%d]" % (msb, lsb)
+
+
 # ───────────────────────────── 环境（变量 → 宽度/取值） ─────────────────────────────
 class Env:
     """变量字母 → (width, value)。width 必填；value 仅求值时需要。"""

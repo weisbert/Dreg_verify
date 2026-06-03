@@ -18,20 +18,35 @@ from . import expr as E
 
 class TestVector:
     def __init__(self, index, assignments, exp_value, exp_width,
-                 is_negative=False, neg_value=None, neg_mode=None, note="", name=None):
+                 is_negative=False, neg_value=None, neg_mode=None, note="", name=None,
+                 designer_expected=None):
         self.index = index                  # T 编号(默认命名 T<index> 用)
         self.assignments = assignments       # {字母: int}
-        self.exp_value = exp_value           # 正确期望值
+        self.exp_value = exp_value           # auto_out：程序按表达式算出的期望值
         self.exp_width = exp_width
         self.is_negative = is_negative
         self.neg_value = neg_value           # 负向时实际写入断言的(错误)期望
         self.neg_mode = neg_mode
         self.note = note
         self.name = name                     # 自定义测试名(None→用 T<index>)；用户可对自己加的测试改名
+        # designer 手填的「期望」(None=未填)。Dreg 验证的对象是 designer 写的逻辑表达式本身——
+        # 用表达式算出的 auto_out 去验证表达式有自证嫌疑，所以断言对比值优先用 designer 手填的期望；
+        # 未填时回退 auto_out(exp_value) 兜底。手填值 != auto_out 不算负向：那恰恰可能是表达式的 bug。
+        self.designer_expected = designer_expected
 
     @property
     def asserted_value(self):
-        return self.neg_value if self.is_negative else self.exp_value
+        """写进 .sv 断言的对比值：负向错值 > designer 手填期望 > auto_out(表达式计算)兜底。"""
+        if self.is_negative:
+            return self.neg_value
+        if self.designer_expected is not None:
+            return self.designer_expected
+        return self.exp_value
+
+    @property
+    def designer_filled(self):
+        """期望是否为 designer 手填（非负向且手填了期望）。"""
+        return (not self.is_negative) and self.designer_expected is not None
 
 
 # ───────────────────────────── 数据特征模式 ─────────────────────────────
@@ -229,7 +244,12 @@ def _dedup(vectors):
 
 # ───────────────────────────── 负向用例 ─────────────────────────────
 def make_negative(vec, mode="invert", fixed_value=None):
-    """基于一个正常向量造一个负向用例（故意填错期望值）。"""
+    """基于一个正常向量造一个负向用例（故意填错期望值）。
+
+    错值防撞：负向断言必须在"RTL 正确"时 FAIL 才有自检意义。RTL 的正确输出可能是
+    auto_out(表达式计算值)，也可能是 designer 手填的期望(两者不同=表达式有 bug 的场景)，
+    所以错值要避开这两个值。1bit 且两者不同时无解(任何值都撞)，保持取反值——
+    此时反例可能 PASS 并打 NEG-BROKEN 标签(日志里可见，不静默)。"""
     w = vec.exp_width
     m = E.mask(w)
     correct = vec.exp_value
@@ -244,6 +264,14 @@ def make_negative(vec, mode="invert", fixed_value=None):
     if wrong == correct:
         # 取反/加一后若仍相等（极少见），强制翻最低位
         wrong = correct ^ (1 if w >= 1 else 0)
+    # 防撞 designer 手填期望：错值 == 手填期望时翻一位避开(同时仍须避开 correct)
+    de = vec.designer_expected
+    if de is not None and wrong == (de & m):
+        for flip in range(max(w, 1)):
+            cand = wrong ^ (1 << flip)
+            if cand != correct and cand != (de & m):
+                wrong = cand
+                break
     return TestVector(
         index=vec.index, assignments=dict(vec.assignments),
         exp_value=correct, exp_width=w,
@@ -358,10 +386,16 @@ def vector_to_base_values(vec, groups):
 
 
 def make_vector_from_base_values(node, bindings, groups, base_values, out_width,
-                                 index=0, expected_override=None, name=None):
+                                 index=0, expected_override=None, name=None,
+                                 designer_expected=None):
     """从 GUI 编辑的 {base_lower:int} 构造一个 TestVector。
-    期望值由表达式自动重算(永远自洽)；若给了 expected_override 且与算出值不同 →
+    auto_out 由表达式自动重算(永远自洽)；若给了 expected_override 且与算出值不同 →
     标负向(故意填错，复用负向机制：asserted_value 取 neg_value)。name 为自定义测试名(可选)。
+
+    designer_expected：designer 手填的「期望」(非负向)。与 expected_override 的区别：
+      - expected_override = 故意填错值 → 标负向，断言预期 FAIL（自检 checker）。
+      - designer_expected = designer 认为的正确值 → 不标负向，断言用它对比；
+        若与 auto_out 不同且仿真 FAIL，说明表达式与 designer 意图不符（这正是 Dreg 要抓的 bug）。
     """
     widths = {ltr: b.width for ltr, b in bindings.items()}
     assign = _expand_base_values(groups, base_values, widths)
@@ -374,4 +408,5 @@ def make_vector_from_base_values(node, bindings, groups, base_values, out_width,
             return TestVector(index, assign, exp_value, exp_width,
                               is_negative=True, neg_value=wrong, neg_mode="value", name=name,
                               note="手工指定期望值(与表达式计算值不同)，预期断言应 FAIL，用于负向自检")
-    return TestVector(index, assign, exp_value, exp_width, name=name)
+    de = (designer_expected & E.mask(exp_width)) if designer_expected is not None else None
+    return TestVector(index, assign, exp_value, exp_width, name=name, designer_expected=de)

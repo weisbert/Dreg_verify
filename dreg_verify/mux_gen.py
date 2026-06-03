@@ -12,9 +12,13 @@ mux 语义（真表探查 + designer .sv 解码，见 mux功能影响面分析.m
   ② 全部数据寄存器(A 列) RF_WRITE 写互异值（否则选错路测不出 = 假绿）
   ③ #1ps; assert (`ENV_RF.<G列名> == 被选中寄存器的值)
 
-测试集（覆盖度，用户拍板）：
-  精简(min)         = 每 case 一个控制值（x 位取 0）  + 1 个"另一条路径"测试
-  全面/穷举(max)    = 每 case × 每个 don't-care 位取值 + 1 个"另一条路径"测试
+测试集（覆盖度三档，2026-06-03 第十一轮拉开差距——每升一档多抓一类真实故障）：
+  精简(min)        = line 路径扫每 case（x 位取 0）+ 1 条另一路径抽测
+                     → 抓"case 接到错的寄存器"（选路错）
+  全面(max)        = 精简 + case don't-care 位展开 + 每 case 一轮反码数据
+                     → 多抓"数据通路位坏死"（第一轮值恰等于坏死值时测不出，反码轮每位都翻过）
+  穷举(exhaustive) = 全面 + 另一条控制路径全扫每 case（取代单条抽测）
+                     → 多抓"只在另一条物理驱动路径下出现的选路错"
   mux 输出不做 iddq 测试（designer 没做）。
 
 ⭐ 架构要点（绕开"per-vector 驱动切换"的结构性难题）：
@@ -87,29 +91,32 @@ def _levels(width):
 
 
 # ───────────────────────────── 互异值分配 ─────────────────────────────
-def alloc_distinct_values(group, bindings=None, data_keys=None):
-    """给每个数据寄存器分配互异值（designer 风格：4bit+ 从 0xA 递减；窄位宽从 1 递增）。
+def _effective_width(case, i, bindings, data_keys):
+    """数据寄存器 i 的有效位宽 = min(Excel A 列声明位宽, tmm/regmap 实际字段位宽)。
 
-    互异是 mux 选路验证的命门：两条数据路同值时选错路也测不出（假绿）。
-    避开 0（RTL mux 坏死输出 0 时不应误判 PASS）。
-
-    ⭐ 位宽口径 = 有效位宽 = min(Excel A 列声明位宽, tmm/regmap 实际字段位宽)：
     写寄存器时 compute_drives 按实际字段位宽截断（sv_writer fw mask），
     互异性必须在**截断后**仍成立——按声明位宽分配再被截断会静默撞值。
     bindings/data_keys 不给时退化为按声明位宽（仅单元测试用）。
+    """
+    w = max(case.input_width, 1)
+    if bindings is not None and data_keys is not None and i < len(data_keys):
+        b = bindings.get(data_keys[i])
+        if b is not None and b.reg_msb is not None and b.reg_lsb is not None:
+            fw = b.reg_msb - b.reg_lsb + 1
+            w = max(min(w, fw), 1)
+    return w
+
+
+def _alloc_loop(group, bindings, data_keys, seed_fn):
+    """互异值分配公共骨架：seed_fn(i, width, mask) 给初值，碰撞时 1..m 循环探测（永不取 0）。
 
     返回 (values, collision)。collision=True 表示有效位宽装不下这么多互异值。
     """
     values, seen, collision = [], {0}, False
     for i, case in enumerate(group.cases):
-        w = max(case.input_width, 1)
-        if bindings is not None and data_keys is not None and i < len(data_keys):
-            b = bindings.get(data_keys[i])
-            if b is not None and b.reg_msb is not None and b.reg_lsb is not None:
-                fw = b.reg_msb - b.reg_lsb + 1
-                w = max(min(w, fw), 1)
+        w = _effective_width(case, i, bindings, data_keys)
         m = E.mask(w)
-        v = ((0xA - i) & m) if w >= 4 else ((i + 1) & m)
+        v = seed_fn(i, w, m)
         if v == 0:
             v = 1
         tries = 0
@@ -121,6 +128,28 @@ def alloc_distinct_values(group, bindings=None, data_keys=None):
         seen.add(v)
         values.append(v)
     return values, collision
+
+
+def alloc_distinct_values(group, bindings=None, data_keys=None):
+    """给每个数据寄存器分配互异值（designer 风格：4bit+ 从 0xA 递减；窄位宽从 1 递增）。
+
+    互异是 mux 选路验证的命门：两条数据路同值时选错路也测不出（假绿）。
+    避开 0（RTL mux 坏死输出 0 时不应误判 PASS）。
+    返回 (values, collision)。
+    """
+    return _alloc_loop(group, bindings, data_keys,
+                       lambda i, w, m: ((0xA - i) & m) if w >= 4 else ((i + 1) & m))
+
+
+def alloc_inverted_values(group, base_values, bindings=None, data_keys=None):
+    """反码数据轮：每个数据寄存器取第一轮值的按位取反（有效位宽内），保持互异、避 0。
+
+    抓的故障：数据通路某位坏死(stuck-at)时，若第一轮写入值恰好等于坏死位的值则测不出；
+    反码轮让每个寄存器的每一位都翻转过 → 两轮合起来每位都验过 0 和 1。
+    返回 (values, collision)。
+    """
+    return _alloc_loop(group, bindings, data_keys,
+                       lambda i, w, m: (~base_values[i]) & m)
 
 
 # ───────────────────────────── 解析一个 mux 组 ─────────────────────────────
@@ -212,11 +241,28 @@ def expand_mux_group(wb, resolver, group):
 
 
 # ───────────────────────────── 向量生成 ─────────────────────────────
+def coverage_mode(mode, exhaustive):
+    """覆盖度三档 → mux 生成模式（generator/GUI 共用此映射，口径必须一致）。
+
+    精简(mode=min) → "min"；全面(mode=max) → "max"；穷举(exhaustive=True) → "exhaustive"。
+    """
+    if exhaustive:
+        return "exhaustive"
+    return "min" if str(mode).lower() == "min" else "max"
+
+
 def make_mux_vectors(group, expansion, mode="min", max_tests=256):
     """为一个 mux 组生成测试向量（vectors.TestVector，assignments 键 = "c:*"/"d:*"）。
 
+    覆盖度三档（每升一档多抓一类真实故障）：
+      "min"(精简)        = line 路径扫每 case（x 位取 0）+ 1 条另一路径抽测
+                           → 抓"case 接到错的寄存器"
+      "max"(全面)        = min + case don't-care 位展开 + 每 case 一轮反码数据
+                           → 多抓"数据通路位坏死"
+      "exhaustive"(穷举) = max + 另一条控制路径全扫每 case（取代单条抽测）
+                           → 多抓"只在另一条物理驱动路径下出现的选路错"
+
     扫描路径优先 line（designer 配方：force 线控扫 case）；没有 line 用 local 扫。
-    末尾追加一个"另一条路径"测试（designer 的 T16：控制走 local 路径也要通）。
     返回 (vectors, meta)。
     """
     line, local = expansion["line"], expansion["local"]
@@ -229,16 +275,27 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
 
     # 互异值按"有效位宽"分配（声明位宽与 tmm/regmap 字段位宽取小），保证截断后仍互异
     data_values, collision = alloc_distinct_values(group, bindings, data_keys)
+    # 反码数据轮（max/exhaustive）：互异值取反后仍互异、避 0
+    if mode == "min":
+        inv_values, inv_collision = None, False
+    else:
+        inv_values, inv_collision = alloc_inverted_values(group, data_values, bindings, data_keys)
 
+    scan_kind = ("line" if scan_path is line else "local") if scan_path else None
+    other_kind = None if other_path is None else ("local" if other_path is local else "line")
     meta = {
         "control": [p["key"] for p in (line, local) if p],
         "data": list(data_keys),
         "missing_vars": [], "total_bits": 0,
         "truncated": False, "dropped": 0, "exhaustive": mode != "min",
-        "scan_path": ("line" if scan_path is line else "local") if scan_path else None,
-        "value_collision": collision,
+        "scan_path": scan_kind,
+        "value_collision": collision or inv_collision,
         "case_map": [(group.cases[i].case_raw, group.cases[i].input_base, data_values[i])
                      for i in range(len(group.cases))],
+        # 覆盖度三档的内容标记（报告/GUI 据此说明"当前档生成了什么"）
+        "data_rounds": 1 if mode == "min" else 2,
+        "other_path_scan": (None if other_path is None
+                            else ("full" if mode == "exhaustive" else "probe")),
     }
 
     vectors = []
@@ -247,12 +304,32 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
 
     widths = {k: b.width for k, b in bindings.items()}
     out_mask = E.mask(group.out_width)
-    idx = 0
-    truncated = False
+    state = {"idx": 0, "capped": False}
 
-    # ── case 扫描 ──
-    scan_key = scan_path["key"]
-    scan_width = widths.get(scan_key, 1)
+    def emit(path, alt_path, ci, cv, values, note):
+        """生成一条向量。含两道闸：max_tests 上限；截断校验——控制值经路径寄存器位宽截断后
+        必须仍命中本 case（case 比寄存器宽时截断会命中别的 case → 期望必错 → 丢弃并记录，
+        不能静默生成污染仿真 log）。返回 False = 已到 max_tests 上限（调用方应停止）。"""
+        if state["idx"] >= max_tests:
+            state["capped"] = True
+            return False
+        cval, cw, dc = parsed[ci]
+        pwidth = widths.get(path["key"], 1)
+        driven = cv & E.mask(pwidth)
+        if not E.case_matches(cval, cw, dc, driven):
+            meta["dropped"] += 1
+            meta["truncated"] = True
+            meta.setdefault("dropped_reasons", []).append(
+                "case %s: ctrl value 0x%X truncated by %d-bit register no longer hits this case"
+                % (group.cases[ci].case_raw, cv, pwidth))
+            return True
+        assignments = _path_assignments(path, alt_path, cv, widths, data_keys, values)
+        vectors.append(V.TestVector(state["idx"], assignments, values[ci] & out_mask,
+                                    group.out_width, note=note))
+        state["idx"] += 1
+        return True
+
+    # ── ① line 路径 case 扫描（min：x 位取 0；max/exhaustive：don't-care 位展开）──
     for ci, pc in enumerate(parsed):
         if pc is None:
             continue
@@ -260,45 +337,53 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
         ctrl_values = E.expand_case_values(cval, cw, dc)
         if mode == "min":
             ctrl_values = ctrl_values[:1]        # 精简：don't-care 位取 0（用户拍板）
+        ok = True
         for cv in ctrl_values:
-            if idx >= max_tests:
-                truncated = True
+            ok = emit(scan_path, other_path, ci, cv,
+                      data_values, "case %s -> %s (ctrl=0x%X via %s path)"
+                      % (group.cases[ci].case_raw, group.cases[ci].input_base, cv, scan_kind))
+            if not ok:
                 break
-            # ⭐ 截断校验：控制值经值寄存器位宽截断后必须仍命中本 case。
-            # case 写得比控制信号宽时(位宽不一致)，截断后会命中别的 case → 期望错 → 误报失败。
-            # 这种"确定错误的向量"直接丢弃并记录（不能静默生成污染仿真 log）。
-            driven = cv & E.mask(scan_width)
-            if not E.case_matches(cval, cw, dc, driven):
-                meta["dropped"] += 1
-                meta["truncated"] = True
-                meta.setdefault("dropped_reasons", []).append(
-                    "case %s: ctrl value 0x%X truncated by %d-bit register no longer hits this case"
-                    % (group.cases[ci].case_raw, cv, scan_width))
-                continue
-            assignments = _path_assignments(scan_path, other_path, cv, widths,
-                                            data_keys, data_values)
-            exp = data_values[ci] & out_mask
-            note = ("case %s -> %s (ctrl=0x%X via %s path)"
-                    % (group.cases[ci].case_raw, group.cases[ci].input_base,
-                       cv, meta["scan_path"]))
-            vectors.append(V.TestVector(idx, assignments, exp, group.out_width, note=note))
-            idx += 1
-        if truncated and idx >= max_tests:
+        if not ok:
             break
 
-    # ── 另一条路径验证（designer 的 T16：控制级联的两条物理路径都要通）──
-    if other_path is not None and parsed and parsed[0] is not None and not truncated:
-        cval, cw, dc = parsed[0]
-        cv = E.expand_case_values(cval, cw, dc)[0]
-        assignments = _path_assignments(other_path, scan_path, cv, widths,
-                                        data_keys, data_values)
-        exp = data_values[0] & out_mask
-        other_kind = "local" if other_path is local else "line"
-        note = ("ctrl via %s path: case %s -> %s (verify the other physical path of the ctrl cascade)"
-                % (other_kind, group.cases[0].case_raw, group.cases[0].input_base))
-        vectors.append(V.TestVector(idx, assignments, exp, group.out_width, note=note))
+    # ── ② 反码数据轮（max/exhaustive）：每 case 再测一次，数据寄存器写反码互异值 ──
+    if inv_values is not None and not state["capped"]:
+        for ci, pc in enumerate(parsed):
+            if pc is None:
+                continue
+            cval, cw, dc = pc
+            cv = E.expand_case_values(cval, cw, dc)[0]
+            if not emit(scan_path, other_path, ci, cv,
+                        inv_values, "case %s -> %s (ctrl=0x%X via %s path, inverted data)"
+                        % (group.cases[ci].case_raw, group.cases[ci].input_base, cv, scan_kind)):
+                break
 
-    meta["truncated"] = meta["truncated"] or truncated   # 丢弃向量(截断校验)与 max_tests 截断都算
+    # ── ③ 另一条控制路径（exhaustive：全扫每 case；min/max：抽测 case[0]——designer 的 T16）──
+    if other_path is not None and not state["capped"]:
+        if mode == "exhaustive":
+            stop = False
+            for ci, pc in enumerate(parsed):
+                if pc is None or stop:
+                    continue
+                cval, cw, dc = pc
+                for cv in E.expand_case_values(cval, cw, dc):
+                    if not emit(other_path, scan_path, ci, cv,
+                                data_values, "ctrl via %s path: case %s -> %s (ctrl=0x%X, "
+                                "full scan of the other physical path)"
+                                % (other_kind, group.cases[ci].case_raw,
+                                   group.cases[ci].input_base, cv)):
+                        stop = True
+                        break
+        elif parsed and parsed[0] is not None:
+            cval, cw, dc = parsed[0]
+            cv = E.expand_case_values(cval, cw, dc)[0]
+            emit(other_path, scan_path, 0, cv,
+                 data_values, "ctrl via %s path: case %s -> %s (verify the other physical "
+                 "path of the ctrl cascade)"
+                 % (other_kind, group.cases[0].case_raw, group.cases[0].input_base))
+
+    meta["truncated"] = meta["truncated"] or state["capped"]   # 丢弃向量与 max_tests 截断都算
     return vectors, meta
 
 

@@ -41,7 +41,7 @@ def find_internal_inputs(node, bindings):
             if bindings.get(ltr) is not None and bindings[ltr].found_in in EXPANDABLE]
 
 
-def expand(sig, wb, resolver, _depth=0, _stack=None):
+def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
     """递归展开 sig。返回 (node, bindings)。
 
     node:     复合 AST，所有内部信号引用已替换为其表达式（带 Part 切片）。
@@ -49,6 +49,9 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
               每个叶子带 xl_letters 属性 = Excel 来源坐标（根行直接输入=列字母 "E"；
               上游行展开来的叶子="上游行名.字母" 如 "pll_n1.A"），供 GUI/报告显示溯源——
               展开后表达式变量名是大写基名，没有这个就对不回 Excel 的 A/B/C 列了。
+    chain_out: 传入 list 时，把『展开链』按 DFS 顺序追加进去（GUI/报告显示用）：
+              [{"out": 行基名, "expr": Excel 原式, "subst": 字母代入真实信号名的等价形式}, ...]
+              首项=本行(根)，同一上游行被多次到达只记一次。
 
     循环引用 / 超深 / 找不到内部信号定义行 / 子表达式解析失败 → 抛 ConeError。
     """
@@ -66,6 +69,13 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
         raise ConeError("信号 %r 表达式解析失败: %s" % (sig.out_name, ex))
     bindings = resolver.resolve_signal_inputs(sig)
 
+    # ── 展开链记录：本行原式 + 字母代入真实信号名(去 _to_logic 的基名+切片)的等价形式 ──
+    if chain_out is not None and all(c["out"] != sig.out_base for c in chain_out):
+        rename = {ltr: b.base + _slice_suffix(b)
+                  for ltr, b in bindings.items() if b is not None and b.base}
+        chain_out.append({"out": sig.out_base, "expr": str(sig.expr).strip(),
+                          "subst": E.to_text(node, rename)})
+
     # 整个 cone 的根信号(stack[0] = 最外层被断言的输出)。叶子的"自引用"判定相对它：
     # 任何层级的叶子若引用根信号，都绝不能 force 根的输出网(那正是要断言的网)。
     root_base = stack[0]
@@ -80,7 +90,7 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
             child = _find_logic(wb, b.base)
             if child is None:
                 raise ConeError("内部信号 %r 在 logic 页找不到定义行" % b.base)
-            child_node, child_leaves = expand(child, wb, resolver, _depth + 1, stack)
+            child_node, child_leaves = expand(child, wb, resolver, _depth + 1, stack, chain_out)
             for key, leaf in child_leaves.items():
                 # 子展开的叶子已带自己的 Excel 来源("行名.字母")，原样并入
                 _merge_leaf(leaves, key, leaf, getattr(leaf, "xl_letters", None) or [])
@@ -104,6 +114,15 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
 
 
 # ───────────────────────────── 内部 ─────────────────────────────
+def _slice_suffix(b):
+    """输入 binding 的切片后缀(来自 Excel 单元格的 [msb:lsb])：[7] / [30:23]；无切片为空。"""
+    if b.slice_msb is None:
+        return ""
+    if b.slice_lsb is None or b.slice_msb == b.slice_lsb:
+        return "[%d]" % b.slice_msb
+    return "[%d:%d]" % (b.slice_msb, b.slice_lsb)
+
+
 def _find_logic(wb, base):
     low = str(base).strip().lower()
     for s in wb.logic:

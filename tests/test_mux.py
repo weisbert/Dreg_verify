@@ -240,13 +240,71 @@ def test_make_mux_vectors_min(wb, expansion):
 
 
 def test_make_mux_vectors_max(wb, expansion):
-    """全面: don't-care 位展开(3'b10x → 100/101) = 4 个扫描 + 1 个 local = 5。"""
+    """全面(2026-06-03 第十一轮): x 位展开(4) + 反码数据轮(3) + 1 个 local 抽测 = 8。"""
     vecs, meta = mux_gen.make_mux_vectors(wb.mux[0], expansion, mode="max")
-    assert len(vecs) == 5
+    assert len(vecs) == 8
     ctrl_values = [v.assignments["c:B"] for v in vecs[:4]]
     assert ctrl_values == [0b010, 0b011, 0b100, 0b101]
     # x=0/x=1 两个值期望相同(都选中第 3 个寄存器)
     assert vecs[2].exp_value == vecs[3].exp_value == 0x8
+    # 反码数据轮(T4..T6): 数据寄存器写反码互异值, 期望跟着变
+    inv = [v for v in vecs if "inverted data" in (v.note or "")]
+    assert len(inv) == 3
+    # 第一轮 0xA/0x9/0x8 → 反码 0x5/0x6/0x7（有效位宽 4bit 内取反）
+    assert inv[0].assignments["d:0"] == 0x5 and inv[0].exp_value == 0x5
+    assert inv[1].assignments["d:1"] == 0x6 and inv[1].exp_value == 0x6
+    assert inv[2].assignments["d:2"] == 0x7 and inv[2].exp_value == 0x7
+    # 每个数据寄存器: 两轮值合起来每一位都翻转过(抓数据通路位坏死的前提)
+    for i, k in enumerate(["d:0", "d:1", "d:2"]):
+        r1, r2 = vecs[0].assignments[k], inv[0 if i == 0 else i].assignments[k]
+        assert (r1 ^ r2) == 0xF, "寄存器 %s 两轮值 0x%X/0x%X 必须每位互补" % (k, r1, r2)
+    assert meta["data_rounds"] == 2 and meta["other_path_scan"] == "probe"
+
+
+def test_make_mux_vectors_exhaustive(wb, expansion):
+    """穷举(2026-06-03 第十一轮): 全面的全部 + local 路径全扫(取代单条抽测)。"""
+    vecs, meta = mux_gen.make_mux_vectors(wb.mux[0], expansion, mode="exhaustive")
+    # line 扫描 4 + 反码轮 3 + local 全扫 4 = 11
+    assert len(vecs) == 11
+    assert meta["other_path_scan"] == "full"
+    # local 全扫: 控制值从 c:C(local 寄存器)进, 模式位 c:A=1, 扫全部 case 值
+    full = [v for v in vecs if "full scan" in (v.note or "")]
+    assert len(full) == 4
+    assert [v.assignments["c:C"] for v in full] == [0b010, 0b011, 0b100, 0b101]
+    assert all(v.assignments["c:A"] == 1 for v in full)
+    # 期望与 line 扫描一致(选中同一个寄存器)
+    assert [v.exp_value for v in full] == [0xA, 0x9, 0x8, 0x8]
+
+
+def test_coverage_mode_mapping():
+    """覆盖度三档映射(generator/GUI 共用): 精简→min, 全面→max, 穷举→exhaustive。"""
+    assert mux_gen.coverage_mode("min", False) == "min"
+    assert mux_gen.coverage_mode("max", False) == "max"
+    assert mux_gen.coverage_mode("min", True) == "exhaustive"
+    assert mux_gen.coverage_mode("max", True) == "exhaustive"
+
+
+def test_alloc_inverted_values(wb):
+    """反码互异值: 取反后仍互异、避 0；与第一轮合起来每位都翻转过。"""
+    grp = wb.mux[0]
+    base, c1 = mux_gen.alloc_distinct_values(grp)
+    inv, c2 = mux_gen.alloc_inverted_values(grp, base)
+    assert not c1 and not c2
+    assert len(set(inv)) == len(inv) and 0 not in inv
+    assert inv == [0x5, 0x6, 0x7]                       # ~0xA/~0x9/~0x8 & 0xF
+
+
+def test_three_levels_differ_without_x_bits(wb):
+    """⭐ 用户问题回归: case 值没有 x 位的 mux 组, 三档测试数也必须不同。"""
+    resolver = R.Resolver(wb)
+    grp = wb.mux[1]                                     # bias_q: 2 个 case, 无 x 位
+    exp = mux_gen.expand_mux_group(wb, resolver, grp)
+    n = {m: len(mux_gen.make_mux_vectors(grp, exp, mode=m)[0])
+         for m in ("min", "max", "exhaustive")}
+    assert n["min"] < n["max"] < n["exhaustive"], "三档必须递增: %s" % n
+    assert n["min"] == 3                                # 2 case + 1 local 抽测
+    assert n["max"] == 5                                # + 2 反码轮
+    assert n["exhaustive"] == 6                         # + 2 local 全扫 - 1 抽测(被全扫取代)
 
 
 # ───────────── ⑤ generator/sv_writer 端到端 ─────────────
@@ -576,8 +634,44 @@ def test_gui_mux_test_items_readonly(gui_win):
     assert w._ti_sig is None                              # 编辑路径安全屏蔽
     assert w._ti_mux_sig is grp
     assert w.ti_table.columnCount() == 4                  # 3 case(min) + 1 local 路径
-    assert w.ti_table.rowCount() == 7                     # 3 控制输入 + 3 数据寄存器 + 期望
+    assert w.ti_table.rowCount() == 8                     # 3 控制输入 + 3 数据寄存器 + auto_out + 期望
     assert "mux" in w.ti_header.text()
+
+
+def test_gui_mux_inputs_box_populated(gui_win):
+    """⭐ 用户问题回归: 点 mux 信号后『输入信号』表不再空白——控制输入+数据寄存器都列出来。"""
+    w = gui_win
+    grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
+    w._load_test_items(grp)
+    # 3 控制行输入(c:A/c:B/c:C) + 3 数据寄存器(d:0/d:1/d:2) = 6 行
+    assert w.ti_inputs.rowCount() == 6
+    roles = [w.ti_inputs.item(r, 2).text() for r in range(6)]
+    # 控制输入细分 line/local/模式位；数据寄存器标"被该 case 选中"
+    assert any("line路径" in x for x in roles)
+    assert any("local路径" in x for x in roles)
+    assert sum(1 for x in roles if "数据寄存器" in x) == 3
+    # 数据寄存器的『字母』列显示对应的 case 值（不是 d:0 这种内部键）
+    letters = [w.ti_inputs.item(r, 0).text() for r in range(6)]
+    assert "case 3'b010" in letters and "case 3'b10x" in letters
+    # 驱动列：数据寄存器 = RF_WRITE，line 线控 = force
+    drives = [w.ti_inputs.item(r, 4).text() for r in range(6)]
+    assert any(x.startswith("RF_WRITE") for x in drives)
+    assert any(x.startswith("force ENV_RF") for x in drives)
+
+
+def test_gui_mux_coverage_levels_differ(gui_win):
+    """⭐ 用户问题回归: GUI 覆盖度三档下 mux 测试列数必须递增（精简<全面<穷举）。"""
+    w = gui_win
+    grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
+    counts = {}
+    for level in ("精简", "全面", "穷举"):
+        w.coverage.setCurrentText(level)
+        w._load_test_items(grp)
+        counts[level] = w.ti_table.columnCount()
+    assert counts["精简"] < counts["全面"] < counts["穷举"], "三档必须递增: %s" % counts
+    # 表头标明当前档位生成内容
+    assert "覆盖度=穷举" in w.ti_header.text()
+    w.coverage.setCurrentText("精简")                     # 还原默认，不影响其它用例
 
 
 def test_gui_mux_generate(gui_win, tmp_path):

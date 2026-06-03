@@ -194,3 +194,54 @@ def test_unbound_var_width_raises():
 def test_empty_expr_raises():
     with pytest.raises(ExprError):
         parse("   ")
+
+
+# ───────────── 反解析 to_text（cone 展开链显示用） ─────────────
+def test_to_text_roundtrip_equivalent():
+    """parse(to_text(node)) 与原 node 求值等价（括号按优先级最小化但不丢语义）。"""
+    cases = [
+        ("A&B|C", {"A": 1, "B": 1, "C": 1}),
+        ("A&(B|C)", {"A": 1, "B": 1, "C": 1}),
+        ("(A?C:B)&(~J)", {"A": 1, "B": 1, "C": 1, "J": 1}),
+        ("E?{B,C,D,1'b0}:{A,B,C,D}", {"A": 1, "B": 8, "C": 7, "D": 16, "E": 1}),
+        ("A-(B-C)", {"A": 8, "B": 8, "C": 8}),
+        ("A<<2", {"A": 8}),
+        ("~(A&B)", {"A": 1, "B": 1}),
+        ("{2{A}}", {"A": 4}),
+        ("A[3:0]^B[1]", {"A": 8, "B": 2}),
+    ]
+    import itertools
+    for text, widths in cases:
+        node = parse(text)
+        rendered = expr.to_text(node)
+        node2 = parse(rendered)
+        # 在多组输入取值下两棵 AST 求值一致
+        names = sorted(widths)
+        for combo in itertools.product(*[(0, (1 << widths[n]) - 1, 1) for n in names]):
+            values = dict(zip(names, combo))
+            v1 = expr.evaluate(node, Env(widths, values), 16)[0]
+            v2 = expr.evaluate(node2, Env(widths, values), 16)[0]
+            assert v1 == v2, "%s -> %s @ %s" % (text, rendered, values)
+
+
+def test_to_text_rename():
+    """rename 把字母换成真实信号名；不在映射里的保持原名。"""
+    node = parse("E?{B,C}:A")
+    out = expr.to_text(node, rename={"A": "pll_n2[31:0]", "B": "pll_n2[30:23]",
+                                     "E": "en_dig_clk_div4"})
+    assert out == "en_dig_clk_div4?{pll_n2[30:23],C}:pll_n2[31:0]"
+
+
+def test_to_text_consts():
+    """常量渲染：短常量二进制(1'b0)，宽常量十六进制。"""
+    assert expr.to_text(parse("1'b0")) == "1'b0"
+    assert expr.to_text(parse("4'b1010")) == "4'b1010"
+    assert expr.to_text(parse("9'h1FF")) == "9'h1FF"
+
+
+def test_to_text_part_node():
+    """Part 节点(cone 代入产物)：子表达式取位段加括号，裸变量不加。"""
+    part = expr.Part(parse("A?B:C"), 7, 0)
+    assert expr.to_text(part) == "(A?B:C)[7:0]"
+    part2 = expr.Part(expr.Var("X"), 3, 3)
+    assert expr.to_text(part2) == "X[3]"
