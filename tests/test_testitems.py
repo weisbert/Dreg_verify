@@ -701,15 +701,20 @@ def test_csv_report_writes_verifiability(wb, tmp_path):
 
 # ───────────── 真值表标注表达式字母 A/B/C（#1） ─────────────
 def test_gui_truthtable_short_headers_and_inputs_table(qapp, wb, tmp_path_factory):
-    """真值表行表头精简为字母(+控制标记)；字母→信号/角色/类型/驱动 集中到上方『输入信号』表。"""
+    """真值表行表头=信号名(2026-06-03 用户拍板：不用字母)；字母→信号/角色/类型/驱动 在上方『输入信号』表。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "g_letters")   # (A?C:B)&(~J)
     w._load_test_items(sig)
-    # 真值表行表头：只留字母，控制位带 "(控制)"，不再塞信号全名
+    # 真值表行表头：直接用信号名，控制位带 "(控制)"；不再是字母
     headers = [w.ti_table.verticalHeaderItem(i).text() for i in range(len(w._ti_groups))]
-    assert {h.split()[0] for h in headers} >= {"A", "B", "C", "J"}
-    assert "A (控制)" in headers and "J (控制)" in headers      # A=三元条件 J=门控 → 控制位
-    assert "C" in headers and "B" in headers                    # 数据位无标记
-    assert all(" → " not in h for h in headers)                 # 信号全名已移到输入表
+    assert "d_bt_lp_linelocal_mode_ctrl (控制)" in headers      # A=三元条件 → 控制位
+    assert "d_bt_lp_iddq (控制)" in headers                     # J=门控 → 控制位
+    assert "d_bt_lp_bt_mode_sel_local" in headers               # C=数据位无标记
+    assert "d_bt_lp_bt_mode_sel" in headers                     # B=数据位无标记
+    assert all(h.split()[0] not in ("A", "B", "C", "J") for h in headers)   # 不再是裸字母
+    # 字母对照在 tooltip 里(对照表达式用)
+    tips = [w.ti_table.verticalHeaderItem(i).toolTip() for i in range(len(w._ti_groups))]
+    assert any("表达式里的 A" in t for t in tips)
+    assert any("表达式里的 J" in t for t in tips)
     # 加粗行=控制位
     bold = {w._group_letters(g) for i, g in enumerate(w._ti_groups)
             if w.ti_table.verticalHeaderItem(i).font().bold()}

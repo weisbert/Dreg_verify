@@ -580,7 +580,8 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.ti_table, 1)
 
         hint = QtWidgets.QLabel(
-            "行表头=字母(粗体=控制/选择位，决定逻辑分支、测试穷举其 0/1 组合)，详见上方『输入信号』表。"
+            "行表头=输入信号名(粗体=控制/选择位，决定逻辑分支、测试穷举其 0/1 组合)；"
+            "信号对应表达式里哪个字母(A/B/C…)看行表头悬停提示或上方『输入信号』表。"
             "auto_out 行=程序按表达式算的值(只读参考)；期望 行=designer 手填、.sv 断言用它对比"
             "(未填→生成时 auto_out 兜底；绿=与 auto_out 一致，红=不一致=表达式可能有 bug)。"
             "负向列(琥珀)=故意填错的自检用例。编辑(含手填期望)自动存盘并在生成/预览的 .sv 里生效。")
@@ -1782,11 +1783,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @classmethod
     def _vheader_short(cls, g):
-        """精简行表头(GUI 真值表用)：只留字母(+控制标记)；信号全名/角色/驱动在上方『输入信号』表。"""
-        ltr = cls._group_letters(g)
-        if not ltr:
-            return g.get("label", g["base"])
-        return "%s (控制)" % ltr if g.get("is_control") else ltr
+        """真值表行表头(GUI 用)：信号名(带位宽)+控制标记（2026-06-03 用户拍板：直接用信号名，不用字母）。
+        字母→信号 的对照仍在上方『输入信号』表与 tooltip 里（对照表达式 A/B/C 时用）。"""
+        label = g.get("label", g["base"])
+        return "%s (控制)" % label if g.get("is_control") else label
 
     @staticmethod
     def _binding_meta(b):
@@ -1921,14 +1921,14 @@ class MainWindow(QtWidgets.QMainWindow):
             wsuf = "[%d:0]" % (out_w - 1) if out_w and out_w > 1 else ""
             auto_label = "auto_out%s" % wsuf
             exp_label = "期望(进.sv)%s" % wsuf
-            # 行表头精简为字母(+控制标记)；完整信号/角色/驱动在上方『输入信号』表
+            # 行表头=信号名(带位宽，控制位带标记+加粗)；字母↔信号对照在 tooltip 与上方『输入信号』表
             vlabels = [self._vheader_short(g) for g in self._ti_groups] + [auto_label, exp_label]
             self.ti_table.setVerticalHeaderLabels(vlabels)
             for i, g in enumerate(self._ti_groups):
                 hi = self.ti_table.verticalHeaderItem(i)
                 if hi:
-                    hi.setToolTip("输入 %s  =  %s\n(%s, %dbit%s)"
-                                  % (self._group_letters(g) or "?", g["label"], g["kind"], g["width"],
+                    hi.setToolTip("%s  =  表达式里的 %s\n(%s, %dbit%s)"
+                                  % (g["label"], self._group_letters(g) or "?", g["kind"], g["width"],
                                      ", 控制位/选择位" if g["is_control"] else ", 数据位"))
                     if g["is_control"]:          # 控制/选择位加粗，提示"看这几行的 0/1 组合"
                         f = hi.font(); f.setBold(True); hi.setFont(f)

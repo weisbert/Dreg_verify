@@ -508,10 +508,13 @@ def test_gui_cone_inputs_table_shows_excel_sources(tmp_path_factory):
     # 大写基名(修复前的显示)不再出现在字母列
     assert "INT_N" not in letter_by_signal.values()
     assert "EN_DIG_CLK_DIV4" not in letter_by_signal.values()
-    # 真值表行表头同样用来源坐标
+    # 真值表行表头 = 信号名(2026-06-03 用户拍板：不用字母/坐标)——cone 信号即叶子寄存器名；
+    # Excel 来源坐标(pll_n1.A)仍在『输入信号』表字母列与行表头 tooltip 里
     headers = [w.ti_table.verticalHeaderItem(i).text() for i in range(len(w._ti_groups))]
-    assert any(h.startswith("pll_n1.A") for h in headers)
-    assert not any(h.startswith("INT_N") for h in headers)
+    assert any(h.startswith("int_n") for h in headers)        # 叶子寄存器名(小写、带位宽)
+    assert not any(h.startswith("INT_N") for h in headers)    # 不是大写变量基名(修复前的显示)
+    tips = [w.ti_table.verticalHeaderItem(i).toolTip() for i in range(len(w._ti_groups))]
+    assert any("pll_n1.A" in t for t in tips)                 # 来源坐标在 tooltip
     # 头部带"已展开上游"标记，提示字母列为什么不是本行 A/B/C
     assert "已展开上游" in w.ti_header.text()
     # ── 非 cone 信号对照：显示不变、无展开标记 ──
