@@ -912,3 +912,20 @@ def test_gui_copy_shortcut_is_widget_scoped(qapp, wb, tmp_path_factory):
            if s.key() == QtGui.QKeySequence("Ctrl+D")]
     assert scs, "应在 ti_table 上挂 Ctrl+D 的 QShortcut"
     assert any(s.context() == QtCore.Qt.WidgetShortcut for s in scs)
+
+
+def test_gui_cascade_help_is_builtin_dialog(qapp, wb, tmp_path_factory):
+    """级联 ? → 程序内置帮助窗(QTextBrowser 渲染 .md)，不再调外部编辑器(如 VS Code)打开文件。"""
+    from PySide6 import QtWidgets
+    gui, w, _sig = _reserve_window(tmp_path_factory, "g_chelp")
+    w._open_cascade_doc()
+    dlg = w._cascade_doc_dlg
+    assert dlg is not None and dlg.isVisible()           # GUI 内弹窗，而不是 QDesktopServices.openUrl
+    view = dlg.findChild(QtWidgets.QTextBrowser)
+    assert view is not None
+    text = view.toPlainText()
+    assert "展开上游" in text and "force" in text         # 内容已渲染(完整 .md 或内置摘要兜底)
+    # 再点一次 → 复用同一个窗口(重读文件刷新内容)，不堆窗口
+    w._open_cascade_doc()
+    assert w._cascade_doc_dlg is dlg
+    dlg.close()

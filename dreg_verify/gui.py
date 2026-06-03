@@ -103,6 +103,25 @@ NEG_FG = QtGui.QColor("#9a5b00")        # 负向列头/标记文字色（深琥�
 HL_BG = QtGui.QColor("#dbe8ff")         # 当前选中测试列的高亮底色（淡蓝；列多横滚时不丢"我在哪列"）
 HL_NEG_BG = QtGui.QColor("#ffdca0")     # 负向列又被选中：琥珀+高亮叠加（更深的琥珀）
 
+# 「级联 ?」内置帮助的兜底内容：仓库根目录的 级联模式说明.md 缺失时显示(正常显示完整 .md)
+CASCADE_DOC_FALLBACK = """\
+# 级联模式 — 展开上游 vs force级联网
+
+> 完整图解在仓库根目录『级联模式说明.md』，当前没找到该文件，以下为内置摘要。
+
+当一个信号的输入引用了**另一行 logic 算出来的网**(级联)时，有两种驱动办法：
+
+| | **展开上游**(默认) | **force级联网** |
+|---|---|---|
+| 做法 | 把上游表达式代入，驱动它的源头寄存器/管脚 | 直接 force 那根 `_to_logic` 网 |
+| 需要 scan_rtl 前缀 | 不需要(纯 Excel) | 需要(该网在 sig_logic 模块内部) |
+| 验证粒度 | 上游+本行一起验(端到端) | 只验本行(隔离验证, fail 定位准) |
+| 没配前缀时 | 照常生成 | 该信号被跳过(给原因) |
+
+**建议**：日常用「展开上游」；某个信号 fail、想定位是上游还是本行的问题时，
+切「force级联网」对可疑信号单独出 .sv(需先跑 scan_rtl 拿前缀)。
+"""
+
 
 class FlowLayout(QtWidgets.QLayout):
     """按钮按可用宽度自动换行的布局（Qt 官方 FlowLayout 示例改写）。
@@ -332,7 +351,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cascade_combo = QtWidgets.QComboBox()
         self.cascade_combo.addItems(["展开上游(推荐)", "force级联网"])
         self.cascade_combo.setToolTip(
-            "输入引用『上游 logic 算出来的网』(级联)时怎么驱动，两种模式图解见 级联模式说明.md：\n\n"
+            "输入引用『上游 logic 算出来的网』(级联)时怎么驱动，点旁边 ? 看图解：\n\n"
             "  展开上游(默认)：把上游表达式代入，改为驱动它的源头寄存器/管脚。\n"
             "      优点=纯 Excel、不需要探针前缀；代价=上游逻辑跟本行一起验，上游有 bug 会连带本行 fail\n\n"
             "  force级联网：直接 force 那根 _to_logic 网。\n"
@@ -343,7 +362,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cascade_combo.currentIndexChanged.connect(self.on_cascade_mode_changed)
         cascade_help = QtWidgets.QPushButton("?")
         cascade_help.setFixedWidth(24)
-        cascade_help.setToolTip("打开『级联模式说明.md』(两种模式的图解与选择建议)")
+        cascade_help.setToolTip("级联模式帮助：两种模式的图解与选择建议(程序内置窗口)")
         cascade_help.clicked.connect(self._open_cascade_doc)
         for w in (QtWidgets.QLabel("覆盖度:"), self.coverage, self.cov_hint,
                   QtWidgets.QLabel("   上限"), self.max_tests,
@@ -479,13 +498,31 @@ class MainWindow(QtWidgets.QMainWindow):
                                 % self.cascade_combo.currentText())
 
     def _open_cascade_doc(self):
-        """打开仓库根目录的『级联模式说明.md』。"""
+        """级联 ? → 程序内置帮助窗(直接渲染『级联模式说明.md』)，不调外部编辑器。"""
+        if getattr(self, "_cascade_doc_dlg", None) is None:
+            dlg = QtWidgets.QDialog(self)
+            dlg.setWindowTitle("级联模式说明 — 展开上游 vs force级联网")
+            dlg.setWindowFlags(dlg.windowFlags() | QtCore.Qt.WindowMaximizeButtonHint)
+            lay = QtWidgets.QVBoxLayout(dlg)
+            self._cascade_doc_view = QtWidgets.QTextBrowser()
+            self._cascade_doc_view.setOpenExternalLinks(True)
+            lay.addWidget(self._cascade_doc_view)
+            bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+            bb.rejected.connect(dlg.close)
+            lay.addWidget(bb)
+            dlg.resize(900, 720)
+            self._cascade_doc_dlg = dlg
+        # 每次打开都重读文件：文档更新后无需重启 GUI；找不到文件则退化为内置摘要
         doc = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "级联模式说明.md")
-        if os.path.isfile(doc):
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(doc))
-        else:
-            QtWidgets.QMessageBox.information(self, "提示", "找不到 级联模式说明.md（应在仓库根目录）")
+        try:
+            with open(doc, encoding="utf-8") as f:
+                md = f.read()
+        except OSError:
+            md = CASCADE_DOC_FALLBACK
+        self._cascade_doc_view.setMarkdown(md)
+        dlg = self._cascade_doc_dlg
+        dlg.show(); dlg.raise_(); dlg.activateWindow()
 
     def on_coverage_changed(self, *args):
         """覆盖度/上限变化 → 即时重算当前信号的测试项：
