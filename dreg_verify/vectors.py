@@ -274,8 +274,13 @@ def input_groups(node, bindings):
     """把表达式引用到的输入按"物理信号(base)"分组——同一物理信号占多个表达式字母(如 A、B
     同为某寄存器位)时共享一列取值。返回有序 list，每项:
         {'base': 显示名(原大小写), 'letters': [字母...], 'rep': 代表字母,
+         'xl_letters': [Excel 来源坐标...](纯显示，见下),
          'width': 该组最大位宽, 'is_control': 是否控制位, 'kind': 'RO'/'RW'/...}
     顺序 = 各 base 在 collect_vars 里首次出现的顺序。
+
+    letters vs xl_letters：letters 是表达式变量名(求值/回写取值用，cone 展开后=叶子大写基名)；
+    xl_letters 是 Excel 来源坐标(GUI/报告字母列显示用)——普通信号两者相同(A/B/C…)，
+    cone 展开信号的 xl_letters 来自叶子 binding 的同名属性("上游行名.字母"，如 pll_n1.A)。
     """
     widths = {ltr: b.width for ltr, b in bindings.items()}
     used = [v for v in E.collect_vars(node) if v in widths]
@@ -303,11 +308,18 @@ def input_groups(node, bindings):
         b = bindings.get(rep)
         base = (b.base if b and b.base else rep)
         width = max(widths[l] for l in letters)
+        # Excel 来源坐标(纯显示)：binding 带 xl_letters(cone 叶子) → 用它；否则=变量字母本身
+        xl = []
+        for l in letters:
+            for src in (getattr(bindings.get(l), "xl_letters", None) or [l]):
+                if src not in xl:
+                    xl.append(src)
         groups.append({
             "base": base,                          # 查表/驱动用的纯基名(不带位宽，勿改)
             "key": gk,                             # 取值字典键 = 基名+切片(同名不同切片各自成组)
             "label": base + _slice_str(b, width),  # 显示用(带 [msb:lsb] 位宽，供 GUI/CSV)
             "letters": list(letters),
+            "xl_letters": xl,
             "rep": rep,
             "width": width,
             "is_control": any(l in control_set for l in letters),

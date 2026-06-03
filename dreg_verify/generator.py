@@ -534,8 +534,10 @@ def report(wb, opts):
         groups = V.input_groups(node, bindings)
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
-                 # letters = 该输入对应的表达式变量(A/B/C…)，让报告里的真值表能对上表达式
-                 "inputs": [{"label": g["label"], "letters": ",".join(g.get("letters") or [])}
+                 # letters = 该输入的 Excel 来源坐标(普通信号=A/B/C…；cone 展开叶子=
+                 # "上游行名.字母"如 pll_n1.A)，让报告里的真值表能对回表达式/Excel
+                 "inputs": [{"label": g["label"],
+                             "letters": ",".join(g.get("xl_letters") or g.get("letters") or [])}
                             for g in groups], "tests": []}
         unresolved_bases = set()
         for vec in vecs:

@@ -46,6 +46,9 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
 
     node:     复合 AST，所有内部信号引用已替换为其表达式（带 Part 切片）。
     bindings: {叶子大写基名: InputBinding}，全部为可驱动输入。
+              每个叶子带 xl_letters 属性 = Excel 来源坐标（根行直接输入=列字母 "E"；
+              上游行展开来的叶子="上游行名.字母" 如 "pll_n1.A"），供 GUI/报告显示溯源——
+              展开后表达式变量名是大写基名，没有这个就对不回 Excel 的 A/B/C 列了。
 
     循环引用 / 超深 / 找不到内部信号定义行 / 子表达式解析失败 → 抛 ConeError。
     """
@@ -79,7 +82,8 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
                 raise ConeError("内部信号 %r 在 logic 页找不到定义行" % b.base)
             child_node, child_leaves = expand(child, wb, resolver, _depth + 1, stack)
             for key, leaf in child_leaves.items():
-                leaves[key] = _wider(leaves.get(key), leaf)
+                # 子展开的叶子已带自己的 Excel 来源("行名.字母")，原样并入
+                _merge_leaf(leaves, key, leaf, getattr(leaf, "xl_letters", None) or [])
             # 输入单元格带切片(如 pll_n2_to_logic[30:23]) → 对子表达式取位段
             if b.slice_msb is not None:
                 mapping[letter] = E.Part(child_node, b.slice_msb, b.slice_lsb)
@@ -90,8 +94,10 @@ def expand(sig, wb, resolver, _depth=0, _stack=None):
             # self_base=root_base：叶子重解析时保持自引用语义
             # （否则自引用叶子会被误判级联 → force 被断言的输出网 → 原 d2a bug 在 cone 路径复活）
             key = b.base.upper()
-            leaves[key] = _wider(leaves.get(key),
-                                 _full_binding(key, b, resolver, self_base=root_base))
+            # Excel 来源坐标(纯显示)：根行直接输入 = 列字母本身；上游行的输入 = "行名.字母"
+            src = letter if _depth == 0 else "%s.%s" % (sig.out_base, letter)
+            _merge_leaf(leaves, key,
+                        _full_binding(key, b, resolver, self_base=root_base), [src])
             mapping[letter] = E.Var(key, b.slice_msb, b.slice_lsb)
 
     return _substitute(node, mapping), leaves
@@ -131,6 +137,21 @@ def _wider(old, new):
     if old is None:
         return new
     return new if new.width > old.width else old
+
+
+def _merge_leaf(leaves, key, new_binding, new_sources):
+    """并入一个叶子：binding 取更宽的；Excel 来源(xl_letters)去重累积。
+
+    去重很关键——pll_n 的 A/B/C/D 四个切片都展开 pll_n2，pll_n2 的四个切片又都展开
+    pll_n1，同一叶子(int_n)会被到达 16 次；来源按 "行名.字母" 字符串去重后仍只有 1 条。"""
+    old = leaves.get(key)
+    merged = _wider(old, new_binding)
+    sources = list(getattr(old, "xl_letters", None) or [])
+    for s in new_sources:
+        if s not in sources:
+            sources.append(s)
+    merged.xl_letters = sources
+    leaves[key] = merged
 
 
 def _substitute(node, mapping):

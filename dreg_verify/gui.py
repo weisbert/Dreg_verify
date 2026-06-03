@@ -212,6 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_node = None
         self._ti_bindings = {}
         self._ti_groups = []
+        self._ti_cone = False    # 当前信号是否经 cone 展开(输入=叶子寄存器而非本行 A/B/C 列)
         self._ti_rows = []
         self._ti_name_low = None
         self._ti_loaded_idx = None
@@ -434,7 +435,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_inputs.verticalHeader().setVisible(False)
         self.ti_inputs.horizontalHeader().setStretchLastSection(True)   # 驱动列吃剩余宽度
         self.ti_inputs.setToolTip("每个表达式变量对应的物理信号、是控制位还是数据位、以及怎么被驱动"
-                                  "(RO→force net；RW→RF_WRITE 地址+bit位)")
+                                  "(RO→force net；RW→RF_WRITE 地址+bit位)。\n"
+                                  "字母列 = Excel 来源坐标：本行输入 = 列字母(A/B/C…)；"
+                                  "展开上游(cone)后的叶子寄存器 = 『上游行名.字母』\n"
+                                  "(如 pll_n1.A = logic 页 pll_n1 那一行的 A 列)。")
         self._fit_inputs_height()         # 起始(无信号)也保持紧凑，不留大空白
         lay.addWidget(self.ti_inputs)
 
@@ -1002,14 +1006,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_ti_preview_signal(switch_tab=False)
 
     def _expand_sig(self, sig):
-        """解析 + 按需 cone 展开 + 输入分组。返回 (node, bindings, groups, err)；失败时 node=None。"""
+        """解析 + 按需 cone 展开 + 输入分组。
+        返回 (node, bindings, groups, cone_expanded, err)；失败时 node=None。"""
         try:
-            node, bindings, _expanded = generator.expand_signal(self.wb, self._resolver, sig)
+            node, bindings, expanded = generator.expand_signal(self.wb, self._resolver, sig)
         except E.ExprError as ex:
-            return None, None, None, "表达式解析失败: %s" % ex
+            return None, None, None, False, "表达式解析失败: %s" % ex
         except generator.cone.ConeError as ex:
-            return None, None, None, "cone 展开失败: %s" % ex
-        return node, bindings, V.input_groups(node, bindings), None
+            return None, None, None, False, "cone 展开失败: %s" % ex
+        return node, bindings, V.input_groups(node, bindings), expanded, None
 
     def _set_signal_negatives(self, sig, want_neg, which):
         """给某信号(重新)设置负向测试：保留全部正向测试，按 first/all 追加正向测试的"故意填错"
@@ -1017,7 +1022,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._resolver is None:
             return
         name_low = sig.out_name.lower()
-        node, bindings, groups, _err = self._expand_sig(sig)
+        node, bindings, groups, _cone, _err = self._expand_sig(sig)
         if node is None:
             return
         hand_edited = (name_low in self._edited and name_low not in self._neg_only)
@@ -1150,6 +1155,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _clear_test_items(self, header_text):
         self._ti_sig = None; self._ti_node = None
         self._ti_bindings = {}; self._ti_groups = []; self._ti_rows = []
+        self._ti_cone = False
         self._ti_name_low = None
         self._ti_hl_col = -1
         self.ti_header.setText(header_text)
@@ -1173,12 +1179,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_mux_test_items(sig)
             return
         name_low = sig.out_name.lower()
-        node, bindings, groups, err = self._expand_sig(sig)
+        node, bindings, groups, cone_expanded, err = self._expand_sig(sig)
         if node is None:
             self._clear_test_items("信号: %s — %s（无法生成测试项）" % (sig.out_name, err))
             return
         self._ti_sig = sig; self._ti_node = node
         self._ti_bindings = bindings; self._ti_groups = groups
+        self._ti_cone = cone_expanded     # 头部/输入表据此标注"已展开上游"
         self._ti_name_low = name_low
         if name_low in self._edited:
             self._ti_rows = self._edited[name_low]["rows"]
@@ -1331,11 +1338,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_ti_header(self, custom):
         tag = "   [已自定义★]" if custom else ""
+        # cone 标记：表达式里引用了内部信号/上游计算网 → 输入已展开成叶子寄存器，
+        # 『输入信号』表的字母列显示 Excel 来源坐标("上游行名.字母")而非本行 A/B/C
+        cone_tag = "   [已展开上游→输入为叶子寄存器]" if getattr(self, "_ti_cone", False) else ""
         # 表达式写成 "输出 = RHS" 等式；字母对照已下移到『输入信号』表，头部保持精简
         self.ti_header.setText(
-            "信号 %s     %s = %s     用例 %d 条%s"
+            "信号 %s     %s = %s     用例 %d 条%s%s"
             % (self._ti_sig.out_name, self._ti_sig.out_base or "out", self._ti_sig.expr,
-               len(self._ti_rows), tag))
+               len(self._ti_rows), tag, cone_tag))
 
     def _ti_mark_customized(self):
         if not self._ti_sig:
@@ -1383,8 +1393,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _group_letters(g):
-        """该输入组对应的表达式变量字母(可能多个，如同一物理信号占 A、B 两个字母)。"""
-        return ",".join(g.get("letters") or [])
+        """该输入组的 Excel 来源坐标(可能多个，如同一物理信号占 A、B 两个字母)。
+        普通信号 = 表达式字母(A/B/C…)；cone 展开信号 = 叶子来源("上游行名.字母"，如 pll_n1.A)。"""
+        return ",".join(g.get("xl_letters") or g.get("letters") or [])
 
     @classmethod
     def _vheader_label(cls, g):
@@ -1463,7 +1474,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for i, g in enumerate(self._ti_groups):
                 hi = self.ti_table.verticalHeaderItem(i)
                 if hi:
-                    hi.setToolTip("表达式变量 %s  =  %s\n(%s, %dbit%s)"
+                    hi.setToolTip("输入 %s  =  %s\n(%s, %dbit%s)"
                                   % (self._group_letters(g) or "?", g["label"], g["kind"], g["width"],
                                      ", 控制位/选择位" if g["is_control"] else ", 数据位"))
                     if g["is_control"]:          # 控制/选择位加粗，提示"看这几行的 0/1 组合"
@@ -1877,7 +1888,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ed:
                 continue
             sig, rows = ed["sig"], ed["rows"]
-            node, bindings, groups, _err = self._expand_sig(sig)
+            node, bindings, groups, _cone, _err = self._expand_sig(sig)
             if node is None:
                 continue
             vecs = self._rows_to_vectors(node, bindings, groups, sig.out_width, rows)

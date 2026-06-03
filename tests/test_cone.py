@@ -67,6 +67,55 @@ def test_expand_pll_chain_leaves(wb, resolver):
     assert bindings["D_XO_FREQ_SEL"].address == 0xC
 
 
+def test_cone_leaves_carry_excel_sources(wb, resolver):
+    """⭐cone 展开后的字母溯源(2026-06-03 用户报告的显示 bug)：
+
+    修复前 GUI『输入信号』表/报告的字母列显示大写基名(INT_N)——与信号列重复且对不回 Excel。
+    修复后叶子带 xl_letters = Excel 来源坐标：
+      根行(pll_n)的直接输入 → 列字母本身("E")
+      上游行展开来的叶子   → "上游行名.字母"("pll_n1.A")"""
+    sig = next(s for s in wb.logic if s.out_base == "pll_n")
+    node, bindings = cone.expand(sig, wb, resolver)
+    groups = V.input_groups(node, bindings)
+    by_base = {g["base"].lower(): g for g in groups}
+    # 根行直接输入：en_dig_clk_div4 = pll_n 行的 E 列
+    assert by_base["en_dig_clk_div4"]["xl_letters"] == ["E"]
+    # 上游行的叶子："行名.字母"
+    assert by_base["en_dig_clk_div2"]["xl_letters"] == ["pll_n2.E"]
+    assert by_base["int_n"]["xl_letters"] == ["pll_n1.A"]
+    assert by_base["frac_n_msb"]["xl_letters"] == ["pll_n1.B"]
+    assert by_base["d_xo_freq_sel"]["xl_letters"] == ["pll_n1.E"]
+    # 同一寄存器的两个切片(frac_n_lsb[15:1]+[0]) → 来源累积成 C、D 两条
+    assert by_base["frac_n_lsb"]["xl_letters"] == ["pll_n1.C", "pll_n1.D"]
+    # 多路径不爆炸：pll_n 的 A/B/C/D ×  pll_n2 的 A/B/C/D 共 16 条路径到达 int_n，
+    # 但来源坐标只有 1 条(去重)
+    assert len(by_base["int_n"]["xl_letters"]) == 1
+    # letters(表达式变量名/求值用)保持叶子基名不变——求值/驱动路径不受显示字段影响
+    assert by_base["int_n"]["letters"] == ["INT_N"]
+
+
+def test_non_cone_groups_xl_letters_equal_letters(wb, resolver):
+    """非 cone 信号：xl_letters = 表达式字母本身(A/B/C…)，显示与修复前完全一致。"""
+    for base in ("d_pfd_en_lnmode", "d_en_refbuf"):
+        sig = next(s for s in wb.logic if s.out_base == base)
+        node = E.parse(sig.expr)
+        bindings = resolver.resolve_signal_inputs(sig)
+        for g in V.input_groups(node, bindings):
+            assert g["xl_letters"] == g["letters"]
+
+
+def test_cone_report_letters_show_excel_sources(wb):
+    """HTML/CSV 报告真值表：cone 信号的字母列 = Excel 来源坐标，不再是大写基名。"""
+    rep = generator.report(wb, generator.GenOptions(signals=["pll_n"], top_output_only=False))
+    t = rep["tables"][0]
+    letters_by_label = {i["label"]: i["letters"] for i in t["inputs"]}
+    assert letters_by_label["int_n[8:0]"] == "pll_n1.A"
+    assert letters_by_label["en_dig_clk_div4"] == "E"
+    assert letters_by_label["frac_n_lsb[15:0]"] == "pll_n1.C,pll_n1.D"
+    # 大写基名(修复前的显示)不再出现
+    assert "INT_N" not in str(letters_by_label.values())
+
+
 def test_expand_expected_value_matches_logic(wb, resolver):
     """for_test T0 输入 → 期望值按 logic 表达式 = 0x0081FFFC（pll_n1 左移 2 位）。"""
     sig = next(s for s in wb.logic if s.out_base == "pll_n")
@@ -387,6 +436,39 @@ def test_gui_cone_signal_editor(tmp_path_factory):
     # 全选导出（全部范围）能产出 pll_n 的块
     res = generator.build(w.wb, w._opts(["pll_n"]))
     assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+
+
+def test_gui_cone_inputs_table_shows_excel_sources(tmp_path_factory):
+    """⭐GUI 显示回归(2026-06-03 用户报告)：cone 信号的『输入信号』表字母列 = Excel 来源坐标。
+
+    修复前：字母列显示大写基名(INT_N/EN_DIG_CLK_DIV4…)，与信号列重复、对不回 Excel；
+    修复后：根行直接输入=列字母(E)；上游行叶子="行名.字母"(pll_n1.A)；头部带展开标记。
+    非 cone 信号(d_pfd_en_lnmode)仍显示 A/B/C… 不变。"""
+    gui, w = _pll_window(tmp_path_factory, "gui_cone_sources")
+    # ── cone 信号 pll_n ──
+    sig = next(s for s in w.signals if s.out_base == "pll_n")
+    w._load_test_items(sig)
+    ti = w.ti_inputs
+    letter_by_signal = {ti.item(r, 1).text(): ti.item(r, 0).text() for r in range(ti.rowCount())}
+    assert letter_by_signal["int_n[8:0]"] == "pll_n1.A"
+    assert letter_by_signal["en_dig_clk_div4"] == "E"
+    assert letter_by_signal["en_dig_clk_div2"] == "pll_n2.E"
+    assert letter_by_signal["frac_n_lsb[15:0]"] == "pll_n1.C,pll_n1.D"
+    # 大写基名(修复前的显示)不再出现在字母列
+    assert "INT_N" not in letter_by_signal.values()
+    assert "EN_DIG_CLK_DIV4" not in letter_by_signal.values()
+    # 真值表行表头同样用来源坐标
+    headers = [w.ti_table.verticalHeaderItem(i).text() for i in range(len(w._ti_groups))]
+    assert any(h.startswith("pll_n1.A") for h in headers)
+    assert not any(h.startswith("INT_N") for h in headers)
+    # 头部带"已展开上游"标记，提示字母列为什么不是本行 A/B/C
+    assert "已展开上游" in w.ti_header.text()
+    # ── 非 cone 信号对照：显示不变、无展开标记 ──
+    sig2 = next(s for s in w.signals if s.out_base == "d_pfd_en_lnmode")
+    w._load_test_items(sig2)
+    letters = {w.ti_inputs.item(r, 0).text() for r in range(w.ti_inputs.rowCount())}
+    assert letters >= {"A", "B", "C"}
+    assert "已展开上游" not in w.ti_header.text()
 
 
 def test_gui_probe_prefix_flows_to_sv(tmp_path_factory):
