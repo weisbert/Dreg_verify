@@ -7,6 +7,7 @@ CLI 与（未来的）GUI 共用此后端。
 from . import cone
 from . import expr as E
 from . import excel_model
+from . import mux_gen
 from . import resolver as R
 from . import vectors as V
 from . import sv_writer as W
@@ -22,7 +23,7 @@ class GenOptions:
                  exclude=None, exclude_regex=None, comments=False, include_risky=False,
                  vector_overrides=None, probe_prefixes=None,
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
-                 cascade_mode="cone"):
+                 cascade_mode="cone", gen_mux=True):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -66,6 +67,9 @@ class GenOptions:
         #   "cone"(默认) = 展开上游表达式驱动其源头寄存器（纯 Excel，不需要探针前缀）
         #   "force"      = 直接 force 字面 _to_logic 网（隔离验证每行；需要 scan_rtl 前缀）
         self.cascade_mode = cascade_mode if cascade_mode in ("cone", "force") else "cone"
+        # mux 页验证（2026-06-03 第九轮）：默认开（用户拍板"logic+mux 都生成"）。
+        # Excel 没有 mux 页时自然为空，不影响纯 logic 表。
+        self.gen_mux = bool(gen_mux)
 
 
 def _norm_set(x):
@@ -123,6 +127,38 @@ def select_signals(wb, opts):
         if opts.types is not None and sig.suffix.lower() not in opts.types:
             continue
         out.append(sig)
+    return out
+
+
+def select_mux_groups(wb, opts):
+    """按 owner / 名称 / 正则 / 排除 过滤 mux 组（2026-06-03 第九轮）。
+
+    复用 select_signals 的过滤语义（MuxGroup 鸭子兼容 out_name/out_base/owner/suffix/top_output）。
+    注意 --type 过滤：MuxGroup.suffix 固定为 "mux"，用 --type mux 可只筛 mux 组。
+    """
+    import re
+    if not opts.gen_mux:
+        return []
+    rx = re.compile(opts.signal_regex, re.I) if opts.signal_regex else None
+    exrx = re.compile(opts.exclude_regex, re.I) if opts.exclude_regex else None
+    out = []
+    for grp in wb.mux:
+        if opts.owners is not None and _ws(grp.owner) not in opts.owners:
+            continue
+        if not _name_matches(grp, opts.signals):
+            continue
+        if rx and not (rx.search(grp.out_name) or rx.search(grp.out_base)):
+            continue
+        if opts.exclude is not None and (grp.out_name.lower() in opts.exclude
+                                         or grp.out_base.lower() in opts.exclude):
+            continue
+        if exrx and (exrx.search(grp.out_name) or exrx.search(grp.out_base)):
+            continue
+        if opts.top_output_only and not grp.is_top:
+            continue
+        if opts.types is not None and grp.suffix.lower() not in opts.types:
+            continue
+        out.append(grp)
     return out
 
 
@@ -300,6 +336,60 @@ def build(wb, opts):
         if stats["unresolved"]:
             n_unresolved_signals += 1
 
+    # ───────────── mux 页（2026-06-03 第九轮：mux 验证，与 logic 块同文件混排）─────────────
+    n_logic_blocks = len(blocks)
+    mux_selected = select_mux_groups(wb, opts)
+    for grp in mux_selected:
+        exp = mux_gen.expand_mux_group(wb, resolver, grp)
+        # 有解析问题 → 跳过并给原因（与 logic risky-skip 同理念：保证产物能 elaborate、跳过必有名字+原因）
+        if exp["issues"] and not opts.include_risky:
+            skipped.append((grp.out_name, grp.assert_id,
+                            [("mux", grp.ctrl_base, "; ".join(exp["issues"]))]))
+            continue
+
+        # 覆盖度映射（用户拍板）：精简=每case一值(x=0)；全面/穷举=每case×每x取值。
+        mux_mode = "min" if (opts.mode == "min" and not opts.exhaustive) else "max"
+        vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode, max_tests=opts.max_tests)
+        if not vecs:
+            skipped.append((grp.out_name, grp.assert_id,
+                            [("mux", grp.ctrl_base,
+                              "无法生成测试向量（控制信号没有可用的驱动路径）")]))
+            continue
+
+        # 反例（自检式==，错值=被选中寄存器值取反——用户拍板与 logic 一致）
+        if _neg_enabled_for(grp, opts):
+            vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
+                                   fixed_value=opts.neg_value)
+            for i, v in enumerate(vecs):
+                v.index = i
+        if opts.negative_vectors_only:
+            vecs = [v for v in vecs if v.is_negative]
+            if not vecs:
+                continue
+
+        # 全局 assert 标号唯一性：assert_mux<N>_T<n> 也纳入同一张查重表（与 logic 跨表查重）
+        aid = grp.assert_id
+        for v in vecs:
+            lbl = "%s_%s" % (aid, W.test_label(v))
+            if lbl in seen_labels:
+                dup_labels.append((lbl, seen_labels[lbl], grp.out_name))
+            else:
+                seen_labels[lbl] = grp.out_name
+
+        lines, stats = W.render_signal_block(grp, exp["bindings"], vecs, meta,
+                                             comments=opts.comments,
+                                             probe_prefix=probe_prefix_for(grp, opts),
+                                             owner_in_msg=opts.owner_in_msg,
+                                             counters=opts.sv_summary,
+                                             used_vars=exp["used_vars"])
+        stats["is_mux"] = True
+        stats["scan_path"] = meta.get("scan_path")
+        blocks.append((lines, stats))
+        n_total_vectors += stats["n_vectors"]
+        n_total_neg += stats["n_negative"]
+        if stats["unresolved"]:
+            n_unresolved_signals += 1
+
     summary = {
         "n_logic_rows": len(wb.logic),
         "n_selected": len(selected),
@@ -312,6 +402,10 @@ def build(wb, opts):
         "n_dup_labels": len(dup_labels),
         "tmm_fields": len(wb.tmm),
         "regmap_signals": len(wb.regmap),
+        # mux 统计（2026-06-03 第九轮）
+        "n_mux_groups": len(wb.mux),
+        "n_mux_selected": len(mux_selected),
+        "n_mux_generated": len(blocks) - n_logic_blocks,
     }
     return {"blocks": blocks, "selected": selected, "errors": errors,
             "skipped": skipped, "dup_labels": dup_labels, "summary": summary,

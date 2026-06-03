@@ -182,7 +182,7 @@ def _s(v):
 
 # ───────────────────────────── 单个信号块 ─────────────────────────────
 def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
-                        probe_prefix="", owner_in_msg=False, counters=False):
+                        probe_prefix="", owner_in_msg=False, counters=False, used_vars=None):
     """
     返回 (lines:list[str], stats:dict)。comments=True 时每信号加 1 行 // <名> 便于导航(默认零注释)。
     node: 已解析(或 cone 展开后)的表达式 AST；None 则从 sig.expr 解析。
@@ -191,9 +191,12 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
     owner_in_msg: True 时断言消息尾部追加 ", owner:<logic P列>"（前半段格式不变）。
     counters: True 时 fail 分支里加计数器++（须配合 render_file(summary=True) 包裹声明，
               否则产物里是未声明变量；generator.build 保证两者同开同关）。
+    used_vars: 显式给定输入键列表（mux 块用——其输入不是表达式变量，键为 "c:*"/"d:*"）；
+               None 则从表达式 AST 收集（logic 块，原行为不变）。
     """
     lines = []
-    used_vars = E.collect_vars(node if node is not None else E.parse(sig.expr))
+    if used_vars is None:
+        used_vars = E.collect_vars(node if node is not None else E.parse(sig.expr))
     aid = sig.assert_id or "X"
     # 探针名用 RTL 真实网名（ls 行 = K 列名 + "_ls" 后缀），不是 K 列原文
     rtl_name = getattr(sig, "rtl_name", sig.out_name)
