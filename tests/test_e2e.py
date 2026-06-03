@@ -147,11 +147,13 @@ def test_negative_cases(wb):
     res = generator.build(wb, opts)
     assert res["summary"]["n_negative"] == 1
     text = generator.render(res)
-    # 正例断言 == ；反例断言(干净日志风格，2026-06-02)反写成 != ——
-    # 按设计 mismatch 时报 info(NEG-OK)不产生 UVM_ERROR，输出真等于错值才报 error(NEG-BROKEN)
-    assert "assert (`ENV_RF.d_logic_bt_lp_reserve==" in text
-    assert "assert (`ENV_RF.d_logic_bt_lp_reserve!=" in text
-    assert "NEG-OK" in text and "NEG-BROKEN" in text
+    # 反例断言语法与正例一模一样(==，2026-06-03 用户更正)，仅期望值故意填错 →
+    # RTL 正确时必然 FAIL → uvm_report_error 正常触发(验证系统能看见报错)。
+    # 功能 N 条 + 负向 1 条 → == 断言数 = 向量总数；绝不出现 !=
+    assert text.count("assert (`ENV_RF.d_logic_bt_lp_reserve==") == res["summary"]["n_vectors"]
+    assert "!=" not in text
+    # 预期内 FAIL 标签在反例的 error 分支
+    assert "NEG-EXPECTED-FAIL" in text
 
 
 # ───────────── UVM 宏正确性（uvm_info 是宏，uvm_report_info 是函数不能加反引号）─────────────

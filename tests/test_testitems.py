@@ -152,10 +152,10 @@ def test_vector_overrides_negative_to_sv(wb):
                                 vector_overrides={"d_logic_bt_lp_reserve": [neg]})
     res = generator.build(wb, opts)
     text = "\n".join(res["blocks"][0][0])
-    # 反例(干净日志风格)：断言反写 != 故意填错的 0（正确应为 1）——
-    # 按设计 mismatch 时报 info(NEG-OK)，不污染 UVM_ERROR 计数
-    assert "!=1'b0" in text
-    assert "NEG-OK" in text and "NEG-BROKEN" in text
+    # 反例(自检式，2026-06-03)：断言语法与正例一模一样，== 故意填错的 0（正确应为 1）→
+    # 仿真时必然 FAIL → uvm_report_error 正常触发(消息带 NEG-EXPECTED-FAIL 标签)
+    assert "==1'b0" in text and "!=" not in text
+    assert "NEG-EXPECTED-FAIL" in text and "NEG-BROKEN" in text
     assert res["blocks"][0][1]["n_negative"] == 1
 
 

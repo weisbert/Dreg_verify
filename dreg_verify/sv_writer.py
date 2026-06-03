@@ -11,13 +11,17 @@ sv_writer.py — 把 logic 信号 + 测试向量渲染为 wr_rf_tc.sv 的过程�
         uvm_report_info("write assert rf_test",
           $sformatf("assert_%s: %s, sim out:0x%0h, you set:0x%0h", "<R>_T<n>", "<out>", `ENV_RF.<out>, <exp>), UVM_LOW);
       end else begin uvm_report_error(... 同上 ...); end
-  - 负向用例（干净日志风格，2026-06-02 用户拍板）：断言条件反写为 !=，
-      按设计 mismatch → info(NEG-OK 标签，不产生 UVM_ERROR)；
-      输出真等于故意填错值 → error(NEG-BROKEN 标签)。
-      这样 log 的 UVM_ERROR 总数 = 真问题数，回归脚本不会被反例污染。id 仍带 _NEG 后缀。
+  - 负向用例（自检式，2026-06-03 用户更正——替换之前的"干净日志 !="风格）：
+      断言语法与正例完全一样（== + 同样的 info/error 分支），仅期望值故意填错 →
+      RTL 正确时断言必然 FAIL → uvm_report_error 正常触发，验证系统能看见"正常的报错"
+      （这正是反例的目的：证明 checker/报错链路真的工作）。
+      该 error 是预期内的：id 带 _NEG 后缀 + 消息尾部 NEG-EXPECTED-FAIL 标签，与真问题区分。
+      若输出真等于错值（断言竟然 PASS）→ info + NEG-BROKEN 标签（反例没起作用）。
+      ⚠ 解读 log：UVM_ERROR 总数 = 真问题数 + 反例数（反例的 error 是故意触发的）。
   - 可选追加（前半段格式不变，新信息全部追加在消息尾部，纯英文）：
       owner_in_msg → 消息尾部加 ", owner:<P列>"（半夜看 log 直接知道是谁的信号）
-      counters     → fail 分支里加计数器++，配合 render_file(summary=True) 出末尾汇总
+      counters     → 计数器++：正例 fail(else 分支)→REAL FAIL；反例没起作用(begin 分支)→NEG broken；
+                     配合 render_file(summary=True) 出末尾汇总
 
 UVM 消息字符串集中在下方常量，按需调整以贴合你们的脚手架。
 """
@@ -39,13 +43,15 @@ DRIVE_REG_MSG = "input reg addr:%0h, reg data:%0h"
 ASSERT_MSG = "assert_%s: %s, sim out:0x%0h, you set:0x%0h"
 # ── 消息尾部追加段（前半段 ASSERT_MSG 保持与 VBA 格式一字不差，便于已有 log 解析脚本继续工作） ──
 OWNER_FMT = ", owner:%s"                                              # owner 追加段(作 %s 实参传入)
-NEG_OK_TAIL = ", NEG-OK(intentional wrong value, mismatch expected)"  # 反例按设计工作
-NEG_BROKEN_TAIL = ", NEG-BROKEN(output equals the wrong value)"       # 反例出真问题
+# 反例 error 分支(预期内的 FAIL，这个 error 是故意触发的、用来自检报错链路)
+NEG_EXPECTED_TAIL = ", NEG-EXPECTED-FAIL(wrong value set on purpose)"
+# 反例 info 分支(断言竟然 PASS = 输出等于错值 = 反例没起作用，没有 error 触发)
+NEG_BROKEN_TAIL = ", NEG-BROKEN(no error fired, output equals the wrong value)"
 # ── 末尾汇总（render_file(summary=True) 时把语句体包进命名块 + 计数器） ──
 SUMMARY_ID = "rf_test summary"        # uvm id for the end-of-test summary line
 SUMMARY_BLOCK = "dreg_rf_test"        # named begin/end block wrapping the whole body
 CNT_REAL_FAIL = "dreg_n_real_fail"    # counter: positive asserts that really failed
-CNT_NEG_BROKEN = "dreg_n_neg_broken"  # counter: negative asserts whose output == wrong value
+CNT_NEG_BROKEN = "dreg_n_neg_broken"  # counter: negative asserts that did NOT fail (no error fired)
 
 
 def _ascii(s):
@@ -220,26 +226,32 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
         lines.append("assert_%s:" % aid_str)
         lines.append("")
         if vec.is_negative:
-            # 反例（干净日志风格）：exp 是故意填错的值 → 断言反写 !=。
-            #   mismatch(条件为真) = 按设计工作 → info NEG-OK，不产生 UVM_ERROR；
-            #   输出真等于错值(条件为假) = 真问题(探针/RTL/checker) → error NEG-BROKEN。
+            # 反例（自检式，2026-06-03 用户更正）：断言语法与正例完全一样(==)，仅期望值故意填错。
+            #   RTL 正确 → 必然 mismatch → else 分支 uvm_report_error 正常触发（验证系统能
+            #   看见"正常的报错"，证明 checker/报错链路真的工作）。该 error 是预期内的，
+            #   消息尾部 NEG-EXPECTED-FAIL 标签与真问题区分。
+            #   断言竟然 PASS(begin 分支) = 输出等于错值 = 反例没起作用 → info + NEG-BROKEN + 计数器。
             if comments:
-                lines.append("// NEG: wrong value set on purpose; mismatch (NEG-OK) is the designed result")
-            cond, info_tail, err_tail = "!=", NEG_OK_TAIL, NEG_BROKEN_TAIL
-            err_cnt = CNT_NEG_BROKEN
+                lines.append("// NEG: wrong value set on purpose; this assert is EXPECTED to fail"
+                             " (self-test that the checker reports errors)")
+            info_tail, err_tail = NEG_BROKEN_TAIL, NEG_EXPECTED_TAIL
+            info_cnt, err_cnt = CNT_NEG_BROKEN, None   # 预期内的 FAIL 不计入 REAL FAIL
         else:
-            cond, info_tail, err_tail = "==", "", ""
-            err_cnt = CNT_REAL_FAIL
+            info_tail, err_tail = "", ""
+            info_cnt, err_cnt = None, CNT_REAL_FAIL
         msg_info = ('$sformatf("%s","%s","%s",%s, %s%s)'
                     % (ASSERT_MSG + info_tail + owner_fmt, aid_str, rtl_name, lhs, exp, owner_arg))
         msg_err = ('$sformatf("%s","%s","%s",%s, %s%s)'
                    % (ASSERT_MSG + err_tail + owner_fmt, aid_str, rtl_name, lhs, exp, owner_arg))
-        lines.append("assert (%s%s%s)begin" % (lhs, cond, exp))
+        # 正反例断言条件统一 ==（判断语法一模一样），仅期望值不同
+        lines.append("assert (%s==%s)begin" % (lhs, exp))
         lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_INFO, ASSERT_ID, msg_info))
+        if counters and info_cnt:
+            lines.append("%s%s++;" % (BODY_INDENT, info_cnt))
         lines.append("end")
         lines.append("else begin")
         lines.append('%s%s("%s",%s,UVM_LOW);' % (BODY_INDENT, UVM_ERROR, ASSERT_ID, msg_err))
-        if counters:
+        if counters and err_cnt:
             lines.append("%s%s++;" % (BODY_INDENT, err_cnt))
         lines.append("end")
         lines.append("")
@@ -302,7 +314,9 @@ def _wrap_with_summary(blocks, body, block_suffix=""):
         "%s%s = 0;" % (BODY_INDENT, CNT_NEG_BROKEN),
         "",
     ]
-    fmt = ("signals:%d asserts:%d (positive:%d, negative:%d), REAL FAIL:%%0d, NEG broken:%%0d"
+    # 反例(自检式)预期触发 error：提示读 log 的人 "UVM_ERROR 应有 = REAL FAIL + 反例数 - NEG broken"
+    fmt = ("signals:%d asserts:%d (positive:%d, negative:%d intentional FAILs), "
+           "REAL FAIL:%%0d, NEG broken(no error fired):%%0d"
            % (n_signals, n_asserts, n_pos, n_neg))
     tail = [
         "",

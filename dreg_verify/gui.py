@@ -1884,8 +1884,9 @@ class MainWindow(QtWidgets.QMainWindow):
         scope_combo.addItem("仅正向（正确用例）", "pos")
         scope_combo.addItem("仅负向（故意填错）", "neg")
         scope_combo.setToolTip("仅负向：只导出你标了'负向'的故意填错用例。\n"
-                               "反例断言按'干净日志'风格：按设计 mismatch 时报 info(NEG-OK)，"
-                               "只有输出真等于错值才报 UVM_ERROR(NEG-BROKEN)")
+                               "反例断言语法与正例完全一样(==)，期望值故意填错 → 仿真时必然 FAIL\n"
+                               "→ uvm_report_error 正常触发(预期内的报错，消息带 NEG-EXPECTED-FAIL 标签)，\n"
+                               "用来自检你的验证系统真的能看见报错")
         si = scope_combo.findData(last_scope)
         if si >= 0:
             scope_combo.setCurrentIndex(si)
@@ -1900,7 +1901,9 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(owner_chk)
         sum_chk = QtWidgets.QCheckBox("末尾测试汇总（断言总数/反例数/真 FAIL 数）")
         sum_chk.setToolTip("仿真 log 最后一行直接给出：信号数、断言总数、正/反例数、\n"
-                           "运行时统计的真 FAIL 数(REAL FAIL)和反例异常数(NEG broken)。\n"
+                           "运行时统计的真 FAIL 数(REAL FAIL)和没起作用的反例数(NEG broken)。\n"
+                           "注意：反例的 error 是故意触发的 → log 的 UVM_ERROR 总数应 =\n"
+                           "REAL FAIL + 反例数 - NEG broken。\n"
                            "实现上会把整个语句体包进一层命名 begin/end 块(声明计数变量)，\n"
                            "贴进任何 task/initial 体里都是合法 SV。")
         sum_chk.setChecked(last_summary)

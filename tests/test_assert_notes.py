@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""断言信息量增强（2026-06-02 用户拍板的四个决定）：
-  1. 反例干净日志风格：断言反写 !=，按设计 mismatch → info(NEG-OK)，输出==错值 → error(NEG-BROKEN)
+"""断言信息量增强（2026-06-02 拍板 + 2026-06-03 反例语义更正）：
+  1. 反例自检式（2026-06-03 更正）：断言语法与正例完全一样(==)、期望值故意填错 →
+     RTL 正确时必然 FAIL → uvm_report_error 正常触发（验证系统能看见报错，自检 checker）。
+     error 分支带 NEG-EXPECTED-FAIL 标签；竟然 PASS(输出==错值) → info + NEG-BROKEN 标签。
   2. 末尾计数器汇总：begin/end 命名块 + 计数变量 + 汇总行(信号/断言/正反例数 + 运行时真 FAIL)
-  3. log 标签分开正反例：_NEG 后缀 + NEG-OK/NEG-BROKEN 标签
+  3. log 标签分开正反例：_NEG 后缀 + NEG-EXPECTED-FAIL/NEG-BROKEN 标签
   4. owner 追加在消息尾部(前半段格式不变)，产物纯英文
 """
 
@@ -40,30 +42,35 @@ def _build_text(wb_, **kw):
     return generator.render(res, comments=opts.comments), res
 
 
-# ───────────── 反例：干净日志风格 ─────────────
-def test_neg_assert_uses_not_equal(wb):
-    """反例断言条件反写成 !=：mismatch(条件真)→info；正例仍是 ==。"""
+# ───────────── 反例：自检式（断言语法与正例一模一样） ─────────────
+def test_neg_assert_same_syntax_as_positive(wb):
+    """反例断言语法与正例完全一样(==)，仅期望值故意填错——产物里绝不出现 !=。
+    这样 RTL 正确时反例必然 FAIL → uvm_report_error 正常触发 → 验证系统能看见报错。"""
     text, res = _build_text(wb, signals=["d_logic_bt_lp_reserve"],
                             neg_signals=["d_logic_bt_lp_reserve"])
-    assert "assert (`ENV_RF.d_logic_bt_lp_reserve==" in text     # 正例 ==
-    assert "assert (`ENV_RF.d_logic_bt_lp_reserve!=" in text     # 反例 !=
-    # != 只出现在反例断言上（数量 = 负向数）
-    assert text.count("!=") == res["summary"]["n_negative"] == 1
+    # 所有断言(正例+反例)都用 ==
+    n_assert_lines = sum(1 for ln in text.splitlines() if ln.startswith("assert ("))
+    assert n_assert_lines == res["summary"]["n_vectors"]
+    assert text.count("assert (`ENV_RF.d_logic_bt_lp_reserve==") == n_assert_lines
+    assert "!=" not in text
+    # 反例断言的 error 分支结构与正例一致(else begin + uvm_report_error)
+    assert text.count("else begin") == n_assert_lines
 
 
 def test_neg_branch_severity(wb):
-    """NEG-OK 标签只跟 uvm_report_info(不产生 ERROR)；NEG-BROKEN 只跟 uvm_report_error。"""
+    """NEG-EXPECTED-FAIL 标签只跟 uvm_report_error(预期内的报错，系统看得见)；
+    NEG-BROKEN(竟然 PASS=反例没起作用)只跟 uvm_report_info。"""
     text, res = _build_text(wb, neg_all=True)
-    n_ok = n_broken = 0
+    n_exp = n_broken = 0
     for ln in text.splitlines():
-        if "NEG-OK" in ln:
-            assert W.UVM_INFO + "(" in ln and W.UVM_ERROR not in ln
-            n_ok += 1
-        if "NEG-BROKEN" in ln:
+        if "NEG-EXPECTED-FAIL" in ln:
             assert W.UVM_ERROR + "(" in ln
+            n_exp += 1
+        if "NEG-BROKEN" in ln:
+            assert W.UVM_INFO + "(" in ln and W.UVM_ERROR not in ln
             n_broken += 1
-    # 每条反例恰好一对 info(NEG-OK)/error(NEG-BROKEN) 分支
-    assert n_ok == n_broken == res["summary"]["n_negative"] >= 1
+    # 每条反例恰好一对 error(NEG-EXPECTED-FAIL)/info(NEG-BROKEN) 分支
+    assert n_exp == n_broken == res["summary"]["n_negative"] >= 1
 
 
 def test_neg_label_and_tags_greppable(wb):
@@ -72,7 +79,7 @@ def test_neg_label_and_tags_greppable(wb):
                           neg_signals=["d_logic_bt_lp_reserve"])
     assert "_NEG:" in text                                       # 标号行
     for ln in text.splitlines():
-        if "NEG-OK" in ln or "NEG-BROKEN" in ln:
+        if "NEG-EXPECTED-FAIL" in ln or "NEG-BROKEN" in ln:
             assert "_NEG" in ln                                  # 消息行的 id 也带
 
 
@@ -97,8 +104,8 @@ def test_owner_in_neg_msgs_too(wb):
     """反例消息也带 owner，顺序固定：NEG 标签在前、owner 在最后。"""
     text, _ = _build_text(wb, signals=["d_logic_bt_lp_reserve"],
                           neg_signals=["d_logic_bt_lp_reserve"], owner_in_msg=True)
-    assert "NEG-OK(intentional wrong value, mismatch expected), owner:%s" in text
-    assert "NEG-BROKEN(output equals the wrong value), owner:%s" in text
+    assert "NEG-EXPECTED-FAIL(wrong value set on purpose), owner:%s" in text
+    assert "NEG-BROKEN(no error fired, output equals the wrong value), owner:%s" in text
 
 
 def test_owner_off_by_default(wb):
@@ -187,12 +194,14 @@ def test_summary_wrap_structure(wb):
 
 
 def test_summary_static_counts(wb):
-    """汇总行静态数字 = 实际生成的信号数/断言数/正反例数；运行时计数器作实参。"""
+    """汇总行静态数字 = 实际生成的信号数/断言数/正反例数；运行时计数器作实参。
+    措辞说明反例的 FAIL 是故意的(intentional FAILs)。"""
     text, res = _build_text(wb, neg_all=True, sv_summary=True)
     s = res["summary"]
     n_sig, n_vec, n_neg = s["n_generated"], s["n_vectors"], s["n_negative"]
     # 静态数字写死在格式串里，运行时计数器保留 %0d 占位
-    expect = ("signals:%d asserts:%d (positive:%d, negative:%d), REAL FAIL:%%0d, NEG broken:%%0d"
+    expect = ("signals:%d asserts:%d (positive:%d, negative:%d intentional FAILs), "
+              "REAL FAIL:%%0d, NEG broken(no error fired):%%0d"
               % (n_sig, n_vec, n_vec - n_neg, n_neg))
     assert expect in text
     sum_line = next(ln for ln in text.splitlines() if "rf_test summary" in ln)
@@ -201,18 +210,21 @@ def test_summary_static_counts(wb):
 
 
 def test_summary_counter_placement(wb):
-    """计数器++只在 else(error)分支：正例→real_fail、反例→neg_broken；每断言恰好一个。"""
+    """计数器++位置：正例 fail(else/error 分支后)→real_fail++；
+    反例竟然 PASS(begin/info 分支后)→neg_broken++；反例的 error 分支无计数(预期内 FAIL 不算真问题)。"""
     text, res = _build_text(wb, neg_all=True, sv_summary=True)
     lines = text.splitlines()
     n_real = sum(1 for ln in lines if ln.strip() == "dreg_n_real_fail++;")
     n_negb = sum(1 for ln in lines if ln.strip() == "dreg_n_neg_broken++;")
     s = res["summary"]
-    assert n_real == s["n_vectors"] - s["n_negative"]
-    assert n_negb == s["n_negative"]
-    # ++ 必须紧跟在 uvm_report_error 行之后(在 fail 分支里)
+    assert n_real == s["n_vectors"] - s["n_negative"]    # 每条正例一个(else 分支)
+    assert n_negb == s["n_negative"]                     # 每条反例一个(begin 分支)
+    # real_fail++ 紧跟 uvm_report_error(正例 fail)；neg_broken++ 紧跟 uvm_report_info(反例竟然 PASS)
     for i, ln in enumerate(lines):
-        if ln.strip().endswith("++;"):
+        if ln.strip() == "dreg_n_real_fail++;":
             assert W.UVM_ERROR in lines[i - 1]
+        elif ln.strip() == "dreg_n_neg_broken++;":
+            assert W.UVM_INFO in lines[i - 1] and "NEG-BROKEN" in lines[i - 1]
 
 
 def test_summary_off_no_artifacts(wb):
@@ -299,13 +311,15 @@ def test_negative_vectors_only(wb):
     assert res["summary"]["n_generated"] == 1
     assert res["summary"]["n_vectors"] == res["summary"]["n_negative"] == 1
     text = generator.render(res, block_suffix="_neg")
-    # 没有任何正例断言(==)，只有反例断言(!=)
-    assert "assert (`ENV_RF.d_logic_bt_lp_reserve!=" in text
-    assert "==" not in "".join(ln for ln in text.splitlines() if ln.startswith("assert ("))
+    # 断言全是反例：语法与正例一样(==)，id 全带 _NEG
+    assert_ids = [ln for ln in text.splitlines()
+                  if ln.startswith("assert_") and ln.endswith(":")]
+    assert assert_ids and all(ln.endswith("_NEG:") for ln in assert_ids)
+    assert "assert (`ENV_RF.d_logic_bt_lp_reserve==" in text
     # T 编号保持"全部"导出时的位置(负向追加在正例后 → 编号不是 T0)
     assert "_T0_NEG:" not in text
-    # 汇总：positive:0、计数器只有 neg_broken 会被用到
-    assert "(positive:0, negative:1)" in text
+    # 汇总：positive:0、计数器只有 neg_broken 会被用到(在反例的 begin 分支)
+    assert "(positive:0, negative:1" in text
     assert "dreg_n_real_fail++;" not in text
     assert "dreg_n_neg_broken++;" in text
 
@@ -331,11 +345,14 @@ def test_cli_separate_neg_file_truly_negative_only(tmp_path):
               "--neg-file", "separate", "--sv-summary", "--owner-in-msg"])
     pos_text = out.read_text(encoding="utf-8")
     neg_text = (tmp_path / "wr_rf_tc_neg.sv").read_text(encoding="utf-8")
-    # 主文件：全正例，无负向，块名无后缀
-    assert "!=" not in pos_text and "begin : dreg_rf_test\n" in pos_text
-    # 负向文件：只有 != 断言，无正例 ==
-    assert "!=" in neg_text
-    assert "==" not in "".join(ln for ln in neg_text.splitlines() if ln.startswith("assert ("))
+    # 主文件：全正例(无 _NEG 断言)，块名无后缀
+    assert "_NEG:" not in pos_text and "begin : dreg_rf_test\n" in pos_text
+    # 负向文件：断言全是 _NEG(语法仍是 ==，与正例一模一样)
+    neg_ids = [ln for ln in neg_text.splitlines()
+               if ln.startswith("assert_") and ln.endswith(":")]
+    assert neg_ids and all(ln.endswith("_NEG:") for ln in neg_ids)
+    assert "!=" not in neg_text                          # 绝不出现 != (2026-06-03 更正)
+    assert "NEG-EXPECTED-FAIL" in neg_text               # error 分支带预期内标签
     # 计数器++有配套声明(包裹仍在)，块名 _neg 后缀
     assert "begin : dreg_rf_test_neg" in neg_text and "end : dreg_rf_test_neg" in neg_text
     assert "int unsigned dreg_n_neg_broken;" in neg_text
@@ -356,7 +373,7 @@ def test_cli_main_full_flow(tmp_path):
     text = out.read_text(encoding="utf-8")
     assert "owner:%s" in text
     assert "begin : dreg_rf_test" in text and "end : dreg_rf_test" in text
-    assert "NEG-OK" in text and "NEG-BROKEN" in text
+    assert "NEG-EXPECTED-FAIL" in text and "NEG-BROKEN" in text
     text.encode("ascii")
 
 
