@@ -193,6 +193,43 @@ def test_infer_from_dreg_env(monkeypatch, tmp_path):
     assert args2.top == "x.v" and args2.rtl_dirs == "rtl" and args2.nets == "n.txt"
 
 
+def test_collect_mux_nets(tmp_path):
+    """mux 环境核查（2026-06-03）：mux 页的输出探针 + 控制衔接网导出；无 mux 页时返回空。"""
+    import openpyxl
+    # 有 mux 页：G 列输出 + B 列控制网被导出；(reserved) 之类非信号名被过滤
+    path = tmp_path / "with_mux.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "mux"
+    ws.append(["MUX TABLE"] + [""] * 9)                          # row1 合并标题
+    ws.append(["mux_input", "mux_ctrl_sig1", "c2", "c3", "c4",
+               "case", "mux_out", "suffix", "top_out", "Notes"])  # row2 表头
+    ws.append(["d_x_t1_to_mux[3:0]", "d_logic_x_tsensor_to_mux[3:0]", "", "", "",
+               "4'b000x", "d_x_bias_i[3:0]", "", 1, ""])
+    ws.append(["d_x_t2_to_mux[3:0]", "d_logic_x_tsensor_to_mux[3:0]", "", "", "",
+               "4'b001x", "d_x_bias_i[3:0]", "", 1, ""])
+    ws.append(["(reserved)", "", "", "", "", "", "(reserved)", "", 0, ""])
+    ws.append(["d_y_g1_to_mux[4:0]", "d_logic_x_agc_to_mux[2:0]", "", "", "",
+               "3'b010", "d_y_rccal[4:0]", "", 1, ""])
+    wb.save(str(path))
+
+    nets = rtl_scan.collect_mux_nets(str(path))
+    assert "d_x_bias_i" in nets and "探针" in nets["d_x_bias_i"]          # G 列输出（去位宽）
+    assert "d_y_rccal" in nets
+    assert "d_logic_x_tsensor_to_mux" in nets                             # B 列控制衔接网
+    assert "d_logic_x_agc_to_mux" in nets
+    assert not any("reserved" in n for n in nets)                         # 非信号名被过滤
+    assert len(nets) == 4
+
+    # 无 mux 页：返回空 dict（纯 logic 表完全不受影响）
+    path2 = tmp_path / "no_mux.xlsx"
+    fixtures.build_workbook(str(path2))
+    assert rtl_scan.collect_mux_nets(str(path2)) == {}
+
+    # 文件不存在 / 读失败：也返回空（不炸两段式流程）
+    assert rtl_scan.collect_mux_nets(str(tmp_path / "ghost.xlsx")) == {}
+
+
 def test_scan_rtl_is_stdlib_only():
     """scan_rtl.py 必须保持零第三方依赖（要能直接拷到无 openpyxl 的服务器上跑）。"""
     import ast

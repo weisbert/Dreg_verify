@@ -62,6 +62,59 @@ def collect_excel_nets(wb):
     return nets
 
 
+def collect_mux_nets(excel_path):
+    """mux 页 → 需要在 ENV_RF 层级核对的网（2026-06-03 第九轮：mux 验证环境核查）。
+
+    直接读 Excel 的 mux 页（不依赖 excel_model 的 mux 支持——那是后续功能；
+    本函数只为"动手写 mux 功能前先验证 RTL 环境"服务）。导出两类：
+      ① G 列 mux 输出基名 —— assert 探针（designer .sv 实证顶层可探，扫描确认层级）
+      ② B 列控制信号网（_to_mux 名）—— logic→mux 衔接核对（测试不直接 force，仅核对存在）
+    数据输入（A 列）是 RW 寄存器走 RF_WRITE，无需网名核对。
+    控制信号的线控 force 输入（linectrl_*）已由 collect_excel_nets 的 logic 循环导出，不重复。
+
+    mux 页不存在 / 读取失败 → 返回空 dict，纯 logic 流程完全不受影响。
+    """
+    import re
+    try:
+        import openpyxl
+    except ImportError:
+        return {}
+    try:
+        wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
+    except Exception:  # noqa: BLE001
+        return {}
+    ws = None
+    for s in wb.sheetnames:
+        if "mux" in s.lower():
+            ws = wb[s]
+            break
+    if ws is None:
+        wb.close()
+        return {}
+
+    def base_name(v):
+        """去位宽尾巴；不是合法信号名（如 '(reserved)'）→ None。"""
+        s = re.sub(r"\[[^\]]*\]\s*$", "", str(v).strip())
+        return s if re.match(r"^[A-Za-z_]\w*$", s) else None
+
+    nets = {}
+    upto = min(ws.max_row or 0, 5000)
+    # mux 页表头在第 2 行（与 logic 页同套路），数据从第 3 行起
+    for row in ws.iter_rows(min_row=3, max_row=upto, values_only=True):
+        g = row[6] if len(row) > 6 else None     # G 列 = mux_out（被验证输出）
+        b = row[1] if len(row) > 1 else None     # B 列 = mux_ctrl_sig1（控制信号）
+        if g is not None and str(g).strip():
+            gb = base_name(g)
+            if gb:
+                nets.setdefault(gb, "mux 输出 %s 的 assert 探针" % str(g).strip())
+        if b is not None and str(b).strip():
+            bb = base_name(b)
+            if bb:
+                nets.setdefault(bb, "mux 控制网 %s（logic→mux 衔接核对）" % str(b).strip())
+    wb.close()
+    return nets
+
+
 def match_excel(wb, sigmap):
     """对照：Excel 需要的网 vs RTL 层级。返回 (prefixes, at_top, missing)，见 scan_rtl.match_nets。"""
     return match_nets(collect_excel_nets(wb), sigmap)

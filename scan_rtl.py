@@ -188,7 +188,18 @@ def _load_excel_nets(excel_path):
         sys.exit("⛔ --excel 需要 dreg_verify 包和 openpyxl（服务器上请改用 --nets 模式）：%s" % ex)
     print("装载 Excel: %s ..." % excel_path)
     wb = excel_model.load_workbook(excel_path)
-    return rtl_scan.collect_excel_nets(wb)
+    nets = rtl_scan.collect_excel_nets(wb)
+    # mux 页的网（2026-06-03：mux 验证环境核查）——mux 页不存在时为空，纯 logic 流程不受影响
+    mux_nets = rtl_scan.collect_mux_nets(excel_path)
+    added = 0
+    for name, why in mux_nets.items():
+        if name not in nets:
+            nets[name] = why
+            added += 1
+    if mux_nets:
+        print("✓ mux 页: 发现 %d 个相关网，新增导出 %d 个（输出探针 + 控制衔接网）"
+              % (len(mux_nets), added))
+    return nets
 
 
 def _infer_from_dreg_env(args):
