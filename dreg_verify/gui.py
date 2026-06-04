@@ -831,6 +831,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 if err and st in ("needs-prefix", "bare-probe", "unresolved", "parse-err",
                                   "false-green"):
                     tip = "%s\n\n%s" % (tip, err)        # 缺前缀/坏掉/裸名提示时把后端 error 全文带上
+                # 嵌套 mux 自动折叠：状态格加 ⚙ 标记 + tooltip 带全文，让 designer 一眼能复核
+                nnote = getattr(sig, "normalized_note", "")
+                if nnote:
+                    it.setText("%s ⚙" % it.text())
+                    tip = "%s\n\n⚙ %s" % (tip, nnote)
                 it.setToolTip(tip)
                 self.table.setItem(r, COL_STATUS, it)
                 self.table.setItem(r, COL_PREFIX, self._prefix_cell(sig, self._analysis.get(r, {})))

@@ -1154,3 +1154,144 @@ def test_empty_vector_reason_surfaces_dropped_reasons():
     assert "控制信号没有可用的驱动路径" not in msg
     # 无 dropped_reasons（控制来源 unknown / 无扫描路径）→ 通用兜底
     assert "控制信号没有可用的驱动路径" in generator._empty_vector_reason({})
+
+
+# ───────────── 嵌套 mux 自动归一化（2026-06-04，envdet5g 实证形态） ─────────────
+def _nested_envdet_wb(path):
+    """复刻真表 envdet5g cornercode（1607~1612 行）的两级嵌套块：
+       里层 case(r_code[2:0]){00x:lut0;01x:lut1;10x:lut2;11x:lut3} + 外层 case(sel){0:自己;1:local}。"""
+    return _build_mux_wb(
+        path,
+        tmm_fields=[
+            ("RCODE", "h3B", "d_r_code[2:0]", "2:0", "N", "RW"),
+            ("SEL", "h10", "d_cc_sel", "0", "N", "RW"),
+            ("LUT", "h20", "d_cc_lut0[1:0]", "1:0", "N", "RW"),
+            ("LUT", "h20", "d_cc_lut1[1:0]", "3:2", "N", "RW"),
+            ("LUT", "h20", "d_cc_lut2[1:0]", "5:4", "N", "RW"),
+            ("LUT", "h20", "d_cc_lut3[1:0]", "7:6", "N", "RW"),
+            ("LOCAL", "h21", "d_cc_local[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_cc_lut0_to_mux[1:0]", "d_r_code_to_mux[2:0]", "3'b00x", "d_cc[1:0]", 1),
+            _mrow("d_cc_lut1_to_mux[1:0]", "d_r_code_to_mux[2:0]", "3'b01x", "d_cc[1:0]", 1),
+            _mrow("d_cc_lut2_to_mux[1:0]", "d_r_code_to_mux[2:0]", "3'b10x", "d_cc[1:0]", 1),
+            _mrow("d_cc_lut3_to_mux[1:0]", "d_r_code_to_mux[2:0]", "3'b11x", "d_cc[1:0]", 1),
+            _mrow("d_cc_to_mux[1:0]", "d_cc_sel_to_mux", "1'b0", "d_cc[1:0]", 1),       # 自引用=里层结果
+            _mrow("d_cc_local_to_mux[1:0]", "d_cc_sel_to_mux", "1'b1", "d_cc[1:0]", 1),
+        ],
+    )
+
+
+def test_nested_mux_normalized_to_multi_ctrl(tmp_path):
+    """⭐两级嵌套块（不同行不同控制+自引用）自动折叠成多控制拼接 {sel, r_code}，6 行→5 行。"""
+    wb = _nested_envdet_wb(str(tmp_path / "nested.xlsx"))
+    grp = _grp(wb, "d_cc")
+    # 控制变成 [sel(高), r_code(低)]，4-bit 拼接
+    assert grp.is_multi_ctrl and [c.base for c in grp.ctrls] == ["d_cc_sel", "d_r_code"]
+    assert grp.ctrl_total_width == 4
+    assert not grp.ctrl_mismatch_rows                      # 折叠后清空，不再报"控制列不一致"
+    assert grp.normalized_note and "嵌套" in grp.normalized_note
+    # 自引用那行消失；5 行拼接 case 正确
+    pairs = [(c.case_raw, c.input_base) for c in grp.cases]
+    assert pairs == [
+        ("4'b1xxx", "d_cc_local"),       # sel=1 → local（r_code don't-care）
+        ("4'b000x", "d_cc_lut0"),        # sel=0 → r_code 选 lut
+        ("4'b001x", "d_cc_lut1"),
+        ("4'b010x", "d_cc_lut2"),
+        ("4'b011x", "d_cc_lut3"),
+    ], pairs
+    assert all(c.input_base != "d_cc" for c in grp.cases)  # 自引用已剔除
+
+
+def test_nested_mux_end_to_end_generates(tmp_path):
+    """折叠后走老的多控制拼接路径：解析通、向量生成、不空（救活原本的 ✗未解析）。"""
+    wb = _nested_envdet_wb(str(tmp_path / "nested2.xlsx"))
+    grp = _grp(wb, "d_cc")
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, grp)
+    assert not exp["issues"], exp["issues"]
+    vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode="min")
+    assert vecs and meta["dropped"] == 0, meta.get("dropped_reasons")
+    assert meta.get("multi_ctrl")
+    res = generator.build(wb, generator.GenOptions(types=["mux"], include_risky=True))
+    assert res["summary"]["n_mux_generated"] == 1
+    # 可见性：.sv 块顶有 ⚙ 注释，report 的可验证性 detail 也带 note（designer 复核用）
+    sv_lines = [ln for lines, st in res["blocks"] if st.get("is_mux") for ln in lines]
+    assert any("⚙" in ln and "嵌套" in ln for ln in sv_lines), "缺 .sv 折叠注释"
+    rep = generator.report(wb, generator.GenOptions(types=["mux"]))
+    vdet = next(v["detail"] for v in rep["verifiability"]["signals"] if v["type"] == "mux")
+    assert "⚙" in vdet and "嵌套" in vdet, vdet
+
+
+def test_nested_mux_no_self_ref_stays_errored(tmp_path):
+    """护栏：控制列不一致但【没有自引用】（真 typo 形态）→ 不折叠，维持 ctrl_mismatch 报错。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "noself.xlsx"),
+        tmm_fields=[
+            ("RCODE", "h3B", "d_r_code[2:0]", "2:0", "N", "RW"),
+            ("SEL", "h10", "d_xx_sel", "0", "N", "RW"),
+            ("D0", "h20", "d_xx_d0[1:0]", "1:0", "N", "RW"),
+            ("D1", "h21", "d_xx_d1[1:0]", "1:0", "N", "RW"),
+            ("D2", "h22", "d_xx_d2[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_xx_d0_to_mux[1:0]", "d_r_code_to_mux[2:0]", "3'b00x", "d_xx[1:0]", 1),
+            _mrow("d_xx_d1_to_mux[1:0]", "d_r_code_to_mux[2:0]", "3'b01x", "d_xx[1:0]", 1),
+            _mrow("d_xx_d2_to_mux[1:0]", "d_xx_sel_to_mux", "1'b1", "d_xx[1:0]", 1),   # 控制变了但无自引用
+        ],
+    )
+    grp = _grp(wb, "d_xx")
+    assert grp.ctrl_mismatch_rows                          # 没折叠，原报错保留
+    assert not grp.normalized_note
+    exp = mux_gen.expand_mux_group(wb, resolver.Resolver(wb), grp)
+    assert any("不一致" in i for i in exp["issues"]), exp["issues"]
+
+
+def test_nested_mux_three_regimes_not_normalized(tmp_path):
+    """护栏：三个控制 regime（>2 级）太复杂、不猜 → 不折叠，维持原报错。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "three.xlsx"),
+        tmm_fields=[
+            ("A", "h10", "d_a3", "0", "N", "RW"),
+            ("B", "h11", "d_b3", "0", "N", "RW"),
+            ("C", "h12", "d_c3", "0", "N", "RW"),
+            ("D0", "h20", "d_y3_d0[1:0]", "1:0", "N", "RW"),
+            ("D1", "h21", "d_y3_d1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_y3_d0_to_mux[1:0]", "d_a3_to_mux", "1'b0", "d_y3[1:0]", 1),
+            _mrow("d_y3_to_mux[1:0]", "d_b3_to_mux", "1'b1", "d_y3[1:0]", 1),       # 自引用
+            _mrow("d_y3_d1_to_mux[1:0]", "d_c3_to_mux", "1'b1", "d_y3[1:0]", 1),    # 第三个控制
+        ],
+    )
+    grp = _grp(wb, "d_y3")
+    assert not grp.normalized_note and grp.ctrl_mismatch_rows
+
+
+def test_nested_mux_bad_width_not_normalized(tmp_path):
+    """护栏：子块 case 位宽与其控制位宽对不上 → _case_bitstr 抛错 → 整组 bail（不部分折叠），
+    维持原 ctrl_mismatch 报错（绝不猜一个错结构出来）。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "badw.xlsx"),
+        tmm_fields=[
+            ("RCODE", "h3B", "d_r_code[2:0]", "2:0", "N", "RW"),
+            ("SEL", "h10", "d_bw_sel", "0", "N", "RW"),
+            ("D0", "h20", "d_bw_d0[1:0]", "1:0", "N", "RW"),
+            ("LOCAL", "h21", "d_bw_local[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_bw_d0_to_mux[1:0]", "d_r_code_to_mux[2:0]", "4'b0000", "d_bw[1:0]", 1),  # 4bit case vs 3bit 控制
+            _mrow("d_bw_to_mux[1:0]", "d_bw_sel_to_mux", "1'b0", "d_bw[1:0]", 1),             # 自引用
+            _mrow("d_bw_local_to_mux[1:0]", "d_bw_sel_to_mux", "1'b1", "d_bw[1:0]", 1),
+        ],
+    )
+    grp = _grp(wb, "d_bw")
+    assert not grp.normalized_note and grp.ctrl_mismatch_rows
+
+
+def test_normal_multi_ctrl_group_untouched(wl_wb):
+    """护栏：今天能跑的正常多控制拼接组（控制每行一致）完全不进归一化——note 空、结构原样。"""
+    g4 = _grp(wl_wb, "d_wl_rf_tx_rc_code")                 # 真·多控制拼接 {lut_en, bwctrl}
+    assert not g4.normalized_note
+    assert not g4.ctrl_mismatch_rows
+    assert [c.base for c in g4.ctrls] == ["d_wl_rf_rc_code_lut_en", "d_wl_rf_bwctrl"]

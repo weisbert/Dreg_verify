@@ -594,6 +594,10 @@ def build(wb, opts):
         if out_warn:
             lines = ["// ⚠ %s" % out_warn] + lines
             mux_warnings.append((grp.out_name, grp.assert_id, out_warn))
+        # 嵌套 mux 自动折叠：.sv 块顶留一句 ⚙ 注释，让看 .sv 的人也能复核合并是否正确
+        nnote = getattr(grp, "normalized_note", "")
+        if nnote:
+            lines = ["// ⚙ %s" % nnote] + lines
         stats["is_mux"] = True
         stats["scan_path"] = meta.get("scan_path")
         blocks.append((lines, stats))
@@ -903,19 +907,22 @@ def report(wb, opts):
 
         # 警告只在【真生成】时显示（被跳过的组用 error 列说明，警告无意义）
         row_warn = out_warn if not skip_reason else ""
+        # 嵌套 mux 自动折叠提示并进 warning/detail（让 --account/报告也能复核），但不改 verif 状态判定
+        nnote = getattr(grp, "normalized_note", "")
+        warn_full = "；".join(x for x in [("⚙ %s" % nnote) if nnote else "", row_warn] if x)
         summary.append(dict(base_row, n_tests=len(vecs),
                             n_neg=sum(1 for v in vecs if v.is_negative),
                             control=",".join(meta.get("control", []) if meta else []),
                             data=",".join(meta.get("data", []) if meta else []),
-                            unresolved="", error=skip_reason, warning=row_warn))
+                            unresolved="", error=skip_reason, warning=warn_full))
         # 可验证性行：issues/碰撞 → unresolved；top_out=0 裸名 → bare-probe（生成了，建议配前缀）；
-        # 其余 clean。（与 GUI analyze_mux_group 同口径）
+        # 其余 clean。（与 GUI analyze_mux_group 同口径；note 只进 detail，不改状态色）
         verif_status = "unresolved" if skip_reason else ("bare-probe" if row_warn else "clean")
         mux_verif_rows.append({
             "R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
             "type": "mux", "top": grp.top_output,
             "status": verif_status,
-            "detail": skip_reason or row_warn, "out_net": "`%s.%s" % (W.ENV, grp.rtl_name),
+            "detail": skip_reason or warn_full, "out_net": "`%s.%s" % (W.ENV, grp.rtl_name),
         })
         if skip_reason:
             continue

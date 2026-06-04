@@ -12,6 +12,7 @@ excel_model.py — 读取 Dreg 核心 Excel 的 logic / regmap / total_memory_ma
 """
 
 import re
+from collections import OrderedDict
 
 try:
     import openpyxl
@@ -158,6 +159,9 @@ class MuxGroup:
         self.cases = cases              # list[MuxCase]
         # 同组各行控制列与首行不一致的行号（read_mux 填；expand_mux_group 转 issue）
         self.ctrl_mismatch_rows = []
+        # 嵌套 mux 自动归一化提示（read_mux 把"一个块塞两级"折叠成多控制拼接时填，非空=已自动合并，
+        # 给 designer 复核用；空=没动过）。详见 _normalize_nested_mux。
+        self.normalized_note = ""
         # 与 LogicSignal 对齐的占位字段（mux 无 logic 后缀语义；expr 是只读属性=case 描述文本）
         self.suffix = "mux"
 
@@ -384,6 +388,112 @@ def _row_ctrls(row):
     return ctrls
 
 
+def _case_bitstr(case_raw, expected_width):
+    """case 字面量 → 定宽 '0'/'1'/'x' 位串（MSB 在左）。只认二进制；非二进制/位宽不符 → ValueError。
+
+    不依赖 expr（避免 excel_model→expr 依赖）；归一化拼接 case 用，遇到八/十/十六进制直接 ValueError
+    让归一化放弃（保守：不认就不动，维持原报错）。
+    """
+    m = re.match(r"\s*(\d+)?'[bB]([01xXzZ?_]+)\s*$", case_raw or "")
+    if not m:
+        raise ValueError("非二进制 case，不归一化: %r" % case_raw)
+    bits = m.group(2).replace("_", "")
+    width = int(m.group(1)) if m.group(1) else len(bits)
+    if len(bits) < width:
+        bits = "0" * (width - len(bits)) + bits      # 左补 0 到声明位宽（4'b01 = 0001）
+    elif len(bits) > width:
+        bits = bits[-width:]
+    for ch in "XZz?":
+        bits = bits.replace(ch, "x")
+    if width != expected_width:
+        raise ValueError("case 位宽 %d != 控制位宽 %d" % (width, expected_width))
+    return bits
+
+
+def _remake_case(src_case, bits, total_w):
+    """以 src_case 的数据输入造一个新 MuxCase，case_raw = 新拼接位串（数据/位宽切片全继承）。"""
+    return MuxCase(row=src_case.row, case_raw="%d'b%s" % (total_w, bits),
+                   input_raw=src_case.input_raw, input_base=src_case.input_base,
+                   input_width=src_case.input_width, input_msb=src_case.input_msb,
+                   input_lsb=src_case.input_lsb)
+
+
+def _normalize_nested_mux(grp, per_case_ctrls):
+    """把『一个输出块塞了两级 mux』(不同行用不同控制 + 一个自引用)折叠成多控制拼接。
+
+    designer 实证形态（envdet5g cornercode，2026-06-04 真表 1607~1612 行）：
+        里层  case(r_code[2:0]) {00x:lut0; 01x:lut1; 10x:lut2; 11x:lut3}
+        外层  case(sel)         {0: <里层结果=输出自己>; 1: local}
+      → 合并成 case({sel, r_code}) {1xxx:local; 000x:lut0; 001x:lut1; 010x:lut2; 011x:lut3}
+        （sel 高位、r_code 低位；外层非自引用 case 的里层位取 don't-care）。
+
+    ⭐只在【唯一安全形态】触发，否则返回 False 保持原样（→ 维持 ctrl_mismatch_rows 报错，绝不猜）：
+      ① 正好 2 个控制 regime（按控制基名分子块），且每个子块都是单控制；
+      ② 全组正好 1 个自引用（数据基名==输出基名），它所在子块=外层，另一个=里层；
+      ③ 各子块 case 都是二进制、位宽==其控制位宽（算得通）。
+    成功 → 改写 grp.ctrls/grp.cases、清 ctrl_mismatch_rows、挂 grp.normalized_note；返回 True。
+
+    安全性：这条路径只在【今天本就报"控制列不一致"错】的块上跑（read_mux 仅对 ctrl_mismatch
+    的组调它）——能跑通的正常表每个块控制一致、永不进来；折叠产物是工具早支持的多控制拼接，
+    resolver/mux_gen/generator/gui 全不改。
+    """
+    cases = grp.cases
+    if len(per_case_ctrls) != len(cases) or len(cases) < 3:
+        return False
+    # 按控制基名分子块（保序）；任一行非单控制 → 放弃
+    blocks = OrderedDict()
+    for case, ctrls in zip(cases, per_case_ctrls):
+        if len(ctrls) != 1:
+            return False
+        bkey = ctrls[0].base.lower()
+        if bkey not in blocks:
+            blocks[bkey] = {"ctrl": ctrls[0], "cases": []}
+        blocks[bkey]["cases"].append(case)
+    if len(blocks) != 2:
+        return False
+    # 找自引用：数据基名 == 输出基名；全组必须正好 1 个，且只落在一个子块
+    out_low = grp.out_base.lower()
+    self_keys = [bk for bk, b in blocks.items()
+                 if any(c.input_base.lower() == out_low for c in b["cases"])]
+    if len(self_keys) != 1:
+        return False
+    outer_key = self_keys[0]
+    inner_key = next(bk for bk in blocks if bk != outer_key)
+    outer, inner = blocks[outer_key], blocks[inner_key]
+    self_cases = [c for c in outer["cases"] if c.input_base.lower() == out_low]
+    if len(self_cases) != 1:
+        return False
+    self_case = self_cases[0]
+    outer_ctrl, inner_ctrl = outer["ctrl"], inner["ctrl"]
+    inner_w = inner_ctrl.width
+    total_w = outer_ctrl.width + inner_w
+    try:
+        outer_bits = {id(c): _case_bitstr(c.case_raw, outer_ctrl.width) for c in outer["cases"]}
+        inner_bits = {id(c): _case_bitstr(c.case_raw, inner_w) for c in inner["cases"]}
+    except ValueError:
+        return False                          # 非二进制/位宽不通：不猜，维持原报错
+    # 构造拼接 case：外层高位、里层低位
+    new_cases = []
+    for c in outer["cases"]:
+        if c is self_case:
+            continue
+        new_cases.append(_remake_case(c, outer_bits[id(c)] + "x" * inner_w, total_w))
+    self_hi = outer_bits[id(self_case)]
+    for c in inner["cases"]:
+        new_cases.append(_remake_case(c, self_hi + inner_bits[id(c)], total_w))
+    # 改写组：多控制 [外层(高,B), 里层(低,C)]
+    outer_ctrl.letter, inner_ctrl.letter = "B", "C"
+    grp.ctrls = [outer_ctrl, inner_ctrl]
+    grp.ctrl_raw, grp.ctrl_base, grp.ctrl_width = outer_ctrl.raw, outer_ctrl.base, outer_ctrl.width
+    grp.cases = new_cases
+    grp.ctrl_mismatch_rows = []
+    grp.normalized_note = (
+        "自动识别为嵌套 mux：外层 %s 选 {里层 %s 的结果, %s} → 已合并成多控制拼接 {%s,%s}（请核对）"
+        % (outer_ctrl.base, inner_ctrl.base, self_case.input_base,
+           outer_ctrl.base, inner_ctrl.base))
+    return True
+
+
 def read_mux(ws, header_row=2):
     """读 mux 页 → list[MuxGroup]。
 
@@ -403,6 +513,7 @@ def read_mux(ws, header_row=2):
     """
     groups = []
     by_base = {}        # G 基名(小写) -> MuxGroup（全局归并，非连续行也并入同一组）
+    rowctrls = {}       # G 基名(小写) -> [本行有效控制列]，与 grp.cases 一一对应（嵌套归一化用）
     for ri, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True),
                              start=header_row + 1):
         in_raw = _s(_col(row, "A"))
@@ -425,10 +536,12 @@ def read_mux(ws, header_row=2):
             # 同组各行控制列应与首行一致（基名比较）。续行控制列【全空】视为合法——继承首行控制
             # （Excel 合并单元格 / 控制只写组首行是 spec 表常见排版；read_only 模式下合并续行读到空）。
             # 只有续行【写了非空但不同】的控制信号才记 mismatch（expand 时转 issue，抓真错误）。
-            row_bases = [c.base.lower() for c in _row_ctrls(row)]
+            this_ctrls = _row_ctrls(row)
+            row_bases = [c.base.lower() for c in this_ctrls]
             if row_bases and row_bases != [c.base.lower() for c in grp.ctrls]:
                 grp.ctrl_mismatch_rows.append(ri)
             grp.cases.append(case)
+            rowctrls[key].append(this_ctrls or list(grp.ctrls))   # 空控制列继承首行
             continue
 
         # ── 新组 ──
@@ -448,7 +561,14 @@ def read_mux(ws, header_row=2):
             ctrls=ctrls,
         )
         by_base[key] = grp
+        rowctrls[key] = [list(ctrls)]
         groups.append(grp)
+
+    # 嵌套 mux 归一化：仅对【控制列不一致】的组试折叠（两级嵌套+单自引用 → 多控制拼接）；
+    # 不匹配则维持 ctrl_mismatch_rows 原报错。正常表每组控制一致，永不进这里。
+    for grp in groups:
+        if grp.ctrl_mismatch_rows:
+            _normalize_nested_mux(grp, rowctrls.get(grp.out_base.lower(), []))
 
     # 组号冲突兜底：N 列读丢/重复导致两组同号时，后者顺延到未用号（撞号=非法 SV 标签）
     seen_no = set()
