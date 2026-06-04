@@ -420,20 +420,21 @@ def _mini_mux_group(case_specs, input_width=4):
                                 owner="", top_output=1, cases=cases)
 
 
-def test_fix_A_value_collision_skipped(wb):
-    """[审查A] 互异值碰撞 → build 必须跳过(假绿防护)，且原因里写明。"""
+def test_fix_A_narrow_field_marker_method(wb):
+    """[审查A→点名法] 互异值装不下(原假绿防护) 不再跳过，改『点名法』生成（被测=标记/其余=0）。
+    窄位宽组从"跳过"变"真能验的测试"。"""
     # 1-bit 数据寄存器 × 3 个 case → 互异值装不下
     grp = _mini_mux_group([("4'b0000", "d_n1"), ("4'b0001", "d_n2"), ("4'b0010", "d_n3")],
                           input_width=1)
     values, collision = mux_gen.alloc_distinct_values(grp)
-    assert collision
-    # 经 build 流程：碰撞组必须落进 skipped（用真实 wb 验证消费路径——把窄位宽组注进 wb.mux）
+    assert collision                                   # 互异值确实装不下
+    # 经 build 流程：碰撞组改点名法生成，不再落进 skipped
     import copy
     wb2 = copy.copy(wb)
     wb2.mux = [grp]
     res = generator.build(wb2, generator.GenOptions(types=["mux"], include_risky=True))
-    assert res["summary"]["n_mux_generated"] == 0
-    assert any("假绿" in str(reasons) for _n, _a, reasons in res["skipped"])
+    assert res["summary"]["n_mux_generated"] == 1      # 点名法 → 生成
+    assert not any("假绿" in str(reasons) for _n, _a, reasons in res["skipped"])
 
 
 def test_fix_B_effective_width_allocation(wb):

@@ -536,14 +536,14 @@ def test_wl_analyze_force_net_blocker_is_blocking(tmp_path):
         assert a["blocking"] is True
 
 
-def test_analyze_mux_group_value_collision_is_false_green(tmp_path):
-    """假绿(数据字段太窄、互异值装不下) → analyze_mux_group 状态='false-green'（GUI 琥珀），
-    不再混进 'unresolved'（红✗）——区分『能解析但字段窄(保护性跳过)』与『真没解析(故障)』。"""
+def test_narrow_field_mux_uses_marker_method(tmp_path):
+    """字段太窄(3 个 1-bit 数据，互异值装不下)：不再判假绿跳过，改『点名法』生成——
+    每 case 一条：被测数据寄存器=标记(非0)、其余=0，期望=标记 → routing 全验，任何位宽都成立。"""
     wb = _build_mux_wb(
         str(tmp_path / "fg.xlsx"),
         tmm_fields=[
             ("CTRL", "h10", "d_ctrl[1:0]", "1:0", "N", "RW"),
-            ("N0", "h20", "d_n0", "0", "N", "RW"),     # 三个 1-bit 数据字段：3 个互异值装不下 → 假绿
+            ("N0", "h20", "d_n0", "0", "N", "RW"),     # 三个 1-bit 数据字段：3 个互异值装不下
             ("N1", "h21", "d_n1", "0", "N", "RW"),
             ("N2", "h22", "d_n2", "0", "N", "RW"),
         ],
@@ -554,9 +554,20 @@ def test_analyze_mux_group_value_collision_is_false_green(tmp_path):
         ],
     )
     r = resolver.Resolver(wb)
-    a = generator.analyze_mux_group(r, wb, _grp(wb, "d_fgout"))
-    assert a["status"] == "false-green", (a["status"], a.get("error"))   # 不是 unresolved
-    assert "假绿" in (a["error"] or "")
+    grp = _grp(wb, "d_fgout")
+    exp = mux_gen.expand_mux_group(wb, r, grp)
+    vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode="min")
+    assert meta["marker_method"] is True                 # 切到点名法
+    assert meta["value_collision"] is False              # 不再算假绿
+    assert len(vecs) == 3                                 # 每 case 一条
+    dks = exp["data_keys"]
+    for ci, v in enumerate(vecs):                         # 被测=标记非0，其余=0，期望=标记
+        assert v.exp_value != 0
+        for j, dk in enumerate(dks):
+            assert (v.assignments[dk] != 0) == (j == ci)
+    # 不再 false-green：analyze 能生成（输出 top_out=0 → 裸名探针/或需前缀）
+    a = generator.analyze_mux_group(r, wb, grp)
+    assert a["status"] in ("clean", "needs-prefix", "bare-probe"), (a["status"], a.get("error"))
 
 
 def test_wl_negative_vectors(wl_wb):

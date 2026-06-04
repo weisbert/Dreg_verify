@@ -177,6 +177,25 @@ def alloc_inverted_values(group, base_values, bindings=None, data_keys=None):
                        lambda i, w, m: (~base_values[i]) & m)
 
 
+def _marker_values(group, target_ci, bindings, data_keys, mark="ones"):
+    """『点名法』一条 case 的数据赋值：被测 case 的数据寄存器=标记值(非0)，其余全=0(对照)。
+
+    互异值装不下时(N 路 > 字段能放的互异值数 = 假绿)的破法：不再要求"全部 N 路同时互异"，
+    改成"一次只点名测一路"——被测那路给标记、其余全给对照(0)。**只需 2 个互异值(标记≠0)，
+    任何位宽都成立**。routing 故障(case 错接到别的源)→ 输出从标记变 0 → 必 FAIL；标记非 0 →
+    输出坏死成 0 也抓到。逐 case 各一条，所有"单路选错"全覆盖，与互异值法故障覆盖等价。
+    mark='ones' → 标记=有效位宽全 1（顺带验数据通路各位 stuck-at-0）；'one' → 标记=1（第二轮换值）。
+    """
+    vals = []
+    for i, case in enumerate(group.cases):
+        if i != target_ci:
+            vals.append(0)
+            continue
+        m = E.mask(_effective_width(case, i, bindings, data_keys))
+        vals.append(m if mark == "ones" else (1 & m))
+    return vals
+
+
 # ───────────────────────────── 解析一个 mux 组 ─────────────────────────────
 def _resolve_ctrl_driver(wb, resolver, ctrl, idx, key_prefix, _stack, _depth, issues):
     """解析一个控制信号的驱动器（三来源分发）。
@@ -751,7 +770,9 @@ def _make_general_vectors(group, expansion, mode, max_tests):
 
     # 互异值（与 LPBT 同一套分配器：有效位宽、避 0、碰撞检测）
     data_values, collision = alloc_distinct_values(group, bindings, data_keys)
-    if mode == "min":
+    # 互异值装不下(假绿) → 改"点名法"逐 case 生成(被测=标记/其余=0)，任何位宽都成立、不再跳过
+    marker_method = collision
+    if mode == "min" or marker_method:
         inv_values, inv_collision = None, False
     else:
         inv_values, inv_collision = alloc_inverted_values(group, data_values, bindings, data_keys)
@@ -766,10 +787,13 @@ def _make_general_vectors(group, expansion, mode, max_tests):
         "missing_vars": [], "total_bits": sum(widths),
         "truncated": False, "dropped": 0, "exhaustive": mode != "min",
         "scan_path": "direct",          # 通用形态：直接驱动控制（不是 line/local 双路径）
-        "value_collision": collision or inv_collision,
-        "case_map": [(group.cases[i].case_raw, group.cases[i].input_base, data_values[i])
+        "value_collision": False if marker_method else (collision or inv_collision),
+        "marker_method": marker_method,  # True=字段太窄、改点名法生成（替代假绿跳过）
+        "case_map": [(group.cases[i].case_raw, group.cases[i].input_base,
+                      (E.mask(_effective_width(group.cases[i], i, bindings, data_keys))
+                       if marker_method else data_values[i]))
                      for i in range(len(group.cases))],
-        "data_rounds": 1 if mode == "min" else 2,
+        "data_rounds": (1 if mode == "min" else 2),
         "other_path_scan": None,
         "multi_ctrl": len(drivers) > 1,
         "ctrl_sources": [d["source"] for d in drivers],
@@ -840,26 +864,34 @@ def _make_general_vectors(group, expansion, mode, max_tests):
         ctrl_values = E.expand_case_values(cval, cw, dc)
         if mode == "min":
             ctrl_values = ctrl_values[:1]            # 精简：don't-care 位取 0（用户拍板）
+        vals = (_marker_values(group, ci, bindings, data_keys, "ones")
+                if marker_method else data_values)
+        dsc = "点名法:被测=标记/其余=0" if marker_method else src_desc
         ok = True
         for cv in ctrl_values:
-            ok = emit(ci, cv, data_values,
+            ok = emit(ci, cv, vals,
                       "case %s -> %s (ctrl=0x%X, %s)"
-                      % (group.cases[ci].case_raw, group.cases[ci].input_base, cv, src_desc))
+                      % (group.cases[ci].case_raw, group.cases[ci].input_base, cv, dsc))
             if not ok:
                 break
         if not ok:
             break
 
-    # ── ② 反码数据轮（max/exhaustive）：每 case 再测一次，数据寄存器写反码互异值 ──
-    if inv_values is not None and not state["capped"]:
+    # ── ② 第二轮（max/exhaustive）：反码数据轮；点名法则换第二个标记值(位翻转覆盖) ──
+    second = ("marker" if (marker_method and mode != "min")
+              else ("inv" if inv_values is not None else None))
+    if second and not state["capped"]:
         for ci, pc in enumerate(parsed):
             if pc is None:
                 continue
             cval, cw, dc = pc
             cv = E.expand_case_values(cval, cw, dc)[0]
-            if not emit(ci, cv, inv_values,
-                        "case %s -> %s (ctrl=0x%X, inverted data)"
-                        % (group.cases[ci].case_raw, group.cases[ci].input_base, cv)):
+            vals = (_marker_values(group, ci, bindings, data_keys, "one")
+                    if second == "marker" else inv_values)
+            tag = "点名法第二轮:标记=1" if second == "marker" else "inverted data"
+            if not emit(ci, cv, vals,
+                        "case %s -> %s (ctrl=0x%X, %s)"
+                        % (group.cases[ci].case_raw, group.cases[ci].input_base, cv, tag)):
                 break
 
     meta["truncated"] = meta["truncated"] or state["capped"]
