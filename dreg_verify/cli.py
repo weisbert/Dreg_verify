@@ -49,6 +49,9 @@ def build_argparser():
                    help="导出'给人看'的测试用例表格(按扩展名: .csv 用 Excel 打开 / .html 网页)。"
                         "可与 --out 同时用(同时出 .sv 和报告)；只传 --report 则只出报告")
     p.add_argument("--list", action="store_true", help="只列出可生成信号清单，不生成")
+    p.add_argument("--account", action="store_true",
+                   help="完整账目：列出每个 logic 信号 + mux 组的去向（生成/跳过原因/过滤原因），"
+                        "一个不漏——核对'有没有谁被悄悄漏掉'")
     p.add_argument("--comments", action="store_true",
                    help="在 .sv 里加少量导航注释(文件头 + 每信号 1 行 // 名)；默认零注释(对齐真实模板)")
     p.add_argument("--owner-in-msg", action="store_true",
@@ -163,6 +166,30 @@ def cmd_list(wb, opts):
         print("%-5s %-40s %-12s %-12s %-3s %s"
               % (g.assert_id, g.out_name[:40], (g.owner or "")[:12],
                  "mux", g.top_output, expr_text[:50]))
+
+
+def cmd_account(wb, opts):
+    """完整账目：跑一遍 build，把每个 logic 信号 + mux 组的去向列全——一个不漏。"""
+    res = generator.build(wb, opts)
+    items = generator.compose_account(wb, opts, res)
+    # 按去向归类统计
+    from collections import OrderedDict
+    by_disp = OrderedDict()
+    for it in items:
+        by_disp.setdefault(it["disposition"], []).append(it)
+    print("完整账目：%d 个 logic 信号 + %d 个 mux 组，逐个去向（一个不漏）"
+          % (len(wb.logic), len(wb.mux)))
+    print("  小结：" + " | ".join("%s %d" % (d, len(v)) for d, v in by_disp.items()))
+    print("-" * 100)
+    print("%-7s %-10s %-44s %s" % ("kind", "去向", "名字(R)", "原因/说明"))
+    print("-" * 100)
+    for it in items:
+        tag = "%s(%s)" % (it["name"][:38], it["aid"])
+        print("%-7s %-10s %-44s %s"
+              % (it["kind"], it["disposition"], tag, (it["reason"] or "")[:60]))
+    print("-" * 100)
+    print("提示：'过滤'=被筛选条件/默认 top_output 滤掉（--include-internal 纳入内部节点）；"
+          "'跳过'=解析问题/缺前缀（原因见上，--include-risky 可强制）；'生成(裸名探针)'=已进 .sv。")
 
 
 def cmd_diagnose(wb, opts):
@@ -737,6 +764,10 @@ def main(argv=None):
         cmd_list(wb, opts)
         return 0
 
+    if args.account:
+        cmd_account(wb, opts)
+        return 0
+
     if args.diagnose:
         cmd_diagnose(wb, opts)
         return 0
@@ -848,6 +879,16 @@ def _report(res, out):
             print("    ...(共 %d 个)" % len(res["mux_warnings"]))
         print("    这些已经生成进 .sv；若仿真 elaboration 报 CUVUNF 说明它们埋在子模块，"
               "跑 scan_rtl 配 --probe-prefix-file 后重生成即可。")
+    if s.get("n_filtered_internal"):
+        # 唯一'默认静默减少'的一类——把名字也亮出来，别让它无声无息
+        fi = res.get("filtered_internal", [])
+        print("  ℹ %d 个 logic 内部节点(top_output=0)默认未生成（不是 RTL 端口、ENV_RF 探不到）："
+              % s["n_filtered_internal"])
+        for sig in fi[:30]:
+            print("    - [R=%s] %s" % (sig.assert_id, sig.out_name))
+        if len(fi) > 30:
+            print("    ...(共 %d 个)" % len(fi))
+        print("    要把它们也纳入用 --include-internal；要逐个核对全部信号去向用 --account。")
 
 
 if __name__ == "__main__":

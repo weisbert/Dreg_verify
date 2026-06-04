@@ -108,6 +108,25 @@ def is_top_output(val):
     return str(val).strip() in ("1", "1.0", "True", "true")
 
 
+def _logic_passes_user_filters(sig, opts, rx, exrx):
+    """除 top_output_only 外的用户筛选（owner/名称/正则/排除/类型）是否全通过。"""
+    if opts.owners is not None and _ws(sig.owner) not in opts.owners:
+        return False
+    if not _name_matches(sig, opts.signals):
+        return False
+    if rx and not (rx.search(sig.out_name) or rx.search(sig.out_base)):
+        return False
+    # 排除：按名集合 或 正则（匹配 K 全名或去位宽基名）
+    if opts.exclude is not None and (sig.out_name.lower() in opts.exclude
+                                     or sig.out_base.lower() in opts.exclude):
+        return False
+    if exrx and (exrx.search(sig.out_name) or exrx.search(sig.out_base)):
+        return False
+    if opts.types is not None and sig.suffix.lower() not in opts.types:
+        return False
+    return True
+
+
 def select_signals(wb, opts):
     """按 owner / 名称 / 正则 / top_output / 类型 过滤 logic 信号；支持排除。"""
     import re
@@ -115,24 +134,28 @@ def select_signals(wb, opts):
     exrx = re.compile(opts.exclude_regex, re.I) if opts.exclude_regex else None
     out = []
     for sig in wb.logic:
-        if opts.owners is not None and _ws(sig.owner) not in opts.owners:
-            continue
-        if not _name_matches(sig, opts.signals):
-            continue
-        if rx and not (rx.search(sig.out_name) or rx.search(sig.out_base)):
-            continue
-        # 排除：按名集合 或 正则（匹配 K 全名或去位宽基名）
-        if opts.exclude is not None and (sig.out_name.lower() in opts.exclude
-                                         or sig.out_base.lower() in opts.exclude):
-            continue
-        if exrx and (exrx.search(sig.out_name) or exrx.search(sig.out_base)):
+        if not _logic_passes_user_filters(sig, opts, rx, exrx):
             continue
         if opts.top_output_only and not is_top_output(sig.top_output):
             continue
-        if opts.types is not None and sig.suffix.lower() not in opts.types:
-            continue
         out.append(sig)
     return out
+
+
+def filtered_internal_signals(wb, opts):
+    """被 top_output_only 默认【静默】过滤掉的 logic 内部节点（top_output=0 但通过了其它所有筛选）。
+
+    这是工具里唯一'默认生效却不进跳过清单'的过滤——单独拎出来，让摘要/账目能把它们也亮出来
+    （logic 内部节点不是 RTL 端口、ENV_RF 探不到，所以默认不验；--include-internal 可纳入）。
+    """
+    if not opts.top_output_only:
+        return []
+    import re
+    rx = re.compile(opts.signal_regex, re.I) if opts.signal_regex else None
+    exrx = re.compile(opts.exclude_regex, re.I) if opts.exclude_regex else None
+    return [sig for sig in wb.logic
+            if _logic_passes_user_filters(sig, opts, rx, exrx)
+            and not is_top_output(sig.top_output)]
 
 
 def select_mux_groups(wb, opts):
@@ -316,6 +339,7 @@ def build(wb, opts):
                           wire_prefixes=opts.probe_prefixes,
                           cascade_mode=opts.cascade_mode)
     selected = select_signals(wb, opts)
+    filtered_internal = filtered_internal_signals(wb, opts)   # 默认静默滤掉的内部节点(可见性用)
     blocks = []
     errors = []
     skipped = []        # 含不可驱动输入(wire兜底/未解析)的信号，默认跳过(与 VBA 一致)
@@ -528,13 +552,68 @@ def build(wb, opts):
         "n_mux_selected": len(mux_selected),
         "n_mux_generated": len(blocks) - n_logic_blocks,
         "n_mux_warnings": len(mux_warnings),
+        # 默认静默过滤掉的 logic 内部节点（top_output=0）——拎出来给可见性
+        "n_filtered_internal": len(filtered_internal),
     }
     return {"blocks": blocks, "selected": selected, "errors": errors,
             "skipped": skipped, "mux_warnings": mux_warnings,
+            "filtered_internal": filtered_internal,
             "dup_labels": dup_labels, "summary": summary,
             # 计数器++已按 opts.sv_summary 写进 blocks，render 必须配套包裹声明/汇总，
             # 否则产物里是未声明变量 → 把标志带在结果里保证两者一致。
             "sv_summary": opts.sv_summary}
+
+
+def compose_account(wb, opts, res):
+    """完整账目：每个 logic 信号 + 每个 mux 组的去向，一个不漏。
+
+    给"我不喜欢被跳过、怕有问题看不见"——把所有信号/组列一遍，标清 disposition：
+      生成 / 生成(裸名探针) / 跳过(原因) / 错误(原因) / 过滤(原因)
+    返回 [{kind, name, aid, disposition, reason}, ...]（logic 在前、mux 在后）。
+    """
+    gen_names = {st.get("out_name") for _l, st in res["blocks"]}
+    bare = {n: w for n, _a, w in res.get("mux_warnings", [])}
+
+    def _reason(reasons):
+        if isinstance(reasons, list):
+            return "; ".join(str(w) for *_h, w in reasons)
+        return str(reasons)
+    skipped_map = {name: _reason(reasons) for name, _aid, reasons in res.get("skipped", [])}
+    error_map = {name: msg for name, _aid, msg in res.get("errors", [])}
+    internal_names = {s.out_name for s in res.get("filtered_internal", [])}
+
+    items = []
+    for sig in wb.logic:
+        n = sig.out_name
+        if n in error_map:
+            disp, reason = "错误", error_map[n]
+        elif n in skipped_map:
+            disp, reason = "跳过", skipped_map[n]
+        elif n in gen_names:
+            disp, reason = "生成", ""
+        elif n in internal_names:
+            disp, reason = "过滤", "logic 内部节点(top_output=0)，ENV_RF 探不到；--include-internal 可纳入"
+        else:
+            disp, reason = "过滤", "被 --owner/--signals/--exclude/--type 等筛选条件排除"
+        items.append({"kind": "logic", "name": n, "aid": sig.assert_id,
+                      "disposition": disp, "reason": reason})
+
+    mux_selected_names = {g.out_name for g in select_mux_groups(wb, opts)}
+    for grp in wb.mux:
+        n = grp.out_name
+        if n in skipped_map:
+            disp, reason = "跳过", skipped_map[n]
+        elif n in gen_names and n in bare:
+            disp, reason = "生成(裸名探针)", bare[n]
+        elif n in gen_names:
+            disp, reason = "生成", ""
+        elif n not in mux_selected_names:
+            disp, reason = "过滤", "被 --owner/--signals/--exclude/--type/--no-mux 排除"
+        else:
+            disp, reason = "跳过", "未生成（原因见诊断/报告）"
+        items.append({"kind": "mux", "name": n, "aid": grp.assert_id,
+                      "disposition": disp, "reason": reason})
+    return items
 
 
 def render(result, header_info=None, comments=False, block_suffix=""):
