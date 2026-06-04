@@ -28,8 +28,10 @@ git pull
 **这一步回答你最关心的"有没有谁被悄悄漏掉"。** 用昨天新加的「完整账目」：
 
 ```bat
-python -m dreg_verify.cli --excel "Hi1108V100_WL_RFTRX_C0C1_DREG_to_dig_95P.xlsx" --account > account.txt
+python -m dreg_verify.cli --excel "Hi1108V100_WL_RFTRX_C0C1_DREG_to_dig_95P.xlsx" --account --out-file account.txt
 ```
+
+> ⚠ **别用 `> account.txt` 重定向**：PowerShell 在中文 Windows 上会拿 GBK 解 Python 的 UTF-8 输出，account.txt 会变乱码（`装载`→`瑁呰浇`）。用上面的 `--out-file`，由 Python 直接写 UTF-8(带 BOM)，记事本/Excel 都能正常打开。
 
 打开 `account.txt`，**先看顶部那行小结**，比如：
 ```

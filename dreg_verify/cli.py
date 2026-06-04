@@ -45,6 +45,9 @@ def build_argparser():
         description="从 Dreg 核心 Excel 的 logic 真值表达式生成 wr_rf_tc.sv 验证文件。")
     p.add_argument("--excel", required=True, help="核心 Excel (.xlsx) 路径")
     p.add_argument("--out", default=None, help="输出 .sv 路径 (默认 wr_rf_tc.sv；只想出报告时不传它)")
+    p.add_argument("--out-file", default=None,
+                   help="把屏幕报告(--account/--list/--diagnose 及生成小结)直接写到此文件(UTF-8 带 BOM)。"
+                        "比 PowerShell 的 `> x.txt` 稳：不会被 GBK 控制台编码弄成乱码")
     p.add_argument("--report", default=None,
                    help="导出'给人看'的测试用例表格(按扩展名: .csv 用 Excel 打开 / .html 网页)。"
                         "可与 --out 同时用(同时出 .sv 和报告)；只传 --report 则只出报告")
@@ -756,6 +759,27 @@ def main(argv=None):
         cascade_mode=args.cascade_mode,
     )
 
+    if args.out_file:
+        return _run_with_outfile(args, opts)
+    return _dispatch(args, opts)
+
+
+def _run_with_outfile(args, opts):
+    """把屏幕报告直接写盘（UTF-8 带 BOM），绕开 PowerShell `>` 的 GBK 重定向乱码。"""
+    path = args.out_file
+    saved = sys.stdout
+    try:
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            sys.stdout = f
+            rc = _dispatch(args, opts)
+    finally:
+        sys.stdout = saved
+    print("报告已写入: %s（UTF-8 带 BOM，可直接用记事本/Excel 打开）" % path)
+    return rc
+
+
+def _dispatch(args, opts):
+    """list/account/diagnose/report/生成 的分派；所有屏幕输出走当前 sys.stdout。"""
     print("装载 Excel: %s ..." % args.excel)
     wb = excel_model.load_workbook(args.excel)
     print("  sheets: %s" % wb.sheet_names)
