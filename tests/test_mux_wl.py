@@ -536,6 +536,29 @@ def test_wl_analyze_force_net_blocker_is_blocking(tmp_path):
         assert a["blocking"] is True
 
 
+def test_analyze_mux_group_value_collision_is_false_green(tmp_path):
+    """假绿(数据字段太窄、互异值装不下) → analyze_mux_group 状态='false-green'（GUI 琥珀），
+    不再混进 'unresolved'（红✗）——区分『能解析但字段窄(保护性跳过)』与『真没解析(故障)』。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "fg.xlsx"),
+        tmm_fields=[
+            ("CTRL", "h10", "d_ctrl[1:0]", "1:0", "N", "RW"),
+            ("N0", "h20", "d_n0", "0", "N", "RW"),     # 三个 1-bit 数据字段：3 个互异值装不下 → 假绿
+            ("N1", "h21", "d_n1", "0", "N", "RW"),
+            ("N2", "h22", "d_n2", "0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_n0_to_mux", "d_ctrl_to_mux[1:0]", "2'b00", "d_fgout", 1),
+            _mrow("d_n1_to_mux", "d_ctrl_to_mux[1:0]", "2'b01", "d_fgout", 1),
+            _mrow("d_n2_to_mux", "d_ctrl_to_mux[1:0]", "2'b10", "d_fgout", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    a = generator.analyze_mux_group(r, wb, _grp(wb, "d_fgout"))
+    assert a["status"] == "false-green", (a["status"], a.get("error"))   # 不是 unresolved
+    assert "假绿" in (a["error"] or "")
+
+
 def test_wl_negative_vectors(wl_wb):
     """负向用例（反例）对通用形态向量同样可用。"""
     opts = generator.GenOptions(probe_prefixes=WL_PREFIXES, neg_all=True)

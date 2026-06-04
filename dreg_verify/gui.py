@@ -150,7 +150,8 @@ def _skipped_detail_text(skipped):
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "unresolved": "✗未解析", "parse-err": "✗解析错",
-                "needs-prefix": "⚠需探针前缀", "bare-probe": "裸名探针"}
+                "needs-prefix": "⚠需探针前缀", "bare-probe": "裸名探针",
+                "false-green": "⚠字段太窄·假绿"}
 STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE 驱动",
                "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
                "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
@@ -159,9 +160,14 @@ STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE
                                "先跑 scan_rtl 配好探针前缀再生成（否则这组会跳过）",
                "bare-probe": "输出 top_out=0（喂内部、非芯片顶层输出）——已按裸名探针 `ENV_RF.<名> "
                              "照常生成；若仿真 elaboration 报 CUVUNF 说明它埋在子模块，"
-                             "再跑 scan_rtl 配前缀重生成即可（不是错误）"}
-# 状态列颜色：红=信号坏掉(会 elaboration 失败)；橙=要前缀否则跳过；蓝=信息(裸名探针已生成,可选配前缀)
-STATUS_FG = {"needs-prefix": QtGui.QColor("#cc7a00"), "bare-probe": QtGui.QColor("#2a7ab0")}
+                             "再跑 scan_rtl 配前缀重生成即可（不是错误）",
+               "false-green": "结构全解析通了，不是未解析——只是数据寄存器字段太窄、装不下每条 case "
+                              "的互异值，硬生成会变『RTL 接错路也 PASS』的假测试(假绿)。工具保护性跳过；"
+                              "要验得加宽字段或拆组（属设计层，不是工具/表的错）"}
+# 状态列颜色：红=信号坏掉(会 elaboration 失败)；橙=要前缀否则跳过；蓝=信息(裸名探针已生成,可选配前缀)；
+# 琥珀(false-green)=能解析但字段太窄、硬生成是假绿——保护性跳过，不是故障，刻意不用红
+STATUS_FG = {"needs-prefix": QtGui.QColor("#cc7a00"), "bare-probe": QtGui.QColor("#2a7ab0"),
+             "false-green": QtGui.QColor("#9a5b00")}
 # 输入来源(found_in)的中文标签——明细面板用；未映射的原样显示
 FOUND_IN_LABEL = {"tmm": "tmm命中", "regmap": "regmap命中", "logic": "级联前级",
                   "logic-internal": "内部信号", "wire": "wire兜底",
@@ -820,7 +826,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     it.setForeground(STATUS_FG.get(st, QtGui.QColor("red")))
                 tip = STATUS_HELP.get(st, st)
                 err = self._analysis.get(r, {}).get("error")
-                if err and st in ("needs-prefix", "bare-probe", "unresolved", "parse-err"):
+                if err and st in ("needs-prefix", "bare-probe", "unresolved", "parse-err",
+                                  "false-green"):
                     tip = "%s\n\n%s" % (tip, err)        # 缺前缀/坏掉/裸名提示时把后端 error 全文带上
                 it.setToolTip(tip)
                 self.table.setItem(r, COL_STATUS, it)
@@ -1467,8 +1474,14 @@ class MainWindow(QtWidgets.QMainWindow):
         mux_mode = mux_gen.coverage_mode(mode, exhaustive)
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                               max_tests=self.max_tests.value())
-        if meta.get("value_collision") or not vecs:
-            self.ti_header.setText("mux 信号 %s：互异值分配失败或控制信号无驱动路径（见左表状态列）"
+        if meta.get("value_collision"):
+            self.ti_header.setText(
+                "mux 信号 %s：⚠字段太窄·假绿 —— 结构解析通了，但数据寄存器字段装不下 %d 条 case 的"
+                "互异值，硬生成是『接错路也 PASS』的假测试，故跳过。要验得加宽字段或拆组（设计层）。"
+                "上方『输入信号』表可看各数据寄存器的实际字段位宽。" % (grp.out_name, len(grp.cases)))
+            return
+        if not vecs:
+            self.ti_header.setText("mux 信号 %s：控制信号没有可用的驱动路径，无法生成测试向量（见左表状态列）"
                                    % grp.out_name)
             return
         # 已手填的期望按输入取值键回填到向量（与生成/报告同一逻辑）

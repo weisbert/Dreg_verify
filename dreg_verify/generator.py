@@ -1010,8 +1010,11 @@ def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None)
                 "error": "; ".join(exp["issues"]), "cone": False}
     vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mode)
     if meta.get("value_collision"):
-        return {"status": "unresolved", "inputs": rows, "out_net": out_net,
-                "error": "数据寄存器位宽装不下 %d 个 case 的互异值——选路不可验证(假绿)" % len(grp.cases),
+        # 假绿不是"没解析"——结构全解析通了，只是数据字段太窄装不下互异值（硬生成=假的 PASS）。
+        # 单列 'false-green' 档（GUI 琥珀，区别于真正的 ✗未解析/红），保护性跳过、非故障。
+        return {"status": "false-green", "inputs": rows, "out_net": out_net,
+                "error": "数据寄存器位宽装不下 %d 个 case 的互异值——选错路也测不出(假绿)，"
+                         "需加宽字段或拆组才能验" % len(grp.cases),
                 "cone": False}
     if not vecs:
         return {"status": "unresolved", "inputs": rows, "out_net": out_net,
