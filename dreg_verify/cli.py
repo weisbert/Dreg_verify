@@ -367,36 +367,107 @@ pre.chain{background:#f4f8ff;border:1px solid #d4e0f5;border-radius:4px;padding:
 .vstat.ok{color:#1a7f37} .vstat.warn{color:#b26a00} .vstat.bad{color:#c00}
 .vsum{margin:10px 0;font-size:13px} .vsum b{margin-right:14px}
 tr.vrow.warn{background:#fff8ec} tr.vrow.bad{background:#ffecec}
+/* ── 分页器（窗口化懒渲染：每页只把当前窗注入 DOM，避免 6000 组一次性全进页面卡死） ── */
+.pagenav{display:flex;gap:10px;align-items:center;margin:10px 0 4px;font-size:13px;
+ flex-wrap:wrap;background:#f7f9fc;border:1px solid var(--bd);border-radius:6px;padding:7px 10px}
+.pagenav.pgbot{margin-top:12px}        /* 每页底部再放一个，读完不必滚回顶 */
+.pgb{padding:5px 13px;border:1px solid var(--bd);border-radius:5px;background:#fff;
+ cursor:pointer;font-size:13px;color:#444}
+.pgb:hover{background:#e9eef6} .pgb:active{background:#dde6f3}
+.pgi{color:#555} .pgper{color:#666;margin-left:auto}
+.pgsel{padding:3px 5px;border:1px solid var(--bd);border-radius:4px}
+.pgbody.ttwrap{min-height:40px}
 """
 
 _REPORT_JS = """
 (function(){
-  var q=document.getElementById('q'),ow=document.getElementById('owner'),
-      no=document.getElementById('negonly'),cnt=document.getElementById('count');
+  function $(id){return document.getElementById(id);}
+  function jget(id){var el=$(id);return el?JSON.parse(el.textContent):[];}
+  var q=$('q'),ow=$('owner'),no=$('negonly'),cnt=$('count');
+  var PER=[30,50,100,200];
+  /* 每个 tab 一份数据 + 当前页/每页。重的真值表(②③)共用一份(check=True 标记)，③ 不再复制第二份 DOM。
+     渲染只把"当前窗"注入 body，DOM 节点数恒定 ⇒ 6000 组也不卡。 */
+  var SEC={
+    sum:{data:jget('sum-data'),per:200,page:0},
+    tt :{data:jget('tt-data'), per:50, page:0},
+    chk:{data:null,            per:50, page:0,ischk:true},
+    det:{data:jget('det-data'),per:200,page:0},
+    ver:{data:jget('ver-data'),per:200,page:0}
+  };
+  SEC.chk.data=SEC.tt.data;
+  var KEYS=['sum','tt','chk','det','ver'];
+
+  function flt(){
+    var qq=(q.value||'').toLowerCase(),oo=ow.value,nn=no.checked;
+    return function(it){
+      if(qq&&it.t.indexOf(qq)<0)return false;
+      if(oo&&it.o!==oo)return false;
+      if(nn&&it.n!==1)return false;
+      return true;
+    };
+  }
+  function filtered(key){return SEC[key].data.filter(flt());}
+
+  function navHtml(key,page,np,total,per){
+    var opts='',i;
+    for(i=0;i<PER.length;i++)opts+='<option'+(PER[i]===per?' selected':'')+'>'+PER[i]+'</option>';
+    return '<button class="pgb" data-k="'+key+'" data-d="-99">«</button>'+
+      '<button class="pgb" data-k="'+key+'" data-d="-1">◀ 上一页</button>'+
+      '<span class="pgi">第 '+(total?page+1:0)+' / '+np+' 页（共 '+total+' 条）</span>'+
+      '<button class="pgb" data-k="'+key+'" data-d="1">下一页 ▶</button>'+
+      '<button class="pgb" data-k="'+key+'" data-d="99">»</button>'+
+      '<label class="pgper">每页 <select class="pgsel" data-k="'+key+'">'+opts+'</select></label>';
+  }
+
+  function render(key){
+    var sec=SEC[key],body=$(key+'-body'),nav=$(key+'-nav');
+    if(!body)return;
+    var list=filtered(key),per=sec.per,np=Math.max(1,Math.ceil(list.length/per));
+    if(sec.page>=np)sec.page=np-1; if(sec.page<0)sec.page=0;
+    if(nav)nav.innerHTML=navHtml(key,sec.page,np,list.length,per);
+    if(!list.length){body.innerHTML='<p class="empty">（无匹配）</p>';return;}
+    var s=sec.page*per,win=list.slice(s,s+per),h='',i;
+    for(i=0;i<win.length;i++)h+=win[i].h;
+    /* 页尾再放一个分页条：读完本页不必滚回顶（按钮走文档级委托，重建 innerHTML 也有效） */
+    body.innerHTML=h+'<div class="pagenav pgbot">'+navHtml(key,sec.page,np,list.length,per)+'</div>';
+    if(sec.ischk&&chkon){applyChk(body,true);resetScore();}   /* 翻到新一页时按本页重置自测 */
+  }
+
+  var active='sum';
   function tab(name){
+    active=name;
     var bs=document.querySelectorAll('.tabbtn'),ss=document.querySelectorAll('.tab'),i;
     for(i=0;i<bs.length;i++)bs[i].classList.toggle('active',bs[i].getAttribute('data-tab')===name);
     for(i=0;i<ss.length;i++)ss[i].classList.toggle('active',ss[i].id===name);
+    render(name);                       /* 切到才渲染：未访问的 tab 不进 DOM */
   }
   var btns=document.querySelectorAll('.tabbtn');
-  for(var i=0;i<btns.length;i++)(function(b){b.onclick=function(){tab(b.getAttribute('data-tab'));};})(btns[i]);
-  function ok(el){
-    var t=el.getAttribute('data-text')||'';
-    if(q.value && t.indexOf(q.value.toLowerCase())<0)return false;
-    if(ow.value && el.getAttribute('data-owner')!==ow.value)return false;
-    if(no.checked && el.getAttribute('data-neg')!=='1')return false;
-    return true;
-  }
-  function apply(){
-    var els=document.querySelectorAll('.filt'),vis=0,sig=0,j;
-    for(j=0;j<els.length;j++){var m=ok(els[j]);els[j].style.display=m?'':'none';
-      if(m){vis++;if(els[j].classList.contains('srow'))sig++;}}
-    cnt.textContent='匹配信号 '+sig;
-  }
-  q.oninput=apply;ow.onchange=apply;no.onchange=apply;apply();
+  for(var bi=0;bi<btns.length;bi++)(function(b){b.onclick=function(){tab(b.getAttribute('data-tab'));};})(btns[bi]);
 
-  /* ===== 真值表检查（designer 自测：遮 auto_out、期望变填空、回车判定） ===== */
-  var chkbtn=document.getElementById('chkbtn'),chkscore=document.getElementById('chkscore');
+  /* 翻页/每页：文档级委托，data-k 指明属于哪个 tab（顶部条与页尾条共用一套处理） */
+  document.addEventListener('click',function(e){
+    var b=e.target;while(b&&b.nodeType===1&&!(b.classList&&b.classList.contains('pgb')))b=b.parentNode;
+    if(!b||b.nodeType!==1||!b.classList.contains('pgb'))return;
+    var sec=SEC[b.getAttribute('data-k')];if(!sec)return;
+    var d=parseInt(b.getAttribute('data-d'),10);
+    if(d===-99)sec.page=0;else if(d===99)sec.page=1e9;else sec.page+=d;
+    render(b.getAttribute('data-k'));
+  });
+  document.addEventListener('change',function(e){
+    var t=e.target;if(!t.classList||!t.classList.contains('pgsel'))return;
+    var key=t.getAttribute('data-k'),sec=SEC[key];if(!sec)return;
+    sec.per=parseInt(t.value,10);sec.page=0;render(key);
+  });
+
+  function applyAll(){
+    for(var i=0;i<KEYS.length;i++)SEC[KEYS[i]].page=0;
+    render(active);                     /* 只重渲当前 tab；其余切过去时再渲 */
+    cnt.textContent='匹配信号 '+filtered('sum').length;
+  }
+  q.oninput=applyAll;ow.onchange=applyAll;no.onchange=applyAll;
+
+  /* ===== 真值表检查（designer 自测：遮 auto_out、期望变填空、回车判定）。按当前页进行。 ===== */
+  var chkbtn=$('chkbtn'),chkscore=$('chkscore');
   var chkon=false,okn=0,badn=0,answered=0;
   /* 宽容解析 designer 输入的数值：0x../0b../16'h../'b../'d../十进制/裸hex（与 GUI 同语义，十进制优先于裸hex） */
   function parseVal(s){
@@ -412,10 +483,12 @@ _REPORT_JS = """
     if(/^[0-9a-f]+$/.test(s))return parseInt(s,16);
     return NaN;
   }
+  function chkBody(){return $('chk-body');}
   function updScore(){
-    var total=document.querySelectorAll('#chk td.cquiz').length;
-    chkscore.innerHTML='已检查 '+answered+'/'+total+' · <b class="ok">一致 '+okn+'</b> · <b class="bad">不一致 '+badn+'</b>';
+    var cb=chkBody(),total=cb?cb.querySelectorAll('td.cquiz').length:0;
+    chkscore.innerHTML='本页已检查 '+answered+'/'+total+' · <b class="ok">一致 '+okn+'</b> · <b class="bad">不一致 '+badn+'</b>';
   }
+  function resetScore(){okn=0;badn=0;answered=0;updScore();}
   /* 遮盖/揭示 = 直接换单元格文本（CSS 透明会被 tr.autorow 的颜色规则按优先级盖回去，靠不住）。
      原文存在 data-t 里，揭示时取回。 */
   function maskCell(cell){
@@ -428,25 +501,27 @@ _REPORT_JS = """
     if(t!==null)cell.textContent=t;
     cell.classList.remove('masked');
   }
-  function setChk(on){
-    chkon=on;okn=0;badn=0;answered=0;
-    chkbtn.textContent=on?'结束检查（显示全部 auto_out）':'开始检查（遮盖所有 auto_out）';
-    chkbtn.classList.toggle('off',on);
-    var autos=document.querySelectorAll('#chk td.cauto'),i;
+  /* 对一个容器(当前渲染的 chk 窗)套用/撤销检查态：遮 auto_out、期望格隐值露填空、清旧判定色 */
+  function applyChk(container,on){
+    if(!container)return;
+    var autos=container.querySelectorAll('td.cauto'),i;
     for(i=0;i<autos.length;i++){if(on)maskCell(autos[i]);else unmaskCell(autos[i]);}
-    var qz=document.querySelectorAll('#chk td.cquiz');
+    var qz=container.querySelectorAll('td.cquiz');
     for(i=0;i<qz.length;i++){
       var sp=qz[i].querySelector('.cval'),inp=qz[i].querySelector('.cin');
-      sp.style.display=on?'none':'';
-      inp.style.display=on?'':'none';
-      inp.value='';inp.className='cin';
-      inp.removeAttribute('data-hit');
+      if(sp)sp.style.display=on?'none':'';
+      if(inp){inp.style.display=on?'':'none';inp.value='';inp.className='cin';inp.removeAttribute('data-hit');}
     }
-    /* 清掉上次的判定颜色（先收集再删，避免边遍历边改 classList 影响 NodeList） */
-    var marked=document.querySelectorAll('#chk .okc,#chk .badc,#chk .okh,#chk .badh'),mlist=[],k;
+    var marked=container.querySelectorAll('.okc,.badc,.okh,.badh'),mlist=[],k;
     for(i=0;i<marked.length;i++)mlist.push(marked[i]);
     for(k=0;k<mlist.length;k++)mlist[k].classList.remove('okc','badc','okh','badh');
-    if(on)updScore();else chkscore.textContent='';
+  }
+  function setChk(on){
+    chkon=on;
+    chkbtn.textContent=on?'结束检查（显示全部 auto_out）':'开始检查（遮盖所有 auto_out）';
+    chkbtn.classList.toggle('off',on);
+    applyChk(chkBody(),on);
+    if(on)resetScore();else chkscore.textContent='';
   }
   if(chkbtn){
     chkbtn.onclick=function(){setChk(!chkon);};
@@ -485,35 +560,30 @@ _REPORT_JS = """
 
 def _write_report_html(path, rep, excel):
     import html
+    import json
 
     def esc(x):
         return html.escape(str(x))
 
-    def attr(signal, owner, neg, text):
-        return ' data-signal="%s" data-owner="%s" data-neg="%s" data-text="%s"' % (
-            esc(signal), esc(owner or ""), "1" if neg else "0", esc((text or "").lower()))
-
-    def flat_table(rows, cols, rowcls, cls_attr, kind):
-        """① 汇总 / ④ 明细：可过滤的横表。rowcls=srow/drow；每行带 data-* 供 JS 过滤。"""
-        if not rows:
-            return '<p class="empty">（无数据）</p>'
+    def flat_rows(rows, cols, kind):
+        """① 汇总 / ④ 明细：返回 (表头 HTML, 行 item 列表)。
+        每个 item = {h:<tr>串, t:搜索文本(小写), o:owner, n:负向0/1}，供 JS 过滤+窗口化渲染。"""
         th = "".join("<th>%s</th>" % esc(h) for _k, h in cols)
-        trs = []
+        items = []
         for r in rows:
             if kind == "sum":
                 neg = bool(r.get("n_neg"))
                 text = "%s %s %s" % (r.get("signal", ""), r.get("owner", ""), r.get("expr", ""))
-                extra = " err" if r.get("error") else (" neg" if neg else "")
+                cls = "err" if r.get("error") else ("neg" if neg else "")
             else:
                 neg = r.get("neg") == "是"
                 text = "%s %s %s %s" % (r.get("signal", ""), r.get("owner", ""),
                                         r.get("test", ""), r.get("expr", ""))
-                extra = " neg" if neg else ""
+                cls = "neg" if neg else ""
             tds = "".join("<td>%s</td>" % esc(r.get(k, "")) for k, _h in cols)
-            trs.append('<tr class="filt %s%s"%s>%s</tr>'
-                       % (rowcls, extra, attr(r.get("signal", ""), r.get("owner", ""), neg, text), tds))
-        return ('<table class="%s"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
-                % (cls_attr, th, "".join(trs)))
+            items.append({"h": '<tr class="%s">%s</tr>' % (cls, tds),
+                          "t": text.lower(), "o": r.get("owner", "") or "", "n": 1 if neg else 0})
+        return th, items
 
     def _exp_cell(tc, check):
         """期望行单元格：负向=红(错值)；手填=绿/红(与 auto_out 一致/不一致)；未填=灰(auto_out 兜底)。
@@ -540,12 +610,11 @@ def _write_report_html(path, rep, excel):
                 '<input class="cin" style="display:none" placeholder="?"></td>'
                 % (cls, tc.get("auto_num", 0), title, shown))
 
-    def truth_tables(tabs, check=False):
-        """②真值表 / ③真值表检查：输入(带位宽)做行、各测试做列；auto_out 与 期望 分两行。
-        check=True 时 auto_out 格可被 JS 遮盖、期望格可填空自测(designer 防自证检查)。"""
-        if not tabs:
-            return '<p class="empty">（无数据）</p>'
-        out = []
+    def truth_blocks(tabs):
+        """②真值表 / ③真值表检查 共用：输入(带位宽)做行、各测试做列；auto_out 与 期望 分两行。
+        统一用『检查态』标记(cauto/cquiz)——②不开检查时与只读表外观一致，③开检查才遮盖/填空，
+        故只生成一份(不再为 ③ 复制第二份 DOM)。返回 item 列表 {h,t,o,n}。"""
+        items = []
         for t in tabs:
             tests = t["tests"]
             hdr = ['<th class="rowhdr">信号\\测试</th>']
@@ -565,7 +634,7 @@ def _write_report_html(path, rep, excel):
                           '用它当期望验证表达式有自证嫌疑，.sv 断言对比的是下面的期望">%s</th>'
                           % esc(t.get("auto_label", "auto_out"))]
             for tc in tests:
-                cls = "neg" if tc["neg"] else ("cauto" if check else "")
+                cls = "neg" if tc["neg"] else "cauto"
                 auto_cells.append('<td class="%s" data-v="%d">%s</td>'
                                   % (cls, tc.get("auto_num", 0),
                                      esc(tc.get("auto_out", tc.get("correct", "")))))
@@ -575,7 +644,7 @@ def _write_report_html(path, rep, excel):
                          '未填的列用 auto_out 兜底(灰)。绿=手填且与 auto_out 一致；红=手填但不一致">%s</th>'
                          % esc(t.get("exp_label", "期望(out)"))]
             for tc in tests:
-                exp_cells.append(_exp_cell(tc, check))
+                exp_cells.append(_exp_cell(tc, True))
             body.append('<tr class="exprow">%s</tr>' % "".join(exp_cells))
             for label, key in (("force", "force"), ("RF_WRITE", "rfwrite")):
                 cells = ['<th class="rowhdr">%s</th>' % label]
@@ -601,18 +670,19 @@ def _write_report_html(path, rep, excel):
             # 标题序号: logic 显示 "R<序号>"; mux 的 R 已是 "mux<N>"，不再加 R 前缀
             rid = str(t["R"])
             rlabel = rid if rid.startswith("mux") else ("R" + rid)
-            out.append('<div class="filt ttblock"%s>'
-                       '<h3>%s　<code>%s</code>　<span class="ex">%s</span></h3>%s'
-                       '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
-                       % (attr(t["signal"], t.get("owner", ""), neg_block, text),
-                          esc(rlabel), esc(t["signal"]), esc(t["expr"]), chain_html,
-                          "".join(hdr), "".join(body)))
-        return "\n".join(out)
+            h = ('<div class="ttblock">'
+                 '<h3>%s　<code>%s</code>　<span class="ex">%s</span></h3>%s'
+                 '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
+                 % (esc(rlabel), esc(t["signal"]), esc(t["expr"]), chain_html,
+                    "".join(hdr), "".join(body)))
+            items.append({"h": h, "t": text.lower(), "o": t.get("owner", "") or "",
+                          "n": 1 if neg_block else 0})
+        return items
 
-    def verif_table(verif):
-        """⑤ 可验证性：逐信号健康度 + 风险输入说明（取代旧 GUI'覆盖诊断'按钮的整页 dump）。"""
+    def verif_rows(verif):
+        """⑤ 可验证性：返回 (顶部健康度概览 HTML, 表头 HTML, 行 item 列表)。"""
         if not verif or not verif.get("signals"):
-            return '<p class="empty">（无数据）</p>'
+            return '<p class="empty">（无数据）</p>', "", []
         c = verif["counts"]
         head = ('<p class="vsum">'
                 '<b class="vstat ok">✅ 可验证 %d</b>'
@@ -624,7 +694,7 @@ def _write_report_html(path, rep, excel):
                 % (c.get("clean", 0), c.get("wire-fallback", 0),
                    c.get("unresolved", 0), c.get("parse-err", 0)))
         th = "".join("<th>%s</th>" % esc(h) for _k, h in VERIF_COLS)
-        trs = []
+        items = []
         for r in verif["signals"]:
             lbl, lvl = VERIF_STATUS.get(r.get("status", ""), (r.get("status", ""), ""))
             text = "%s %s %s" % (r.get("signal", ""), r.get("owner", ""), r.get("detail", ""))
@@ -634,11 +704,15 @@ def _write_report_html(path, rep, excel):
                     cells.append('<td><span class="vstat %s">%s</span></td>' % (lvl, esc(lbl)))
                 else:
                     cells.append("<td>%s</td>" % esc(r.get(k, "")))
-            trs.append('<tr class="filt vrow %s"%s>%s</tr>'
-                       % (lvl, attr(r.get("signal", ""), r.get("owner", ""), False, text),
-                          "".join(cells)))
-        return head + ('<table class="full"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
-                       % (th, "".join(trs)))
+            items.append({"h": '<tr class="vrow %s">%s</tr>' % (lvl, "".join(cells)),
+                          "t": text.lower(), "o": r.get("owner", "") or "", "n": 0})
+        return head, th, items
+
+    def js_blob(el_id, items):
+        # JSON 嵌进 <script type=application/json>：把 "</" 转义成 "<\\/" 防止意外闭合 script 标签
+        # （JSON.parse 时 \\/ 还原成 /）。ensure_ascii=False 让中文可读、体积更小。
+        payload = json.dumps(items, ensure_ascii=False).replace("</", "<\\/")
+        return '<script type="application/json" id="%s">%s</script>' % (el_id, payload)
 
     owners = sorted({(r.get("owner") or "") for r in rep["summary"] if r.get("owner")})
     owner_opts = '<option value="">全部 owner</option>' + "".join(
@@ -652,8 +726,14 @@ def _write_report_html(path, rep, excel):
                      if tc.get("designer_filled"))
     n_pos_tc = sum(1 for t in rep.get("tables", []) for tc in t["tests"] if not tc["neg"])
 
-    # 真值表检查 tab：全局按钮(遮盖 auto_out) + 计分 + 使用说明 + 可填空的真值表
-    chk_section = (
+    # 各 tab 的数据收集成 item 列表（HTML 串 + 元数据），下面嵌成 JSON 给前端窗口化渲染。
+    sum_th, sum_items = flat_rows(rep["summary"], SUMMARY_COLS, "sum")
+    det_th, det_items = flat_rows(rep["detail"], DETAIL_COLS, "det")
+    tt_items = truth_blocks(rep.get("tables", []))            # ②③ 共用这一份
+    ver_head, ver_th, ver_items = verif_rows(rep.get("verifiability"))
+
+    # 真值表检查 tab 顶部说明条（静态，不进窗口化）
+    chkbar = (
         '<div class="chkbar">'
         '<button id="chkbtn">开始检查（遮盖所有 auto_out）</button>'
         '<span id="chkscore"></span>'
@@ -662,10 +742,24 @@ def _write_report_html(path, rep, excel):
         '自己算输出填进去按回车 → 立即揭晓 auto_out 并比对。'
         '<b style="color:#1a7f37">绿=一致</b>；<b style="color:#c00">红=不一致</b>'
         '（要么你算错了，要么表达式有 bug——后者正是 Dreg 要抓的）。'
-        '答完可以改值再回车重判（计分随之修正）。'
+        '答完可以改值再回车重判（计分随之修正）。检查按「当前页」进行（翻页即换一组）。'
         '检查结果只在本页面，不回写 .sv；负向列(_NEG)是故意填错的自检用例，不参与检查。</span>'
         '</div>'
-    ) + truth_tables(rep.get("tables", []), check=True)
+    )
+
+    # 每个 section 只留『分页条 + 空挂载点』，真正内容由 JS 按当前窗注入；行表的表头静态保留。
+    sum_sec = ('<div class="pagenav" id="sum-nav"></div>'
+               '<table class="sum"><thead><tr>%s</tr></thead>'
+               '<tbody class="pgbody" id="sum-body"></tbody></table>' % sum_th)
+    tt_sec = '<div class="pagenav" id="tt-nav"></div><div class="pgbody ttwrap" id="tt-body"></div>'
+    chk_sec = (chkbar + '<div class="pagenav" id="chk-nav"></div>'
+               '<div class="pgbody ttwrap" id="chk-body"></div>')
+    det_sec = ('<div class="pagenav" id="det-nav"></div>'
+               '<table class="full"><thead><tr>%s</tr></thead>'
+               '<tbody class="pgbody" id="det-body"></tbody></table>' % det_th)
+    ver_sec = (ver_head + '<div class="pagenav" id="ver-nav"></div>'
+               '<table class="full"><thead><tr>%s</tr></thead>'
+               '<tbody class="pgbody" id="ver-body"></tbody></table>' % ver_th)
 
     # 仅对 body 模板做 % 替换；CSS/JS 含字面 % 与 {}，单独拼接(不参与格式化)。
     body = (
@@ -675,7 +769,8 @@ def _write_report_html(path, rep, excel):
         '正向期望: designer 手填 %d / auto_out 兜底 %d　'
         '负向(红/_NEG)=故意填错期望, 预期应 FAIL。</p>'
         '<p class="sum">auto_out=程序按表达式算的值(参考)；期望=designer 手填、.sv 断言用它对比'
-        '（未填→auto_out 兜底）。用「③ 真值表检查」可自测期望而不被 auto_out 影响。</p>'
+        '（未填→auto_out 兜底）。用「③ 真值表检查」可自测期望而不被 auto_out 影响。'
+        '<span class="ex">　大表分页显示：用搜索/owner 过滤后翻页，DOM 只渲当前页，再多组也不卡。</span></p>'
         '<div class="toolbar">'
         '<input type="text" id="q" placeholder="搜索 信号名 / owner / 表达式…">'
         '<select id="owner">%s</select>'
@@ -698,16 +793,14 @@ def _write_report_html(path, rep, excel):
         '</main>'
     ) % (
         esc(os.path.basename(excel)), n_sig, n_tc, n_neg, n_designer, n_pos_tc - n_designer,
-        owner_opts,
-        flat_table(rep["summary"], SUMMARY_COLS, "srow", "sum", "sum"),
-        truth_tables(rep.get("tables", [])),
-        chk_section,
-        flat_table(rep["detail"], DETAIL_COLS, "drow", "full", "det"),
-        verif_table(rep.get("verifiability")),
+        owner_opts, sum_sec, tt_sec, chk_sec, det_sec, ver_sec,
     )
+    # 各 tab 数据：JSON 嵌在页面里，由前端 JS 解析后窗口化渲染（②③ 共用 tt-data）。
+    blobs = (js_blob("sum-data", sum_items) + js_blob("tt-data", tt_items)
+             + js_blob("det-data", det_items) + js_blob("ver-data", ver_items))
     doc = ('<!doctype html><html lang="zh"><head><meta charset="utf-8">'
            '<title>Dreg 测试用例报告</title><style>' + _REPORT_CSS + '</style></head><body>'
-           + body + '<script>' + _REPORT_JS + '</script></body></html>')
+           + body + blobs + '<script>' + _REPORT_JS + '</script></body></html>')
     with open(path, "w", encoding="utf-8") as f:
         f.write(doc)
 

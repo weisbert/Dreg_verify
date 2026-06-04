@@ -26,6 +26,18 @@ from dreg_verify import resolver as R               # noqa: E402
 from dreg_verify import sv_writer as W              # noqa: E402
 import fixtures                                      # noqa: E402
 
+import re                                             # noqa: E402
+
+
+def _decoded_html(html):
+    """窗口化报告把各 tab 的真值表/行内容存进 <script type=application/json> blob（懒渲染）。
+    解码这些 blob 的 HTML 串并拼回静态壳，得到『前端真正会渲染出来的 HTML』，供子串断言。"""
+    parts = [html]
+    for m in re.finditer(r'<script type="application/json" id="[^"]+">(.*?)</script>', html, re.S):
+        for it in json.loads(m.group(1)):
+            parts.append(it.get("h", ""))
+    return "".join(parts)
+
 
 @pytest.fixture(scope="module")
 def wb(tmp_path_factory):
@@ -221,16 +233,18 @@ def test_html_report_has_check_tab(wb, tmp_path):
     rep = generator.report(wb, generator.GenOptions(top_output_only=False))
     path = tmp_path / "r.html"
     cli.write_report(str(path), rep, "synthetic.xlsx")
-    html = path.read_text(encoding="utf-8")
-    # 五个 tab
-    assert 'data-tab="chk"' in html and "真值表检查" in html and 'id="chk"' in html
+    raw = path.read_text(encoding="utf-8")
+    html = _decoded_html(raw)        # 真值表内容现走 JSON blob 懒渲染，解码后断言实际渲染结构
+    # 五个 tab + 共用一份真值表数据(②③ 不再各存一份 DOM)
+    assert 'data-tab="chk"' in raw and "真值表检查" in raw and 'id="chk"' in raw
+    assert 'id="chk-body"' in raw and 'id="tt-data"' in raw and 'id="chk-data"' not in raw
     # 全局按钮 + 计分 + 说明
-    assert 'id="chkbtn"' in html and 'id="chkscore"' in html
+    assert 'id="chkbtn"' in raw and 'id="chkscore"' in raw
     # 检查表格结构：auto_out 格(cauto, 带数值 data-v) + 期望填空格(cquiz, 含 input)
-    assert 'class="cauto"' in html or "cauto" in html
+    assert 'class="cauto"' in html
     assert "cquiz" in html and 'class="cin"' in html and "data-v=" in html
     # JS：数值解析 + 判定逻辑
-    assert "parseVal" in html and "okc" in html and "badc" in html
+    assert "parseVal" in raw and "okc" in raw and "badc" in raw
 
 
 def test_html_check_tab_mask_and_reanswer(wb, tmp_path):
@@ -267,12 +281,48 @@ def test_html_report_truth_table_two_rows(wb, tmp_path):
         vector_overrides={"d_logic_bt_lp_reserve": [v1, v2, v3]}))
     path = tmp_path / "r.html"
     cli.write_report(str(path), rep, "synthetic.xlsx")
-    html = path.read_text(encoding="utf-8")
+    html = _decoded_html(path.read_text(encoding="utf-8"))   # 解码 JSON blob 后断言渲染结构
     assert 'class="autorow"' in html               # auto_out 行
     assert "auto_out" in html
-    assert 'class="dsgn"' in html or "dsgn" in html        # 手填且一致(绿)
+    # ②③ 统一用检查态标记(cquiz)，故颜色类与 cquiz 同格：cquiz dsgn / dsgndiff / cquiz fb
+    assert 'class="cquiz dsgn"' in html                    # 手填且一致(绿)
     assert "dsgndiff" in html                              # 手填但不一致(红)
-    assert 'class="fb"' in html or '"fb"' in html          # 未填兜底(灰)
+    assert 'class="cquiz fb"' in html                      # 未填兜底(灰)
+
+
+def test_html_report_windowed_lazy_render(wb, tmp_path):
+    """⭐窗口化懒渲染回归（2026-06-04）：大报告(几千组)在浏览器卡死/闪退的根因是整份内容
+    一次性进 DOM + ②③ 各存一份。现在：①各 tab 内容存进 JSON blob，DOM 里只留空挂载点；
+    ②②③共用一份真值表数据(无 chk-data)；③重内容(ttblock)不出现在静态壳里(不预渲)。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    raw = path.read_text(encoding="utf-8")
+
+    # 挂载点都在且为空（内容靠 JS 注入），分页条占位都在
+    for key in ("sum", "tt", "chk", "det", "ver"):
+        assert ('id="%s-body"' % key) in raw and ('id="%s-nav"' % key) in raw
+    assert 'id="tt-body"></div>' in raw                    # tt 挂载点是空的
+    assert 'id="sum-body"></tbody>' in raw                 # sum 挂载点是空的
+
+    # 各数据 blob 可被 JSON 解析，条数与 rep 对应；②③ 共用 tt-data（没有 chk-data）
+    def blob(idv):
+        m = re.search(r'<script type="application/json" id="%s">(.*?)</script>' % idv, raw, re.S)
+        assert m, "缺少数据 blob: " + idv
+        return json.loads(m.group(1))
+    assert 'id="chk-data"' not in raw
+    assert len(blob("tt-data")) == len(rep["tables"])
+    assert len(blob("sum-data")) == len(rep["summary"])
+    assert len(blob("det-data")) == len(rep["detail"])
+    for it in blob("tt-data"):                             # 每个 item 带过滤元数据
+        assert set(("h", "t", "o", "n")) <= set(it.keys())
+
+    # 关键：重内容(真值表 ttblock)只在 JSON blob 里，不在静态 DOM 壳里(否则又会一次性进 DOM)。
+    # 用渲染出的元素形式断言（裸词 ttblock/autorow 还会出现在 CSS 选择器里，不算预渲）。
+    shell = re.sub(r'<script type="application/json"[^>]*>.*?</script>', "", raw, flags=re.S)
+    assert '<div class="ttblock">' not in shell
+    assert 'class="autorow"' not in shell
 
 
 def test_csv_report_detail_has_auto_out_column(wb, tmp_path):
