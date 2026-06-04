@@ -241,6 +241,28 @@ def _mux_ctrl_desc(grp):
     return grp.ctrl_base
 
 
+def _empty_vector_reason(meta):
+    """向量为空时给【真实】原因：优先 meta 记录的逐 case 丢弃原因（去重精简），否则才用通用兜底。
+
+    向量为空有两类来源，旧版一律甩"控制信号没有可用的驱动路径"——当真因在数据侧（如同一寄存器
+    喂多 case 被 by_base 冲突全丢）时这句话指错了地方。emit 已把每 case 丢弃原因记进
+    meta['dropped_reasons']，这里把它去重后呈出来；只有 emit 从没跑过（控制来源 unknown / 无扫描
+    路径，确实没驱动路径）时 dropped_reasons 为空，才落到通用兜底。
+    """
+    reasons = (meta or {}).get("dropped_reasons") or []
+    seen, uniq = set(), []
+    for r in reasons:
+        core = r.split(": ", 1)[-1] if ": " in r else r   # 去掉 "case X: " 前缀再去重
+        if core not in seen:
+            seen.add(core)
+            uniq.append(core)
+    if uniq:
+        head = "；".join(uniq[:3])
+        more = "（…等 %d 类原因）" % len(uniq) if len(uniq) > 3 else ""
+        return "所有测试向量都被丢弃：" + head + more
+    return "无法生成测试向量（控制信号没有可用的驱动路径）"
+
+
 def mux_prefix_risks(grp, exp, opts):
     """硬阻断：force 一个【子模块内部网】但没配前缀的输入——没前缀 force 必 CUVUNF，默认跳过。
     （build/report/GUI 共用，口径必须一致；--include-risky 可强制生成。）
@@ -533,8 +555,7 @@ def build(wb, opts):
             continue
         if not vecs:
             skipped.append((grp.out_name, grp.assert_id,
-                            [("mux", _mux_ctrl_desc(grp),
-                              "无法生成测试向量（控制信号没有可用的驱动路径）")]))
+                            [("mux", _mux_ctrl_desc(grp), _empty_vector_reason(meta))]))
             continue
 
         # designer 手填期望（mux，第十一轮续）：按输入取值键对号入座。须在反例之前——
@@ -869,7 +890,7 @@ def report(wb, opts):
                                % len(grp.cases))
                 vecs = []
             elif not vecs:
-                skip_reason = "无法生成测试向量（控制信号没有可用的驱动路径）"
+                skip_reason = _empty_vector_reason(meta)
             else:
                 # designer 手填期望（与 build() 双轨同步——报告必须反映 .sv 真实断言值）
                 apply_mux_expected(vecs, opts.mux_expected.get(grp.out_name.lower())
@@ -1018,7 +1039,7 @@ def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None)
                 "cone": False}
     if not vecs:
         return {"status": "unresolved", "inputs": rows, "out_net": out_net,
-                "error": "无法生成测试向量（控制信号没有可用的驱动路径）", "cone": False}
+                "error": _empty_vector_reason(meta), "cone": False}
     # 结构都解析通了。再看前缀：① force 子模块网缺前缀=硬阻断（默认跳过）；② 输出 top_out=0
     # 缺前缀=软提示（照常生成裸名）。两者都 needs-prefix，detail 区分；GUI 能据此着色+给文案。
     eff_opts = opts or GenOptions(probe_prefixes={

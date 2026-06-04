@@ -132,13 +132,35 @@ def _effective_width(case, i, bindings, data_keys):
     return w
 
 
+def _case_base_key(case, i, bindings, data_keys):
+    """该 case 数据源的物理寄存器标识——必须与 emit 的 by_base 冲突检查【同口径】(b.base.lower())。
+
+    同一物理寄存器喂多个 case 时（真表实证：d:0/d:1/d:2 全是同一个 *_t0 寄存器），它们在一条向量里
+    只能拿【同一个值】；否则 emit 的 by_base 检查判"同寄存器被写不同值"→ 整条向量丢弃 → 全丢=空向量。
+    """
+    if bindings is not None and data_keys is not None and i < len(data_keys):
+        b = bindings.get(data_keys[i])
+        if b is not None and getattr(b, "base", None):
+            return b.base.lower()
+    return case.input_base.lower()
+
+
 def _alloc_loop(group, bindings, data_keys, seed_fn):
     """互异值分配公共骨架：seed_fn(i, width, mask) 给初值，碰撞时 1..m 循环探测（永不取 0）。
 
+    ⭐按【物理寄存器】分配，不是按 case 序号：同一寄存器喂多个 case 时复用同一个值。否则 emit 的
+    by_base 冲突检查会因"同一寄存器被写不同值"把每条向量都丢弃 → 空向量（误报"控制无驱动路径"）。
+    互异性只要求在【不同寄存器】之间成立——mux 选路只能区分到不同源，同源两 case 即便选错也输出同值
+    （设计本就如此，非真故障，不可也不必区分）。collision 据此按【不同寄存器数】判，不再按 case 数。
     返回 (values, collision)。collision=True 表示有效位宽装不下这么多互异值。
     """
     values, seen, collision = [], {0}, False
+    by_base = {}                            # 物理寄存器基名 → 已分配值（同源 case 复用）
     for i, case in enumerate(group.cases):
+        bkey = _case_base_key(case, i, bindings, data_keys)
+        if bkey in by_base:
+            values.append(by_base[bkey])    # 同一寄存器：复用同值，避开 by_base 冲突丢弃
+            continue
         w = _effective_width(case, i, bindings, data_keys)
         m = E.mask(w)
         v = seed_fn(i, w, m)
@@ -151,6 +173,7 @@ def _alloc_loop(group, bindings, data_keys, seed_fn):
         if v in seen:
             collision = True
         seen.add(v)
+        by_base[bkey] = v
         values.append(v)
     return values, collision
 
@@ -178,17 +201,22 @@ def alloc_inverted_values(group, base_values, bindings=None, data_keys=None):
 
 
 def _marker_values(group, target_ci, bindings, data_keys, mark="ones"):
-    """『点名法』一条 case 的数据赋值：被测 case 的数据寄存器=标记值(非0)，其余全=0(对照)。
+    """『点名法』一条 case 的数据赋值：被测 case 所属【寄存器】的所有 case=标记值(非0)，
+    其余寄存器的 case 全=0(对照)。
 
     互异值装不下时(N 路 > 字段能放的互异值数 = 假绿)的破法：不再要求"全部 N 路同时互异"，
     改成"一次只点名测一路"——被测那路给标记、其余全给对照(0)。**只需 2 个互异值(标记≠0)，
     任何位宽都成立**。routing 故障(case 错接到别的源)→ 输出从标记变 0 → 必 FAIL；标记非 0 →
     输出坏死成 0 也抓到。逐 case 各一条，所有"单路选错"全覆盖，与互异值法故障覆盖等价。
+    ⭐标记按【物理寄存器】给：被测寄存器喂的所有 case 都给标记（同源必同值，否则 by_base 冲突丢弃），
+    只把【别的寄存器】的 case 置 0——选错到别的源才会从标记变 0 被抓；选到同源的另一 case 输出不变
+    （设计本就同值，非真故障）。
     mark='ones' → 标记=有效位宽全 1（顺带验数据通路各位 stuck-at-0）；'one' → 标记=1（第二轮换值）。
     """
+    target_base = _case_base_key(group.cases[target_ci], target_ci, bindings, data_keys)
     vals = []
     for i, case in enumerate(group.cases):
-        if i != target_ci:
+        if _case_base_key(case, i, bindings, data_keys) != target_base:
             vals.append(0)
             continue
         m = E.mask(_effective_width(case, i, bindings, data_keys))

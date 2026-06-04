@@ -1025,3 +1025,132 @@ def test_lpbt_logic_control_passthrough_not_hijacked(tmp_path):
     d = exp["ctrl_drivers"][0]
     assert d["source"] == "logic", (d["source"], exp["issues"])   # 没被 force 劫持
     assert d["line"] is not None or d["local"] is not None
+
+
+# ───────────── 同源喂多 case：互异值按物理寄存器分配（2026-06-04 回归） ─────────────
+def test_wl_shared_data_source_across_cases_generates(tmp_path):
+    """⭐回归（2026-06-04，真表 vga_cfb_dpd_ss_lut5 症状）：同一个数据寄存器喂多个 case
+    （d:0/d:1/d:2 全是 *_t0）。旧版互异值【按 case 序号】分配 → 同一寄存器被写 3 个不同值 →
+    emit 的 by_base 冲突检查把每条向量都丢弃 → 空向量 → 误报"控制信号没有可用的驱动路径"。
+    修复：互异值【按物理寄存器】分配，同源 case 复用同值 → 正常生成、不再空。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "shared.xlsx"),
+        tmm_fields=[
+            ("CTRL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),      # 2bit 寄存器直出控制
+            ("T0", "h20", "d_src_t0[2:0]", "2:0", "N", "RW"),
+            ("T1", "h21", "d_src_t1[2:0]", "2:0", "N", "RW"),
+        ],
+        mux_rows=[
+            # 3 个 case：00→t0, 01→t0(同源!), 10→t1
+            _mrow("d_src_t0_to_mux[2:0]", "d_sel_to_mux[1:0]", "2'b00", "d_shared[2:0]", 1),
+            _mrow("d_src_t0_to_mux[2:0]", "d_sel_to_mux[1:0]", "2'b01", "d_shared[2:0]", 1),
+            _mrow("d_src_t1_to_mux[2:0]", "d_sel_to_mux[1:0]", "2'b10", "d_shared[2:0]", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    grp = _grp(wb, "d_shared")
+    exp = mux_gen.expand_mux_group(wb, r, grp)
+    assert not exp["issues"], exp["issues"]
+    # 互异值：同源(t0)的两个 case 必须同值；t0 != t1（不同寄存器才需互异）
+    values, collision = mux_gen.alloc_distinct_values(grp, exp["bindings"], exp["data_keys"])
+    assert values[0] == values[1], "同一寄存器喂的两个 case 必须分配同值（否则 by_base 冲突全丢）"
+    assert values[0] != values[2], "不同寄存器必须互异（mux 选路才能验）"
+    assert not collision                                   # 2 个不同寄存器，3bit 装得下
+    # 端到端：向量真的生成了（不再空、不再被 by_base 冲突全丢）
+    vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode="min")
+    assert vecs, "同源喂多 case 不该再产生空向量"
+    assert meta["dropped"] == 0, meta.get("dropped_reasons")
+    assert not meta.get("value_collision")
+    # build 流程同样生成（不再落进 skipped）
+    import copy
+    wb2 = copy.copy(wb)
+    wb2.mux = [grp]
+    res = generator.build(wb2, generator.GenOptions(types=["mux"], include_risky=True))
+    assert res["summary"]["n_mux_generated"] == 1
+
+
+def test_wl_shared_source_narrow_marker_marks_whole_register(tmp_path):
+    """同源喂多 case + 字段太窄（点名法路径）：被测寄存器喂的【所有】case 一起给标记，
+    只把别的寄存器置 0——否则同源 case 一个标记一个 0 仍会撞 by_base 冲突。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "shared_narrow.xlsx"),
+        tmm_fields=[
+            ("CTRL", "h10", "d_sel2[1:0]", "1:0", "N", "RW"),
+            ("T0", "h20", "d_n_t0", "0", "N", "RW"),          # 1bit
+            ("T1", "h21", "d_n_t1", "0", "N", "RW"),          # 1bit
+            ("T2", "h22", "d_n_t2", "0", "N", "RW"),          # 1bit
+        ],
+        mux_rows=[
+            _mrow("d_n_t0_to_mux", "d_sel2_to_mux[1:0]", "2'b00", "d_narrow", 1),
+            _mrow("d_n_t0_to_mux", "d_sel2_to_mux[1:0]", "2'b01", "d_narrow", 1),  # 同源 t0
+            _mrow("d_n_t1_to_mux", "d_sel2_to_mux[1:0]", "2'b10", "d_narrow", 1),
+            _mrow("d_n_t2_to_mux", "d_sel2_to_mux[1:0]", "2'b11", "d_narrow", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    grp = _grp(wb, "d_narrow")
+    exp = mux_gen.expand_mux_group(wb, r, grp)
+    assert not exp["issues"], exp["issues"]
+    # 3 个不同寄存器、各 1bit（只放得下值 1，避 0）→ 互异值装不下 → 点名法
+    _values, collision = mux_gen.alloc_distinct_values(grp, exp["bindings"], exp["data_keys"])
+    assert collision
+    # 点名 ci=0（t0）：t0 喂的两个 case(0,1)都给标记，t1/t2 置 0
+    mv = mux_gen._marker_values(grp, 0, exp["bindings"], exp["data_keys"], "ones")
+    assert mv[0] == 1 and mv[1] == 1 and mv[2] == 0 and mv[3] == 0, mv
+    # 端到端：点名法生成、不空、不丢
+    vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode="min")
+    assert vecs and meta.get("marker_method") and meta["dropped"] == 0, meta.get("dropped_reasons")
+
+
+def test_wl_cascaded_control_with_shared_data_source_generates(tmp_path):
+    """⭐回归（完全贴合真表 vga_cfb_dpd_ss_lut5 形态）：控制是级联 mux(temp_code) + 下游同一个
+    数据寄存器喂多个 case。控制侧完全正常解析（全 RW/regmap 命中），却因数据侧 by_base 冲突空向量
+    → 误报"控制信号没有可用的驱动路径"（指错了地方）。修复后正常生成。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "casc_shared.xlsx"),
+        tmm_fields=[
+            ("TCMODE", "h10", "d_tcmode", "0", "N", "RW"),
+            ("TCLINE", "h11", "d_tcline[3:0]", "3:0", "Y", "RO"),     # 够宽载体（RO 线）
+            ("TCLOCAL", "h12", "d_tclocal[3:0]", "3:0", "N", "RW"),   # 够宽载体（RW，优先）
+            ("DT0", "h20", "d_dt0[2:0]", "2:0", "N", "RW"),
+            ("DT1", "h21", "d_dt1[2:0]", "2:0", "N", "RW"),
+            ("DT2", "h22", "d_dt2[2:0]", "2:0", "N", "RW"),
+        ],
+        mux_rows=[
+            # 上游组1：控制 mux d_tc = case(tcmode){0:line; 1:local}
+            _mrow("d_tcline_to_mux[3:0]", "d_tcmode_to_mux", "1'b0", "d_tc[3:0]", 1),
+            _mrow("d_tclocal_to_mux[3:0]", "d_tcmode_to_mux", "1'b1", "d_tc[3:0]", 1),
+            # 下游组2：控制=d_tc(级联)，5 个 case 映射 t0/t0/t1/t1/t2（同一寄存器喂多 case）
+            _mrow("d_dt0_to_mux[2:0]", "d_tc_to_mux[3:0]", "4'b0000", "d_dout[2:0]", 2),
+            _mrow("d_dt0_to_mux[2:0]", "d_tc_to_mux[3:0]", "4'b0001", "d_dout[2:0]", 2),  # 同源 t0
+            _mrow("d_dt1_to_mux[2:0]", "d_tc_to_mux[3:0]", "4'b0010", "d_dout[2:0]", 2),
+            _mrow("d_dt1_to_mux[2:0]", "d_tc_to_mux[3:0]", "4'b0011", "d_dout[2:0]", 2),  # 同源 t1
+            _mrow("d_dt2_to_mux[2:0]", "d_tc_to_mux[3:0]", "4'b0100", "d_dout[2:0]", 2),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    grp = _grp(wb, "d_dout")
+    exp = mux_gen.expand_mux_group(wb, r, grp)
+    assert not exp["issues"], exp["issues"]
+    assert exp["ctrl_drivers"][0]["source"] == "mux"      # 控制确是级联 mux，正常解析
+    # 端到端：向量生成、不空、不丢（修复前这里空 → 误报"控制无驱动路径"）
+    vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode="min")
+    assert vecs, "级联控制+同源数据不该再产生空向量"
+    assert meta["dropped"] == 0, meta.get("dropped_reasons")
+    # 同源 t0 的两个 case 在同一条向量里写同值
+    dv, _coll = mux_gen.alloc_distinct_values(grp, exp["bindings"], exp["data_keys"])
+    assert dv[0] == dv[1] and dv[2] == dv[3] and dv[0] != dv[2] != dv[4]
+
+
+def test_empty_vector_reason_surfaces_dropped_reasons():
+    """向量为空时不再一律甩"控制无驱动路径"：meta 有逐 case 丢弃原因就抛真因（去重）。"""
+    # 有 dropped_reasons → 抛真因
+    meta = {"dropped_reasons": [
+        "case 2'b00: 寄存器 d_x 同时被下游数据与上游级联配方写不同值（冲突），该向量丢弃",
+        "case 2'b01: 寄存器 d_x 同时被下游数据与上游级联配方写不同值（冲突），该向量丢弃",
+    ]}
+    msg = generator._empty_vector_reason(meta)
+    assert "都被丢弃" in msg and "冲突" in msg
+    assert "控制信号没有可用的驱动路径" not in msg
+    # 无 dropped_reasons（控制来源 unknown / 无扫描路径）→ 通用兜底
+    assert "控制信号没有可用的驱动路径" in generator._empty_vector_reason({})
