@@ -862,3 +862,56 @@ def test_cone_leaf_shorthand_cascade_still_forces_ls():
     wb2 = excel_model.DregWorkbook(logic=[s_up, s_mid, s_top], regmap={}, tmm={}, sheet_names=[])
     _node, leaves = cone.expand(s_top, wb2, R.Resolver(wb2))
     assert leaves["D_UP"].wire == "d_up_ls"
+
+
+def test_cone_cycle_falls_back_to_force_when_base_is_register():
+    """cone 成环但内部信号基名是顶层真寄存器（linectrl 形态：logic 输出撞名 RO 寄存器 d61）
+    → expand_signal 回退为 force 顶层基名（for_test 那招），不再抛 cone 失败。"""
+    s = _mk_logic("d_band_sel", 4, "A",
+                  {"A": {"raw": "d_band_sel_to_logic", "base": "d_band_sel", "width": 4,
+                         "msb": 3, "lsb": 0}},
+                  "2", suffix="to_mux", top_output=0)
+    tmm = {"d_band_sel": excel_model.TmmField("d_band_sel", 0, 5, 0x3D, "RO", "N", "R")}
+    wb2 = excel_model.DregWorkbook(logic=[s], regmap={}, tmm=tmm, sheet_names=[])
+    res = R.Resolver(wb2)
+    with pytest.raises(cone.ConeError):           # 裸 cone.expand 仍会成环
+        cone.expand(s, wb2, res)
+    notes = []
+    node, bindings, expanded = generator.expand_signal(wb2, res, s, fallback_notes=notes)
+    assert expanded is False                      # 没展开（走了回退）
+    b = bindings["A"]
+    assert b.kind == "RO" and b.resolved is True
+    assert b.wire == "d_band_sel"                 # force 顶层基名 = for_test
+    assert b.found_in in ("tmm", "regmap")
+    assert "回退force" in (b.note or "")
+    assert notes and "cone 成环" in notes[0]
+    assert "d_band_sel" not in res.force_overrides  # 回退不污染 resolver 全局 override
+
+
+def test_cone_cycle_no_register_still_errors():
+    """cone 成环且内部信号顶层无寄存器 → 回退兜不住 → 仍报 cone 失败（不乱 force 不存在的网→CUVUNF）。"""
+    s = _mk_logic("d_pure", 1, "A",
+                  {"A": {"raw": "d_pure_to_logic", "base": "d_pure", "width": 1,
+                         "msb": None, "lsb": None}},
+                  "3", suffix="to_logic", top_output=0)
+    wb2 = excel_model.DregWorkbook(logic=[s], regmap={}, tmm={}, sheet_names=[])
+    with pytest.raises(cone.ConeError):
+        generator.expand_signal(wb2, R.Resolver(wb2), s)
+
+
+def test_gui_force_signals_flows_to_resolver_and_opts(tmp_path_factory):
+    """GUI『强制 force 信号』：force_signals 流进 resolver.force_overrides 与 _opts(GenOptions)
+    （= 生成/.sv 路径都按 force 顶层基名处理；状态列与产物一致）。"""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("gui_force") / "synthetic_pll.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path)); w.on_load()
+    assert "pll_n2" not in w._resolver.force_overrides       # 初始没有
+    w._force_signals = {"pll_n2"}
+    w._reanalyze_all()
+    assert "pll_n2" in w._resolver.force_overrides            # 流进 resolver（GUI 状态/分析）
+    assert "pll_n2" in w._opts(["pll_n"]).force_overrides     # 流进 GenOptions（build/预览/.sv）

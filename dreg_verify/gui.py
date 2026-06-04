@@ -308,6 +308,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # 探针前缀 {信号名小写: 层级前缀}：输出网在 ENV_RF 的子模块里时（如 pll_n 在
         # U_BT_LP_PLL_DIG 内部），断言探针写 `ENV_RF.<前缀>.<网名>。按 Excel 路径持久化。
         self._probe_prefixes = {}
+        # 强制 force 的基名集合（小写）：列进来的信号直接 force 顶层基名网、跳过 cone 展开
+        # （for_test 那招）。用于覆盖工具的自动判断（如撞名 RO 寄存器的内部信号）。按 Excel 路径持久化。
+        self._force_signals = set()
         self._preview_source = None   # 预览页内容来源: None/"all"/"signal" —— 配置变更后联动刷新
         self._build_ui()
 
@@ -384,6 +387,11 @@ class MainWindow(QtWidgets.QMainWindow):
         b_prefix.setToolTip("输出网不在 ENV_RF 顶层、而在子模块里时（如 pll_n 在 U_BT_LP_PLL_DIG 内部），\n"
                             "给勾选/选中的信号设置层级前缀 → 断言写 `ENV_RF.<前缀>.<信号名>。留空清除。")
         b_prefix.clicked.connect(self.on_set_probe_prefix)
+        b_force = QtWidgets.QPushButton("强制 force 信号")
+        b_force.setToolTip("列出要『直接 force 顶层基名网、跳过 cone 展开』的信号基名(每行一个)。\n"
+                           "用于覆盖工具的自动判断：撞名 RO 寄存器的内部信号(如 d_wl_rf_linectrl_band_sel)\n"
+                           "等价于 for_test 的 force `ENV_RF.<基名>。cone 成环时工具已会自动回退，这里是手动指定。")
+        b_force.clicked.connect(self.on_set_force_signals)
         # 测试项编辑(含 designer 手填期望)的导出/导入：给同事复用、入版本库、跨机器迁移
         b_exp_edits = QtWidgets.QPushButton("导出编辑…")
         b_exp_edits.setToolTip("把当前 Excel 的全部测试项编辑(手填期望/负向/自定义列)导出为 .json 文件，\n"
@@ -399,6 +407,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (b_negall, b_negnone):
             bulk.addWidget(b)
         bulk.addWidget(b_prefix)
+        bulk.addWidget(b_force)
         bulk.addWidget(QtWidgets.QLabel(" 编辑:"))
         bulk.addWidget(b_exp_edits)
         bulk.addWidget(b_imp_edits)
@@ -730,8 +739,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.signals = list(self.wb.logic) + list(self.wb.mux)
         # 探针前缀按 Excel 路径持久化：换表自动恢复上次配置（须在建 Resolver 前加载——wire 前缀要传进去）
         self._probe_prefixes = dict(_load_settings().get("probe_prefixes", {}).get(path, {}))
+        self._force_signals = set(_load_settings().get("force_signals", {}).get(path, []))
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
+                                    force_overrides=self._force_signals,
                                     cascade_mode=self._cascade_mode())
         self._analysis = {}
         # 切换工作簿，清空旧的测试项编辑状态
@@ -1132,6 +1143,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("探针前缀映射已更新（共 %d 条），影响 %d 个信号"
                                 "（见蓝色『探针前缀』列；状态列应变 clean）" % (len(mapping), affected))
 
+    def _save_force_signals(self):
+        """强制 force 基名按 Excel 路径写入 settings（pytest 下 no-op，与其它持久化策略一致）。"""
+        st = _load_settings()
+        all_maps = st.get("force_signals", {})
+        path = self.path_edit.text().strip()
+        if self._force_signals:
+            all_maps[path] = sorted(self._force_signals)
+        else:
+            all_maps.pop(path, None)
+        st["force_signals"] = all_maps
+        _save_settings(st)
+
+    def on_set_force_signals(self):
+        """强制 force 信号编辑器：每行一个基名，列进来的信号直接 force 顶层基名网、跳过 cone 展开。
+
+        用于覆盖工具自动判断（如撞名 RO 寄存器的内部信号），等价 CLI 的 --force-signals、
+        也等价 for_test 的 force `ENV_RF.<基名>。cone 成环时工具已自动回退，这里供手动指定别的信号。
+        """
+        if not self.wb:
+            return
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("强制 force 信号（跳过 cone，直接 force 顶层基名）")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.addWidget(QtWidgets.QLabel(
+            "每行一个信号基名（去 _to_logic/_to_mux 后缀、去位宽）。列进来的信号：\n"
+            "    · 直接 force 顶层基名网 `ENV_RF.<基名>（= for_test 那招），跳过 cone 展开；\n"
+            "    · 适合撞名 RO 寄存器的内部信号（如 d_wl_rf_linectrl_band_sel）。\n"
+            "前提：该基名在 ENV_RF 顶层真实存在（tmm/regmap 里有这个寄存器/网），否则仿真会 CUVUNF。\n"
+            "留空 = 清除。cone 成环时工具已会自动回退到 force，这里是手动覆盖别的信号。"))
+        edit = QtWidgets.QPlainTextEdit()
+        edit.setPlainText("\n".join(sorted(self._force_signals)))
+        self._mono(edit)
+        lay.addWidget(edit)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.resize(560, 380)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        names = set()
+        for line in edit.toPlainText().splitlines():
+            s = line.split("#", 1)[0].strip().lower()    # # 开头/行尾 = 注释
+            if s:
+                names.add(s)
+        self._force_signals = names
+        self._save_force_signals()
+        self._reanalyze_all()
+        self.status.showMessage("强制 force 信号已更新（共 %d 个）——这些信号跳过 cone、直接 force 顶层基名"
+                                "（状态列应变 clean/需前缀）" % len(names))
+
     def _analyze_one(self, sig):
         """单信号解析画像：logic 走 analyze_signal，mux 组走 analyze_mux_group（2026-06-03 第九轮）。"""
         if isinstance(sig, excel_model.MuxGroup):
@@ -1149,6 +1211,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _reanalyze_all(self):
         """探针前缀/级联模式变更后重建 Resolver（两者都影响所有信号的输入解析）并刷新全表。"""
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
+                                    force_overrides=self._force_signals,
                                     cascade_mode=self._cascade_mode())
         for i, s in enumerate(self.signals):
             try:
@@ -2668,6 +2731,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mode=mode, max_tests=self.max_tests.value(), exhaustive=exhaustive,
             top_output_only=False,   # GUI 已按表勾选，不再二次过滤
             probe_prefixes=dict(self._probe_prefixes),
+            force_overrides=set(self._force_signals),
             owner_in_msg=owner_in_msg,
             sv_summary=sv_summary,
             cascade_mode=self._cascade_mode(),

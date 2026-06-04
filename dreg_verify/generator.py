@@ -305,7 +305,7 @@ def parse_probe_prefix_lines(text):
     return out
 
 
-def expand_signal(wb, resolver, sig, chain_out=None):
+def expand_signal(wb, resolver, sig, chain_out=None, fallback_notes=None):
     """解析表达式并按需做 cone 展开（输入引用内部 logic 信号时递归代入其表达式）。
 
     返回 (node, bindings, expanded)：
@@ -319,10 +319,57 @@ def expand_signal(wb, resolver, sig, chain_out=None):
     """
     node = E.parse(sig.expr)
     bindings = resolver.resolve_signal_inputs(sig)
-    if cone.find_internal_inputs(node, bindings):
-        node, bindings = cone.expand(sig, wb, resolver, chain_out=chain_out)
-        return node, bindings, True
+    internal = cone.find_internal_inputs(node, bindings)
+    if internal:
+        try:
+            node2, bindings2 = cone.expand(sig, wb, resolver, chain_out=chain_out)
+            return node2, bindings2, True
+        except cone.ConeError:
+            # cone 成环/超深 → 回退为 force 基名（for_test 那招）：内部输入若基名在 tmm/regmap
+            # 有真实寄存器（如 linectrl_band_sel 撞名 RO 寄存器 d61），改直接 force 顶层基名网，
+            # 不再展开。兜不住（内部输入纯逻辑节点、顶层没有该网）→ 仍抛 ConeError 让上层报错。
+            fb = _cone_force_fallback(resolver, sig, node, bindings, internal, fallback_notes)
+            if fb is not None:
+                if chain_out is not None:
+                    del chain_out[:]      # cone 半途成环可能已写入残缺展开链 → 回退非 cone，清掉
+                return node, fb, False
+            raise
     return node, bindings, False
+
+
+def _cone_force_fallback(resolver, sig, node, bindings, internal_letters, notes=None):
+    """cone 失败兜底：把"基名是 tmm/regmap 真实寄存器"的内部输入临时按 force(RO) 基名重解析。
+
+    成功（重解析后不再有无解的内部输入）→ 返回新 bindings；否则 None（兜不住，让上层报 cone 失败）。
+    与 for_test 一致：force 顶层基名网（如 d_wl_rf_linectrl_band_sel），不碰撞名的 logic 输出。
+    """
+    forceable = []
+    for ltr in internal_letters:
+        b = bindings.get(ltr)
+        if b is None:
+            continue
+        tmm, _ta = resolver._match_tmm(b.base)
+        rm, _ra = resolver._match_regmap(b.base)
+        if tmm is not None or rm is not None:        # 基名在表里有真寄存器 → 可 force 顶层基名
+            forceable.append(b.base.lower())
+    if not forceable:
+        return None
+    saved = resolver.force_overrides
+    try:
+        resolver.force_overrides = set(saved) | set(forceable)
+        fb = resolver.resolve_signal_inputs(sig)
+    finally:
+        resolver.force_overrides = saved
+    if cone.find_internal_inputs(node, fb):           # 还有兜不住的内部输入 → 不算成功
+        return None
+    for ltr in internal_letters:                      # 在 note 上留痕，GUI/报告可见
+        b = fb.get(ltr)
+        if b is not None and b.base.lower() in forceable:
+            b.note = (b.note + " " if b.note else "") + "[cone成环→回退force基名]"
+    if notes is not None:
+        notes.append("%s: cone 成环，已回退为 force 基名（%s）"
+                     % (sig.out_name, ", ".join(sorted(set(forceable)))))
+    return fb
 
 
 def build(wb, opts):
@@ -344,6 +391,7 @@ def build(wb, opts):
     errors = []
     skipped = []        # 含不可驱动输入(wire兜底/未解析)的信号，默认跳过(与 VBA 一致)
     mux_warnings = []   # 照常生成但有提示的 mux 组（如 top_out=0 用裸名探针，可能要前缀）
+    cone_fallbacks = [] # cone 成环 → 回退 force 基名的信号（for_test 那招），可见性用
     n_total_vectors = 0
     n_total_neg = 0
     n_total_designer = 0     # designer 手填期望的用例数（其余正向用 auto_out 兜底）
@@ -353,7 +401,8 @@ def build(wb, opts):
 
     for sig in selected:
         try:
-            node, bindings, expanded = expand_signal(wb, resolver, sig)
+            node, bindings, expanded = expand_signal(wb, resolver, sig,
+                                                     fallback_notes=cone_fallbacks)
         except E.ExprError as ex:
             errors.append((sig.out_name, sig.assert_id, "表达式解析失败: %s" % ex))
             continue
@@ -557,6 +606,7 @@ def build(wb, opts):
     }
     return {"blocks": blocks, "selected": selected, "errors": errors,
             "skipped": skipped, "mux_warnings": mux_warnings,
+            "cone_fallbacks": cone_fallbacks,
             "filtered_internal": filtered_internal,
             "dup_labels": dup_labels, "summary": summary,
             # 计数器++已按 opts.sv_summary 写进 blocks，render 必须配套包裹声明/汇总，
