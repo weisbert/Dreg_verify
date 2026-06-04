@@ -92,7 +92,7 @@ def test_wl_gui_status_bare_probe(wl_win):
 
 
 def test_wl_gui_status_column_info_blue_not_red(wl_win):
-    """状态列文本='裸名探针'、信息色蓝（区别于未解析的红、需前缀的橙），tooltip 含 error 全文。"""
+    """状态列文本='输出裸名·已生成'、信息色蓝（区别于未解析的红、缺前缀的橙），tooltip 含 error 全文。"""
     from PySide6 import QtGui
     from dreg_verify import gui as G
     w = wl_win
@@ -100,7 +100,7 @@ def test_wl_gui_status_column_info_blue_not_red(wl_win):
     # 找到该信号在表格里的行（排序后行号 ≠ signals 下标）
     row = next(r for r in range(w.table.rowCount()) if w._idx_of_row(r) == i)
     cell = w.table.item(row, G.COL_STATUS)
-    assert cell.text() == "裸名探针"
+    assert cell.text() == G.STATUS_LABEL["bare-probe"]    # 标签文本以常量为准（避免硬编码漂移）
     assert cell.foreground().color() == QtGui.QColor("#2a7ab0")    # 信息蓝，不是红/橙
     assert "scan_rtl" in cell.toolTip()                            # error 全文带上
 

@@ -150,17 +150,19 @@ def _skipped_detail_text(skipped):
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "unresolved": "✗未解析", "parse-err": "✗解析错",
-                "needs-prefix": "⚠需探针前缀", "bare-probe": "裸名探针",
+                "needs-prefix": "⚠输入缺前缀·跳过", "bare-probe": "输出裸名·已生成",
                 "false-green": "⚠字段太窄·假绿"}
 STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE 驱动",
                "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
                "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
                "parse-err": "表达式或输入解析出错",
-               "needs-prefix": "要 force 子模块内的衔接网（级联网/wire 兜底）但没配前缀——"
-                               "先跑 scan_rtl 配好探针前缀再生成（否则这组会跳过）",
-               "bare-probe": "输出 top_out=0（喂内部、非芯片顶层输出）——已按裸名探针 `ENV_RF.<名> "
-                             "照常生成；若仿真 elaboration 报 CUVUNF 说明它埋在子模块，"
-                             "再跑 scan_rtl 配前缀重生成即可（不是错误）",
+               "needs-prefix": "【输入侧·硬阻断】要 force 的某根输入网埋在子模块里（级联 _to_mux 衔接网 / "
+                               "wire 兜底），force 基名钉不住——没配前缀就 force 必 CUVUNF，所以默认【跳过】"
+                               "整组。先跑 scan_rtl 配好探针前缀，这组才会生成。",
+               "bare-probe": "【输出侧·软提示，已生成】输出 top_out=0（喂内部、非芯片顶层输出），"
+                             "工具照样用裸名探针 `ENV_RF.<输出名> 探、【照常生成】.sv。只有仿真 elaboration "
+                             "真报 CUVUNF（说明它埋在子模块）时，再跑 scan_rtl 配前缀重生成即可（不是错误）。"
+                             "—— 和『输入缺前缀』的区别：那个是输入 force 不到、硬阻断；这个是输出怎么探、不阻断。",
                "false-green": "结构全解析通了，不是未解析——只是数据寄存器字段太窄、装不下每条 case "
                               "的互异值，硬生成会变『RTL 接错路也 PASS』的假测试(假绿)。工具保护性跳过；"
                               "要验得加宽字段或拆组（属设计层，不是工具/表的错）"}
