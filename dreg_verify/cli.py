@@ -404,7 +404,8 @@ _REPORT_JS = """
     var qq=(q.value||'').toLowerCase(),oo=ow.value,nn=no.checked;
     return function(it){
       if(qq&&it.t.indexOf(qq)<0)return false;
-      if(oo&&it.o!==oo)return false;
+      if(oo==='__no_owner__'){if(it.o!=='')return false;}   /* 「（无 owner）」专项 */
+      else if(oo&&it.o!==oo)return false;
       if(nn&&it.n!==1)return false;
       return true;
     };
@@ -734,8 +735,12 @@ def _write_report_html(path, rep, excel):
         return '<script type="application/json" id="%s">%s</script>' % (el_id, payload)
 
     owners = sorted({(r.get("owner") or "") for r in rep["summary"] if r.get("owner")})
-    owner_opts = '<option value="">全部 owner</option>' + "".join(
-        '<option value="%s">%s</option>' % (esc(o), esc(o)) for o in owners)
+    # owner 列(P/L/AE)留空的信号：下拉给一个「（无 owner）×N」专项（哨兵值 __no_owner__），
+    # 仅当真有空 owner 信号时才出现（都填好就不打扰）。
+    n_no_owner = sum(1 for r in rep["summary"] if not r.get("owner"))
+    no_owner_opt = ('<option value="__no_owner__">（无 owner） ×%d</option>' % n_no_owner) if n_no_owner else ""
+    owner_opts = ('<option value="">全部 owner</option>' + no_owner_opt + "".join(
+        '<option value="%s">%s</option>' % (esc(o), esc(o)) for o in owners))
     n_sig = len(rep["summary"])
     n_tc = len(rep["detail"])
     n_neg = sum(1 for r in rep["detail"] if r.get("neg") == "是")

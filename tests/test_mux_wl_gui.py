@@ -242,3 +242,35 @@ def test_lpbt_gui_header_single_ctrl(lpbt_win):
     txt = w.ti_header.text()
     assert "case(d_logic_bt_lp_lna_agc)" in txt, txt
     assert "另一路径抽测" in txt        # LPBT 双路径文案
+
+
+# ───────────── ⑥ owner 留空的信号：下拉可筛「（无 owner）」 ─────────────
+def test_gui_filter_no_owner(wl_win):
+    """Excel owner 列(P/L/AE)留空 → sig.owner=''；下拉出现「（无 owner） ×N」，选中只显示这些。"""
+    from dreg_verify import gui as G
+    w = wl_win
+    for s in (w.signals[0], w.signals[1]):       # 模拟两个信号 owner 列留空
+        s.owner = ""
+    w._populate_filters()
+    n_blank = sum(1 for s in w.signals if not s.owner)
+    assert n_blank >= 2
+    texts = [w.owner_combo.itemText(k) for k in range(w.owner_combo.count())]
+    item = next((t for t in texts if t.startswith(G.NO_OWNER)), None)
+    assert item == "%s ×%d" % (G.NO_OWNER, n_blank), texts     # 带计数
+    w.owner_combo.setCurrentText(item); w.apply_filter()
+    for r in range(w.table.rowCount()):                         # 只有无 owner 的行可见
+        s = w._sig_of_row(r)
+        assert w.table.isRowHidden(r) == bool(s.owner), s.out_name
+    w.owner_combo.setCurrentText("全部 owner"); w.apply_filter()
+
+
+def test_gui_filter_no_owner_absent_when_all_owned(wl_win):
+    """所有信号都有 owner 时，下拉不出现「（无 owner）」项（不打扰）。"""
+    from dreg_verify import gui as G
+    w = wl_win
+    for s in w.signals:
+        if not s.owner:
+            s.owner = "someone"
+    w._populate_filters()
+    texts = [w.owner_combo.itemText(k) for k in range(w.owner_combo.count())]
+    assert not any(t.startswith(G.NO_OWNER) for t in texts), texts

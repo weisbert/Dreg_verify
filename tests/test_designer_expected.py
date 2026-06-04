@@ -342,6 +342,31 @@ def test_html_check_toggle_perf(wb, tmp_path):
     assert "thead th{position:sticky" in raw       # 扁平表的 sticky 仍在
 
 
+def test_html_report_no_owner_filter(wb, tmp_path):
+    """owner 列留空 → 报告 owner 下拉给「（无 owner）×N」专项（哨兵 __no_owner__），仅在真有空 owner 时出现。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    for r in rep["summary"][:2]:                    # 模拟两个信号 owner 列留空
+        r["owner"] = ""
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    raw = path.read_text(encoding="utf-8")
+    n_blank = sum(1 for r in rep["summary"] if not r.get("owner"))
+    assert ('<option value="__no_owner__">（无 owner） ×%d</option>' % n_blank) in raw
+
+
+def test_html_report_no_owner_filter_absent_when_all_owned(wb, tmp_path):
+    """所有信号都有 owner 时，下拉不出现「（无 owner）」选项（JS 分支常驻无妨，但选项不生成）。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    for r in rep["summary"]:
+        r["owner"] = r.get("owner") or "someone"
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    raw = path.read_text(encoding="utf-8")
+    assert '<option value="__no_owner__"' not in raw
+
+
 def test_csv_report_detail_has_auto_out_column(wb, tmp_path):
     """CSV 明细含 auto_out 与期望来源列。"""
     from dreg_verify import cli

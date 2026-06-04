@@ -148,6 +148,7 @@ def _skipped_detail_text(skipped):
 (COL_SEL, COL_NEG, COL_R, COL_K, COL_OWNER, COL_TYPE, COL_TOP, COL_STATUS,
  COL_PREFIX, COL_EXPR) = range(10)
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
+NO_OWNER = "（无 owner）"          # owner 下拉的特殊项：Excel owner 列留空(P/L/AE)的信号
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "unresolved": "✗未解析", "parse-err": "✗解析错",
                 "needs-prefix": "⚠输入缺前缀·跳过", "bare-probe": "输出裸名·已生成",
@@ -792,10 +793,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _populate_filters(self):
         owners = sorted({s.owner for s in self.signals if s.owner})
         types = sorted({s.suffix for s in self.signals if s.suffix})
-        for combo, items, head in ((self.owner_combo, owners, "全部 owner"),
-                                   (self.type_combo, types, "全部 type")):
-            combo.blockSignals(True); combo.clear(); combo.addItem(head); combo.addItems(items)
-            combo.blockSignals(False)
+        self.type_combo.blockSignals(True)
+        self.type_combo.clear(); self.type_combo.addItem("全部 type"); self.type_combo.addItems(types)
+        self.type_combo.blockSignals(False)
+        # owner 下拉：全部 → （无 owner）[仅当真有空 owner 信号时] → 具体 owner 名
+        n_no_owner = sum(1 for s in self.signals if not s.owner)
+        self.owner_combo.blockSignals(True); self.owner_combo.clear()
+        self.owner_combo.addItem("全部 owner")
+        if n_no_owner:
+            self.owner_combo.addItem("%s ×%d" % (NO_OWNER, n_no_owner))
+        self.owner_combo.addItems(owners)
+        self.owner_combo.blockSignals(False)
 
     def _populate_table(self):
         self._sig_loading = True
@@ -899,7 +907,10 @@ class MainWindow(QtWidgets.QMainWindow):
             sig = self._sig_of_row(r)
             st = self._analysis[self._idx_of_row(r)]["status"]
             show = True
-            if owner != "全部 owner" and sig.owner != owner:
+            if owner.startswith(NO_OWNER):           # 「（无 owner） ×N」：只看 owner 列留空的
+                if sig.owner:
+                    show = False
+            elif owner != "全部 owner" and sig.owner != owner:
                 show = False
             if typ != "全部 type" and sig.suffix != typ:
                 show = False
