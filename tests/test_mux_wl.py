@@ -549,12 +549,14 @@ def test_wl_negative_vectors(wl_wb):
 from fixtures import _set_row, _tmm_reg, _tmm_field  # noqa: E402
 
 
-def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None):
-    """造一个只有 logic(空)/tmm/regmap/mux 四页的最小工作簿，给级联/边界回归用。
+def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=None):
+    """造一个只有 logic(默认空)/tmm/regmap/mux 四页的最小工作簿，给级联/边界回归用。
 
     tmm_fields: [(reg_name, addr, field_name(可带[msb:lsb]), bit, dig, typ), ...]
     mux_rows:   [{列字母: 值}, ...]（直接 _set_row 到 mux 页数据行，row 从 3 起）
     regmap_fields: [(reg, typ, signal), ...] 可选
+    logic_rows: [{列字母: 值}, ...] 可选——往 logic 页加行（A..J=输入, K=输出, L=表达式,
+                M=suffix, N=top_output, R=序号），用于复现"mux 数据/控制输入是某 logic 输出"的形态。
     """
     import openpyxl
     wb = openpyxl.Workbook()
@@ -562,6 +564,8 @@ def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None):
     ws.title = "logic"
     _set_row(ws, 2, {"A": "in_A", "K": "out", "L": "expr", "M": "suffix",
                      "N": "top", "P": "owner", "R": "no"})
+    for ri, cells in enumerate(logic_rows or [], start=3):
+        _set_row(ws, ri, cells)
     rm = wb.create_sheet("regmap")
     _set_row(rm, 2, {"D": "Reg", "F": "Type", "G": "Signal", "J": "b15", "Y": "b0", "AE": "owner"})
     from openpyxl.utils import column_index_from_string
@@ -781,3 +785,106 @@ def test_review_fix5_genuine_mismatch_still_caught(tmp_path):
     r = resolver.Resolver(wb)
     exp = mux_gen.expand_mux_group(wb, r, grp)
     assert any("不一致" in i for i in exp["issues"])
+
+
+# ───────────── ⑧ mux 数据输入是 top_output=0 logic 输出的 _to_mux 衔接网（2026-06-04 WL linectrl/_line）─────────────
+# 真表 270 组里 ~41 个"数据输入未解析"的根因：mux 页 A 列写的是显式 X_to_mux 真网，但基名 X 撞上一个
+# top_output=0 的 logic 输出 → resolve 在"内部信号"兜底短路（cone 还会假成环）→ 未解析跳过。
+# 修复：原文带 _to_mux 时不走内部信号兜底，落到 force 字面网（needs-prefix）。
+
+
+def _mux_skip_reason(wb, res, out_base):
+    """从 compose_account 取某 mux 组的去向+原因（= 用户跑 --account 看到的那一行）。"""
+    items = generator.compose_account(wb, generator.GenOptions(), res)
+    it = next(i for i in items if i["kind"] == "mux" and i["name"].startswith(out_base))
+    return it["disposition"], it["reason"]
+
+
+def test_wl_linectrl_collision_data_input_forces_net(tmp_path):
+    """linectrl 家族（名字撞车 + 纯透传）：mux 数据输入 X_to_mux，X 既是 top_output=0 logic 输出、
+    又与一个 RO 寄存器同名。修前→resolve 在"内部信号"兜底短路→未解析跳过；修后→force 字面网。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "linectrl.xlsx"),
+        tmm_fields=[
+            ("MODE", "h10", "d_wl_rf_mode", "0", "N", "RW"),
+            ("BAND", "h11", "d_wl_rf_band_sel[5:0]", "5:0", "Y", "RO"),   # 底层 RO（与 logic 输出同名）
+            ("LOCAL", "h12", "d_wl_rf_local[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_wl_rf_band_sel_to_mux[3:0]", "d_wl_rf_mode_to_mux", "1'b0", "d_wl_rf_out[3:0]", 1),
+            _mrow("d_wl_rf_local_to_mux[3:0]", "d_wl_rf_mode_to_mux", "1'b1", "d_wl_rf_out[3:0]", 1),
+        ],
+        logic_rows=[
+            # 纯透传 + 名字撞车：logic 输出 d_wl_rf_band_sel[3:0] = A（同名 RO 寄存器的低 4 位）
+            {"A": "d_wl_rf_band_sel_to_logic[3:0]", "K": "d_wl_rf_band_sel[3:0]",
+             "L": "A", "M": "to_mux", "N": 0, "R": 1},
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_wl_rf_out"))
+    b = exp["bindings"]["d:0"]                              # 线控数据输入
+    assert b.found_in == "needs-prefix", (b.found_in, b.note)
+    assert b.kind == "RO"
+    assert b.resolved is True                              # ⭐ 不再"未解析"
+    assert b.wire == "d_wl_rf_band_sel_to_mux"            # force 字面衔接网
+    assert not any("未解析" in i for i in exp["issues"]), exp["issues"]
+    # --account 视角：没前缀 → 跳过原因是"缺前缀"(丙类)，不是"未解析"(丁类)
+    res0 = generator.build(wb, generator.GenOptions())
+    disp, reason = _mux_skip_reason(wb, res0, "d_wl_rf_out")
+    assert disp == "跳过"
+    assert "前缀" in reason and "未解析" not in reason, reason
+    # 配前缀 → 整组生成
+    res1 = generator.build(wb, generator.GenOptions(probe_prefixes={
+        "d_wl_rf_out": "U_X.U_MUX", "d_wl_rf_band_sel_to_mux": "U_X.U_SIGLOGIC"}))
+    assert res1["summary"]["n_mux_generated"] == 1
+
+
+def test_wl_line_family_data_input_forces_net(tmp_path):
+    """_line 家族（无名字撞车 + 门控三元 B?A:0）：mux 数据输入 X_to_mux，X 是 top_output=0 logic
+    输出（与寄存器不同名）。同样应 force 字面 _to_mux 网（needs-prefix），不判未解析。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "line.xlsx"),
+        tmm_fields=[
+            ("MODE", "h10", "d_wl_rf_tx_en_mode", "0", "N", "RW"),
+            ("TXLINE", "h11", "d_wl_rf_linectrl_tx_en", "0", "Y", "RO"),    # _line 底层 RO 线控寄存器
+            ("FREQ", "h12", "d_wl_rf_freq_5g_sel_reg", "0", "N", "RW"),     # 门控 B（简化为寄存器）
+            ("LOCAL", "h13", "d_wl_rf_tx_en_local", "0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_wl_rf_tx_en_line_to_mux", "d_wl_rf_tx_en_mode_to_mux", "1'b0", "d_wl_rf_tx_en", 1),
+            _mrow("d_wl_rf_tx_en_local_to_mux", "d_wl_rf_tx_en_mode_to_mux", "1'b1", "d_wl_rf_tx_en", 1),
+        ],
+        logic_rows=[
+            # _line 形态：d_wl_rf_tx_en_line = B?A:1'b0（A=RO 线控, B=频选），top_output=0
+            {"A": "d_wl_rf_linectrl_tx_en_to_logic", "B": "d_wl_rf_freq_5g_sel_reg_to_logic",
+             "K": "d_wl_rf_tx_en_line", "L": "B?A:1'b0", "M": "to_mux", "N": 0, "R": 1},
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_wl_rf_tx_en"))
+    b = exp["bindings"]["d:0"]
+    assert b.found_in == "needs-prefix", (b.found_in, b.note)
+    assert b.kind == "RO" and b.resolved is True
+    assert b.wire == "d_wl_rf_tx_en_line_to_mux"
+    assert not any("未解析" in i for i in exp["issues"]), exp["issues"]
+
+
+def test_internal_to_logic_input_still_cone_expandable(tmp_path):
+    """守护：修复只对 _to_mux 生效。logic 页输入引用 top_output=0 内部信号（_to_logic 后缀）时
+    仍标 logic-internal（cone 展开路径不受影响）——logic 页输入从不带 _to_mux 后缀。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "cone.xlsx"),
+        tmm_fields=[("R0", "h10", "d_leaf_reg", "0", "N", "RW")],
+        mux_rows=[  # 给个最小 mux 组占位（_build_mux_wb 需要 mux 页）
+            _mrow("d_leaf_reg_to_mux", "d_leaf_reg_to_mux", "1'b0", "d_dummy", 9)],
+        logic_rows=[
+            # 内部信号 d_inner（top_output=0）；下游 d_top 以 d_inner_to_logic 引用它
+            {"A": "d_leaf_reg_to_logic", "K": "d_inner", "L": "A", "M": "to_logic", "N": 0, "R": 1},
+            {"A": "d_inner_to_logic", "K": "d_top", "L": "A", "M": "ls", "N": 1, "R": 2},
+        ],
+    )
+    r = resolver.Resolver(wb)
+    sig = next(s for s in wb.logic if s.out_base == "d_top")
+    b = r.resolve_signal_inputs(sig)["A"]
+    # _to_logic 内部信号 → 仍走 cone 可展开标记（未被 _to_mux 例外改变）
+    assert b.found_in in ("logic-internal", "logic-computed"), (b.found_in, b.note)

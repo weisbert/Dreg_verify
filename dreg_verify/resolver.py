@@ -233,10 +233,16 @@ class Resolver:
                     note = ("自引用：输入是本行输出 %r 的前级原始信号(RTL 端口 %s → regfile → "
                             "%s_to_logic)，force 前级信号名 %r；不能 force 输出网 %r"
                             % (base, base, base, base, chained_rtl))
-                elif not chained_top:
+                elif not chained_top and not _raw_has_to_mux(raw):
                     # 输入是内部信号(top_output=0)：RTL/ENV_RF 层探不到，force 会层级查找失败。
                     # 注意内部信号"自引用"(is_self 且 top_output=0)也落在这里：它没有顶层端口可
                     # force，按内部信号交 cone 展开 → cone 会报"循环引用"错误(组合环，表本身有问题)。
+                    # ⚠ 例外 `not _raw_has_to_mux(raw)`（2026-06-04 WL linectrl/_line 实证，270 组中 ~41
+                    #   "数据输入未解析"的根因）：原文是显式 X_to_mux 衔接网时不走这里——X_to_mux 是
+                    #   RTL 真网（由上游 logic 表达式驱动），即便基名 X 撞上一个 top_output=0 的 logic
+                    #   输出（甚至与某 RO 寄存器同名 → cone 会假成环），也该 force 字面网（落到下面
+                    #   _raw_has_to_mux 分支 → needs-prefix），而非当"内部信号探不到"判未解析跳过。
+                    #   （logic 页输入从不带 _to_mux 后缀 → 此例外对 LPBT/logic-cone 永不改变行为。）
                     kind = "UNKNOWN"
                     found_in = "logic-internal"
                     note = ("⚠ 输入 %r 是内部信号(top_output=0)，RTL/ENV_RF 层探不到，无法 force；"
