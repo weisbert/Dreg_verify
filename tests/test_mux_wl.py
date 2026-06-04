@@ -888,3 +888,106 @@ def test_internal_to_logic_input_still_cone_expandable(tmp_path):
     b = r.resolve_signal_inputs(sig)["A"]
     # _to_logic 内部信号 → 仍走 cone 可展开标记（未被 _to_mux 例外改变）
     assert b.found_in in ("logic-internal", "logic-computed"), (b.found_in, b.note)
+
+
+def test_wl_control_internal_logic_output_forces_net(tmp_path):
+    """控制侧·纯 OR 族（fb_en=A|B，输入全是 top_output=0 内部信号）：控制本身是内部 logic 输出，
+    经显式 _to_mux 网喂 mux。无透传路径 → 改 force 字面 _to_mux 网（needs-prefix），不判未解析。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "ctrl_or.xlsx"),
+        tmm_fields=[
+            ("LEAF", "h10", "d_leaf", "0", "N", "RW"),
+            ("D0", "h20", "d_data0[3:0]", "3:0", "N", "RW"),
+            ("D1", "h21", "d_data1[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_data0_to_mux[3:0]", "d_fb_en_to_mux", "1'b0", "d_cout[3:0]", 1),
+            _mrow("d_data1_to_mux[3:0]", "d_fb_en_to_mux", "1'b1", "d_cout[3:0]", 1),
+        ],
+        logic_rows=[
+            # 两个内部 enable（top_output=0），作为控制表达式的输入
+            {"A": "d_leaf_to_logic", "K": "d_en_a", "L": "A", "M": "to_logic", "N": 0, "R": 1},
+            {"A": "d_leaf_to_logic", "K": "d_en_b", "L": "A", "M": "to_logic", "N": 0, "R": 2},
+            # 控制 fb_en = A|B（两输入都是内部信号）→ discover_ctrl_paths 找不到 line/local
+            {"A": "d_en_a_to_logic", "B": "d_en_b_to_logic", "K": "d_fb_en",
+             "L": "A|B", "M": "to_mux", "N": 0, "R": 3},
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_cout"))
+    d = exp["ctrl_drivers"][0]
+    assert d["source"] == "mux-force", (d["source"], exp["issues"])
+    b = d["binding"]
+    assert b.found_in == "needs-prefix", (b.found_in, b.note)
+    assert b.kind == "RO" and b.resolved is True
+    assert b.wire == "d_fb_en_to_mux"                      # force 字面控制衔接网
+    assert not any("未解析" in i for i in exp["issues"]), exp["issues"]
+    # --account：没前缀 → "缺前缀"(丙类)，不是"未解析"(丁类)
+    res0 = generator.build(wb, generator.GenOptions())
+    disp, reason = _mux_skip_reason(wb, res0, "d_cout")
+    assert disp == "跳过"
+    assert "前缀" in reason and "未解析" not in reason, reason
+    # 配控制网前缀 → 整组生成
+    res1 = generator.build(wb, generator.GenOptions(probe_prefixes={
+        "d_cout": "U_X.U_MUX", "d_fb_en_to_mux": "U_X.U_SIGLOGIC"}))
+    assert res1["summary"]["n_mux_generated"] == 1
+
+
+def test_wl_control_gated_logic_output_forces_net(tmp_path):
+    """控制侧·门控族（tx_filter_en=A&(B|C)，三输入全内部）：与纯 OR 同理，门控表达式同样无透传
+    路径 → force 控制 _to_mux 网。守护"四种表达式形态统一触发"中的 A&(B|C)。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "ctrl_gate.xlsx"),
+        tmm_fields=[
+            ("LEAF", "h10", "d_leaf", "0", "N", "RW"),
+            ("D0", "h20", "d_data0[3:0]", "3:0", "N", "RW"),
+            ("D1", "h21", "d_data1[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_data0_to_mux[3:0]", "d_txf_en_to_mux", "1'b0", "d_cout2[3:0]", 1),
+            _mrow("d_data1_to_mux[3:0]", "d_txf_en_to_mux", "1'b1", "d_cout2[3:0]", 1),
+        ],
+        logic_rows=[
+            {"A": "d_leaf_to_logic", "K": "d_en_a", "L": "A", "M": "to_logic", "N": 0, "R": 1},
+            {"A": "d_leaf_to_logic", "K": "d_en_b", "L": "A", "M": "to_logic", "N": 0, "R": 2},
+            {"A": "d_leaf_to_logic", "K": "d_en_c", "L": "A", "M": "to_logic", "N": 0, "R": 3},
+            {"A": "d_en_a_to_logic", "B": "d_en_b_to_logic", "C": "d_en_c_to_logic",
+             "K": "d_txf_en", "L": "A&(B|C)", "M": "to_mux", "N": 0, "R": 4},
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_cout2"))
+    d = exp["ctrl_drivers"][0]
+    assert d["source"] == "mux-force", (d["source"], exp["issues"])
+    assert d["binding"].wire == "d_txf_en_to_mux"
+    assert d["binding"].found_in == "needs-prefix"
+    assert not any("未解析" in i for i in exp["issues"]), exp["issues"]
+
+
+def test_lpbt_logic_control_passthrough_not_hijacked(tmp_path):
+    """守护：控制是 logic 输出但有干净 line(RO)/local(RW) 透传路径（LPBT 形态）时，仍走 logic
+    级联（source='logic'），不被 force 兜底劫持——force 只在『无透传路径』时接管。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "lpbt_ctrl.xlsx"),
+        tmm_fields=[
+            ("MODE", "h10", "d_mode", "0", "N", "RW"),
+            ("LINE", "h11", "d_line", "0", "Y", "RO"),
+            ("LOCAL", "h12", "d_local", "0", "N", "RW"),
+            ("D0", "h20", "d_data0[3:0]", "3:0", "N", "RW"),
+            ("D1", "h21", "d_data1[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_data0_to_mux[3:0]", "d_ctrl_to_mux", "1'b0", "d_cout3[3:0]", 1),
+            _mrow("d_data1_to_mux[3:0]", "d_ctrl_to_mux", "1'b1", "d_cout3[3:0]", 1),
+        ],
+        logic_rows=[
+            # 控制 d_ctrl = mode?local:line（line=RO 透传, local=RW 透传）→ 有 line/local 路径
+            {"A": "d_line_to_logic", "B": "d_mode_to_logic", "C": "d_local_to_logic",
+             "K": "d_ctrl", "L": "B?C:A", "M": "to_mux", "N": 0, "R": 1},
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_cout3"))
+    d = exp["ctrl_drivers"][0]
+    assert d["source"] == "logic", (d["source"], exp["issues"])   # 没被 force 劫持
+    assert d["line"] is not None or d["local"] is not None

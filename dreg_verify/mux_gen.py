@@ -32,6 +32,7 @@ import re
 
 from . import expr as E
 from . import vectors as V
+from .resolver import _raw_has_to_mux
 
 # assignment 键约定（向后兼容关键——designer 手填期望/报告/GUI 都按键对号入座）：
 #   控制 idx=0（B 列）：  "c:<后缀>"     —— 与 LPBT 单控制完全一致
@@ -208,22 +209,46 @@ def _resolve_ctrl_driver(wb, resolver, ctrl, idx, key_prefix, _stack, _depth, is
             return driver
         driver["ctrl_node"] = node
         ctrl_bindings = resolver.resolve_signal_inputs(ctrl_sig)
+        pending = []     # "输入未解析"延迟上报：仅当级联与 force 兜底都不可行时才算问题
         for letter in sorted(ctrl_bindings.keys()):
             key = key_prefix + ctrl_key(idx, letter)
             driver["bindings"][key] = ctrl_bindings[letter]
             driver["keys"].append(key)
             if not ctrl_bindings[letter].resolved:
-                issues.append("控制信号 %s 的输入 %s=%s 未解析: %s"
-                              % (ctrl.base, letter, ctrl_bindings[letter].base,
-                                 ctrl_bindings[letter].note or ""))
+                pending.append("控制信号 %s 的输入 %s=%s 未解析: %s"
+                               % (ctrl.base, letter, ctrl_bindings[letter].base,
+                                  ctrl_bindings[letter].note or ""))
         paths = discover_ctrl_paths(node, ctrl_bindings)
         for p in paths:
             p["key"] = key_prefix + ctrl_key(idx, p["var"])
         driver["line"] = next((p for p in paths if p["kind"] == "RO"), None)
         driver["local"] = next((p for p in paths if p["kind"] == "RW"), None)
-        if driver["line"] is None and driver["local"] is None:
-            issues.append("控制信号 %s 的表达式 %r 没有可透传的驱动路径（无法把控制驱到指定 case 值）"
-                          % (ctrl.base, ctrl_sig.expr))
+        if driver["line"] is not None or driver["local"] is not None:
+            # 级联可行（LPBT/designer 形态）：照旧上报未解析输入（不影响已选透传路径）
+            issues.extend(pending)
+            return driver
+        # ── 无可透传路径：若控制原文是显式 _to_mux 衔接网，改 force 该网到 case 值 ──
+        #   WL 实证（2026-06-04）：控制本身是内部 logic 输出（fb_en/tx_filter_en/rx_filter_en/
+        #   vga_dpd_en），门控表达式 A|B|C / A&(B|C…) 的输入又是内部信号 → 级联透传必失败；
+        #   但 mux 控制列写的是显式 X_to_mux 真网 → force 它到每 case 对应 bit 即可验选路
+        #   （与数据侧 force `_to_mux` 网完全对称；按结构判定，自动覆盖任何同族控制）。
+        #   logic 页输入从不带 _to_mux 后缀 → 此兜底对 LPBT/logic-cone 永不触发。
+        if _raw_has_to_mux(ctrl.raw):
+            fkey = key_prefix + ctrl_key(idx, "reg")
+            finfo = {"raw": ctrl.raw, "base": ctrl.base, "width": ctrl.width,
+                     "msb": ctrl.msb, "lsb": ctrl.lsb}
+            fb = resolver.resolve(fkey, finfo)
+            if fb.resolved:
+                driver["source"] = "mux-force"
+                driver["key"] = fkey
+                driver["binding"] = fb
+                driver["bindings"] = {fkey: fb}    # 重置：丢掉级联失败的内部输入绑定，只 force 这根网
+                driver["keys"] = [fkey]
+                return driver
+        # 既不能级联也不能 force（连 _to_mux 衔接网都没有）：才是真问题
+        issues.extend(pending)
+        issues.append("控制信号 %s 的表达式 %r 没有可透传的驱动路径（无法把控制驱到指定 case 值）"
+                      % (ctrl.base, ctrl_sig.expr))
         return driver
 
     # ── (b) 寄存器直出（WL 主要形态）：RW → RF_WRITE 写控制值 / RO 线控 → force ──
