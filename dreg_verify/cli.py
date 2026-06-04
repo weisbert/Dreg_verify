@@ -327,6 +327,9 @@ table{border-collapse:collapse;font-size:12px;margin-top:8px}
 table.full,table.sum{width:100%}
 th,td{border:1px solid var(--bd);padding:4px 6px;text-align:left;vertical-align:top}
 th{background:var(--hd)} thead th{position:sticky;top:128px}
+/* 真值表每块表头不 sticky：一页几十张表 = 几百个 sticky 元素，鼠标一动就全量重算→卡。
+   每块独立、滚动时钉住价值不大；扁平表(汇总/明细/可验证性)仍保留单一 sticky 表头。 */
+.tt thead th{position:static;top:auto}
 tbody tr:nth-child(even){background:#fafbfc}
 tr.neg{background:#fff3f3} tr.err{background:#ffe9e9}
 .tt td,.tt th{text-align:center} .tt th.rowhdr{text-align:left;background:#eef1f5;white-space:nowrap}
@@ -501,27 +504,43 @@ _REPORT_JS = """
     if(t!==null)cell.textContent=t;
     cell.classList.remove('masked');
   }
-  /* 对一个容器(当前渲染的 chk 窗)套用/撤销检查态：遮 auto_out、期望格隐值露填空、清旧判定色 */
-  function applyChk(container,on){
-    if(!container)return;
-    var autos=container.querySelectorAll('td.cauto'),i;
-    for(i=0;i<autos.length;i++){if(on)maskCell(autos[i]);else unmaskCell(autos[i]);}
-    var qz=container.querySelectorAll('td.cquiz');
-    for(i=0;i<qz.length;i++){
-      var sp=qz[i].querySelector('.cval'),inp=qz[i].querySelector('.cin');
-      if(sp)sp.style.display=on?'none':'';
-      if(inp){inp.style.display=on?'':'none';inp.value='';inp.className='cin';inp.removeAttribute('data-hit');}
+  /* 分帧调度：一次性显示整页几百个 <input> 会触发一次巨大同步重排、主线程冻结(鼠标卡)。
+     改成每帧处理一批、帧间让步，把"一次长冻结"摊成几帧，鼠标全程不卡。 */
+  var chkJob=0;
+  var raf=window.requestAnimationFrame?function(f){return window.requestAnimationFrame(f);}
+                                       :function(f){return setTimeout(f,16);};
+  var caf=window.cancelAnimationFrame?function(h){window.cancelAnimationFrame(h);}
+                                      :function(h){clearTimeout(h);};
+  /* 对一个容器(当前渲染的 chk 窗)套用/撤销检查态：遮 auto_out、期望格隐值露填空、清旧判定色。
+     done 在全部处理完后回调。 */
+  function applyChk(container,on,done){
+    if(chkJob){caf(chkJob);chkJob=0;}
+    if(!container){if(done)done();return;}
+    /* 旧判定色量小，立即清掉 */
+    var marked=container.querySelectorAll('.okc,.badc,.okh,.badh'),i;
+    for(i=0;i<marked.length;i++)marked[i].classList.remove('okc','badc','okh','badh');
+    var autos=container.querySelectorAll('td.cauto'),qz=container.querySelectorAll('td.cquiz');
+    var ai=0,qi=0,BATCH=80;
+    function step(){
+      var budget=BATCH;
+      while(ai<autos.length&&budget>0){if(on)maskCell(autos[ai]);else unmaskCell(autos[ai]);ai++;budget--;}
+      while(qi<qz.length&&budget>0){
+        var sp=qz[qi].querySelector('.cval'),inp=qz[qi].querySelector('.cin');
+        if(sp)sp.style.display=on?'none':'';
+        if(inp){inp.style.display=on?'':'none';inp.value='';inp.className='cin';inp.removeAttribute('data-hit');}
+        qi++;budget--;
+      }
+      if(ai<autos.length||qi<qz.length){chkJob=raf(step);}     /* 还有 → 下一帧继续(让步) */
+      else{chkJob=0;if(done)done();}
     }
-    var marked=container.querySelectorAll('.okc,.badc,.okh,.badh'),mlist=[],k;
-    for(i=0;i<marked.length;i++)mlist.push(marked[i]);
-    for(k=0;k<mlist.length;k++)mlist[k].classList.remove('okc','badc','okh','badh');
+    step();
   }
   function setChk(on){
     chkon=on;
     chkbtn.textContent=on?'结束检查（显示全部 auto_out）':'开始检查（遮盖所有 auto_out）';
     chkbtn.classList.toggle('off',on);
-    applyChk(chkBody(),on);
-    if(on)resetScore();else chkscore.textContent='';
+    applyChk(chkBody(),on,function(){if(!on)chkscore.textContent='';});
+    if(on)resetScore();else chkscore.textContent='';     /* 计分总数靠 cquiz 数量，立即可显示 */
   }
   if(chkbtn){
     chkbtn.onclick=function(){setChk(!chkon);};

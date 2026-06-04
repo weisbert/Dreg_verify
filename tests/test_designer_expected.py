@@ -325,6 +325,23 @@ def test_html_report_windowed_lazy_render(wb, tmp_path):
     assert 'class="autorow"' not in shell
 
 
+def test_html_check_toggle_perf(wb, tmp_path):
+    """⭐性能回归(2026-06-04)：点「开始/结束检查」整页一次性显示几百个 <input> 会触发一次
+    巨大同步重排、主线程冻结(鼠标卡)；几百个 sticky 真值表表头又让滚动持续卡。优化：
+    ①applyChk 分帧调度(requestAnimationFrame 分批、帧间让步)；②真值表表头取消 sticky。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    raw = path.read_text(encoding="utf-8")
+    # ① 检查态切换分帧：用 requestAnimationFrame 分批，主线程让步
+    assert "requestAnimationFrame" in raw
+    assert "function step()" in raw and "chkJob" in raw
+    # ② 真值表每块表头不 sticky（扁平表仍保留 thead sticky）
+    assert ".tt thead th{position:static" in raw
+    assert "thead th{position:sticky" in raw       # 扁平表的 sticky 仍在
+
+
 def test_csv_report_detail_has_auto_out_column(wb, tmp_path):
     """CSV 明细含 auto_out 与期望来源列。"""
     from dreg_verify import cli
