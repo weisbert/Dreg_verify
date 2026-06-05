@@ -574,6 +574,12 @@ _REPORT_JS = """
       updScore();
     });
   }
+
+  function boot(){     /* 首屏初始化：active=①汇总 必须主动渲一次，否则首屏空白、要切 tab 才出来 */
+    render(active);
+    cnt.textContent='匹配信号 '+filtered('sum').length;
+  }
+  boot();
 })();
 """
 

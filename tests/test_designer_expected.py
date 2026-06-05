@@ -325,6 +325,19 @@ def test_html_report_windowed_lazy_render(wb, tmp_path):
     assert 'class="autorow"' not in shell
 
 
+def test_html_report_initial_render(wb, tmp_path):
+    """⭐bug回归(2026-06-05)：窗口化后首屏 active=①汇总 tab 没主动渲染 → 一片空白，
+    要切一下 tab 才出来。修复：IIFE 末尾 boot() 首屏渲染 active tab + 设置匹配计数。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    raw = path.read_text(encoding="utf-8")
+    assert "function boot()" in raw          # 首屏初始化函数存在
+    assert re.search(r"\bboot\(\);", raw)     # 顶层有调用（否则首屏不渲染）
+    assert "render(active)" in raw            # boot 体里渲染当前(首屏=汇总)tab
+
+
 def test_html_check_toggle_perf(wb, tmp_path):
     """⭐性能回归(2026-06-04)：点「开始/结束检查」整页一次性显示几百个 <input> 会触发一次
     巨大同步重排、主线程冻结(鼠标卡)；几百个 sticky 真值表表头又让滚动持续卡。优化：
