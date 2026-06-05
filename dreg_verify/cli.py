@@ -336,7 +336,10 @@ tr.neg{background:#fff3f3} tr.err{background:#ffe9e9}
 .tt td.neg,.tt th.negh{background:#ffe3e3;color:#a40000}
 .tt tr.exprow th,.tt tr.exprow td{font-weight:600;border-top:2px solid #999}
 .tt td.drv{font-family:Consolas,monospace;font-size:11px;text-align:left;color:#555}
-.ttblock{margin-bottom:6px} .ex{color:#888} code{background:#f5f5f5;padding:0 3px}
+/* 屏幕外的真值表块跳过布局/绘制：一页几十张表，窗口缩放/滚动只算可见的几张，不再全量重排。
+   contain-intrinsic-size 给屏外块占位高度(auto=记住实测值)，滚动条稳定。检查切换的重排也跟着变轻。 */
+.ttblock{margin-bottom:6px;content-visibility:auto;contain-intrinsic-size:auto 320px}
+.ex{color:#888} code{background:#f5f5f5;padding:0 3px}
 pre.chain{background:#f4f8ff;border:1px solid #d4e0f5;border-radius:4px;padding:8px 10px;
  font-family:Consolas,monospace;font-size:12px;color:#234;margin:6px 0 2px;overflow-x:auto}
 .empty{color:#999;padding:20px}

@@ -353,6 +353,8 @@ def test_html_check_toggle_perf(wb, tmp_path):
     # ② 真值表每块表头不 sticky（扁平表仍保留 thead sticky）
     assert ".tt thead th{position:static" in raw
     assert "thead th{position:sticky" in raw       # 扁平表的 sticky 仍在
+    # ③ 屏外真值表块跳过布局：窗口缩放/滚动只算可见块（2026-06-05 缩放卡顿优化）
+    assert "content-visibility:auto" in raw and "contain-intrinsic-size" in raw
 
 
 def test_html_report_no_owner_filter(wb, tmp_path):
