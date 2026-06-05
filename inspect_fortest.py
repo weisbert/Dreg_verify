@@ -252,6 +252,115 @@ def dump_anchors(out, grid, maxr, maxc, header_rows, anchors, span):
                 out.append("\n".join(line))
 
 
+# ───────────────────────────── SECTION 3：按测试组(每输出一组) ─────────────────────────────
+# for_test 列固定语义(0 基)：A=0 case标记, B=1 regaddr, C=2 regval, D=3 输出, E=4 期望,
+# F=5 输入信号, J=9 RO, K=10 bits, N=13 组号, O=14 起为 T1,T2,...
+COL_A, COL_B, COL_C, COL_D, COL_E, COL_F, COL_I, COL_J, COL_K, COL_N = 0, 1, 2, 3, 4, 5, 8, 9, 10, 13
+T_START = 14
+TAG_KW = ("iddq", "tsensor", "dft")
+
+
+def build_groups(grid, maxr):
+    """按 col A 非空(『case』标记)切组 —— 每个输出一组。返回 [(start_idx, end_idx)] (0 基, 含头不含尾)。
+    数据从第 3 行(idx 2)起；col A 非空即新组起点。"""
+    starts = [r for r in range(2, maxr) if not is_blank(grid[r][COL_A])]
+    groups = []
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else maxr
+        groups.append((s, e))
+    return groups
+
+
+def _group_info(grid, s, e, maxc):
+    """抽一组的概要：输出(col D)/期望(col E)/组号(col N)/输入列表/标记。"""
+    outs, exps, inputs = [], [], []
+    nval = ""
+    tags = set()
+    last_t = T_START - 1
+    for r in range(s, e):
+        row = grid[r]
+        d = cell_str(row[COL_D]) if COL_D < len(row) else ""
+        if d:
+            outs.append(d)
+        ev = cell_str(row[COL_E]) if COL_E < len(row) else ""
+        if ev:
+            exps.append(ev)
+        if not nval:
+            nval = cell_str(row[COL_N]) if COL_N < len(row) else ""
+        f = cell_str(row[COL_F]) if COL_F < len(row) else ""
+        if f:
+            tvals = []
+            for c in range(T_START, maxc):
+                tv = cell_str(row[c]) if c < len(row) else ""
+                tvals.append(tv)
+                if tv != "":
+                    last_t = max(last_t, c)
+            inputs.append({
+                "row": r + 1,
+                "F": f,
+                "RO": cell_str(row[COL_J]) if COL_J < len(row) else "",
+                "K": cell_str(row[COL_K]) if COL_K < len(row) else "",
+                "B": cell_str(row[COL_B]) if COL_B < len(row) else "",
+                "C": cell_str(row[COL_C]) if COL_C < len(row) else "",
+                "I": cell_str(row[COL_I]) if COL_I < len(row) else "",
+                "T": tvals,
+            })
+        txt = " ".join(cell_str(v) for v in row if not is_blank(v)).lower()
+        for k in TAG_KW:
+            if k in txt:
+                tags.add(k)
+    n_t = max(0, last_t - T_START + 1)
+    return {"out": outs, "exp": exps, "N": nval, "inputs": inputs, "tags": tags, "n_t": n_t}
+
+
+def dump_group_directory(out, grid, groups, maxc):
+    out.append("")
+    out.append("=" * 72)
+    out.append("==== SECTION 3: 测试组目录(每输出一组，共 %d 组) ====" % len(groups))
+    out.append("  组号N | 行范围 | 输入数 | 标记 | 输出(col D) | 期望(col E)")
+    for (s, e) in groups:
+        info = _group_info(grid, s, e, maxc)
+        tagmark = ("<" + ",".join(sorted(info["tags"])) + ">") if info["tags"] else ""
+        out.append("  N=%-3s 行%d..%d (%d行) 输入%d %-22s 输出=%s 期望=%s"
+                   % (info["N"], s + 1, e, e - s, len(info["inputs"]), tagmark,
+                      ";".join(info["out"])[:60] or "(无)",
+                      ";".join(info["exp"])[:40] or "(无)"))
+
+
+def dump_groups_full(out, grid, groups, maxc, match_subs):
+    """dump 匹配 match_subs(对 col D 输出名子串，小写) 的组的完整真值表。"""
+    out.append("")
+    out.append("=" * 72)
+    out.append("==== SECTION 4: 命中组完整真值表 (匹配: %s) ====" % match_subs)
+    hit = 0
+    for (s, e) in groups:
+        info = _group_info(grid, s, e, maxc)
+        outname = ";".join(info["out"]).lower()
+        if not any(sub in outname for sub in match_subs):
+            continue
+        hit += 1
+        out.append("")
+        out.append("-" * 72)
+        out.append("【组 N=%s  行 %d..%d】 输出=%s  期望=%s"
+                   % (info["N"], s + 1, e, ";".join(info["out"]), ";".join(info["exp"]) or "(无)"))
+        n_t = info["n_t"]
+        thdr = " ".join("T%d" % (i + 1) for i in range(n_t))
+        out.append("  输入信号 [RO|bits|regaddr=值] :  %s" % thdr)
+        for inp in info["inputs"]:
+            tv = " ".join((inp["T"][i] if i < len(inp["T"]) and inp["T"][i] != "" else ".")
+                          for i in range(n_t))
+            reg = ("%s=%s" % (inp["B"], inp["C"])) if (inp["B"] or inp["C"]) else ""
+            meta = "RO=%s|bit%s%s" % (inp["RO"] or "?", inp["K"] or "?",
+                                     ("|" + reg) if reg else "")
+            out.append("    %-44s [%s]" % (inp["F"], meta))
+            out.append("        T: %s" % tv)
+    if hit == 0:
+        out.append("  ⚠ 没有 col D 输出名匹配 %s 的组。看 SECTION 3 目录挑准确名字再 --out-sig。" % match_subs)
+    else:
+        out.append("")
+        out.append("(共 dump %d 组)" % hit)
+
+
 # ───────────────────────────── main ─────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="摸清 for_test 测试用例页的真实排版")
@@ -261,6 +370,11 @@ def main():
     ap.add_argument("--span", type=int, default=5, help="每锚点往下连带 dump 行数(默认 5)")
     ap.add_argument("--cols", type=int, default=80, help="最多看前多少列(默认 80)")
     ap.add_argument("--rows", type=int, default=10000, help="最多扫描多少行(默认 10000)")
+    ap.add_argument("--groups", action="store_true",
+                    help="打印测试组目录(每输出一组：组号/行范围/输入数/iddq·dft·tsensor标记/输出/期望)")
+    ap.add_argument("--out-sig", default="",
+                    help="逗号分隔的输出名子串(对 col D)；命中组 dump 完整真值表(含 T 向量)。"
+                         "如 --out-sig mixer2g_trim,mixer5g_trim")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -294,14 +408,25 @@ def main():
                % (sheet, ws.max_row, ws.max_column, maxr, maxc))
     out.append("logic.K 基名集合规模(用于认信号名列): %d" % len(logic_k))
 
+    match_subs = [s.strip().lower() for s in args.out_sig.split(",") if s.strip()]
+    group_mode = args.groups or match_subs
+
     dump_overview(out, wb, sheet)
-    out.append("")
-    out.append("=" * 72)
-    out.append("==== SECTION 1: [%s] 列结构 ====" % sheet)
-    dump_raw_head(out, grid, maxc)
-    dump_merges(out, merges, maxc)
-    dump_column_profile(out, grid, maxr, maxc, logic_k)
-    dump_anchors(out, grid, maxr, maxc, 3, anchors, args.span)
+    if not group_mode:
+        # 默认：摸结构(列画像/合并/锚点行)
+        out.append("")
+        out.append("=" * 72)
+        out.append("==== SECTION 1: [%s] 列结构 ====" % sheet)
+        dump_raw_head(out, grid, maxc)
+        dump_merges(out, merges, maxc)
+        dump_column_profile(out, grid, maxr, maxc, logic_k)
+        dump_anchors(out, grid, maxr, maxc, 3, anchors, args.span)
+    else:
+        groups = build_groups(grid, maxr)
+        if args.groups:
+            dump_group_directory(out, grid, groups, maxc)
+        if match_subs:
+            dump_groups_full(out, grid, groups, maxc, match_subs)
 
     wb.close()
     out_path = args.out if args.out else os.path.splitext(args.excel)[0] + "_fortest.txt"
