@@ -33,6 +33,16 @@ class TestVector:
         # 用表达式算出的 auto_out 去验证表达式有自证嫌疑，所以断言对比值优先用 designer 手填的期望；
         # 未填时回退 auto_out(exp_value) 兜底。手填值 != auto_out 不算负向：那恰恰可能是表达式的 bug。
         self.designer_expected = designer_expected
+        # item③ iddq DFT 态拍（第二十二轮）：True=本拍是 DFT 漏电态(force 门=1、断言输出=常量支)，
+        # 期望来源是 dft 门而非 designer 手填（designer_filled 据此排除，报告标"来源=dft 门"）。
+        self.dft_pitch = False
+        # 额外 force（不在表达式输入里的网，如 iddq 门）：[(wire_lhs, value, width)]，渲染在常规驱动后。
+        self.extra_forces = []
+        # 本拍后须 release 的网名（force 门=1 后必须释放，否则后续拍门钉死=S4）：[wire_lhs]。
+        self.release_nets = []
+        # 本拍后须【重新 force 回某值】的网（dft_observe 开时：DFT 拍不能 release 门——会连带抹掉全局
+        # 前导 force iddq=透传，污染后续被门控块——而要 force 回透传值恢复前导态）：[(wire_lhs,val,width)]。
+        self.restore_forces = []
 
     @property
     def asserted_value(self):
@@ -45,8 +55,9 @@ class TestVector:
 
     @property
     def designer_filled(self):
-        """期望是否为 designer 手填（非负向且手填了期望）。"""
-        return (not self.is_negative) and self.designer_expected is not None
+        """期望是否为 designer 手填（非负向、手填了期望、且不是 DFT 拍）。
+        DFT 拍的期望来自 dft 门常量支（工具推导），不计入 designer 手填统计/标注。"""
+        return (not self.is_negative) and self.designer_expected is not None and not self.dft_pitch
 
 
 # ───────────────────────────── 数据特征模式 ─────────────────────────────

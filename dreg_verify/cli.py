@@ -91,6 +91,10 @@ def build_argparser():
     g2.add_argument("--max-tests", type=int, default=256, help="单信号向量上限(默认256)")
     g2.add_argument("--exhaustive", action="store_true",
                     help="总输入位很少时做真·全穷举")
+    g2.add_argument("--logic-mode", choices=["min", "max", "exhaustive"], default=None,
+                    help="只设 logic 侧覆盖档(精简/全面/穷举)，与 mux 侧解耦；不传则跟随 --mode/--exhaustive")
+    g2.add_argument("--mux-mode", choices=["min", "max", "exhaustive"], default=None,
+                    help="只设 mux 侧覆盖档(精简/全面/穷举)，与 logic 侧解耦；不传则跟随 --mode/--exhaustive")
 
     g3 = p.add_argument_group("负向(异常)用例")
     g3.add_argument("--neg-signals", help="对这些信号追加负向用例(逗号分隔)")
@@ -868,6 +872,8 @@ def main(argv=None):
         mode=args.mode,
         max_tests=args.max_tests,
         exhaustive=args.exhaustive,
+        logic_mode=args.logic_mode,
+        mux_mode=args.mux_mode,
         neg_signals=_split(args.neg_signals),
         neg_all=args.neg_all,
         neg_mode=args.neg_mode,

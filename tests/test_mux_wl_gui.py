@@ -157,11 +157,11 @@ def test_wl_gui_header_multi_ctrl_desc(wl_win):
     w._load_test_items(grp)
     txt = w.ti_header.text()
     assert "{d_wl_rf_rc_code_lut_en,d_wl_rf_bwctrl}" in txt, txt
-    # 通用形态穷举文案
-    w.coverage.setCurrentText("穷举")
+    # 通用形态穷举文案（mux 侧档位，第二十二轮起与 logic 解耦）
+    w.coverage_mux.setCurrentText("穷举")
     w._load_test_items(grp)
     assert "无另一条控制路径概念" in w.ti_header.text()
-    w.coverage.setCurrentText("精简")
+    w.coverage_mux.setCurrentText("精简")
 
 
 # ───────────── ③ 级联组真值表照常渲染 ─────────────

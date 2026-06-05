@@ -388,22 +388,117 @@ def test_wl_vectors_logic_ctrl_lpbt_path(wl_wb, wl_resolver):
 
 
 def test_wl_coverage_levels(wl_wb, wl_resolver):
-    """通用形态覆盖度：精简 < 全面（+x位展开+反码轮）；穷举=全面（无另一条路径概念）。"""
+    """通用形态覆盖度：精简 < 全面 < 穷举。组4 含级联控制(C=bwctrl→组2，mode=0 RO/mode=1 RW
+    两分支) → 全面/穷举补 item④ 备用载体(mode=0)轮：全面 DC=0、穷举 DC 全展（第二十二轮）。"""
     g4 = _grp(wl_wb, "d_wl_rf_tx_rc_code")
     exp = mux_gen.expand_mux_group(wl_wb, wl_resolver, g4)
-    n = {m: len(mux_gen.make_mux_vectors(g4, exp, mode=m)[0])
-         for m in ("min", "max", "exhaustive")}
-    # min=5（每 case 1 条）；max=20（case0 的 4 个 x 位展开成 16）+5（反码轮）=25
+    res = {m: mux_gen.make_mux_vectors(g4, exp, mode=m) for m in ("min", "max", "exhaustive")}
+    n = {m: len(v) for m, (v, _meta) in res.items()}
+    # min=5（每 case 1 条）
+    # max=20（case0 的 4 x 位展开成 16 +4）+5（反码轮）+5（级联 alt 轮，每 case 1 条 mode=0）=30
+    # exhaustive=20+5+20（alt 轮 DC 全展：case0 16 +4）=45
     assert n["min"] == 5
-    assert n["max"] == 16 + 4 + 5
-    assert n["exhaustive"] == n["max"]
-    # 反码轮的期望值 = 反码互异值
-    vecs_max, _ = mux_gen.make_mux_vectors(g4, exp, mode="max")
+    assert n["max"] == 20 + 5 + 5
+    assert n["exhaustive"] == 20 + 5 + 20
+    assert n["min"] < n["max"] < n["exhaustive"]            # 三档严格递增（级联组）
+    # 级联 alt 轮（mode=0 备用载体）只在全面/穷举出现
+    assert res["min"][1].get("cascade_alt") is None
+    assert res["max"][1].get("cascade_alt") is True
+    assert len([v for v in res["max"][0] if "alt载体" in (v.note or "")]) == 5
+    assert len([v for v in res["exhaustive"][0] if "alt载体" in (v.note or "")]) == 20
+    # 反码轮的期望值 = 反码互异值（与 alt 轮 note 不同，计数不相串）
+    vecs_max = res["max"][0]
     inv = [v for v in vecs_max if "inverted data" in (v.note or "")]
     assert len(inv) == 5
     base_vals, _ = mux_gen.alloc_distinct_values(g4, exp["bindings"], exp["data_keys"])
     inv_vals, _ = mux_gen.alloc_inverted_values(g4, base_vals, exp["bindings"], exp["data_keys"])
     assert [v.exp_value for v in inv] == inv_vals
+
+
+def test_wl_cascade_two_branch(wl_wb, wl_resolver):
+    """⭐ item④ 级联两分支（第二十二轮）：组3 控制=组2 输出(case0=RO 线控/case1=RW local)。
+    精简只走主载体(mode=1 写 local)；全面/穷举补 alt 轮(mode=0 force RO linectrl)，对齐 designer
+    16 拍签核表（mode=1 半张 + mode=0 半张）。"""
+    g3 = _grp(wl_wb, "d_wl_rf_tx_bwctrl")
+    exp = mux_gen.expand_mux_group(wl_wb, wl_resolver, g3)
+    assert exp["issues"] == []
+    rec = exp["ctrl_drivers"][0]["recipe"]
+    # 双载体：主=RW local(ci1)、alt=RO 线控(ci0)
+    assert rec["carrier_ci"] == 1 and rec["carrier_alt_ci"] == 0
+    assert rec["alt_skipped_reason"] == ""
+    assert exp["bindings"][rec["carrier_key"]].kind == "RW"
+    assert exp["bindings"][rec["carrier_alt_key"]].kind == "RO"
+    # 精简：4 条全主载体(mode=1 选 local)，无 alt
+    vmin, mmin = mux_gen.make_mux_vectors(g3, exp, mode="min")
+    assert len(vmin) == 4
+    assert all(v.assignments["m2.c:reg"] == 1 for v in vmin)
+    assert mmin.get("cascade_alt") is None
+    # 全面：8 主(mode=1) + 4 alt(mode=0)
+    vmax, mmax = mux_gen.make_mux_vectors(g3, exp, mode="max")
+    main = [v for v in vmax if v.assignments.get("m2.c:reg") == 1]
+    alt = [v for v in vmax if v.assignments.get("m2.c:reg") == 0]
+    assert len(main) == 8 and len(alt) == 4
+    assert mmax.get("cascade_alt") is True
+    # alt 向量：上游模式驱到 0（选 RO 线控分支）、写【备用载体】(linectrl) 而非主载体(local)
+    for v in alt:
+        assert rec["carrier_alt_key"] in v.assignments      # 写了 RO 线控载体（渲染层 force）
+        assert rec["carrier_key"] not in v.assignments      # 没写主 RW 载体
+        assert "alt载体" in (v.note or "")
+    # alt 选值覆盖 4 个 case（每 case 各一条，slice_lsb=0 → 载体=case 值原样）
+    assert sorted(v.assignments[rec["carrier_alt_key"]] for v in alt) == [0, 1, 2, 3]
+    # ⭐ 渲染级回归（评审 wf_657e87b6 major）：min 主轮【不得】驱动备用载体(RO linectrl)——
+    # 旧 compute_drives 对未驱动的 used_var 凭空补 force=0，污染产物且破坏 min 字节一致。
+    only3 = dict(probe_prefixes=WL_PREFIXES, signals={"d_wl_rf_tx_bwctrl"})
+    txt_min = generator.render(generator.build(wl_wb, generator.GenOptions(mux_mode="min", **only3)))
+    assert "linectrl_bwctrl" not in txt_min, "min 主轮不应出现备用载体 linectrl_bwctrl 的驱动"
+    txt_max = generator.render(generator.build(wl_wb, generator.GenOptions(mux_mode="max", **only3)))
+    assert "force `ENV_RF.d_wl_rf_linectrl_bwctrl" in txt_max     # 全面 alt 轮才 force 它
+
+
+def test_coverage_decouple_genoptions():
+    """⭐ 第二十二轮：GenOptions 覆盖档位 logic/mux 解耦——各自覆盖对应侧；未传则回退旧 (mode,exhaustive)。"""
+    G = generator
+    # 未解耦：两侧都回退到 (mode, exhaustive)，与旧行为逐字节一致
+    o = G.GenOptions(mode="max", exhaustive=False)
+    assert o.logic_vec_params() == ("max", False)
+    assert o.mux_cov_mode() == "max"
+    o2 = G.GenOptions(mode="min", exhaustive=True)
+    assert o2.logic_vec_params() == ("min", True)
+    assert o2.mux_cov_mode() == "exhaustive"
+    # 解耦：各侧只跟自己的档，互不影响
+    d = G.GenOptions(mode="min", exhaustive=False, logic_mode="min", mux_mode="exhaustive")
+    assert d.logic_vec_params() == ("min", False)
+    assert d.mux_cov_mode() == "exhaustive"
+    d2 = G.GenOptions(mode="max", exhaustive=True, logic_mode="max", mux_mode="min")
+    assert d2.logic_vec_params() == ("max", False)   # logic_mode 覆盖，忽略 exhaustive
+    assert d2.mux_cov_mode() == "min"
+    # 非法值忽略 → 回退到 (mode, exhaustive)，不抛错
+    d3 = G.GenOptions(mode="min", logic_mode="bogus", mux_mode="")
+    assert d3.logic_vec_params() == ("min", False)
+    assert d3.mux_cov_mode() == "min"
+
+
+def test_coverage_decouple_build_independent(lpbt_wb):
+    """⭐ build() 端到端：logic 侧与 mux 侧覆盖档互不串档（改一侧另一侧用例数不动）。"""
+    G = generator
+
+    def counts(**kw):
+        res = G.build(lpbt_wb, G.GenOptions(**kw))
+        lc = sum(st["n_vectors"] for _l, st in res["blocks"] if not st.get("is_mux"))
+        mc = sum(st["n_vectors"] for _l, st in res["blocks"] if st.get("is_mux"))
+        return lc, mc
+
+    l_min, m_min = counts(logic_mode="min", mux_mode="min")
+    l_max, m_max = counts(logic_mode="max", mux_mode="max")
+    assert l_min < l_max, "logic 全面应比精简多用例: %d/%d" % (l_min, l_max)   # logic 旋钮生效
+    assert m_min < m_max, "mux 全面应比精简多用例: %d/%d" % (m_min, m_max)     # mux 旋钮生效
+    # logic 精简 + mux 全面 → logic 跟 logic 档(=l_min)、mux 跟 mux 档(=m_max)，互不串
+    assert counts(logic_mode="min", mux_mode="max") == (l_min, m_max)
+    # logic 全面 + mux 精简 → 反向同理
+    assert counts(logic_mode="max", mux_mode="min") == (l_max, m_min)
+    # 未传新参 = 回退旧 (mode,exhaustive)：默认(min)==两侧精简；--mode max==两侧全面
+    assert counts() == (l_min, m_min)
+    assert counts(mode="max") == (l_max, m_max)
 
 
 def test_wl_key_role():
@@ -1657,3 +1752,78 @@ def test_dft_observe_forces_iddq_gate(tmp_path):
     # render 把前导写进产物最前
     txt = generator.render(res1)
     assert "d_iddq_mode" in txt and "1'b0" in txt
+
+
+def test_wl_iddq_dft(tmp_path):
+    """⭐ item③ iddq DFT 态拍（第二十二轮）：被 dft 页门控(B?0:A)的输出，全面/穷举补一条 DFT 拍
+    (force 门=1 → 断言输出=常量支0 → 该拍后 release)；精简不补。期望取门常量支(0)，非"透传取反"；
+    release 保证不钉死后续拍(S4)。"""
+    def _wb():
+        return _build_mux_wb(
+            str(tmp_path / "iddq.xlsx"),
+            tmm_fields=[
+                ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+                ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),    # DFT 门=RO 线（可 force）
+                ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+                ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+            ],
+            mux_rows=[
+                _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+                _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+            ],
+            dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
+        )
+    # 精简：不补 DFT 拍（保三档区别）—— iddq 门完全不出现
+    txt_min = generator.render(generator.build(_wb(), generator.GenOptions(mux_mode="min")))
+    assert "d_iddq_mode" not in txt_min
+    # 全面：补一条 DFT 拍
+    res = generator.build(_wb(), generator.GenOptions(mux_mode="max"))
+    txt = generator.render(res)
+    assert "force `ENV_RF.d_iddq_mode=1'b1;" in txt          # 门=1：B?0:A 的非透传支(选中常量0)
+    assert "release `ENV_RF.d_iddq_mode;" in txt             # S4：拍后释放，不钉死后续拍
+    # force..release 区段内断言输出==常量支 0（2-bit 输出 → 2'b00；功能值非 0，故非"取反"）
+    seg = txt[txt.index("force `ENV_RF.d_iddq_mode=1'b1;"):txt.index("release `ENV_RF.d_iddq_mode;")]
+    assert "==2'b00)begin" in seg, seg
+    # DFT 拍是正例、期望来自 dft 门 → 不计入 designer 手填统计（designer_filled 排除 dft_pitch）
+    assert res["summary"]["n_designer"] == 0
+    # 穷举档同样补；exhaustive 不因 DFT 拍报错
+    txt_ex = generator.render(generator.build(_wb(), generator.GenOptions(mux_mode="exhaustive")))
+    assert "force `ENV_RF.d_iddq_mode=1'b1;" in txt_ex and "release `ENV_RF.d_iddq_mode;" in txt_ex
+    # M3 + 报告一致：report() 也含 DFT 拍，且明细期望来源标"DFT门"（非 designer 手填）
+    rep = generator.report(_wb(), generator.GenOptions(mux_mode="max"))
+    dg = [d for d in rep["detail"] if d["signal"].startswith("d_g")]
+    assert dg, "报告里应有 d_g 的明细行"
+    assert any("DFT门" in d["exp_src"] for d in dg), dg
+    # Fix C（评审 major）：报告 force 列须含 iddq 门 force（extra_forces），否则报告与 .sv 不符
+    assert any("d_iddq_mode=1'b1" in (d.get("force") or "") for d in dg), [d.get("force") for d in dg]
+    # Fix A（评审 blocker）：dft_observe 开时 DFT 拍后必须 force 回透传(恢复全局前导)，不能 bare release
+    txt_obs = generator.render(generator.build(
+        _wb(), generator.GenOptions(mux_mode="max", dft_observe=True)))
+    assert "release `ENV_RF.d_iddq_mode" not in txt_obs       # 开 dft_observe：不 release（会抹前导）
+    assert "force `ENV_RF.d_iddq_mode=1'b1;" in txt_obs        # DFT 拍 force 门=1
+    assert "force `ENV_RF.d_iddq_mode=1'b0;" in txt_obs        # 拍后 force 回透传 0（restore 前导）
+
+
+def test_wl_iddq_dft_skip_surfaced(tmp_path):
+    """评审 M2/Fix D+E：iddq 门不是可 force 的 RO 网 → DFT 拍补不上，原因须在 .sv(// ⚠) 与报告里可见
+    （缺口必须可见，别让"少验一支 iddq"无声无息）。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "iddqskip.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("IDDQ", "h11", "d_iddq_mode", "0", "N", "RW"),    # 门=RW（非可 force RO）→ 跳过 DFT 拍
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+        ],
+        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
+    )
+    res = generator.build(wb, generator.GenOptions(mux_mode="max"))
+    assert "未补 DFT 拍" in generator.render(res)                # .sv 块顶 // ⚠ 透出（M2）
+    assert any("未补 DFT 拍" in w for _n, _a, w in res["mux_warnings"])
+    rep = generator.report(wb, generator.GenOptions(mux_mode="max"))
+    assert any("未补 DFT 拍" in (r.get("detail") or "")          # 报告可验证性 detail 也透出（Fix E）
+               for r in rep["verifiability"]["signals"]), rep["verifiability"]["signals"]

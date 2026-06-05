@@ -667,13 +667,13 @@ def test_gui_mux_coverage_levels_differ(gui_win):
     grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
     counts = {}
     for level in ("精简", "全面", "穷举"):
-        w.coverage.setCurrentText(level)
+        w.coverage_mux.setCurrentText(level)              # mux 侧档位（第二十二轮起与 logic 解耦）
         w._load_test_items(grp)
         counts[level] = w.ti_table.columnCount()
     assert counts["精简"] < counts["全面"] < counts["穷举"], "三档必须递增: %s" % counts
     # 表头标明当前档位生成内容
     assert "覆盖度=穷举" in w.ti_header.text()
-    w.coverage.setCurrentText("精简")                     # 还原默认，不影响其它用例
+    w.coverage_mux.setCurrentText("精简")                 # 还原默认，不影响其它用例
 
 
 def test_gui_mux_generate(gui_win, tmp_path):

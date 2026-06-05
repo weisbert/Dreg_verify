@@ -101,7 +101,12 @@ def compute_drives(vec, bindings, used_vars):
         if b is None:
             unresolved.append((ltr, "", "变量无绑定"))
             continue
-        val = vec.assignments.get(ltr, 0)
+        # 该向量没驱动这个 used_var → 不强行 force/写 0。级联两分支(item④)里主轮不写 alt 载体、
+        # alt 轮不写主载体；旧版 .get(ltr,0) 会给未用载体凭空补一条 0 驱动，污染产物并破坏 min 字节
+        # 一致。常规 logic/mux 向量对每个 used_var 都显式赋值，故此跳过对它们逐字节无影响。
+        if ltr not in vec.assignments:
+            continue
+        val = vec.assignments[ltr]
         if not b.resolved:
             unresolved.append((ltr, b.base, b.note or "未解析"))
             continue
@@ -225,6 +230,12 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
             n_neg += 1
         if getattr(vec, "designer_filled", False):
             n_designer += 1
+        # item③ DFT 拍的额外 force（如 iddq 门=1）：在常规输入驱动之后、#1ps 之前
+        for (wlhs, wval, wwid) in (getattr(vec, "extra_forces", None) or []):
+            hexs = fmt_bin(wval, wwid)
+            lines.append("force `%s.%s=%s;" % (ENV, wlhs, hexs))
+            lines.append('%s("%s",$sformatf("%s","%s", %s),UVM_LOW);'
+                         % (UVM_INFO, DRIVE_ID, DRIVE_WIRE_MSG, wlhs, hexs))
         lines.append("#1ps;")
         # 断言对比值 = designer 手填期望 优先；未填 → auto_out(表达式计算值)兜底；负向 → 故意错值
         exp = fmt_bin(vec.asserted_value, vec.exp_width)
@@ -270,6 +281,12 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
         if counters and err_cnt:
             lines.append("%s%s++;" % (BODY_INDENT, err_cnt))
         lines.append("end")
+        # item③ DFT 拍后 release 门网（S4：否则 force 的 iddq=1 钉死后续所有拍/块的门）
+        for wlhs in (getattr(vec, "release_nets", None) or []):
+            lines.append("release `%s.%s;" % (ENV, wlhs))
+        # dft_observe 开时改为 force 回透传值（恢复全局前导态；release 会抹掉前导 force→污染后续块）
+        for (wlhs, wval, wwid) in (getattr(vec, "restore_forces", None) or []):
+            lines.append("force `%s.%s=%s;" % (ENV, wlhs, fmt_bin(wval, wwid)))
         lines.append("")
 
     stats = {

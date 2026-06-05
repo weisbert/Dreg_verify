@@ -24,7 +24,7 @@ class GenOptions:
                  vector_overrides=None, probe_prefixes=None,
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
                  cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None,
-                 dft_observe=False):
+                 dft_observe=False, logic_mode=None, mux_mode=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -84,6 +84,37 @@ class GenOptions:
         # DFT 观测模式（第二十轮续②）：被验证输出走 _to_dft 且被 iddq 门控时，在产物开头 force 门到
         # 透传值(iddq=0)，使我们断言的基名网反映功能值——= for_test 的做法。默认关（直探内部网为主）。
         self.dft_observe = bool(dft_observe)
+        # 覆盖档位 logic/mux 解耦（第二十二轮，用户拍板互不绑定）：logic_mode/mux_mode ∈
+        # {min,max,exhaustive}。未显式传(=None)则该侧回退到 (mode, exhaustive) 合成的档位——
+        # 所有旧调用方(CLI/GUI/436 测试)不传新参时产物逐字节不变。读取统一走
+        # logic_vec_params()/mux_cov_mode()，build()/report()/GUI 同口径。
+        self.logic_mode = logic_mode if logic_mode in ("min", "max", "exhaustive") else None
+        self.mux_mode = mux_mode if mux_mode in ("min", "max", "exhaustive") else None
+
+    def logic_vec_params(self):
+        """logic 向量生成参数 (mode, exhaustive)，供 V.generate_vectors。
+        未解耦(logic_mode=None)时 = 原 (self.mode, self.exhaustive)，逐字节不变。"""
+        if self.logic_mode is None:
+            return self.mode, self.exhaustive
+        return _decompose_cov(self.logic_mode)
+
+    def mux_cov_mode(self):
+        """mux 覆盖档 {min,max,exhaustive}，供 mux_gen.make_mux_vectors。
+        未解耦(mux_mode=None)时 = coverage_mode(self.mode, self.exhaustive)，与旧行为一致。"""
+        if self.mux_mode is None:
+            return mux_gen.coverage_mode(self.mode, self.exhaustive)
+        return self.mux_mode
+
+
+def _decompose_cov(collapsed):
+    """覆盖档 {min,max,exhaustive} → generate_vectors 的 (mode, exhaustive)。
+    与 mux_gen.coverage_mode 互逆：min→(min,F)、max→(max,F)、exhaustive→(max,T)
+    （穷举意图下若总位数超 cap，由 vectors 自动退化为'全面'，故底模式取 max）。"""
+    if collapsed == "exhaustive":
+        return "max", True
+    if collapsed == "max":
+        return "max", False
+    return "min", False
 
 
 def _norm_set(x):
@@ -268,6 +299,48 @@ def dft_force_preamble(wb, resolver, gen_bases, opts):
                          % (gb, transp, b.note or ""))
             warns.append((gb, "DFT 门无法解析，需手动设 =%d" % transp))
     return lines, warns
+
+
+def _append_dft_vectors(out_base, vecs, wb, resolver, side_mode, dft_observe=False):
+    """item③ iddq DFT 态拍（第二十二轮）：被 dft 页门控的输出，在功能向量外追加一条 DFT 态拍——
+    force 门(iddq)到选中【常量支】的值、断言输出=该常量(0)，该拍后还原门态（S4：否则 force 的
+    iddq=1 会钉死后续所有拍/块的门）。
+
+    side_mode ∈ {min,max,exhaustive}：精简(min)不补，保三档区别（精简对'iddq 门坏死'是假绿，由
+    报告/GUI 据 meta['iddq_skipped'] 标注，见 §3.5）。原地追加进 vecs（T 编号由调用方统一重排）。
+    dft_observe：开时全局前导已 force 门=透传，本拍不能 release(会连带抹掉前导→污染后续被门控块=评审
+    blocker)，须 force 回透传值恢复前导态；关时无前导，release 让门回 RTL 默认(透传)即可。
+    返回 None（正常补 / 该输出无 dft 门 → 无需补）或 str（被门控但补不了的原因，供 meta['iddq_skipped']）。
+    """
+    if side_mode == "min":
+        return None                                   # 精简档不补 iddq 拍（保三档区别）
+    g = wb.dft.get(out_base) if getattr(wb, "dft", None) else None
+    if not g:
+        return None                                   # 该输出不被 dft 门控 → 无需 DFT 拍
+    # 门网解析（与 dft_force_preamble 同口径）：必须是可 force 的 RO 网
+    info = {"raw": g["gate_base"], "base": g["gate_base"], "width": 1, "msb": None, "lsb": None}
+    b = resolver.resolve("dft_gate_" + g["gate_base"], info)
+    if not (b.resolved and b.kind == "RO"):
+        return "iddq 门 %s 非可 force 的 RO 网，未补 DFT 拍（%s）" % (g["gate_base"], b.note or "")
+    # 模板：首条功能=1(exp_value!=0) 的正向向量，克隆其输入驱动（点名法窄字段下 marker 非零即可当模板）
+    tmpl = next((v for v in vecs if not v.is_negative and v.exp_value != 0), None)
+    if tmpl is None:
+        return "找不到 exp_value!=0 的功能向量作模板，未补 DFT 拍"
+    # 门=1 选中【常量支】(输出=0)：标准 iddq 门 `B?0:A`(transparent=0) → 门值=1；期望取该字面常量 0
+    # （不是"透传取反"——S1：read_dft 已把功能透传值算进 exp，DFT 拍要的是非透传支的常量 0）。
+    transp = int(g["transparent"])
+    gate_val = 1 - transp
+    dv = V.TestVector(len(vecs), dict(tmpl.assignments), 0, tmpl.exp_width,
+                      designer_expected=0,
+                      note="IDDQ 漏电态：门=1 应把输出压到常量支(0)（dft 页 %s）" % g["gate_raw"])
+    dv.dft_pitch = True
+    dv.extra_forces = [(b.wire_lhs, gate_val, 1)]     # 额外 force iddq 门=常量支值
+    if dft_observe:
+        dv.restore_forces = [(b.wire_lhs, transp, 1)]  # 还原全局前导态（透传），不 release（评审 blocker）
+    else:
+        dv.release_nets = [b.wire_lhs]                # 无前导：release 让门回 RTL 默认(透传)（S4）
+    vecs.append(dv)
+    return None
 
 
 def probe_prefix_for(sig, opts):
@@ -529,9 +602,10 @@ def build(wb, opts):
             meta = {"control": [], "data": [], "truncated": False}
         else:
             try:
+                _lmode, _lexh = opts.logic_vec_params()
                 vecs, meta = V.generate_vectors(
                     node, bindings, sig.out_width,
-                    mode=opts.mode, max_tests=opts.max_tests, exhaustive=opts.exhaustive)
+                    mode=_lmode, max_tests=opts.max_tests, exhaustive=_lexh)
             except E.ExprError as ex:
                 errors.append((sig.out_name, sig.assert_id, "向量生成失败: %s" % ex))
                 continue
@@ -541,6 +615,17 @@ def build(wb, opts):
                                        fixed_value=opts.neg_value)
                 for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
                     v.index = i
+
+        # item③ iddq DFT 态拍（第二十二轮）：被 dft 门控的 logic 输出补一条 DFT 拍（全面/穷举；精简不补）。
+        # 仅自动向量路径补（override=用户全定制，不注入工具拍）；放在负向之后 → DFT 拍不被自动负向翻倍。
+        if override is None:
+            _dft_skip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
+                                            mux_gen.coverage_mode(*opts.logic_vec_params()),
+                                            opts.dft_observe)
+            if _dft_skip:
+                meta["iddq_skipped"] = _dft_skip
+            for i, v in enumerate(vecs):
+                v.index = i
 
         # 真·仅负向：只保留负向向量(编号不重排，与"全部"导出的 T 编号一致便于对照)；
         # 没有负向的信号整个不出现在产物里
@@ -564,6 +649,11 @@ def build(wb, opts):
                                              probe_prefix=probe_prefix_for(sig, opts),
                                              owner_in_msg=opts.owner_in_msg,
                                              counters=opts.sv_summary)
+        # 缺口可见（M2）：logic 输出被 dft 门控却补不上 DFT 拍 → 块顶留 ⚠（与 mux 路同口径，
+        # 别让"少验一支 iddq"在 logic 侧无声无息；render_signal_block 不读 meta 故在此补）。
+        # 不进 mux_warnings（那是 mux 专用通道，CLI 文案会误标）；报告侧由 summary.warning 透出。
+        if meta.get("iddq_skipped"):
+            lines = ["// ⚠ %s" % meta["iddq_skipped"]] + lines
         stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
@@ -592,8 +682,8 @@ def build(wb, opts):
             continue
 
         # 覆盖度三档（2026-06-03 第十一轮）：精简=每case一值；全面=+x位展开+反码数据轮；
-        # 穷举=+另一条控制路径全扫。映射统一走 mux_gen.coverage_mode（与 GUI/report 同口径）。
-        mux_mode = mux_gen.coverage_mode(opts.mode, opts.exhaustive)
+        # 穷举=+另一条控制路径全扫。第二十二轮起 mux 侧档位与 logic 解耦，走 opts.mux_cov_mode()。
+        mux_mode = opts.mux_cov_mode()
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode, max_tests=opts.max_tests,
                                               data_overrides=mux_data_for(opts, grp))
         # ⭐ 互异值碰撞 = 选路不可验证（两条数据路同值 → 选错路也测不出 = 假绿）。
@@ -620,6 +710,15 @@ def build(wb, opts):
                                    fixed_value=opts.neg_value)
             for i, v in enumerate(vecs):
                 v.index = i
+
+        # item③ iddq DFT 态拍（mux 被门控输出，如 mixer2g_en）：全面/穷举补、精简不补；放负向之后。
+        _dft_skip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
+                                        opts.mux_cov_mode(), opts.dft_observe)
+        if _dft_skip:
+            meta["iddq_skipped"] = _dft_skip
+        for i, v in enumerate(vecs):
+            v.index = i
+
         if opts.negative_vectors_only:
             vecs = [v for v in vecs if v.is_negative]
             if not vecs:
@@ -645,6 +744,13 @@ def build(wb, opts):
         if out_warn:
             lines = ["// ⚠ %s" % out_warn] + lines
             mux_warnings.append((grp.out_name, grp.assert_id, out_warn))
+        # 缺口可见（M2，第二十二轮）：级联 alt 分支无法判别被跳过 / iddq DFT 拍补不上 → 透出，
+        # 别让"少验一支"无声无息（与 cascade/iddq 覆盖的"缺口必须可见"原则一致）。
+        for _k in ("cascade_alt_skipped", "iddq_skipped"):
+            _gapmsg = meta.get(_k)
+            if _gapmsg:
+                lines = ["// ⚠ %s" % _gapmsg] + lines
+                mux_warnings.append((grp.out_name, grp.assert_id, _gapmsg))
         # 嵌套 mux 自动折叠：.sv 块顶留一句 ⚙ 注释，让看 .sv 的人也能复核合并是否正确
         nnote = getattr(grp, "normalized_note", "")
         if nnote:
@@ -839,9 +945,11 @@ def _fmt_cell(val, width):
 
 
 def _exp_src(vec):
-    """期望来源（报告明细列）：designer 手填 / auto_out 兜底 / 负向(故意填错)。"""
+    """期望来源（报告明细列）：负向 / DFT门 / designer 手填 / auto_out 兜底。"""
     if vec.is_negative:
         return "负向(故意填错)"
+    if getattr(vec, "dft_pitch", False):
+        return "DFT门(iddq=1→压0)"          # item③：期望来自 dft 门常量支，非 designer 手填(M3)
     if vec.designer_filled:
         return "designer手填"
     return "auto_out兜底"
@@ -885,9 +993,10 @@ def report(wb, opts):
             meta = {"control": [], "data": []}
         else:
             try:
+                _lmode, _lexh = opts.logic_vec_params()
                 vecs, meta = V.generate_vectors(node, bindings, sig.out_width,
-                                                mode=opts.mode, max_tests=opts.max_tests,
-                                                exhaustive=opts.exhaustive)
+                                                mode=_lmode, max_tests=opts.max_tests,
+                                                exhaustive=_lexh)
             except E.ExprError as ex:
                 summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                                 "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
@@ -897,6 +1006,12 @@ def report(wb, opts):
             if _neg_enabled_for(sig, opts):
                 vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
                                        fixed_value=opts.neg_value)
+            # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 logic 挂点；override 路径不注入）
+            _lskip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
+                                         mux_gen.coverage_mode(*opts.logic_vec_params()),
+                                         opts.dft_observe)
+            if _lskip:
+                meta["iddq_skipped"] = _lskip   # 缺口可见(M2)：报告 error 列透出（.sv 已有 // ⚠）
         groups = V.input_groups(node, bindings)
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
@@ -912,7 +1027,12 @@ def report(wb, opts):
             forces, writes, unres = W.compute_drives(vec, bindings, used)
             for (ltr, base, note) in unres:
                 unresolved_bases.add(base or ltr)
-            force_str = "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces)
+            # DFT 拍的 iddq 门 force 在 vec.extra_forces 里（不在 used_vars 绑定中）——报告 force 列
+            # 也带上，否则报告与 .sv 不符（恰好漏掉区分 DFT 拍的那条门 force）。
+            _fparts = ["%s=%s" % (f["wire"], f["hex"]) for f in forces]
+            _fparts += ["%s=%s" % (wl, W.fmt_bin(wv, ww))
+                        for (wl, wv, ww) in (getattr(vec, "extra_forces", None) or [])]
+            force_str = "; ".join(_fparts)
             write_str = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
             bv = V.vector_to_base_values(vec, groups)
             table["tests"].append({
@@ -951,7 +1071,8 @@ def report(wb, opts):
             "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
             "n_tests": len(vecs), "n_neg": sum(1 for v in vecs if v.is_negative),
             "control": ",".join(meta.get("control", [])), "data": ",".join(meta.get("data", [])),
-            "unresolved": ";".join(sorted(unresolved_bases)), "error": "",
+            "unresolved": ";".join(sorted(unresolved_bases)),
+            "error": ("⚠覆盖缺口: %s" % meta["iddq_skipped"]) if meta.get("iddq_skipped") else "",
         })
 
     # ───────────── mux 组（与 build() 双轨同步——报告里必须能看到 .sv 里的每个 mux 块）─────────────
@@ -973,7 +1094,7 @@ def report(wb, opts):
         elif blockers and not opts.include_risky:
             skip_reason = "; ".join(r[2] for r in blockers)
         else:
-            mux_mode = mux_gen.coverage_mode(opts.mode, opts.exhaustive)
+            mux_mode = opts.mux_cov_mode()
             vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                                   max_tests=opts.max_tests,
                                                   data_overrides=mux_data_for(opts, grp))
@@ -992,6 +1113,11 @@ def report(wb, opts):
                                            fixed_value=opts.neg_value)
                     for i, v in enumerate(vecs):
                         v.index = i
+                # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 mux 挂点）；skip 原因进 meta 供透出
+                _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
+                                             opts.mux_cov_mode(), opts.dft_observe)
+                if _rskip:
+                    meta["iddq_skipped"] = _rskip
 
         # 警告只在【真生成】时显示（被跳过的组用 error 列说明，警告无意义）
         row_warn = out_warn if not skip_reason else ""
@@ -1006,12 +1132,16 @@ def report(wb, opts):
         otr = ("手填值超字段宽已截断"
                if (meta and meta.get("override_truncated")) else "")
         cnote = (meta.get("contradiction_note") if meta else "") or exp.get("contradiction_note", "")
+        # 缺口可见（M2）：alt 分支跳过 / iddq DFT 拍补不上 → 报告也透出（与 .sv 的 // ⚠ 同口径）
+        gap = "；".join(meta.get(k) for k in ("cascade_alt_skipped", "iddq_skipped")
+                        if meta and meta.get(k))
         warn_full = "；".join(x for x in [("⚙ %s" % nnote) if nnote else "",
                                           ("⚙ %s" % snote) if snote else "",
                                           ("⚠ %s" % ocoll) if ocoll else "",
                                           ("⚠ %s" % omk) if omk else "",
                                           ("⚠ %s" % otr) if otr else "",
-                                          ("⚠ %s" % cnote) if cnote else "", row_warn] if x)
+                                          ("⚠ %s" % cnote) if cnote else "",
+                                          ("⚠ %s" % gap) if gap else "", row_warn] if x)
         summary.append(dict(base_row, n_tests=len(vecs),
                             n_neg=sum(1 for v in vecs if v.is_negative),
                             control=",".join(meta.get("control", []) if meta else []),
@@ -1053,7 +1183,11 @@ def report(wb, opts):
                 "designer_filled": vec.designer_filled,
                 "correct": _fmt_cell(vec.exp_value, vec.exp_width),
                 "auto_num": vec.exp_value, "width": vec.exp_width,
-                "force": "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces),
+                # DFT 拍 iddq 门 force 在 extra_forces（同 logic 路），报告 force 列带上以与 .sv 一致
+                "force": "; ".join(
+                    ["%s=%s" % (f["wire"], f["hex"]) for f in forces]
+                    + ["%s=%s" % (wl, W.fmt_bin(wv, ww))
+                       for (wl, wv, ww) in (getattr(vec, "extra_forces", None) or [])]),
                 "rfwrite": "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes),
             })
             detail.append({

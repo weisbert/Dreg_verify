@@ -391,6 +391,12 @@ def _resolve_ctrl_driver(wb, resolver, ctrl, idx, key_prefix, _stack, _depth, is
     return driver
 
 
+def _is_linectrl_base(b):
+    """该绑定的物理基名是否命中线控族(tsensor/linectrl)——item④ alt 载体判别用。"""
+    nm = (getattr(b, "base", None) or "").lower()
+    return ("tsensor" in nm) or ("linectrl" in nm)
+
+
 def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
     """上游 mux 的『驱到任意目标值』配方（mux 级联，cone「展开上游」思路）。
 
@@ -400,14 +406,22 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
       ③ 载体数据寄存器写 V（_apply_ctrl_driver 在出向量时做）
     全部赋值键带 "m<上游组号>." 前缀与下游隔离。
 
+    item④（第二十二轮）级联两分支：designer for_test 把级联 trim 的两支都当基线——
+    mode=1 写 RW local(=主载体 carrier) + mode=0 force RO 线控(=备用载体 carrier_alt)。
+    本函数并列产出两套载体；alt 轮只在 mux_mode≥全面 才由 _make_general_vectors 生成。
+
     返回 {'upstream','prefix','carrier_ci','carrier_key','carrier_eff_width',
-          'ctrl_drivers'(上游的),'ctrl_values'(上游控制子值),'bindings','keys','issues'}
+          'carrier_alt_ci','carrier_alt_key','carrier_alt_eff_width','alt_skipped_reason',
+          'ctrl_drivers'(上游的),'ctrl_values'(主载体子值),'ctrl_values_alt'(alt载体子值),
+          'bindings','keys','issues'}
     """
     issues = []
     prefix = "m%s." % upstream.group_no
     out = {"upstream": upstream, "prefix": prefix,
            "carrier_ci": None, "carrier_key": None, "carrier_eff_width": 0,
-           "ctrl_drivers": [], "ctrl_values": [],
+           "carrier_alt_ci": None, "carrier_alt_key": None, "carrier_alt_eff_width": 0,
+           "alt_skipped_reason": "",
+           "ctrl_drivers": [], "ctrl_values": [], "ctrl_values_alt": [],
            "bindings": {}, "keys": [], "issues": issues}
     low = upstream.out_base.lower()
     if low in _stack:
@@ -451,7 +465,23 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
                       % upstream.out_width)
         return out
 
-    # ── ② 上游控制驱到载体 case 的值（递归三来源解析）──
+    # ── ①' 备用载体（item④ 级联两分支）：主载体优先 RW；alt = 另一个【非 RW】且命中
+    #    tsensor/linectrl 的载体（mode=0 走 RO 线控 force）。M1 实证上游恰好 2 case
+    #    (tsensor RO + local RW) → alt 唯一无歧义。多个非 RW 候选无法判别 → 跳过 alt 并记
+    #    alt_skipped_reason（不进 issues、不阻断主轮；不靠 case 行序静默选错）。
+    alt_cands = [c for c in candidates if c[1] != out["carrier_ci"] and not c[0]]   # 非主载体、非 RW
+    named = [c for c in alt_cands if _is_linectrl_base(c[3])]
+    alt_pick = None
+    if len(named) == 1:
+        alt_pick = named[0]
+    elif not named and len(alt_cands) == 1:
+        alt_pick = alt_cands[0]
+    elif alt_cands:
+        out["alt_skipped_reason"] = (
+            "上游 mux%s 有 %d 个非 RW 载体候选，mode=0 备用分支(item④ RO 线控)无法判别，已跳过 alt 轮"
+            % (upstream.group_no, len(alt_cands)))
+
+    # ── ② 上游控制驱到载体 case 的值（递归三来源解析）；alt 载体同算一份上游子值 ──
     carrier_case = upstream.cases[out["carrier_ci"]]
     try:
         cval, cw, dc = E.parse_case_literal(carrier_case.case_raw)
@@ -464,10 +494,31 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
                       % (carrier_case.case_raw, cw, upstream.ctrl_total_width))
         return out
     subs = E.split_case_value(cval, dc, widths) if widths else []
+    # alt 载体的上游控制子值（驱到 mode=0 那条 case）；解析/位宽不符 → 放弃 alt（不阻断主轮）
+    alt_subs = None
+    if alt_pick is not None:
+        alt_case = upstream.cases[alt_pick[1]]
+        try:
+            acv, acw, adc = E.parse_case_literal(alt_case.case_raw)
+            if not (upstream.ctrls and acw != upstream.ctrl_total_width):
+                alt_subs = E.split_case_value(acv, adc, widths) if widths else []
+        except E.ExprError:
+            alt_subs = None
+        if alt_subs is None and not out["alt_skipped_reason"]:
+            out["alt_skipped_reason"] = ("上游 mux%s 的 mode=0 case 值无法解析，已跳过 alt 轮"
+                                         % upstream.group_no)
+    if alt_pick is not None and alt_subs is not None:
+        _ar, aci, akey, ab, aeff = alt_pick
+        out["carrier_alt_ci"], out["carrier_alt_key"] = aci, akey
+        out["carrier_alt_eff_width"] = aeff
+        out["bindings"][akey] = ab
+        out["keys"].append(akey)
     for idx, ctrl in enumerate(upstream.ctrls):
         d = _resolve_ctrl_driver(wb, resolver, ctrl, idx, prefix, stack, _depth, issues)
         out["ctrl_drivers"].append(d)
         out["ctrl_values"].append(subs[idx][0])      # don't-care 位取 0
+        if out["carrier_alt_ci"] is not None:
+            out["ctrl_values_alt"].append(alt_subs[idx][0])
         out["bindings"].update(d["bindings"])
         out["keys"].extend(d["keys"])
     return out
@@ -485,11 +536,15 @@ def _driver_eff_mask(driver, key, fallback_width):
     return E.mask(w)
 
 
-def _apply_ctrl_driver(assignments, driver, value):
+def _apply_ctrl_driver(assignments, driver, value, use_alt=False):
     """把一个控制驱动器驱到指定值（写 assignments）。
 
     返回 (实际驱到的值, ok, why_not)——实际值可能因寄存器位宽截断而不等于请求值，
     调用方用它做 case 命中回验（截断后命中错 case 的向量必须丢弃，不能静默生成）。
+
+    use_alt（item④ 级联两分支）：仅对 src=='mux' 生效——True 时走备用载体 carrier_alt
+    （mode=0、RO 线控 force），否则走主载体 carrier（mode=1、RW local）。非 mux 来源忽略此参。
+    嵌套级联的上游控制仍走各自主载体（两分支只针对最近一层级联，与 M1 两级实证一致）。
     """
     src = driver["source"]
     if src in ("reg", "mux-force"):
@@ -519,12 +574,20 @@ def _apply_ctrl_driver(assignments, driver, value):
     if src == "mux":
         recipe = driver["recipe"]
         up = recipe["upstream"]
-        if recipe["carrier_key"] is None:
+        # item④：use_alt 走备用载体(mode=0 RO 线控)；否则主载体(mode=1 RW local)。备用载体在
+        # 全面/穷举档由 _make_general_vectors 才请求，且 resolve 已确认 carrier_alt_ci 存在。
+        if use_alt and recipe.get("carrier_alt_ci") is not None:
+            ckey, cci = recipe["carrier_alt_key"], recipe["carrier_alt_ci"]
+            ceff, cvals = recipe["carrier_alt_eff_width"], recipe["ctrl_values_alt"]
+        else:
+            ckey, cci = recipe["carrier_key"], recipe["carrier_ci"]
+            ceff, cvals = recipe["carrier_eff_width"], recipe["ctrl_values"]
+        if ckey is None:
             return 0, False, ("控制信号 %s 的上游 mux%s 没有可用载体"
                               % (driver["base"], up.group_no))
-        # 上游控制驱到载体 case（递归）；收集各上游控制【实际驱到的值】（可能被其寄存器位宽截断）
+        # 上游控制驱到载体 case（递归，仍走主载体）；收集各上游控制【实际驱到的值】（可能被位宽截断）
         up_parts = []
-        for ud, uv in zip(recipe["ctrl_drivers"], recipe["ctrl_values"]):
+        for ud, uv in zip(recipe["ctrl_drivers"], cvals):
             udv, ok, why = _apply_ctrl_driver(assignments, ud, uv)
             if not ok:
                 return 0, False, why
@@ -533,7 +596,7 @@ def _apply_ctrl_driver(assignments, driver, value):
         # 上游 mux 会选错 case（载体没被选中）→ 该向量必须丢弃，不能静默生成（不变量 B）。
         if up_parts:
             up_cv, _w, _dc = E.concat_case_parts(up_parts)
-            carrier_case = up.cases[recipe["carrier_ci"]]
+            carrier_case = up.cases[cci]
             try:
                 ccv, ccw, cdc = E.parse_case_literal(carrier_case.case_raw)
                 if not E.case_matches(ccv, ccw, cdc, up_cv):
@@ -548,9 +611,9 @@ def _apply_ctrl_driver(assignments, driver, value):
         # 落在上游输出的 [msb:lsb] 段——写载体前先左移 slice_lsb（选值 N → 上游输出 N<<slice_lsb），
         # 否则上游输出=N、被下游切成 N>>slice_lsb → 选错 case。slice_lsb=0（全宽）时为 no-op。
         slice_lsb = driver.get("ctrl_slice_lsb", 0)
-        m = E.mask(min(recipe["carrier_eff_width"], up.out_width))
+        m = E.mask(min(ceff, up.out_width))
         driven = (value << slice_lsb) & m
-        assignments[recipe["carrier_key"]] = driven
+        assignments[ckey] = driven
         # 回报值要【投影回切片前的坐标系】(>> slice_lsb)，与 case 字面量(post-slice 选值)同口径——
         # 否则 emit 的截断回验拿 driven(=N<<slice_lsb) 比 case(=N) 会全部判 miss 而误丢弃整组。
         return (driven >> slice_lsb), True, ""
@@ -988,8 +1051,9 @@ def _make_general_vectors(group, expansion, mode, max_tests, data_overrides=None
     state = {"idx": 0, "capped": False}
     src_desc = "+".join(sorted(set(meta["ctrl_sources"])))
 
-    def emit(ci, cv, vals, note):
-        """产出一条向量。三道闸：max_tests 上限；控制驱动失败丢弃；截断回验丢弃；寄存器冲突丢弃。"""
+    def emit(ci, cv, vals, note, use_alt=False):
+        """产出一条向量。三道闸：max_tests 上限；控制驱动失败丢弃；截断回验丢弃；寄存器冲突丢弃。
+        use_alt（item④）：级联控制改走备用载体(mode=0、RO 线控 force)——透传给 _apply_ctrl_driver。"""
         if state["idx"] >= max_tests:
             state["capped"] = True
             return False
@@ -998,7 +1062,7 @@ def _make_general_vectors(group, expansion, mode, max_tests, data_overrides=None
         assignments = {}
         driven_parts = []
         for d, (sv, _sdc) in zip(drivers, subs):
-            driven, ok, why = _apply_ctrl_driver(assignments, d, sv)
+            driven, ok, why = _apply_ctrl_driver(assignments, d, sv, use_alt=use_alt)
             if not ok:
                 meta["dropped"] += 1
                 meta.setdefault("dropped_reasons", []).append(
@@ -1073,6 +1137,40 @@ def _make_general_vectors(group, expansion, mode, max_tests, data_overrides=None
                         "case %s -> %s (ctrl=0x%X, %s)"
                         % (group.cases[ci].case_raw, group.cases[ci].input_base, cv, tag)):
                 break
+
+    # ── ③ 级联 alt 分支轮（item④，全面/穷举）：cascade 控制改走【备用载体】(mode=0、RO 线控 force)──
+    #    designer for_test 把级联 trim 两支都当基线：主轮①②走 mode=1 写 RW local；这轮补 mode=0
+    #    force tsensor/linectrl 的另半张表，对齐 16 拍签核表。仅当存在带 carrier_alt 的 mux 控制时跑；
+    #    全面档 alt 仅主选值(DC=0)、穷举档 alt 才 DC 全展(与主支对称)。RO 源网 force 由其绑定 kind
+    #    在渲染层决定（与数据侧 RO 线控同口径）。
+    has_alt = any(d["source"] == "mux" and d["recipe"].get("carrier_alt_ci") is not None
+                  for d in drivers)
+    if mode != "min" and has_alt and not state["capped"]:
+        meta["cascade_alt"] = True
+        for ci, pc in enumerate(parsed):
+            if pc is None or ci in shadowed:
+                continue
+            cval, cw, dc = pc
+            alt_cvs = E.expand_case_values(cval, cw, dc)
+            if mode != "exhaustive":
+                alt_cvs = alt_cvs[:1]                  # 全面：DC 位取 0；穷举：DC 全展
+            vals = (_marker_values(group, ci, bindings, data_keys, "ones")
+                    if marker_method else data_values)
+            stop = False
+            for cv in alt_cvs:
+                if not emit(ci, cv, vals,
+                            "case %s -> %s (ctrl=0x%X, alt载体 mode=0/RO 线控 force)"
+                            % (group.cases[ci].case_raw, group.cases[ci].input_base, cv),
+                            use_alt=True):
+                    stop = True
+                    break
+            if stop:
+                break
+    # alt 被跳过(多 RO 候选无法判别 / mode=0 case 不可解析)的原因汇总进 meta（M2 报告可见性用）
+    alt_skips = [d["recipe"].get("alt_skipped_reason") for d in drivers
+                 if d["source"] == "mux" and d["recipe"].get("alt_skipped_reason")]
+    if alt_skips:
+        meta["cascade_alt_skipped"] = "；".join(sorted(set(alt_skips)))
 
     meta["truncated"] = meta["truncated"] or state["capped"]
     return vectors, meta

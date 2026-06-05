@@ -472,23 +472,42 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(splitter, 1)
 
         opt = QtWidgets.QHBoxLayout()
-        # 覆盖度：把旧的 min/max + 小信号全穷举 合成一个高层选择(精简<全面<穷举)。
+        # 覆盖度（第二十二轮起 logic/mux 解耦为两个下拉，互不绑定——用户拍板）：把旧的
+        # min/max + 小信号全穷举 合成的高层档位(精简<全面<穷举)分给 logic 侧、mux 侧各一个。
         self.coverage = QtWidgets.QComboBox(); self.coverage.addItems(["精简", "全面", "穷举"])
         self.coverage.setToolTip(
-            "测试用例的覆盖强度(对'未自定义'的信号即时生效)：\n"
-            "【logic 信号】\n"
+            "【logic 信号】测试用例覆盖强度(对'未自定义'的信号即时生效)：\n"
             "  精简 = 每种控制位组合各取 1 组代表数据(最少用例)\n"
             "  全面 = 每种控制位组合再扫多组数据(全0/全1/反码/走步/区分)\n"
-            "  穷举 = 所有输入的全部组合(仅当总输入位≤10，否则自动退化为'全面')\n"
-            "【mux 信号·单控制 logic 行(line/local 双路径)】\n"
+            "  穷举 = 所有输入的全部组合(仅当总输入位≤10，否则自动退化为'全面')")
+        self.coverage_mux = QtWidgets.QComboBox(); self.coverage_mux.addItems(["精简", "全面", "穷举"])
+        self.coverage_mux.setToolTip(
+            "【mux 信号】覆盖强度，与 logic 侧独立设置：\n"
+            "·单控制 logic 行(line/local 双路径)：\n"
             "  精简 = 每 case 1 条(x位取0) + 1 条另一路径抽测\n"
             "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据(抓数据通路位坏死)\n"
             "  穷举 = 全面 + 另一条控制路径全扫每 case(两条物理驱动路径全验)\n"
-            "【mux 信号·多控制 / 寄存器直出 / mux 级联(直接驱动控制)】\n"
+            "·多控制 / 寄存器直出 / mux 级联(直接驱动控制)：\n"
             "  精简 = 每 case 1 条(x位取0)\n"
             "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据(抓数据通路位坏死)\n"
-            "  穷举 = 同全面(没有另一条物理控制路径可扫)")
+            "  穷举 = 同全面(没有另一条物理控制路径可扫)\n"
+            "⚠ 精简档不补 iddq 门控拍、级联只走 mode=1 主载体（不验 mode=0 RO 线控分支）；\n"
+            "  升【全面/穷举】才补这两类覆盖（缺口在报告/产物注释里也会标注）")
+        # 恢复上次档位（连接信号【前】设值，避免初始化期间误触 on_coverage_changed）；
+        # 迁移：旧文件只有单 coverage 键时同步赋两侧，缺键则默认精简（index 0）。
+        # ⚠ pytest 下【不】从真实 settings 恢复（与 _save_settings 的 pytest no-op 对称）：否则用户
+        # 真机 ~/.dreg_verify_gui.json 里持久化的 coverage_mux 会污染「断言覆盖档版面」的 GUI 测试
+        # （旧版从不恢复 → 测试恒以默认精简起步，这里保持同一行为）。
+        if "pytest" not in sys.modules:
+            _cst = _load_settings()
+            _legacy_cov = _cst.get("coverage")
+            for _combo, _key in ((self.coverage, "coverage_logic"),
+                                 (self.coverage_mux, "coverage_mux")):
+                _v = _cst.get(_key, _legacy_cov)
+                if _v in ("精简", "全面", "穷举"):
+                    _combo.setCurrentText(_v)
         self.coverage.currentIndexChanged.connect(self.on_coverage_changed)
+        self.coverage_mux.currentIndexChanged.connect(self.on_coverage_changed)
         self.cov_hint = QtWidgets.QLabel("")            # 实时显示当前信号的用例条数
         self.cov_hint.setStyleSheet("color:#1558d6;")
         self.max_tests = QtWidgets.QSpinBox(); self.max_tests.setRange(1, 100000); self.max_tests.setValue(256)
@@ -520,7 +539,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if _load_settings().get("dft_observe"):
             self.dft_observe_chk.setChecked(True)
         self.dft_observe_chk.stateChanged.connect(self.on_dft_observe_changed)
-        for w in (QtWidgets.QLabel("覆盖度:"), self.coverage, self.cov_hint,
+        for w in (QtWidgets.QLabel("logic覆盖:"), self.coverage,
+                  QtWidgets.QLabel("mux覆盖:"), self.coverage_mux, self.cov_hint,
                   QtWidgets.QLabel("   上限"), self.max_tests,
                   QtWidgets.QLabel("   级联:"), self.cascade_combo, cascade_help,
                   self.dft_observe_chk):
@@ -661,13 +681,33 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ───────────── 覆盖度（精简/全面/穷举 → 向量生成参数） ─────────────
     def _coverage(self):
-        """把「覆盖度」下拉映射成 (mode, exhaustive)。穷举位数过多时由 vectors 自动退化为'全面'。"""
+        """logic 侧「覆盖度」下拉 → (mode, exhaustive)。穷举位数过多时由 vectors 自动退化为'全面'。"""
         c = self.coverage.currentText()
         if c == "穷举":
             return ("max", True)
         if c == "全面":
             return ("max", False)
         return ("min", False)       # 精简
+
+    def _mux_coverage(self):
+        """mux 侧「覆盖度」下拉 → (mode, exhaustive)。与 logic 侧 _coverage() 独立（第二十二轮解耦）。"""
+        c = self.coverage_mux.currentText()
+        if c == "穷举":
+            return ("max", True)
+        if c == "全面":
+            return ("max", False)
+        return ("min", False)       # 精简
+
+    def _mux_cov_mode(self):
+        """mux 覆盖档 {min,max,exhaustive}（与 generator/report 同口径）。"""
+        return mux_gen.coverage_mode(*self._mux_coverage())
+
+    def _persist_coverage(self):
+        """持久化两侧覆盖档（第二十二轮解耦），下次启动恢复。pytest 下 _save_settings 为 no-op。"""
+        st = _load_settings()
+        st["coverage_logic"] = self.coverage.currentText()
+        st["coverage_mux"] = self.coverage_mux.currentText()
+        _save_settings(st)
 
     # ───────────── 级联模式（展开上游 / force级联网） ─────────────
     def _cascade_mode(self):
@@ -732,7 +772,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """覆盖度/上限变化 → 即时重算当前信号的测试项：
         · 纯自动信号：直接按新覆盖度重算；
         · 仅靠'负向'定制(无手改正向)的信号：按新覆盖度重算正向后再补回负向；
-        · 手改过测试项的信号：保留编辑不动(避免冲掉用户工作)。"""
+        · 手改过测试项的信号：保留编辑不动(避免冲掉用户工作)。
+        两侧覆盖下拉与 max_tests 都连到此；mux 编辑器读 mux 档、logic 编辑器读 logic 档。"""
+        self._persist_coverage()
         if self._sig_loading or getattr(self, "_ti_loading", False):
             return
         sig, name_low = self._ti_sig, self._ti_name_low
@@ -1278,7 +1320,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _analyze_one(self, sig):
         """单信号解析画像：logic 走 analyze_signal，mux 组走 analyze_mux_group（2026-06-03 第九轮）。"""
         if isinstance(sig, excel_model.MuxGroup):
-            mode, exhaustive = self._coverage()
             # 传全部已配置探针前缀（不只本信号的）——级联衔接网的前缀也要能命中，
             # mux_prefix_risks 才能正确区分"还缺前缀"和"已配好可生成"
             # 带上手填数据值(B2)——否则左表状态用自动值算，与右侧编辑器/生成结果不一致(审查 #9)
@@ -1286,7 +1327,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                         mux_data={k: dict(v) for k, v in self._mux_data.items()})
             return generator.analyze_mux_group(
                 self._resolver, self.wb, sig,
-                mode=mux_gen.coverage_mode(mode, exhaustive),
+                mode=self._mux_cov_mode(),
                 probe_prefix=self._prefix_of(sig), opts=opts)
         return generator.analyze_signal(self._resolver, sig, wb=self.wb,
                                         probe_prefix=self._prefix_of(sig))
@@ -1572,8 +1613,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_header.setText("mux 信号 %s：无法生成测试 — %s"
                                    % (grp.out_name, "；".join(exp["issues"])))
             return
-        mode, exhaustive = self._coverage()
-        mux_mode = mux_gen.coverage_mode(mode, exhaustive)
+        mux_mode = self._mux_cov_mode()
         data_ov = self._mux_data.get(grp.out_name.lower())     # B2 用户手填数据值（按物理基名）
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                               max_tests=self.max_tests.value(),
@@ -1665,7 +1705,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "mux 信号: %s = case(%s) %d 选 1　|　覆盖度=%s → 测试 %d 个（%s）　|　"
             "期望已手填 %d/%d　|　输入由 case 结构自动生成（只读）；期望行可手填，数据值可手填，负向勾选照常"
             % (grp.out_name, generator._mux_ctrl_desc(grp), len(grp.cases),
-               self.coverage.currentText(), len(vecs), cov_desc, n_filled, len(pos)))
+               self.coverage_mux.currentText(), len(vecs), cov_desc, n_filled, len(pos)))
         snote = (meta or {}).get("shadowed_note")        # A2 死分支：靠后重复 case 已跳过，标注出来
         if snote:
             self.ti_header.setText(self.ti_header.text() + "　|　⚙ " + snote)
@@ -2535,8 +2575,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._render_mux_exp_col(c, n_inputs)
         finally:
             self._ti_loading = False
-        mode, exhaustive = self._coverage()
-        self._update_mux_header(grp, vecs, mux_gen.coverage_mode(mode, exhaustive))
+        self._update_mux_header(grp, vecs, self._mux_cov_mode())
         self._update_cov_hint()
 
     def _on_mux_data_changed(self, item):
@@ -2953,6 +2992,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return generator.GenOptions(
             signals=signals or None, neg_signals=neg_signals or None,
             mode=mode, max_tests=self.max_tests.value(), exhaustive=exhaustive,
+            # 覆盖档位解耦（第二十二轮）：logic 侧走 mode/exhaustive（=logic 下拉），mux 侧独立。
+            mux_mode=self._mux_cov_mode(),
             top_output_only=False,   # GUI 已按表勾选，不再二次过滤
             probe_prefixes=dict(self._probe_prefixes),
             force_overrides=set(self._force_signals),

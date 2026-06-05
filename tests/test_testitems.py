@@ -577,6 +577,29 @@ def test_gui_coverage_mapping(qapp, wb, tmp_path_factory):
     w.coverage.setCurrentText("穷举"); assert w._coverage() == ("max", True)
 
 
+def test_gui_coverage_decouple_mapping(qapp, wb, tmp_path_factory):
+    """第二十二轮解耦：logic 走 _coverage()、mux 走 _mux_coverage()/_mux_cov_mode()，互不影响。"""
+    gui, w, sig = _reserve_window(tmp_path_factory, "covdec")
+    w.coverage.setCurrentText("精简"); w.coverage_mux.setCurrentText("穷举")
+    assert w._coverage() == ("min", False)              # logic 侧
+    assert w._mux_coverage() == ("max", True)           # mux 侧独立
+    assert w._mux_cov_mode() == "exhaustive"
+    w.coverage.setCurrentText("全面"); w.coverage_mux.setCurrentText("精简")
+    assert w._coverage() == ("max", False)
+    assert w._mux_cov_mode() == "min"
+
+
+def test_gui_coverage_no_restore_under_pytest(qapp, wb, tmp_path_factory, monkeypatch):
+    """⭐ 审查修复(wf_b5a361e3 confirmed)：pytest 下【不】从真实 settings 恢复覆盖档——即便磁盘有
+    coverage_mux / legacy coverage 也默认精简。否则用户真机持久化的档位会污染断言覆盖版面的 GUI 测试。"""
+    from dreg_verify import gui as G
+    monkeypatch.setattr(G, "_load_settings",
+                        lambda: {"coverage_mux": "穷举", "coverage_logic": "全面", "coverage": "穷举"})
+    _gui, w, _sig = _reserve_window(tmp_path_factory, "covnorestore")
+    assert w.coverage.currentText() == "精简"
+    assert w.coverage_mux.currentText() == "精简"
+
+
 def test_gui_coverage_live_update(qapp, wb, tmp_path_factory):
     """切换覆盖度即时刷新'未自定义'信号的测试项；'全面'用例数 ≥ '精简'。"""
     gui, w, sig = _reserve_window(tmp_path_factory, "cov2")
