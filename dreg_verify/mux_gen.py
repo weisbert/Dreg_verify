@@ -611,15 +611,23 @@ def expand_mux_group(wb, resolver, group):
     #   RW 寄存器(*_local/*_lut) → RF_WRITE；RO 寄存器(线控 linectrl_*) → force；
     #   级联(logic/mux 输出的衔接网) → force 字面 _to_mux 网（需探针前缀，build 层把关）。
     #   旧版"必须 RW"硬门已按 WL 实证放开——LPBT 数据全 RW，行为不变。
+    seen_data_bases = set()              # used_vars 按【物理寄存器】收拢：同一寄存器只列一行
+    seen_unres_bases = set()
     for i, case in enumerate(group.cases):
         key = DATA_KEY % i
         info = {"raw": case.input_raw, "base": case.input_base, "width": case.input_width,
                 "msb": case.input_msb, "lsb": case.input_lsb}
         b = resolver.resolve(key, info)
         bindings[key] = b
-        used_vars.append(key)
-        data_keys.append(key)
-        if not b.resolved:
+        data_keys.append(key)            # 逐 case 保留——向量生成按 ci 对齐（含死分支占位）
+        # 显示/驱动渲染（used_vars）只列【唯一物理寄存器】：死分支重复行 / LUT 型同源多 case 不再重复
+        # 显示成多行（与 for_test 一致，t0~t7 各一行）。compute_drives 本就按寄存器合并 → .sv 完全不变。
+        bkey = (b.base or "").lower() or key
+        if bkey not in seen_data_bases:
+            seen_data_bases.add(bkey)
+            used_vars.append(key)
+        if not b.resolved and bkey not in seen_unres_bases:
+            seen_unres_bases.add(bkey)   # 同一寄存器的"未解析"只报一次（不被死分支刷屏）
             issues.append("数据输入 %s 未解析: %s" % (case.input_base, b.note or ""))
 
     # ── ③ case 值解析（保留 don't-care 位；位宽对控制拼接总宽校验）──

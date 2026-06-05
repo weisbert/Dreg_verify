@@ -1592,3 +1592,29 @@ def test_b2_overwidth_override_truncation_noted(tmp_path):
     exp = mux_gen.expand_mux_group(wb, r, g)
     _v, m = mux_gen.make_mux_vectors(g, exp, mode="min", data_overrides={"d_s1": 0x1F})
     assert m.get("override_truncated", {}).get("d_s1") == (0x1F, 0xF)
+
+
+def test_used_vars_collapses_data_by_register(tmp_path):
+    """[显示收拢] used_vars 按物理寄存器去重——死分支/LUT 型同源多 case 不重复列(像 for_test t0~t7 各一行)；
+    data_keys 仍逐 case 保留(向量生成对齐)；compute_drives 本就按寄存器合并，故 .sv 不变。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "collapse.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+            ("S2", "h22", "d_s2[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),  # 死分支同源
+            _mrow("d_s2_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b10", "d_g[1:0]", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_g"))
+    data_in_used = [k for k in exp["used_vars"] if mux_gen.key_role(k) == "data"]
+    assert len(data_in_used) == 3, data_in_used                       # s0/s1/s2 各一行(d:2 死分支收拢)
+    assert {exp["bindings"][k].base.lower() for k in data_in_used} == {"d_s0", "d_s1", "d_s2"}
+    assert len(exp["data_keys"]) == 4                                  # data_keys 仍 4 个(逐 case)

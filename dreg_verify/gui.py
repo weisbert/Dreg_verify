@@ -2088,11 +2088,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # ── 控制信号：按 ctrl_drivers 三来源渲染 ──
         for drv in exp.get("ctrl_drivers", []):
             rows.extend(self._mux_ctrl_rows(drv, exp))
-        # ── 数据寄存器：与 grp.cases 一一对应 ──
+        # ── 数据寄存器：按【物理寄存器】收拢（同一寄存器只显一行，与 used_vars 同口径）——
+        #    死分支重复行 / LUT 型同源多 case 不再刷成多行，与 for_test 一致(t0~t7 各一行)。
+        seen_bases = set()
         for di, key in enumerate(exp.get("data_keys", [])):
             b = exp["bindings"].get(key)
             if b is None:
                 continue
+            bkey = (b.base or "").lower() or key
+            if bkey in seen_bases:
+                continue
+            seen_bases.add(bkey)
             kind, drive = self._binding_meta(b)
             case_raw = grp.cases[di].case_raw if di < len(grp.cases) else "?"
             # RO 线控数据走 force（线控寄存器），其余是被该 case 选中的本地/lut 寄存器
