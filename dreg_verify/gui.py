@@ -511,9 +511,19 @@ class MainWindow(QtWidgets.QMainWindow):
         cascade_help.setFixedWidth(24)
         cascade_help.setToolTip("级联模式帮助：两种模式的图解与选择建议(程序内置窗口)")
         cascade_help.clicked.connect(self._open_cascade_doc)
+        # DFT 观测模式：被验证输出走 _to_dft 且被 iddq 门控时，产物开头 force 门到透传值(iddq=0)
+        self.dft_observe_chk = QtWidgets.QCheckBox("DFT观测")
+        self.dft_observe_chk.setToolTip(
+            "被验证输出走 _to_dft、被 iddq 门控时：在产物开头 force iddq 门到透传值(=0)，\n"
+            "使我们断言的基名网反映功能值——与 for_test 一致。\n"
+            "（iddq_mode 多为 RO、默认 0，不开多半也对；开了更确定、且匹配 for_test。默认关=直探内部网。）")
+        if _load_settings().get("dft_observe"):
+            self.dft_observe_chk.setChecked(True)
+        self.dft_observe_chk.stateChanged.connect(self.on_dft_observe_changed)
         for w in (QtWidgets.QLabel("覆盖度:"), self.coverage, self.cov_hint,
                   QtWidgets.QLabel("   上限"), self.max_tests,
-                  QtWidgets.QLabel("   级联:"), self.cascade_combo, cascade_help):
+                  QtWidgets.QLabel("   级联:"), self.cascade_combo, cascade_help,
+                  self.dft_observe_chk):
             opt.addWidget(w)
         opt.addStretch(1)
         root.addLayout(opt)
@@ -683,6 +693,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_mux_test_items(self._ti_mux_sig)
         self.status.showMessage("级联模式已切换为『%s』——含级联输入的信号已按新模式重新解析"
                                 % self.cascade_combo.currentText())
+
+    def on_dft_observe_changed(self, *args):
+        """DFT 观测模式切换：持久化 + 刷新预览（只影响产物前导 force，不改各信号真值表/解析）。"""
+        st = _load_settings()
+        st["dft_observe"] = self.dft_observe_chk.isChecked()
+        _save_settings(st)
+        self._refresh_preview()
 
     def _open_cascade_doc(self):
         """级联 ? → 程序内置帮助窗(直接渲染『级联模式说明.md』)，不调外部编辑器。"""
@@ -2948,7 +2965,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # 保证"全部"与"仅负向"两份导出的负向错值一致(便于对照)
             mux_expected={k: dict(v) for k, v in self._mux_expected.items()},
             # mux 手填数据值（B2）：替换自动互异/标记值，预览/生成/报告都按此走
-            mux_data={k: dict(v) for k, v in self._mux_data.items()})
+            mux_data={k: dict(v) for k, v in self._mux_data.items()},
+            # DFT 观测模式（续②）：产物开头 force iddq 门到透传值，使 _to_dft 输出反映功能值
+            dft_observe=(self.dft_observe_chk.isChecked()
+                         if hasattr(self, "dft_observe_chk") else False))
 
     # ───────────── 收集 / 选项 ─────────────
     def _collect(self):

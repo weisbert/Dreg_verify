@@ -685,12 +685,56 @@ def _normalize_type(v):
 
 # ───────────────────────────── 顶层装载 ─────────────────────────────
 class DregWorkbook:
-    def __init__(self, logic, regmap, tmm, sheet_names, mux=None):
+    def __init__(self, logic, regmap, tmm, sheet_names, mux=None, dft=None):
         self.logic = logic              # list[LogicSignal]
         self.regmap = regmap            # dict
         self.tmm = tmm                  # dict
         self.sheet_names = sheet_names
         self.mux = mux if mux is not None else []   # list[MuxGroup]（无 mux 页 = 空列表）
+        # {输出基名low: 门控信息}（dft 页；无 dft 页=空）。DFT 观测模式用，见 read_dft。
+        self.dft = dft if dft is not None else {}
+
+
+def _dft_strip(name):
+    """dft 门/输出名 → 去位宽 + 去 _to_dft 后缀的基名。"""
+    s = _strip_width(name)[0]
+    if s.lower().endswith("_to_dft"):
+        s = s[:-len("_to_dft")]
+    return s
+
+
+_DFT_GATE_LO = re.compile(r"^\s*\w+\s*\?\s*0\s*:\s*\w+\s*$")    # cond?0:A → 门=0 时透传(取功能值 A)
+_DFT_GATE_HI = re.compile(r"^\s*\w+\s*\?\s*\w+\s*:\s*0\s*$")    # cond?A:0 → 门=1 时透传
+
+
+def read_dft(ws, header_row=2):
+    """读 dft 页：被 DFT mux 门控的输出 + 其门控（Hi1108 实证，全表一致）。
+
+    列：B=门信号(to_dft，恒=iddq_mode)、D=被观测输出(=mux/logic 的 G/K 基名)、E=门控表达式 B?0:A。
+    `B?0:A` 含义：门 B=0 → 输出取功能值 A(透传)；B=1 → 输出强制 0(IDDQ 漏电测试)。
+    返回 {输出基名low: {"gate_base": 门基名low, "gate_raw": 门原文, "transparent": 0/1}}。
+    只收能识别成"单条件门 cond?0:x / cond?x:0"的行（其余跳过，不乱猜）。
+    用途：DFT 观测模式把门 force 到 transparent 值，使被门控输出反映功能值（= for_test 的 iddq=0 做法）。
+    """
+    out = {}
+    if ws is None:
+        return out
+    for r in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        out_raw = _s(r[3]) if len(r) > 3 else ""       # D 列：被观测输出
+        gate_raw = _s(r[1]) if len(r) > 1 else ""      # B 列：门信号(iddq_mode)
+        expr = _s(r[4]) if len(r) > 4 else ""          # E 列：门控表达式
+        if not out_raw or not gate_raw or not expr:
+            continue
+        if _DFT_GATE_LO.match(expr):
+            transparent = 0
+        elif _DFT_GATE_HI.match(expr):
+            transparent = 1
+        else:
+            continue                                   # 非"单条件门"形态：不处理
+        ob = _strip_width(out_raw)[0].lower()
+        out[ob] = {"gate_base": _dft_strip(gate_raw).lower(),
+                   "gate_raw": gate_raw, "transparent": transparent}
+    return out
 
 
 def _find_sheet(wb, *candidates):
@@ -710,11 +754,13 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     ws_regmap = _find_sheet(wb, "regmap")
     ws_tmm = _find_sheet(wb, "total_memory_map", "total memory map", "memory_map")
     ws_mux = _find_sheet(wb, "mux")
+    ws_dft = _find_sheet(wb, "dft")
 
     logic = read_logic(ws_logic, logic_header_row)
     regmap = read_regmap(ws_regmap, regmap_header_row) if ws_regmap is not None else {}
     tmm = read_tmm(ws_tmm) if ws_tmm is not None else {}
     mux = read_mux(ws_mux) if ws_mux is not None else []
+    dft = read_dft(ws_dft) if ws_dft is not None else {}
     names = list(wb.sheetnames)
     wb.close()
-    return DregWorkbook(logic, regmap, tmm, names, mux=mux)
+    return DregWorkbook(logic, regmap, tmm, names, mux=mux, dft=dft)

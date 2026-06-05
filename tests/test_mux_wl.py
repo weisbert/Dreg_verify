@@ -583,7 +583,7 @@ def test_wl_negative_vectors(wl_wb):
 from fixtures import _set_row, _tmm_reg, _tmm_field  # noqa: E402
 
 
-def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=None):
+def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=None, dft_rows=None):
     """造一个只有 logic(默认空)/tmm/regmap/mux 四页的最小工作簿，给级联/边界回归用。
 
     tmm_fields: [(reg_name, addr, field_name(可带[msb:lsb]), bit, dig, typ), ...]
@@ -591,6 +591,7 @@ def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=Non
     regmap_fields: [(reg, typ, signal), ...] 可选
     logic_rows: [{列字母: 值}, ...] 可选——往 logic 页加行（A..J=输入, K=输出, L=表达式,
                 M=suffix, N=top_output, R=序号），用于复现"mux 数据/控制输入是某 logic 输出"的形态。
+    dft_rows: [(A=<out>_to_dft, B=<gate>_to_dft, D=<out>, E=门控表达式), ...] 可选——造 dft 页。
     """
     import openpyxl
     wb = openpyxl.Workbook()
@@ -616,6 +617,11 @@ def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=Non
                      "F": "case", "G": "mux_out", "H": "to_logic", "I": "top", "L": "Owner", "N": 0})
     for ri, cells in enumerate(mux_rows, start=3):
         _set_row(mx, ri, cells)
+    if dft_rows:
+        ds = wb.create_sheet("dft")
+        _set_row(ds, 2, {"A": "A", "B": "B", "C": "C", "D": "out put signal", "E": "logic expression"})
+        for ri, (a, b, d, e) in enumerate(dft_rows, start=3):
+            _set_row(ds, ri, {"A": a, "B": b, "D": d, "E": e})
     wb.save(path)
     return excel_model.load_workbook(path)
 
@@ -1618,3 +1624,36 @@ def test_used_vars_collapses_data_by_register(tmp_path):
     assert len(data_in_used) == 3, data_in_used                       # s0/s1/s2 各一行(d:2 死分支收拢)
     assert {exp["bindings"][k].base.lower() for k in data_in_used} == {"d_s0", "d_s1", "d_s2"}
     assert len(exp["data_keys"]) == 4                                  # data_keys 仍 4 个(逐 case)
+
+
+# ───────── 第二十轮 续②：DFT 路观测模式（force iddq 门到透传值）─────────
+def test_dft_observe_forces_iddq_gate(tmp_path):
+    """[续②] 输出在 dft 页被 iddq 门控(B?0:A)时：dft_observe=True 在产物前导 force 门到透传值(0)，
+    使我们断言的基名网反映功能值（= for_test 的 iddq=0）；关时无前导。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "dft.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),    # DFT 门=RO 线
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+        ],
+        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
+    )
+    # dft 页解析：d_g 被 d_iddq_mode 门控、透传值 0
+    assert wb.dft.get("d_g") == {"gate_base": "d_iddq_mode",
+                                 "gate_raw": "d_iddq_mode_to_dft", "transparent": 0}
+    # 关：无前导 force
+    res0 = generator.build(wb, generator.GenOptions(dft_observe=False))
+    assert not res0.get("dft_preamble")
+    # 开：前导 force iddq 门到 1'b0
+    res1 = generator.build(wb, generator.GenOptions(dft_observe=True))
+    pre = "\n".join(res1.get("dft_preamble") or [])
+    assert "force" in pre and "d_iddq_mode" in pre and "1'b0" in pre, pre
+    # render 把前导写进产物最前
+    txt = generator.render(res1)
+    assert "d_iddq_mode" in txt and "1'b0" in txt

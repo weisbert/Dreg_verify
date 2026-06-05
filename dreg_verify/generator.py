@@ -23,7 +23,8 @@ class GenOptions:
                  exclude=None, exclude_regex=None, comments=False, include_risky=False,
                  vector_overrides=None, probe_prefixes=None,
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
-                 cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None):
+                 cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None,
+                 dft_observe=False):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -80,6 +81,9 @@ class GenOptions:
         # （与 by_base/点名法同口径——覆盖度切换/case 重排都稳）。
         self.mux_data = {str(k).lower(): {str(bk).lower(): int(bv) for bk, bv in v.items()}
                          for k, v in (mux_data or {}).items() if v}
+        # DFT 观测模式（第二十轮续②）：被验证输出走 _to_dft 且被 iddq 门控时，在产物开头 force 门到
+        # 透传值(iddq=0)，使我们断言的基名网反映功能值——= for_test 的做法。默认关（直探内部网为主）。
+        self.dft_observe = bool(dft_observe)
 
 
 def _norm_set(x):
@@ -230,6 +234,40 @@ def mux_data_for(opts, grp):
     """该 mux 组的用户手填数据值覆写 {物理基名(小写): int}，没有则 None（按信号名/基名两套键查）。"""
     return (opts.mux_data.get(grp.out_name.lower())
             or opts.mux_data.get(grp.out_base.lower()) or None)
+
+
+def dft_force_preamble(wb, resolver, gen_bases, opts):
+    """DFT 观测模式产物前导：被生成的输出里凡在 dft 页被门控的，把其门(iddq)force 到透传值。
+
+    门通常全表统一(iddq_mode)，按门去重只 force 一次。透传后我们断言的基名网=功能值（= for_test）。
+    门是 RO 线 → force；RW → 提示 RF_WRITE；无法解析 → 留 ⚠ 注释（用户手动设）。返回 (lines, warnings)。
+    """
+    if not opts.dft_observe or not getattr(wb, "dft", None):
+        return [], []
+    gates = {}      # gate_base_low -> (gate_raw, transparent)
+    for ob in gen_bases:
+        g = wb.dft.get(ob)
+        if g:
+            gates.setdefault(g["gate_base"], (g["gate_raw"], g["transparent"]))
+    if not gates:
+        return [], []
+    lines = ["// ⚙ DFT 观测模式：force DFT 门到透传值，"
+             "使被门控的 _to_dft 输出反映功能值（= for_test 的 iddq=0）"]
+    warns = []
+    for gb, (graw, transp) in sorted(gates.items()):
+        info = {"raw": gb, "base": gb, "width": 1, "msb": None, "lsb": None}
+        b = resolver.resolve("dft_gate_" + gb, info)
+        if b.resolved and b.kind == "RO":
+            lines.append("force `%s.%s = 1'b%d;" % (W.ENV, b.wire_lhs, transp))
+        elif b.resolved and b.kind == "RW" and b.address is not None:
+            lines.append("// ⚠ DFT 门 %s 是 RW(addr 0x%X)，请用 RF_WRITE 设字段=%d"
+                         % (gb, b.address, transp))
+            warns.append((gb, "DFT 门是 RW，需 RF_WRITE 设=%d" % transp))
+        else:
+            lines.append("// ⚠ DFT 门 %s 无法解析为可 force 的网，请手动设 =%d（%s）"
+                         % (gb, transp, b.note or ""))
+            warns.append((gb, "DFT 门无法解析，需手动设 =%d" % transp))
+    return lines, warns
 
 
 def probe_prefix_for(sig, opts):
@@ -671,10 +709,16 @@ def build(wb, opts):
         # 默认静默过滤掉的 logic 内部节点（top_output=0）——拎出来给可见性
         "n_filtered_internal": len(filtered_internal),
     }
+    # DFT 观测模式（第二十轮续②，默认关）：被生成的输出里凡在 dft 页被 iddq 门控的，
+    # 在产物前导 force 门到透传值，使断言的基名网反映功能值（= for_test 的 iddq=0 做法）。
+    gen_bases = {str(st.get("out_name", "")).split("[")[0].lower() for _l, st in blocks}
+    dft_preamble, dft_warnings = dft_force_preamble(wb, resolver, gen_bases, opts)
+    summary["n_dft_forced"] = sum(1 for x in dft_preamble if x.startswith("force"))
     return {"blocks": blocks, "selected": selected, "errors": errors,
             "skipped": skipped, "mux_warnings": mux_warnings,
             "cone_fallbacks": cone_fallbacks,
             "filtered_internal": filtered_internal,
+            "dft_preamble": dft_preamble, "dft_warnings": dft_warnings,
             "dup_labels": dup_labels, "summary": summary,
             # 计数器++已按 opts.sv_summary 写进 blocks，render 必须配套包裹声明/汇总，
             # 否则产物里是未声明变量 → 把标志带在结果里保证两者一致。
@@ -738,7 +782,8 @@ def render(result, header_info=None, comments=False, block_suffix=""):
     两份贴进同一作用域时块名不重名(同名兄弟命名块 = elaboration 错误)。"""
     return W.render_file(result["blocks"], header_info=header_info, comments=comments,
                          summary=result.get("sv_summary", False),
-                         block_suffix=block_suffix)
+                         block_suffix=block_suffix,
+                         preamble=result.get("dft_preamble") or None)
 
 
 def analyze_signal(resolver, sig, wb=None, probe_prefix=""):
