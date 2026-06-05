@@ -309,6 +309,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # mux 信号的 designer 手填期望：{信号名小写: {输入取值键(generator.mux_assign_key): int}}
         # mux 向量由 case 结构自动生成、不走 vector_overrides → 期望单独按取值键存（覆盖度切换不串号）
         self._mux_expected = {}
+        # 勾了"负向"的 mux 信号名(小写)集合。mux 负向不走 _edited(无表达式可编辑)，生成时经
+        # neg_signals 追加；这里单独存盘，否则关 GUI 重开后 mux 的负向勾选会丢(logic 的不丢)。
+        self._mux_neg = set()
         self._ti_mux_vecs = []    # 当前 mux 信号的向量（期望行编辑时对号入座）
         self._ti_mux_exp_row = -1 # 当前 mux 表里"期望"行的行号
         # 真值表列宽：用户手动拖过 → 重建表格时保留手动宽度(换信号才恢复自动)
@@ -759,6 +762,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._customized = set()
         self._neg_only = {}
         self._mux_expected = {}
+        self._mux_neg = set()
         # 编辑持久化按"已加载"的 Excel 路径分桶（不能用 path_edit 实时文本——
         # 用户改了路径还没点加载时，编辑仍属于旧表）
         self._loaded_excel_path = path
@@ -1015,9 +1019,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         r = item.row()
         sig = self._sig_of_row(r)
-        # mux 信号：负向不走编辑器 override（无表达式可编辑），勾选状态在生成时经 neg_signals 生效
+        # mux 信号：负向不走编辑器 override（无表达式可编辑），勾选状态在生成时经 neg_signals 生效。
+        # 记进 _mux_neg 并存盘——否则关 GUI 重开后 mux 负向勾选会丢(这正是用户碰到的 bug)。
         if isinstance(sig, excel_model.MuxGroup):
             want_mux = item.checkState() == QtCore.Qt.Checked
+            if want_mux:
+                self._mux_neg.add(sig.out_name.lower())
+            else:
+                self._mux_neg.discard(sig.out_name.lower())
+            self._persist_edits()
             self.status.showMessage("%s（mux）已%s负向——生成时追加 1 条故意填错的自检断言(_NEG)"
                                     % (sig.out_name, "标记" if want_mux else "清除"))
             return
@@ -1363,7 +1373,12 @@ class MainWindow(QtWidgets.QMainWindow):
             for r in rows:
                 sig = self._sig_of_row(r)
                 name_low = sig.out_name.lower()
-                if want:
+                if isinstance(sig, excel_model.MuxGroup):     # mux 负向走 _mux_neg(存盘)，不进 _edited
+                    if want:
+                        self._mux_neg.add(name_low)
+                    else:
+                        self._mux_neg.discard(name_low)
+                elif want:
                     if not self._signal_has_negative(name_low):   # 已有负向的不塌成 1 条
                         self._set_signal_negatives(sig, True, "first")
                 else:
@@ -1716,12 +1731,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         allbuckets = _load_edits_file()
-        if self._edited or self._mux_expected:
+        if self._edited or self._mux_expected or self._mux_neg:
             allbuckets[path] = {
                 "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
                 "neg_only": dict(self._neg_only),
                 # mux 手填期望：{信号名: {输入取值键: int}}（mux 不走 rows 编辑模型，单独一段）
                 "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
+                # 勾了负向的 mux 信号名（mux 负向也是用户的选择，必须存盘）
+                "mux_neg": sorted(self._mux_neg),
             }
         else:
             allbuckets.pop(path, None)        # 编辑全清空 → 桶也删掉
@@ -1744,14 +1761,19 @@ class MainWindow(QtWidgets.QMainWindow):
         return n_restored
 
     def _sync_neg_checks_from_edits(self):
-        """把 _edited 里含负向行的信号在左表勾上"负向"列（恢复/导入编辑后调用）。"""
+        """把含负向的信号在左表勾上"负向"列（恢复/导入编辑后调用）。
+        logic：_edited 里有 kind==neg 行；mux：在 _mux_neg 集合里。"""
         self._sig_loading = True
         try:
             for r in range(self.table.rowCount()):
                 sig = self._sig_of_row(r)
-                if sig is None or isinstance(sig, excel_model.MuxGroup):
+                if sig is None:
                     continue
-                if self._signal_has_negative(sig.out_name.lower()):
+                if isinstance(sig, excel_model.MuxGroup):
+                    checked = sig.out_name.lower() in self._mux_neg
+                else:
+                    checked = self._signal_has_negative(sig.out_name.lower())
+                if checked:
                     cell = self.table.item(r, COL_NEG)
                     if cell is not None:
                         cell.setCheckState(QtCore.Qt.Checked)
@@ -1793,6 +1815,12 @@ class MainWindow(QtWidgets.QMainWindow):
             merged = self._mux_expected.setdefault(name_low, {})
             merged.update({str(k): int(v) for k, v in exp_map.items()})
             n_restored += 1
+        # mux 负向勾选：恢复到 _mux_neg（仍存在于 mux 页的才恢复，改名/删行的列出来）
+        for name_low in (bucket.get("mux_neg") or []):
+            if name_low in mux_by_name:
+                self._mux_neg.add(name_low)
+            else:
+                missing.append(name_low + "（mux 负向：mux 页不存在）")
         return n_restored, missing
 
     def on_export_edits(self):

@@ -274,3 +274,49 @@ def test_gui_filter_no_owner_absent_when_all_owned(wl_win):
     w._populate_filters()
     texts = [w.owner_combo.itemText(k) for k in range(w.owner_combo.count())]
     assert not any(t.startswith(G.NO_OWNER) for t in texts), texts
+
+
+# ───────────── ⑦ mux 负向勾选跨会话持久化（bug 回归） ─────────────
+def test_wl_gui_mux_negatives_persist_across_reload(gui_app, tmp_path, monkeypatch):
+    """⭐bug 回归(2026-06-05)：mux 信号的"负向"勾选关 GUI 重开后丢失——表现为用户点了
+    『全部加负向』(含 clean 的 logic 与非 clean 的 mux)，重开却只剩 logic 的负向还勾着。
+    根因：mux 负向只在勾选框、不进 _edited 存盘，_sync_neg_checks_from_edits 又整个跳过 mux。
+    修复：mux 负向存进 _mux_neg 并落盘/恢复。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
+    excel = tmp_path / "wl.xlsx"
+    fixtures.build_wl_workbook(str(excel))
+    mux_lower = None
+
+    def _mux_row(w, sig):
+        return next(r for r in range(w.table.rowCount())
+                    if w.signals[w._idx_of_row(r)] is sig)
+
+    # 窗口1：全部加负向（5 个 mux 组 + 2 个 logic）→ 落盘
+    w1 = G.MainWindow(); w1.path_edit.setText(str(excel)); w1.on_load()
+    mux_lower = {s.out_name.lower() for s in w1.signals
+                 if isinstance(s, excel_model.MuxGroup)}
+    w1.on_all_signals_neg(True)
+    assert set(w1._mux_neg) == mux_lower            # 落盘前就进了 _mux_neg
+    w1.close()
+
+    # 窗口2：重开 → mux 组负向都恢复勾上，生成时(_mux_neg_checked)也读得到
+    w2 = G.MainWindow(); w2.path_edit.setText(str(excel)); w2.on_load()
+    for s in [x for x in w2.signals if isinstance(x, excel_model.MuxGroup)]:
+        cell = w2.table.item(_mux_row(w2, s), G.COL_NEG)
+        assert cell.checkState() == QtCore.Qt.Checked, s.out_name
+    assert {n.lower() for n in w2._mux_neg_checked()} == mux_lower
+    # 取消一个 mux 负向 → 落盘更新
+    g0 = next(x for x in w2.signals if isinstance(x, excel_model.MuxGroup))
+    w2.table.item(_mux_row(w2, g0), G.COL_NEG).setCheckState(QtCore.Qt.Unchecked)
+    assert g0.out_name.lower() not in w2._mux_neg
+    w2.close()
+
+    # 窗口3：再重开 → 那个被取消的 mux 不再勾，其余仍勾
+    w3 = G.MainWindow(); w3.path_edit.setText(str(excel)); w3.on_load()
+    for s in [x for x in w3.signals if isinstance(x, excel_model.MuxGroup)]:
+        cell = w3.table.item(_mux_row(w3, s), G.COL_NEG)
+        want = QtCore.Qt.Unchecked if s.out_name == g0.out_name else QtCore.Qt.Checked
+        assert cell.checkState() == want, s.out_name
+    w3.close()
