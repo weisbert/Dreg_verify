@@ -320,3 +320,84 @@ def test_wl_gui_mux_negatives_persist_across_reload(gui_app, tmp_path, monkeypat
         want = QtCore.Qt.Unchecked if s.out_name == g0.out_name else QtCore.Qt.Checked
         assert cell.checkState() == want, s.out_name
     w3.close()
+
+
+# ───────────── ⑧ 第二十轮 B1：mux 编辑器按钮态 + 级联切换重渲 ─────────────
+def test_b1_mux_greys_logic_only_buttons(lpbt_win):
+    """[B1a] 选 mux 信号 → 列结构/CSV 按钮置灰(无 mux 分支，点了只弹"先选信号"=误导) + 准确 tooltip；
+    有 mux 分支的「auto→期望」「预览本信号.sv」保持可用；切回 logic 信号恢复全可用。"""
+    w = lpbt_win
+    mux = next(s for s in w.signals if isinstance(s, excel_model.MuxGroup))
+    w._load_test_items(mux)
+    assert w._ti_mux_sig is mux and w._ti_sig is None
+    for t in ("加正向列", "复制列", "删除列", "重新生成", "加负向(选中)",
+              "全部用例加负向", "删负向", "导出CSV", "重命名列…"):
+        assert not w._ti_btns[t].isEnabled(), t
+        assert "case 结构" in w._ti_btns[t].toolTip(), t      # 准确说明，不是"先选信号"
+    assert w._ti_btns["auto→期望"].isEnabled()                # 有 mux 分支 → 保持可用
+    assert w._ti_btns["预览本信号.sv"].isEnabled()
+    # 切回 logic 信号 → 列编辑按钮恢复可用 + 原 tooltip
+    logic = next(s for s in w.signals if not isinstance(s, excel_model.MuxGroup))
+    w._load_test_items(logic)
+    assert w._ti_sig is logic
+    assert w._ti_btns["加正向列"].isEnabled()
+    assert "case 结构" not in w._ti_btns["加正向列"].toolTip()
+
+
+def test_b1_cascade_toggle_rerenders_mux(wl_win):
+    """[B1b] 选中 mux 信号时切级联模式 → mux 真值表必须按新模式重渲（修前 on_cascade_mode_changed
+    只重渲 logic、mux 看着"切了没反应"）。切到 force 后控制行会显示被 force 的衔接网+needs-prefix。"""
+    w = wl_win
+    mux = next(s for s in w.signals if isinstance(s, excel_model.MuxGroup))
+    w._load_test_items(mux)
+    assert w._ti_mux_sig is mux
+    calls = []
+    orig = w._load_mux_test_items
+    w._load_mux_test_items = lambda g, _o=orig: (calls.append(g), _o(g))[1]
+    try:
+        w.on_cascade_mode_changed()                # 切级联模式（不依赖持久化的下拉初值）
+    finally:
+        w._load_mux_test_items = orig
+    assert calls and calls[-1] is mux              # mux 真值表确实被重渲了
+
+
+# ───────────── ⑨ 第二十轮 B2：mux 数据值可手填 + 落盘 + 重开恢复 ─────────────
+def test_b2_mux_data_cell_editable_persist_reload(gui_app, tmp_path, monkeypatch):
+    """[B2] mux 数据行可双击手填(控制行只读) → 存进 _mux_data + 落盘 + 整表重渲生效；重开恢复。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
+    excel = tmp_path / "wl.xlsx"
+    fixtures.build_wl_workbook(str(excel))
+    w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
+    # 找一个能生成向量(有可手填数据行)的 mux 组
+    grp = None
+    for s in w.signals:
+        if isinstance(s, excel_model.MuxGroup):
+            w._load_test_items(s)
+            if w._ti_mux_data_rows:
+                grp = s; break
+    assert grp is not None, "没有任何 mux 组有可手填数据行"
+    name_low = grp.out_name.lower()
+    drow = min(w._ti_mux_data_rows)
+    base_low, width = w._ti_mux_data_rows[drow]
+    # 数据格可编辑；控制行(行0)若是控制则只读
+    dcell = w.ti_table.item(drow, 0)
+    assert dcell.flags() & QtCore.Qt.ItemIsEditable
+    ctrl_rows = [r for r in range(w.ti_table.rowCount())
+                 if r not in w._ti_mux_data_rows and r < w._ti_mux_exp_row - 1]
+    if ctrl_rows:
+        assert not (w.ti_table.item(ctrl_rows[0], 0).flags() & QtCore.Qt.ItemIsEditable)
+    # 手填数据值 = 2（setText 触发 itemChanged → _on_mux_data_changed → 重渲+落盘）
+    w.ti_table.item(drow, 0).setText(w._cell_text(2, width))
+    assert w._mux_data.get(name_low, {}).get(base_low) == 2
+    # 落盘（edits.json 里有 mux_data 段）
+    import json
+    saved = json.load(open(str(tmp_path / "edits.json"), encoding="utf-8"))
+    assert any((b.get("mux_data") or {}).get(name_low, {}).get(base_low) == 2
+               for b in saved.values()), saved
+    w.close()
+    # 重开 → _mux_data 恢复
+    w2 = G.MainWindow(); w2.path_edit.setText(str(excel)); w2.on_load()
+    assert w2._mux_data.get(name_low, {}).get(base_low) == 2
+    w2.close()

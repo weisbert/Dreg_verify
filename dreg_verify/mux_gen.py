@@ -145,21 +145,50 @@ def _case_base_key(case, i, bindings, data_keys):
     return case.input_base.lower()
 
 
-def _alloc_loop(group, bindings, data_keys, seed_fn):
+def _alloc_loop(group, bindings, data_keys, seed_fn, overrides=None, truncated=None):
     """互异值分配公共骨架：seed_fn(i, width, mask) 给初值，碰撞时 1..m 循环探测（永不取 0）。
 
     ⭐按【物理寄存器】分配，不是按 case 序号：同一寄存器喂多个 case 时复用同一个值。否则 emit 的
     by_base 冲突检查会因"同一寄存器被写不同值"把每条向量都丢弃 → 空向量（误报"控制无驱动路径"）。
     互异性只要求在【不同寄存器】之间成立——mux 选路只能区分到不同源，同源两 case 即便选错也输出同值
     （设计本就如此，非真故障，不可也不必区分）。collision 据此按【不同寄存器数】判，不再按 case 数。
-    返回 (values, collision)。collision=True 表示有效位宽装不下这么多互异值。
+
+    overrides（B2 用户手填数据值，第二十轮）：{物理基名(小写): int}。手填值【优先占位】（用户值
+    sacrosanct），自动值绕开它们；手填值彼此撞 / 撞 0 / 撞自动值 → collision=True（由调用方决定
+    阻断还是仅警告——手填撞值是用户的责任，按 [[gui-feedback]] 不静默）。
+    返回 (values, collision)。collision=True 表示有效位宽装不下这么多互异值（或手填撞值）。
     """
+    overrides = overrides or {}
     values, seen, collision = [], {0}, False
     by_base = {}                            # 物理寄存器基名 → 已分配值（同源 case 复用）
+    # ── 第一遍：登记手填值（按该 base 有效位宽 mask），占住 seen 让自动值避开（用户值优先）──
+    ov_norm, ov_seen = {}, set()            # 物理基名 → 已 mask 的手填值；ov_seen=手填值集合
+    for i, case in enumerate(group.cases):
+        bkey = _case_base_key(case, i, bindings, data_keys)
+        if bkey in overrides and bkey not in ov_norm:
+            w = _effective_width(case, i, bindings, data_keys)
+            raw = overrides[bkey]
+            masked = raw & E.mask(w)
+            ov_norm[bkey] = masked
+            if truncated is not None and raw >= 0 and raw != masked:
+                truncated[bkey] = (raw, masked)   # 手填值超字段宽被静默截断 → 调用方出提示(#5)
+    for v in ov_norm.values():
+        # 仅当与【另一个手填值】相同才算撞（两路同值=不可区分=假绿）。手填值撞初始 0 占位【不算】
+        # ——全1 取反=0 是 deterministic 的合法第二轮值，撞名义 0 不是真碰撞(#6 误报修复)；
+        # 自动值仍靠 seen 绕开全部手填值(含 0)。
+        if v in ov_seen:
+            collision = True
+        ov_seen.add(v)
+        seen.add(v)
+    # ── 第二遍：按 case 顺序分配（手填 base 用手填值，其余 seed+探测避开 seen）──
     for i, case in enumerate(group.cases):
         bkey = _case_base_key(case, i, bindings, data_keys)
         if bkey in by_base:
             values.append(by_base[bkey])    # 同一寄存器：复用同值，避开 by_base 冲突丢弃
+            continue
+        if bkey in ov_norm:
+            by_base[bkey] = ov_norm[bkey]   # 手填值原样（已占 seen）
+            values.append(ov_norm[bkey])
             continue
         w = _effective_width(case, i, bindings, data_keys)
         m = E.mask(w)
@@ -178,26 +207,30 @@ def _alloc_loop(group, bindings, data_keys, seed_fn):
     return values, collision
 
 
-def alloc_distinct_values(group, bindings=None, data_keys=None):
+def alloc_distinct_values(group, bindings=None, data_keys=None, overrides=None, truncated=None):
     """给每个数据寄存器分配互异值（designer 风格：4bit+ 从 0xA 递减；窄位宽从 1 递增）。
 
     互异是 mux 选路验证的命门：两条数据路同值时选错路也测不出（假绿）。
-    避开 0（RTL mux 坏死输出 0 时不应误判 PASS）。
+    避开 0（RTL mux 坏死输出 0 时不应误判 PASS）。overrides=用户手填值（见 _alloc_loop）；
+    truncated=可选 dict，被填入"手填值超字段宽被截断"的 {base:(raw,masked)}（#5 诊断）。
     返回 (values, collision)。
     """
     return _alloc_loop(group, bindings, data_keys,
-                       lambda i, w, m: ((0xA - i) & m) if w >= 4 else ((i + 1) & m))
+                       lambda i, w, m: ((0xA - i) & m) if w >= 4 else ((i + 1) & m),
+                       overrides=overrides, truncated=truncated)
 
 
-def alloc_inverted_values(group, base_values, bindings=None, data_keys=None):
+def alloc_inverted_values(group, base_values, bindings=None, data_keys=None, overrides=None):
     """反码数据轮：每个数据寄存器取第一轮值的按位取反（有效位宽内），保持互异、避 0。
 
     抓的故障：数据通路某位坏死(stuck-at)时，若第一轮写入值恰好等于坏死位的值则测不出；
     反码轮让每个寄存器的每一位都翻转过 → 两轮合起来每位都验过 0 和 1。
+    overrides=用户手填值的【反码】（第二轮也尊重手填，保"每位翻转"覆盖，见调用方）。
     返回 (values, collision)。
     """
     return _alloc_loop(group, bindings, data_keys,
-                       lambda i, w, m: (~base_values[i]) & m)
+                       lambda i, w, m: (~base_values[i]) & m,
+                       overrides=overrides)
 
 
 def _marker_values(group, target_ci, bindings, data_keys, mark="ones"):
@@ -325,6 +358,17 @@ def _resolve_ctrl_driver(wb, resolver, ctrl, idx, key_prefix, _stack, _depth, is
         # cone 展开上游模式（默认）：反解上游 mux → 上游控制驱动 + 载体数据寄存器写目标值
         driver["source"] = "mux"
         driver["upstream"] = upstream
+        # ⭐ 下游控制是上游输出的【切片】(如 temp_code_to_mux[3:1], slice_lsb=1)时，case 选值 N 落在
+        # 上游输出的 [msb:lsb] 位段——必须把它左移 slice_lsb 写进载体（否则上游输出=N、被切片成 N>>1，
+        # 选错 case；mux56→mux157 实证）。slice_lsb=0（全宽控制）时为 no-op，不影响既有级联测试。
+        driver["ctrl_slice_lsb"] = ctrl.lsb or 0
+        # 切片必须落在上游输出位宽内——否则高位 case 选值会被静默截断丢成 truncated（审查 #1）。
+        slice_msb = ctrl.msb if ctrl.msb is not None else (driver["ctrl_slice_lsb"] + ctrl.width - 1)
+        if slice_msb >= upstream.out_width:
+            issues.append("下游控制 %s 的切片 [%d:%d] 超出上游 mux%s 输出 %s 的位宽 %d——"
+                          "高位 case 选值会被截掉(静默丢成 truncated)，请核对 Excel 切片或上游输出位宽"
+                          % (ctrl.base, slice_msb, driver["ctrl_slice_lsb"],
+                             upstream.group_no, upstream.out_base, upstream.out_width))
         recipe = resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth + 1)
         driver["recipe"] = recipe
         for msg in recipe["issues"]:
@@ -500,10 +544,16 @@ def _apply_ctrl_driver(assignments, driver, value):
                 pass
         # 载体数据寄存器写目标值。下游看到的是上游 mux【输出】(out_width 位)，不是载体寄存器
         # (carrier_eff_width 位)——按两者取小截断，emit 的截断回验才能正确丢弃越界 case（不变量 E）。
+        # ⭐ slice 复合（mux56→mux157 实证）：下游控制是上游输出的切片 [msb:lsb] 时，case 选值 N
+        # 落在上游输出的 [msb:lsb] 段——写载体前先左移 slice_lsb（选值 N → 上游输出 N<<slice_lsb），
+        # 否则上游输出=N、被下游切成 N>>slice_lsb → 选错 case。slice_lsb=0（全宽）时为 no-op。
+        slice_lsb = driver.get("ctrl_slice_lsb", 0)
         m = E.mask(min(recipe["carrier_eff_width"], up.out_width))
-        driven = value & m
+        driven = (value << slice_lsb) & m
         assignments[recipe["carrier_key"]] = driven
-        return driven, True, ""
+        # 回报值要【投影回切片前的坐标系】(>> slice_lsb)，与 case 字面量(post-slice 选值)同口径——
+        # 否则 emit 的截断回验拿 driven(=N<<slice_lsb) 比 case(=N) 会全部判 miss 而误丢弃整组。
+        return (driven >> slice_lsb), True, ""
 
     return 0, False, "控制信号 %s 来源未知（无法驱动）" % driver["base"]
 
@@ -591,10 +641,64 @@ def expand_mux_group(wb, resolver, group):
             parsed_cases.append(None)
             issues.append("case 值 %r 解析失败: %s" % (case.case_raw, ex))
 
+    # ── ④ 死分支/矛盾检测（Verilog case 先到先得 = 首次匹配优先，按【具体控制值】判，覆盖 don't-care 子集）──
+    #    每个具体控制值由【最靠前】匹配它的 case 拥有。靠后 case 的具体值若已被更早 case 拥有：
+    #      整条都被【同源】更早 case 拥有 → 纯死分支：shadowed 跳过 + 软提示（不阻断）。
+    #      任一具体值被【不同源】更早 case 拥有 → 规格矛盾：同输入两期望必假红 → 硬报 issue
+    #        （整条都死则也 shadowed，让 include_risky 放行时按先到先得只留前者、不产假红）。
+    #      部分重叠且全同源 → 冗余无害（输出相同），仅软提示、照常生成。
+    #    精确同键是"全覆盖"的特例（沿用 mixer2g_trim 实证行为）；并堵住"x 位 case 与窄 case 部分重叠"
+    #    的隐藏假红（审查 #2/#3）。解析失败(None)的 case 不参与。
+    shadowed = set()
+    shadow_pairs = []                    # 同源全死分支 [(后 row, 先 row)]
+    redundant_pairs = []                 # 同源部分重叠 [(后 row, 先 row)]（冗余无害）
+    contradictions = []                  # 不同源重叠 [(后 row, 先 row, 后源, 先源)]
+    claimed = {}                         # 具体控制值 -> (拥有它的 ci, 该 ci 的物理源 base_low)
+    for ci, pc in enumerate(parsed_cases):
+        if pc is None:
+            continue
+        cv, cw, dc = pc
+        base_low = group.cases[ci].input_base.lower()
+        try:
+            vals = E.expand_case_values(cv, cw, dc)
+        except E.ExprError:
+            vals = [cv]
+        owners = [claimed[v] for v in vals if v in claimed]      # 已被更早 case 拥有的具体值的 owner
+        diff = next((o for o in owners if o[1] != base_low), None)
+        full = owners and len(owners) == len(vals)
+        if diff is not None:
+            contradictions.append((group.cases[ci].row, group.cases[diff[0]].row,
+                                   group.cases[ci].input_base, group.cases[diff[0]].input_base))
+            if full:
+                shadowed.add(ci)         # 整条死：先到先得只留前者（include_risky 放行时不产假红）
+        elif full:
+            shadowed.add(ci)             # 整条被同源更早 case 覆盖 → 纯死分支
+            shadow_pairs.append((group.cases[ci].row, group.cases[owners[0][0]].row))
+        elif owners:
+            redundant_pairs.append((group.cases[ci].row, group.cases[owners[0][0]].row))
+        for v in vals:
+            claimed.setdefault(v, (ci, base_low))      # 首次匹配认领（不覆盖更早拥有者）
+    for later, first, lb, fb in contradictions:
+        issues.append("mux 页第 %s 行与第 %s 行有相同的控制选择值却选不同数据源（%s vs %s）——"
+                      "同一选择值 RTL 只能输出一个，规格矛盾，请核对 Excel"
+                      % (later, first, lb, fb))
+    note_bits = []
+    if shadow_pairs:
+        note_bits.append("死分支 %d 条（%s）：控制值被更靠前的同源 case 完全覆盖，Verilog 先到先得轮不到，已跳过其测试"
+                         % (len(shadow_pairs), "、".join("第%s行←第%s行" % p for p in shadow_pairs)))
+    if redundant_pairs:
+        note_bits.append("冗余重叠 %d 条（%s）：与更靠前的同源 case 有重叠控制值（输出相同、无害），照常生成"
+                         % (len(redundant_pairs), "、".join("第%s行∩第%s行" % p for p in redundant_pairs)))
+    shadowed_note = "；".join(note_bits)
+    contradiction_note = ("规格矛盾 %d 处：%s" % (len(contradictions),
+                          "、".join("第%s行/第%s行选择值重叠却选不同源(%s vs %s)" % c for c in contradictions))
+                          if contradictions else "")
+
     return {"bindings": bindings, "used_vars": used_vars, "data_keys": data_keys,
-            "ctrl_drivers": ctrl_drivers,
+            "ctrl_drivers": ctrl_drivers, "contradiction_note": contradiction_note,
             "ctrl_sig": ctrl_sig, "ctrl_node": ctrl_node, "line": line, "local": local,
-            "parsed_cases": parsed_cases, "issues": issues}
+            "parsed_cases": parsed_cases, "issues": issues,
+            "shadowed": shadowed, "shadowed_note": shadowed_note}
 
 
 # ───────────────────────────── 向量生成 ─────────────────────────────
@@ -608,8 +712,11 @@ def coverage_mode(mode, exhaustive):
     return "min" if str(mode).lower() == "min" else "max"
 
 
-def make_mux_vectors(group, expansion, mode="min", max_tests=256):
+def make_mux_vectors(group, expansion, mode="min", max_tests=256, data_overrides=None):
     """为一个 mux 组生成测试向量（vectors.TestVector，assignments 键 = "c:*"/"d:*"）。
+
+    data_overrides（B2，第二十轮）：{物理基名(小写): int} 用户手填的数据值，替换自动互异/标记值；
+    撞值降级为非阻断警告（meta['override_collision']，用户负责）。None=全自动（行为不变）。
 
     形态分发（2026-06-03 第十四轮）：
       LPBT 形态（单控制 + logic 来源）→ 本函数的 line/local 双路径生成器（行为与历史版本完全一致）
@@ -628,23 +735,32 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
     """
     drivers = expansion.get("ctrl_drivers")
     if drivers is not None and not (len(drivers) == 1 and drivers[0]["source"] == "logic"):
-        return _make_general_vectors(group, expansion, mode, max_tests)
+        return _make_general_vectors(group, expansion, mode, max_tests, data_overrides)
 
     line, local = expansion["line"], expansion["local"]
     data_keys = expansion["data_keys"]
     parsed = expansion["parsed_cases"]
     bindings = expansion["bindings"]
+    shadowed = expansion.get("shadowed") or set()    # 死分支 case：跳过、不生成冗余向量
 
     scan_path = line or local
     other_path = local if scan_path is line else line
 
     # 互异值按"有效位宽"分配（声明位宽与 tmm/regmap 字段位宽取小），保证截断后仍互异
-    data_values, collision = alloc_distinct_values(group, bindings, data_keys)
-    # 反码数据轮（max/exhaustive）：互异值取反后仍互异、避 0
+    has_ov = bool(data_overrides)
+    ov_trunc = {}
+    data_values, collision = alloc_distinct_values(group, bindings, data_keys,
+                                                   overrides=data_overrides, truncated=ov_trunc)
+    # ⭐ 字段容量碰撞独立于手填判定（审查 #4/#10：单个手填不该掩盖窄字段假绿）：用【无 override】的
+    # 自动分配复测——auto_cap=True 表示字段本身装不下互异值（与手填无关），仍按容量假绿阻断。
+    auto_cap = collision if not has_ov else alloc_distinct_values(group, bindings, data_keys)[1]
+    # 反码数据轮（max/exhaustive）：互异值取反后仍互异、避 0；手填值第二轮也用其反码
     if mode == "min":
         inv_values, inv_collision = None, False
     else:
-        inv_values, inv_collision = alloc_inverted_values(group, data_values, bindings, data_keys)
+        inv_ov = {b: (~v) for b, v in (data_overrides or {}).items()}
+        inv_values, inv_collision = alloc_inverted_values(group, data_values, bindings, data_keys,
+                                                          overrides=inv_ov)
 
     scan_kind = ("line" if scan_path is line else "local") if scan_path else None
     other_kind = None if other_path is None else ("local" if other_path is local else "line")
@@ -654,9 +770,16 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
         "missing_vars": [], "total_bits": 0,
         "truncated": False, "dropped": 0, "exhaustive": mode != "min",
         "scan_path": scan_kind,
-        "value_collision": collision or inv_collision,
+        # 容量碰撞(auto_cap)=字段太窄装不下互异值 → 阻断(假绿)，手填掩盖不了；
+        # 仅当碰撞【非容量、纯手填值之间引起】才降级为非阻断 override_collision 警告（用户负责）。
+        "value_collision": (collision or inv_collision) if (auto_cap or not has_ov) else False,
+        "override_collision": bool(has_ov and (collision or inv_collision) and not auto_cap),
+        "override_truncated": dict(ov_trunc),
+        "data_overrides": dict(data_overrides or {}),
         "case_map": [(group.cases[i].case_raw, group.cases[i].input_base, data_values[i])
                      for i in range(len(group.cases))],
+        "shadowed": sorted(shadowed),                 # 死分支 case 序号（GUI/HTML 标注用）
+        "shadowed_note": expansion.get("shadowed_note", ""),
         # 覆盖度三档的内容标记（报告/GUI 据此说明"当前档生成了什么"）
         "data_rounds": 1 if mode == "min" else 2,
         "other_path_scan": (None if other_path is None
@@ -696,7 +819,7 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
 
     # ── ① line 路径 case 扫描（min：x 位取 0；max/exhaustive：don't-care 位展开）──
     for ci, pc in enumerate(parsed):
-        if pc is None:
+        if pc is None or ci in shadowed:           # 死分支：先到先得，靠后同值 case 不生成
             continue
         cval, cw, dc = pc
         ctrl_values = E.expand_case_values(cval, cw, dc)
@@ -715,7 +838,7 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
     # ── ② 反码数据轮（max/exhaustive）：每 case 再测一次，数据寄存器写反码互异值 ──
     if inv_values is not None and not state["capped"]:
         for ci, pc in enumerate(parsed):
-            if pc is None:
+            if pc is None or ci in shadowed:
                 continue
             cval, cw, dc = pc
             cv = E.expand_case_values(cval, cw, dc)[0]
@@ -729,7 +852,7 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256):
         if mode == "exhaustive":
             stop = False
             for ci, pc in enumerate(parsed):
-                if pc is None or stop:
+                if pc is None or stop or ci in shadowed:
                     continue
                 cval, cw, dc = pc
                 for cv in E.expand_case_values(cval, cw, dc):
@@ -775,8 +898,11 @@ def _path_assignments(active_path, inactive_path, ctrl_value, widths, data_keys,
 
 
 # ───────────────────────────── 通用向量生成（WL 形态） ─────────────────────────────
-def _make_general_vectors(group, expansion, mode, max_tests):
+def _make_general_vectors(group, expansion, mode, max_tests, data_overrides=None):
     """通用向量生成：多控制拼接 / 寄存器直出控制 / mux 级联控制 / RO 线控数据。
+
+    data_overrides（B2）：{物理基名(小写): int} 用户手填数据值——尊重用户字面值，不走点名法，
+    撞值降级为非阻断警告（meta['override_collision']）。
 
     覆盖度三档（与 LPBT 口径对齐——每升一档多抓一类真实故障）：
       "min"(精简)        = 每 case 1 条（don't-care 位取 0）
@@ -793,17 +919,27 @@ def _make_general_vectors(group, expansion, mode, max_tests):
     data_keys = expansion["data_keys"]
     bindings = expansion["bindings"]
     parsed = expansion["parsed_cases"]
+    shadowed = expansion.get("shadowed") or set()    # 死分支 case：跳过、不生成冗余向量
     out_mask = E.mask(group.out_width)
     widths = [d["width"] for d in drivers]
 
     # 互异值（与 LPBT 同一套分配器：有效位宽、避 0、碰撞检测）
-    data_values, collision = alloc_distinct_values(group, bindings, data_keys)
-    # 互异值装不下(假绿) → 改"点名法"逐 case 生成(被测=标记/其余=0)，任何位宽都成立、不再跳过
-    marker_method = collision
+    has_ov = bool(data_overrides)
+    ov_trunc = {}
+    data_values, collision = alloc_distinct_values(group, bindings, data_keys,
+                                                   overrides=data_overrides, truncated=ov_trunc)
+    # ⭐ 字段容量碰撞独立于手填判定（审查 #4/#8/#10：单个手填不该关掉窄字段的点名法保护→假绿）：
+    # 用【无 override】的自动分配复测——auto_cap=True 表示字段本身装不下互异值（与手填无关）。
+    auto_cap = collision if not has_ov else alloc_distinct_values(group, bindings, data_keys)[1]
+    # 装不下(auto_cap) → 点名法逐 case 生成(被测=标记/其余=0)，任何位宽都成立、不跳过。点名法对
+    # 字段容量假绿的保护【不因手填关闭】；此时手填值在点名法下不生效（用 0/标记，下面 note 提示）。
+    marker_method = auto_cap
     if mode == "min" or marker_method:
         inv_values, inv_collision = None, False
     else:
-        inv_values, inv_collision = alloc_inverted_values(group, data_values, bindings, data_keys)
+        inv_ov = {b: (~v) for b, v in (data_overrides or {}).items()}
+        inv_values, inv_collision = alloc_inverted_values(group, data_values, bindings, data_keys,
+                                                          overrides=inv_ov)
 
     ctrl_keys = []
     for d in drivers:
@@ -815,12 +951,20 @@ def _make_general_vectors(group, expansion, mode, max_tests):
         "missing_vars": [], "total_bits": sum(widths),
         "truncated": False, "dropped": 0, "exhaustive": mode != "min",
         "scan_path": "direct",          # 通用形态：直接驱动控制（不是 line/local 双路径）
-        "value_collision": False if marker_method else (collision or inv_collision),
+        # 容量假绿走点名法(marker_method)保护、不跳过；仅当碰撞【非容量、纯手填值之间】才降级为
+        # 非阻断 override_collision 警告（用户负责）。marker_method 不因手填关闭(审查 #4/#8/#10)。
+        "value_collision": False if (marker_method or has_ov) else (collision or inv_collision),
+        "override_collision": bool(has_ov and (collision or inv_collision) and not auto_cap),
+        "override_ignored_marker": bool(has_ov and marker_method),   # 手填值因点名法保护未生效
+        "override_truncated": dict(ov_trunc),
+        "data_overrides": dict(data_overrides or {}),
         "marker_method": marker_method,  # True=字段太窄、改点名法生成（替代假绿跳过）
         "case_map": [(group.cases[i].case_raw, group.cases[i].input_base,
                       (E.mask(_effective_width(group.cases[i], i, bindings, data_keys))
                        if marker_method else data_values[i]))
                      for i in range(len(group.cases))],
+        "shadowed": sorted(shadowed),                 # 死分支 case 序号（GUI/HTML 标注用）
+        "shadowed_note": expansion.get("shadowed_note", ""),
         "data_rounds": (1 if mode == "min" else 2),
         "other_path_scan": None,
         "multi_ctrl": len(drivers) > 1,
@@ -886,7 +1030,7 @@ def _make_general_vectors(group, expansion, mode, max_tests):
 
     # ── ① case 扫描（min：x 位取 0；max/exhaustive：don't-care 位展开）──
     for ci, pc in enumerate(parsed):
-        if pc is None:
+        if pc is None or ci in shadowed:             # 死分支：先到先得，靠后同值 case 不生成
             continue
         cval, cw, dc = pc
         ctrl_values = E.expand_case_values(cval, cw, dc)
@@ -910,7 +1054,7 @@ def _make_general_vectors(group, expansion, mode, max_tests):
               else ("inv" if inv_values is not None else None))
     if second and not state["capped"]:
         for ci, pc in enumerate(parsed):
-            if pc is None:
+            if pc is None or ci in shadowed:
                 continue
             cval, cw, dc = pc
             cv = E.expand_case_values(cval, cw, dc)[0]

@@ -123,6 +123,14 @@ class MuxCtrl:
     def __repr__(self):
         return "MuxCtrl(%s=%s[%d])" % (self.letter, self.base, self.width)
 
+    @property
+    def label(self):
+        """显示用控制名：lsb>0 的切片(如 temp_code[3:1])显出来——非零偏移一眼可见(A1 隐患处，
+        case 选值落在 [msb:lsb] 段而非低位)；lsb==0/无切片显裸基名(与历史显示一致，不扰动)。"""
+        if self.lsb is not None and self.lsb > 0 and self.msb is not None:
+            return "%s[%d:%d]" % (self.base, self.msb, self.lsb)
+        return self.base
+
 
 class MuxGroup:
     """mux 页的一组（同一个被验证输出）：G = case({B,C,D,E}) { F行: A行; ... }
@@ -180,9 +188,9 @@ class MuxGroup:
         注意这不是可求值表达式——mux 不走 expr.parse 路径。"""
         items = "; ".join("%s:%s" % (c.case_raw, c.input_base) for c in self.cases)
         if len(self.ctrls) > 1:
-            sel = "{%s}" % ",".join(c.base for c in self.ctrls)    # 多控制拼接（B 在高位）
+            sel = "{%s}" % ",".join(c.label for c in self.ctrls)   # 多控制拼接（B 在高位，带切片）
         else:
-            sel = self.ctrl_base
+            sel = self.ctrls[0].label if self.ctrls else self.ctrl_base
         return "case(%s){%s}" % (sel, items)
 
     @property

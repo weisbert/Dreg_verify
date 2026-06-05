@@ -1295,3 +1295,300 @@ def test_normal_multi_ctrl_group_untouched(wl_wb):
     assert not g4.normalized_note
     assert not g4.ctrl_mismatch_rows
     assert [c.base for c in g4.ctrls] == ["d_wl_rf_rc_code_lut_en", "d_wl_rf_bwctrl"]
+
+
+# ───────── 第二十轮 A1：cone 级联控制是上游输出【切片】时的 lsb 复合（mux56→mux157 实证）─────────
+def test_a1_cascade_control_slice_lsb_composed(tmp_path):
+    """[A1·必修·隐藏假红] 下游控制 = 上游 mux 输出的切片 d_umux_to_mux[3:1]（slice_lsb=1）：
+    case 选值 N 落在上游输出的 [3:1] 段 → 写载体前必须左移 slice_lsb（载体=N<<1，使上游输出[3:1]=N）。
+    修前 mux_gen 把 N 原样写载体 → 上游输出=N、被下游切成 N>>1 → 8 个 case 错 7 个（只有真仿真暴露）。
+    （真表 mux56: temp_code=case(temp_code_mode){0:线控;1:local} → mux157: mixer2g_trim=case(temp_code[3:1]){8选1}）"""
+    wb = _build_mux_wb(
+        str(tmp_path / "a1.xlsx"),
+        tmm_fields=[
+            ("UCTRL", "h10", "d_uctrl", "0", "N", "RW"),
+            ("ULINE", "h11", "d_uline[3:0]", "3:0", "Y", "RO"),     # 上游 line 路（RO）
+            ("ULOCAL", "h12", "d_ulocal[3:0]", "3:0", "N", "RW"),   # 上游 local 路（RW，做载体）
+            ("DD0", "h20", "d_dd0[1:0]", "1:0", "N", "RW"),
+            ("DD1", "h21", "d_dd1[1:0]", "1:0", "N", "RW"),
+            ("DD2", "h22", "d_dd2[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            # 上游组1：d_umux[3:0] = case(d_uctrl){0:line(RO); 1:local(RW)}；载体=local=m1.d:1
+            _mrow("d_uline_to_mux[3:0]", "d_uctrl_to_mux", "1'b0", "d_umux[3:0]", 1),
+            _mrow("d_ulocal_to_mux[3:0]", "d_uctrl_to_mux", "1'b1", "d_umux[3:0]", 1),
+            # 下游组2：控制 = d_umux 的切片 [3:1]（slice_lsb=1，3 位）；取 N=0/2/5 子集
+            _mrow("d_dd0_to_mux[1:0]", "d_umux_to_mux[3:1]", "3'b000", "d_dmux[1:0]", 2),
+            _mrow("d_dd1_to_mux[1:0]", "d_umux_to_mux[3:1]", "3'b010", "d_dmux[1:0]", 2),
+            _mrow("d_dd2_to_mux[1:0]", "d_umux_to_mux[3:1]", "3'b101", "d_dmux[1:0]", 2),
+        ],
+    )
+    r = resolver.Resolver(wb)                          # 默认 cone（展开上游）
+    g = _grp(wb, "d_dmux")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    assert not exp["issues"], exp["issues"]
+    assert exp["ctrl_drivers"][0]["source"] == "mux"
+    assert exp["ctrl_drivers"][0]["ctrl_slice_lsb"] == 1               # 记下切片偏移
+    # 显示项：lsb>0 的切片在 expr/控制描述里显出来（一眼看见非零偏移）
+    assert g.expr.startswith("case(d_umux[3:1])"), g.expr
+    assert generator._mux_ctrl_desc(g) == "d_umux[3:1]"
+    vecs, meta = mux_gen.make_mux_vectors(g, exp, mode="min")
+    # 载体（上游 local RW，键 m1.d:1）= N<<1：case 000→0, 010→2<<1=4, 101→5<<1=10
+    carriers = [v.assignments["m1.d:1"] for v in vecs]
+    assert carriers == [0, 4, 10], carriers
+    # 上游控制 d_uctrl 被驱到 1（选中 local 载体路径，使上游输出 == 载体值）
+    assert all(v.assignments["m1.c:reg"] == 1 for v in vecs)
+
+
+def test_a1_cascade_full_width_control_unchanged(tmp_path):
+    """[A1 向后兼容] 下游控制是上游输出全宽 d_umux_to_mux[3:0]（slice_lsb=0）→ 载体 = N 原样，
+    修复对 lsb=0 是 no-op（既有级联测试不受影响）。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "a1fw.xlsx"),
+        tmm_fields=[
+            ("UCTRL", "h10", "d_uctrl", "0", "N", "RW"),
+            ("ULINE", "h11", "d_uline[3:0]", "3:0", "Y", "RO"),
+            ("ULOCAL", "h12", "d_ulocal[3:0]", "3:0", "N", "RW"),
+            ("DD0", "h20", "d_dd0[1:0]", "1:0", "N", "RW"),
+            ("DD1", "h21", "d_dd1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_uline_to_mux[3:0]", "d_uctrl_to_mux", "1'b0", "d_umux[3:0]", 1),
+            _mrow("d_ulocal_to_mux[3:0]", "d_uctrl_to_mux", "1'b1", "d_umux[3:0]", 1),
+            _mrow("d_dd0_to_mux[1:0]", "d_umux_to_mux[3:0]", "4'b0011", "d_dmux[1:0]", 2),
+            _mrow("d_dd1_to_mux[1:0]", "d_umux_to_mux[3:0]", "4'b0101", "d_dmux[1:0]", 2),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    g = _grp(wb, "d_dmux")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    assert exp["ctrl_drivers"][0]["ctrl_slice_lsb"] == 0
+    vecs, _meta = mux_gen.make_mux_vectors(g, exp, mode="min")
+    carriers = [v.assignments["m1.d:1"] for v in vecs]
+    assert carriers == [0b0011, 0b0101], carriers     # 全宽：载体 = case 值原样
+
+
+# ───────── 第二十轮 A2：死分支去重（先到先得）+ 同值不同源=规格矛盾硬报（mixer2g_trim 实证）─────────
+def test_a2_duplicate_same_source_shadowed(tmp_path):
+    """[A2] 靠后 case 与更靠前 case 控制值相同、且选同一数据源 → 死分支（Verilog 先到先得）：
+    标记 shadowed、跳过其测试 + 软提示，不阻断生成。（mixer2g_trim 行1090-1094≡1085-1089 实证）"""
+    wb = _build_mux_wb(
+        str(tmp_path / "a2dup.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+            ("S2", "h22", "d_s2[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),  # 死分支≡行3、同源
+            _mrow("d_s2_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b10", "d_g[1:0]", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    g = _grp(wb, "d_g")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    assert not exp["issues"], exp["issues"]            # 同源死分支不是 issue（不阻断生成）
+    assert exp["shadowed"] == {2}                      # 第三行（ci=2）= 死分支
+    assert "死分支" in exp["shadowed_note"]
+    vecs, meta = mux_gen.make_mux_vectors(g, exp, mode="min")
+    assert len(vecs) == 3                              # 00/01/10 三条；重复的 00 不再生成
+    assert meta["shadowed"] == [2]
+    assert meta["shadowed_note"]
+    # .sv 块顶有 ⚙ 死分支注释（看 .sv 的人能复核少了哪些行）
+    res = generator.build(wb, generator.GenOptions())
+    block_text = "\n".join("\n".join(lines) for lines, st in res["blocks"] if st.get("is_mux"))
+    assert "死分支" in block_text
+
+
+def test_a2_duplicate_diff_source_contradiction(tmp_path):
+    """[A2] 靠后 case 与更靠前 case 控制值相同、却选【不同】数据源 → 规格矛盾（RTL 同选择值只能输出一个）：
+    硬报 issue、整组跳过让 designer 改 Excel（不静默挑一个，否则验的是错的期望）。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "a2bad.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),  # 同控制值→不同源=矛盾
+        ],
+    )
+    r = resolver.Resolver(wb)
+    g = _grp(wb, "d_g")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    assert any("规格矛盾" in i for i in exp["issues"]), exp["issues"]
+    # build 默认跳过该组并给原因（不静默生成可能错的期望）
+    res = generator.build(wb, generator.GenOptions())
+    assert any("d_g" in s[0] for s in res["skipped"]), [s[0] for s in res["skipped"]]
+
+
+# ───────── 第二十轮 B2：用户手填 mux 数据值（override-by-base）+ 撞值非阻断警告 ─────────
+def _b2_wb(path):
+    return _build_mux_wb(
+        path,
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("S0", "h20", "d_s0[3:0]", "3:0", "N", "RW"),
+            ("S1", "h21", "d_s1[3:0]", "3:0", "N", "RW"),
+            ("S2", "h22", "d_s2[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[3:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[3:0]", 1),
+            _mrow("d_s1_to_mux[3:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[3:0]", 1),
+            _mrow("d_s2_to_mux[3:0]", "d_sel_to_mux[1:0]", "2'b10", "d_g[3:0]", 1),
+        ],
+    )
+
+
+def test_b2_data_override_replaces_value(tmp_path):
+    """[B2] 手填数据值按物理基名替换自动互异值；选中该源的向量 auto_out 随之改；不撞值=无警告。"""
+    wb = _b2_wb(str(tmp_path / "b2.xlsx"))
+    r = resolver.Resolver(wb)
+    g = _grp(wb, "d_g")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    v, m = mux_gen.make_mux_vectors(g, exp, mode="min", data_overrides={"d_s1": 5})
+    # case 2'b01 → d:1（d_s1）；手填 5 → 该数据键=5 且 auto_out(exp_value)=5
+    assert v[1].assignments["d:1"] == 5
+    assert v[1].exp_value == 5
+    # 其余源仍自动分配、互不相同，不撞值
+    assert not m.get("value_collision") and not m.get("override_collision")
+    vals = {v[0].assignments["d:0"], v[1].assignments["d:1"], v[2].assignments["d:2"]}
+    assert len(vals) == 3 and 5 in vals
+
+
+def test_b2_data_override_collision_warns_not_skips(tmp_path):
+    """[B2] 手填两路同值 → override_collision 非阻断警告(用户负责)，仍生成、不 skip 整组；
+    build 把警告挂进 mux_warnings（不进 skipped）。"""
+    wb = _b2_wb(str(tmp_path / "b2c.xlsx"))
+    r = resolver.Resolver(wb)
+    g = _grp(wb, "d_g")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    v, m = mux_gen.make_mux_vectors(g, exp, mode="min", data_overrides={"d_s0": 3, "d_s1": 3})
+    assert m.get("override_collision") is True
+    assert not m.get("value_collision")        # 不阻断
+    assert v                                    # 仍生成
+    res = generator.build(wb, generator.GenOptions(mux_data={"d_g": {"d_s0": 3, "d_s1": 3}}))
+    assert not any("d_g" in s[0] for s in res["skipped"])        # 没被跳过
+    assert any("撞值" in w[2] for w in res["mux_warnings"]), res["mux_warnings"]
+
+
+# ───────── 第二十轮 对抗式审查确认问题的回归 ─────────
+def test_a2_subsumption_diff_source_contradiction(tmp_path):
+    """[审查#2/#3·major] x 位 case 与更窄 case 在【具体控制值】上重叠却选不同源 = 隐藏假红：
+    3'b01x(→s0) 覆盖 {010,011}；后面 3'b010(→s1) 的 010 已被 s0 拥有 → 规格矛盾硬报（精确同键去重抓不到）。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "a2sub.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[2:0]", "2:0", "N", "RW"),
+            ("S0", "h20", "d_s0[3:0]", "3:0", "N", "RW"),
+            ("S1", "h21", "d_s1[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[3:0]", "d_sel_to_mux[2:0]", "3'b01x", "d_g[3:0]", 1),
+            _mrow("d_s1_to_mux[3:0]", "d_sel_to_mux[2:0]", "3'b010", "d_g[3:0]", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_g"))
+    assert any("规格矛盾" in i for i in exp["issues"]), exp["issues"]
+    res = generator.build(wb, generator.GenOptions())
+    assert any("d_g" in s[0] for s in res["skipped"])           # 默认跳过（不产假红）
+
+
+def test_a2_subsumption_same_source_redundant(tmp_path):
+    """[审查#2] 更窄 case 在更靠前的 x 位同源 case 内 → 死分支(被完全覆盖)，shadowed+软提示，不阻断。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "a2subok.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[2:0]", "2:0", "N", "RW"),
+            ("S0", "h20", "d_s0[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[3:0]", "d_sel_to_mux[2:0]", "3'b01x", "d_g[3:0]", 1),
+            _mrow("d_s0_to_mux[3:0]", "d_sel_to_mux[2:0]", "3'b010", "d_g[3:0]", 1),  # 010∈{010,011}，同源
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_g"))
+    assert not exp["issues"], exp["issues"]
+    assert exp["shadowed"] == {1}                                # 后行被完全覆盖=死分支
+    assert "死分支" in exp["shadowed_note"]
+
+
+def test_a1_slice_exceeds_upstream_width_flagged(tmp_path):
+    """[审查#1] 下游控制切片 msb 超出上游 mux 输出位宽 → 硬报 issue（否则高位 case 选值被静默截断丢弃）。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "a1ovf.xlsx"),
+        tmm_fields=[
+            ("UCTRL", "h10", "d_uctrl", "0", "N", "RW"),
+            ("ULINE", "h11", "d_uline[3:0]", "3:0", "Y", "RO"),
+            ("ULOCAL", "h12", "d_ulocal[3:0]", "3:0", "N", "RW"),
+            ("DD0", "h20", "d_dd0[1:0]", "1:0", "N", "RW"),
+            ("DD1", "h21", "d_dd1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_uline_to_mux[3:0]", "d_uctrl_to_mux", "1'b0", "d_umux[3:0]", 1),
+            _mrow("d_ulocal_to_mux[3:0]", "d_uctrl_to_mux", "1'b1", "d_umux[3:0]", 1),
+            # 控制切片 [5:1]（msb=5 ≥ 上游 d_umux 位宽 4）
+            _mrow("d_dd0_to_mux[1:0]", "d_umux_to_mux[5:1]", "5'b00000", "d_dmux[1:0]", 2),
+            _mrow("d_dd1_to_mux[1:0]", "d_umux_to_mux[5:1]", "5'b00001", "d_dmux[1:0]", 2),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_dmux"))
+    assert any("超出上游" in i and "位宽" in i for i in exp["issues"]), exp["issues"]
+
+
+def test_b2_narrow_field_override_keeps_marker_protection(tmp_path):
+    """[审查#4/#8/#10·critical] 窄字段(装不下互异值)下手填一个值【不该】关掉点名法保护→假绿。
+    3 个 1-bit 数据源：无 override 走点名法；手填一个后仍走点名法、不误报手填撞值，并提示手填未生效。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "b2narrow.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("S0", "h20", "d_s0", "0", "N", "RW"),       # 1-bit
+            ("S1", "h21", "d_s1", "0", "N", "RW"),
+            ("S2", "h22", "d_s2", "0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux", "d_sel_to_mux[1:0]", "2'b00", "d_g", 1),
+            _mrow("d_s1_to_mux", "d_sel_to_mux[1:0]", "2'b01", "d_g", 1),
+            _mrow("d_s2_to_mux", "d_sel_to_mux[1:0]", "2'b10", "d_g", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    g = _grp(wb, "d_g")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    _v0, m0 = mux_gen.make_mux_vectors(g, exp, mode="min")
+    assert m0.get("marker_method")                       # 无 override：点名法保护
+    _v1, m1 = mux_gen.make_mux_vectors(g, exp, mode="min", data_overrides={"d_s0": 1})
+    assert m1.get("marker_method")                       # 手填后仍点名法（修前=False=假绿）
+    assert not m1.get("override_collision")              # 不归咎手填（容量问题非手填撞值）
+    assert m1.get("override_ignored_marker")             # 照实提示：手填值在点名法下未生效
+
+
+def test_b2_allones_override_no_spurious_collision(tmp_path):
+    """[审查#6·major] 全1 手填值(0xF)在 max/exhaustive 反码轮 ~0xF&0xF=0，不该误报 override_collision。"""
+    wb = _b2_wb(str(tmp_path / "b2allones.xlsx"))         # 3 个 4-bit 源（互异装得下）
+    r = resolver.Resolver(wb)
+    g = _grp(wb, "d_g")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    for mode in ("min", "max", "exhaustive"):
+        _v, m = mux_gen.make_mux_vectors(g, exp, mode=mode, data_overrides={"d_s1": 0xF})
+        assert not m.get("override_collision"), mode      # 全1 取反成 0 不算撞值
+        assert not m.get("value_collision"), mode
+
+
+def test_b2_overwidth_override_truncation_noted(tmp_path):
+    """[审查#5] 超字段宽的手填值被静默截断 → meta['override_truncated'] 记下来给提示（导入/接口路径）。"""
+    wb = _b2_wb(str(tmp_path / "b2ovf.xlsx"))             # d_s1 字段 4-bit
+    r = resolver.Resolver(wb)
+    g = _grp(wb, "d_g")
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    _v, m = mux_gen.make_mux_vectors(g, exp, mode="min", data_overrides={"d_s1": 0x1F})
+    assert m.get("override_truncated", {}).get("d_s1") == (0x1F, 0xF)

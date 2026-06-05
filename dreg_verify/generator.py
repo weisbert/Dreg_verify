@@ -23,7 +23,7 @@ class GenOptions:
                  exclude=None, exclude_regex=None, comments=False, include_risky=False,
                  vector_overrides=None, probe_prefixes=None,
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
-                 cascade_mode="cone", gen_mux=True, mux_expected=None):
+                 cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -75,6 +75,11 @@ class GenOptions:
         # （输入取值的稳定序列化）对号入座；覆盖度切换后对不上键的期望宁可丢弃也不张冠李戴。
         self.mux_expected = {str(k).lower(): dict(v) for k, v in
                              (mux_expected or {}).items() if v}
+        # {mux信号名(小写): {物理基名(小写): int}} —— B2 用户手填的 mux 数据值（第二十轮）。
+        # 替换自动互异/标记值；撞值非阻断警告(meta['override_collision'])。按物理基名键
+        # （与 by_base/点名法同口径——覆盖度切换/case 重排都稳）。
+        self.mux_data = {str(k).lower(): {str(bk).lower(): int(bv) for bk, bv in v.items()}
+                         for k, v in (mux_data or {}).items() if v}
 
 
 def _norm_set(x):
@@ -221,6 +226,12 @@ def apply_mux_expected(vecs, exp_map):
             v.designer_expected = int(de) & E.mask(v.exp_width)
 
 
+def mux_data_for(opts, grp):
+    """该 mux 组的用户手填数据值覆写 {物理基名(小写): int}，没有则 None（按信号名/基名两套键查）。"""
+    return (opts.mux_data.get(grp.out_name.lower())
+            or opts.mux_data.get(grp.out_base.lower()) or None)
+
+
 def probe_prefix_for(sig, opts):
     """该信号的探针层级前缀，没有则空串。
 
@@ -235,10 +246,11 @@ def probe_prefix_for(sig, opts):
 
 
 def _mux_ctrl_desc(grp):
-    """mux 组控制信号的人读描述（skipped 诊断用）：单控制=基名，多控制=拼接 {c1,c2}。"""
+    """mux 组控制信号的人读描述（skipped 诊断用）：单控制=基名，多控制=拼接 {c1,c2}。
+    带切片(lsb>0)的控制显出 [msb:lsb]（如 temp_code[3:1]）——非零偏移一眼可见。"""
     if len(grp.ctrls) > 1:
-        return "{%s}" % ",".join(c.base for c in grp.ctrls)
-    return grp.ctrl_base
+        return "{%s}" % ",".join(c.label for c in grp.ctrls)
+    return grp.ctrls[0].label if grp.ctrls else grp.ctrl_base
 
 
 def _empty_vector_reason(meta):
@@ -544,7 +556,8 @@ def build(wb, opts):
         # 覆盖度三档（2026-06-03 第十一轮）：精简=每case一值；全面=+x位展开+反码数据轮；
         # 穷举=+另一条控制路径全扫。映射统一走 mux_gen.coverage_mode（与 GUI/report 同口径）。
         mux_mode = mux_gen.coverage_mode(opts.mode, opts.exhaustive)
-        vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode, max_tests=opts.max_tests)
+        vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode, max_tests=opts.max_tests,
+                                              data_overrides=mux_data_for(opts, grp))
         # ⭐ 互异值碰撞 = 选路不可验证（两条数据路同值 → 选错路也测不出 = 假绿）。
         # 这不是"可能 elaboration 失败"的风险而是"确定验证无效"，include_risky 也不放行。
         if meta.get("value_collision"):
@@ -598,6 +611,35 @@ def build(wb, opts):
         nnote = getattr(grp, "normalized_note", "")
         if nnote:
             lines = ["// ⚙ %s" % nnote] + lines
+        # 死分支去重（A2）：靠后的重复 case 已跳过，块顶留一句 ⚙ 注释让看 .sv 的人知道少了哪些行
+        snote = meta.get("shadowed_note")
+        if snote:
+            lines = ["// ⚙ %s" % snote] + lines
+        # 手填数据值撞值（B2，非容量）：两条【手填】数据路取到相同值 → 选错路也测不出(假绿)。
+        # 仅在确属手填值之间撞时报（容量太窄的撞已走点名法/跳过，不归咎手填）。
+        if meta.get("override_collision"):
+            ocoll = ("手填数据值有撞值：≥2 条数据路被你手填成相同值 → 选错路也测不出(假绿)，请核对手填值"
+                     "（字段够宽、是手填值本身重复，工具未自动改）")
+            lines = ["// ⚠ %s" % ocoll] + lines
+            mux_warnings.append((grp.out_name, grp.assert_id, ocoll))
+        # 手填值因字段太窄走了点名法保护而未生效（B2，#8）：照实说明，别让用户以为手填生效了
+        if meta.get("override_ignored_marker"):
+            omk = ("字段太窄(装不下互异值)，已用点名法保护(被测=标记/其余=0)——你手填的数据值在此模式下"
+                   "不生效；要让手填值生效需加宽数据字段或拆分 mux 组")
+            lines = ["// ⚠ %s" % omk] + lines
+            mux_warnings.append((grp.out_name, grp.assert_id, omk))
+        # 手填值超字段宽被截断（B2，#5）：导入/编程接口可能传超宽值，截断要让人看见
+        if meta.get("override_truncated"):
+            ot = "、".join("%s: 0x%X→0x%X" % (b, rm[0], rm[1])
+                          for b, rm in sorted(meta["override_truncated"].items()))
+            otmsg = "手填数据值超出字段位宽、已按字段截断（%s）" % ot
+            lines = ["// ⚠ %s" % otmsg] + lines
+            mux_warnings.append((grp.out_name, grp.assert_id, otmsg))
+        # 规格矛盾（A2，#3）：被 include_risky 放行时 issues 不挡，块顶仍要留 ⚠ 让假红有据可查
+        cnote = meta.get("contradiction_note") or exp.get("contradiction_note")
+        if cnote:
+            lines = ["// ⚠ %s" % cnote] + lines
+            mux_warnings.append((grp.out_name, grp.assert_id, cnote))
         stats["is_mux"] = True
         stats["scan_path"] = meta.get("scan_path")
         blocks.append((lines, stats))
@@ -888,7 +930,8 @@ def report(wb, opts):
         else:
             mux_mode = mux_gen.coverage_mode(opts.mode, opts.exhaustive)
             vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
-                                                  max_tests=opts.max_tests)
+                                                  max_tests=opts.max_tests,
+                                                  data_overrides=mux_data_for(opts, grp))
             if meta.get("value_collision"):
                 skip_reason = ("数据寄存器位宽装不下 %d 个 case 的互异值——选错路也测不出(假绿)"
                                % len(grp.cases))
@@ -907,9 +950,23 @@ def report(wb, opts):
 
         # 警告只在【真生成】时显示（被跳过的组用 error 列说明，警告无意义）
         row_warn = out_warn if not skip_reason else ""
-        # 嵌套 mux 自动折叠提示并进 warning/detail（让 --account/报告也能复核），但不改 verif 状态判定
+        # 嵌套 mux 自动折叠 + 死分支去重(A2) 提示并进 warning/detail（让 --account/报告也能复核），
+        # 但不改 verif 状态判定（这俩是"已自动处理+请复核"的软提示，不是阻断问题）
         nnote = getattr(grp, "normalized_note", "")
-        warn_full = "；".join(x for x in [("⚙ %s" % nnote) if nnote else "", row_warn] if x)
+        snote = meta.get("shadowed_note", "") if meta else ""
+        ocoll = ("手填数据值有撞值(≥2 数据路被手填成同值=假绿)，请核对手填值"
+                 if (meta and meta.get("override_collision")) else "")
+        omk = ("字段太窄已用点名法保护、手填值未生效(要生效需加宽字段)"
+               if (meta and meta.get("override_ignored_marker")) else "")
+        otr = ("手填值超字段宽已截断"
+               if (meta and meta.get("override_truncated")) else "")
+        cnote = (meta.get("contradiction_note") if meta else "") or exp.get("contradiction_note", "")
+        warn_full = "；".join(x for x in [("⚙ %s" % nnote) if nnote else "",
+                                          ("⚙ %s" % snote) if snote else "",
+                                          ("⚠ %s" % ocoll) if ocoll else "",
+                                          ("⚠ %s" % omk) if omk else "",
+                                          ("⚠ %s" % otr) if otr else "",
+                                          ("⚠ %s" % cnote) if cnote else "", row_warn] if x)
         summary.append(dict(base_row, n_tests=len(vecs),
                             n_neg=sum(1 for v in vecs if v.is_negative),
                             control=",".join(meta.get("control", []) if meta else []),
@@ -1036,7 +1093,8 @@ def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None)
     if exp["issues"]:
         return {"status": "unresolved", "inputs": rows, "out_net": out_net,
                 "error": "; ".join(exp["issues"]), "cone": False}
-    vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mode)
+    vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mode,
+                                          data_overrides=(mux_data_for(opts, grp) if opts else None))
     if meta.get("value_collision"):
         # 假绿不是"没解析"——结构全解析通了，只是数据字段太窄装不下互异值（硬生成=假的 PASS）。
         # 单列 'false-green' 档（GUI 琥珀，区别于真正的 ✗未解析/红），保护性跳过、非故障。
@@ -1044,6 +1102,12 @@ def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None)
                 "error": "数据寄存器位宽装不下 %d 个 case 的互异值——选错路也测不出(假绿)，"
                          "需加宽字段或拆组才能验" % len(grp.cases),
                 "cone": False}
+    # 手填值撞值（B2，#9）：照常生成但状态标"假绿警告"（橙），让左表/明细也看得见——
+    # 与 build/report 同口径（非阻断、用户负责）。
+    if meta.get("override_collision"):
+        return {"status": "false-green", "inputs": rows, "out_net": out_net,
+                "error": "手填数据值有撞值：≥2 条数据路被手填成相同值=选错路也测不出(假绿)，请核对手填值",
+                "blocking": False, "cone": False}
     if not vecs:
         return {"status": "unresolved", "inputs": rows, "out_net": out_net,
                 "error": _empty_vector_reason(meta), "cone": False}
