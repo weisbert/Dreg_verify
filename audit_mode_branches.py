@@ -106,14 +106,15 @@ def audit(wb, resolver):
                 continue                                  # 不是功能/线控二分支，跳过
             for b, c in line_src:
                 kind, desc, coverable = _classify(b)
-                if depth > 1:
-                    status = "[~] 深层级联(mode mux 在第%d层)·两分支只展开最近一层→mode=0缺失" % depth
-                elif coverable:
-                    status = "[OK] mode=0 已能生成"
+                # 深层级联(mode mux 在第2+层)已由生成器递归传播 use_alt 支持(第二十四轮)，
+                # 故判定只看 mode=0 源能否 force，不再按深度卡 [~]；深度仅作信息标注。
+                deep = "（深层级联·已支持）" if depth > 1 else ""
+                if coverable:
+                    status = "[OK] mode=0 已能生成" + deep
                 elif kind == "needs-prefix":
-                    status = "[XX] mode=0 缺失·配 scan_rtl 探针前缀即可修"
+                    status = "[XX] mode=0 缺失·配 scan_rtl 探针前缀即可修" + deep
                 else:
-                    status = "[XX] mode=0 缺失·%s" % desc
+                    status = "[XX] mode=0 缺失·%s%s" % (desc, deep)
                 rows.append({
                     "signal": g.out_name, "owner": g.owner or "",
                     "mode_mux": "mux%s %s" % (up.group_no, up.out_base),
@@ -145,13 +146,12 @@ def main():
     if not rows:
         out.append("未发现受 *_mode 二分支影响的下游 mux（或全部 mode=0 已可生成）。")
     else:
-        order = {"[X": 0, "[~": 1, "[O": 2}
+        order = {"[X": 0, "[O": 1}
         rows.sort(key=lambda r: (order.get(r["status"][:2], 9), r["signal"]))
         n_gap = sum(1 for r in rows if r["status"].startswith("[XX]"))
-        n_deep = sum(1 for r in rows if r["status"].startswith("[~]"))
         n_ok = sum(1 for r in rows if r["status"].startswith("[OK]"))
-        out.append("受 *_mode 二分支影响的下游 mux：%d 条  |  [XX]缺失 %d  [~]深层 %d  [OK]已生成 %d\n"
-                   % (len(rows), n_gap, n_deep, n_ok))
+        out.append("受 *_mode 二分支影响的下游 mux：%d 条  |  [XX]缺失(需配前缀) %d  [OK]已生成 %d\n"
+                   % (len(rows), n_gap, n_ok))
         for r in rows:
             out.append("%s" % r["status"])
             out.append("    信号: %s   owner: %s" % (r["signal"], r["owner"]))

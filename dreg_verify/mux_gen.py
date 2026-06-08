@@ -611,9 +611,12 @@ def _apply_ctrl_driver(assignments, driver, value, use_alt=False):
     if src == "mux":
         recipe = driver["recipe"]
         up = recipe["upstream"]
-        # item④：use_alt 走备用载体(mode=0 RO 线控)；否则主载体(mode=1 RW local)。备用载体在
-        # 全面/穷举档由 _make_general_vectors 才请求，且 resolve 已确认 carrier_alt_ci 存在。
-        if use_alt and recipe.get("carrier_alt_ci") is not None:
+        # item④：use_alt 走备用载体(mode=0 RO 线控)；否则主载体(mode=1 RW local)。
+        # ⭐ 深层级联(第二十四轮)：mode mux 可能不在最近一层，而在更上游(如 lpf_cmain←corner_sel←bwctrl，
+        #    mode mux=bwctrl 在第 2 层)。规则：本层有 alt 载体 → 在此消费 alt、上游控制走各自主载体；
+        #    本层无 alt 但更深层有 → 本层走主载体，把 use_alt 透传给上游驱动，让它在持有 alt 的那层消费。
+        used_alt_here = use_alt and recipe.get("carrier_alt_ci") is not None
+        if used_alt_here:
             ckey, cci = recipe["carrier_alt_key"], recipe["carrier_alt_ci"]
             ceff, cvals = recipe["carrier_alt_eff_width"], recipe["ctrl_values_alt"]
         else:
@@ -622,10 +625,11 @@ def _apply_ctrl_driver(assignments, driver, value, use_alt=False):
         if ckey is None:
             return 0, False, ("控制信号 %s 的上游 mux%s 没有可用载体"
                               % (driver["base"], up.group_no))
-        # 上游控制驱到载体 case（递归，仍走主载体）；收集各上游控制【实际驱到的值】（可能被位宽截断）
+        # 上游控制驱到载体 case（递归）；alt 已在本层消费则上游走主载体，否则把 use_alt 透传到更深层
+        descend_alt = use_alt and not used_alt_here
         up_parts = []
         for ud, uv in zip(recipe["ctrl_drivers"], cvals):
-            udv, ok, why = _apply_ctrl_driver(assignments, ud, uv)
+            udv, ok, why = _apply_ctrl_driver(assignments, ud, uv, use_alt=descend_alt)
             if not ok:
                 return 0, False, why
             up_parts.append((udv, ud["width"], 0))
@@ -656,6 +660,30 @@ def _apply_ctrl_driver(assignments, driver, value, use_alt=False):
         return (driven >> slice_lsb), True, ""
 
     return 0, False, "控制信号 %s 来源未知（无法驱动）" % driver["base"]
+
+
+def _recipe_has_alt(recipe):
+    """级联配方树里【任意一层】有 mode=0 备用载体？深层级联(第二十四轮)：mode mux 可能不在最近
+    一层(如 lpf_cmain←corner_sel←bwctrl 的 bwctrl 在第 2 层)——只查最近层会漏掉这半张表。"""
+    if not recipe:
+        return False
+    if recipe.get("carrier_alt_ci") is not None:
+        return True
+    return any(d.get("source") == "mux" and _recipe_has_alt(d.get("recipe"))
+               for d in recipe.get("ctrl_drivers", []))
+
+
+def _recipe_alt_skips(recipe):
+    """递归收集级联树里所有 alt 被跳过的原因（含深层 mode mux），供报告缺口可见(M2)。"""
+    if not recipe:
+        return []
+    out = []
+    if recipe.get("alt_skipped_reason"):
+        out.append(recipe["alt_skipped_reason"])
+    for d in recipe.get("ctrl_drivers", []):
+        if d.get("source") == "mux":
+            out.extend(_recipe_alt_skips(d.get("recipe")))
+    return out
 
 
 def expand_mux_group(wb, resolver, group):
@@ -1195,8 +1223,7 @@ def _make_general_vectors(group, expansion, mode, max_tests, data_overrides=None
     #    force tsensor/linectrl 的另半张表，对齐 16 拍签核表。仅当存在带 carrier_alt 的 mux 控制时跑；
     #    全面档 alt 仅主选值(DC=0)、穷举档 alt 才 DC 全展(与主支对称)。RO 源网 force 由其绑定 kind
     #    在渲染层决定（与数据侧 RO 线控同口径）。
-    has_alt = any(d["source"] == "mux" and d["recipe"].get("carrier_alt_ci") is not None
-                  for d in drivers)
+    has_alt = any(d["source"] == "mux" and _recipe_has_alt(d["recipe"]) for d in drivers)
     if mode != "min" and has_alt and not state["capped"]:
         meta["cascade_alt"] = True
         for ci, pc in enumerate(parsed):
@@ -1218,9 +1245,11 @@ def _make_general_vectors(group, expansion, mode, max_tests, data_overrides=None
                     break
             if stop:
                 break
-    # alt 被跳过(多 RO 候选无法判别 / mode=0 case 不可解析)的原因汇总进 meta（M2 报告可见性用）
-    alt_skips = [d["recipe"].get("alt_skipped_reason") for d in drivers
-                 if d["source"] == "mux" and d["recipe"].get("alt_skipped_reason")]
+    # alt 被跳过(多 RO 候选无法判别 / mode=0 case 不可解析 / 深层线控源需前缀)的原因汇总进 meta（M2 可见性）
+    alt_skips = []
+    for d in drivers:
+        if d["source"] == "mux":
+            alt_skips.extend(_recipe_alt_skips(d["recipe"]))
     if alt_skips:
         meta["cascade_alt_skipped"] = "；".join(sorted(set(alt_skips)))
 

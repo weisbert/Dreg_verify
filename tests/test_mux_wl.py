@@ -1973,3 +1973,49 @@ def test_cascade_alt_mode0_logic_carrier_visible_and_generatable(tmp_path):
     assert exp2["ctrl_drivers"][0]["recipe"]["carrier_alt_ci"] is not None
     assert meta2.get("cascade_alt") is True
     assert sum(1 for v in vecs2 if "alt" in (v.note or "")) == 4  # b0..b3 各一条 mode=0
+
+
+def test_cascade_alt_mode0_depth2_ro_register(tmp_path):
+    """深层(第2层)级联 mode=0 生成（第二十四轮 audit 桶二）：D ← M(中间) ← MM(mode mux)，MM 的 mode=0
+    源是 RO【寄存器】(force 名即可、不需前缀)。修前两分支只展开最近一层 → 深层 mode mux 的 mode=0 静默
+    漏掉(cascade_alt=None)；修后递归传播 use_alt → 生成 mode=0。断言到【赋值级】：确实把 mode 位驱到 0
+    + force RO 线控载体、且不写 RW 主载体（不是挂名假 mode=0）。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "depth2.xlsx"),
+        tmm_fields=[
+            ("MODE", "h70", "d_mode", "0", "N", "RW"),
+            ("MMLOC", "h71", "d_mm_local[1:0]", "1:0", "N", "RW"),
+            ("MMLINE", "h72", "d_mm_line[1:0]", "1:0", "Y", "RO"),   # mode=0 源 = RO 寄存器(非 logic→mux 网)
+            ("MIDA", "h73", "d_mid_a[1:0]", "1:0", "N", "RW"),
+            ("MIDB", "h74", "d_mid_b[1:0]", "1:0", "N", "RW"),
+            ("D0", "h75", "d_down0[3:0]", "3:0", "N", "RW"),
+            ("D1", "h76", "d_down1[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            # MM(mux70) d_mm[1:0] = d_mode? local(RW) : line(RO 寄存器)
+            _mrow("d_mm_line_to_mux[1:0]", "d_mode_to_mux", "1'b0", "d_mm[1:0]", 70, h="to_mux"),
+            _mrow("d_mm_local_to_mux[1:0]", "d_mode_to_mux", "1'b1", "d_mm[1:0]", 70, h="to_mux"),
+            # M(mux71, 中间层) d_mid[1:0] = case(d_mm[1:0]) → mid RW 源
+            _mrow("d_mid_a_to_mux[1:0]", "d_mm_to_mux[1:0]", "2'b00", "d_mid[1:0]", 71, h="to_mux"),
+            _mrow("d_mid_b_to_mux[1:0]", "d_mm_to_mux[1:0]", "2'b01", "d_mid[1:0]", 71, h="to_mux"),
+            # D(mux72, 最下游) d_down[3:0] = case(d_mid[0] 切片) → down RW 源
+            _mrow("d_down0_to_mux[3:0]", "d_mid_to_mux[0]", "1'b0", "d_down[3:0]", 72),
+            _mrow("d_down1_to_mux[3:0]", "d_mid_to_mux[0]", "1'b1", "d_down[3:0]", 72),
+        ],
+    )
+    g = _grp(wb, "d_down")
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    # mode mux 在第2层：D 的直接 recipe 无 alt，但递归树里 MM 有
+    assert exp["ctrl_drivers"][0]["recipe"].get("carrier_alt_ci") is None
+    assert mux_gen._recipe_has_alt(exp["ctrl_drivers"][0]["recipe"]) is True
+    vecs, meta = mux_gen.make_mux_vectors(g, exp, mode="max", max_tests=256)
+    assert meta.get("cascade_alt") is True
+    alt = [v for v in vecs if "alt" in (v.note or "")]
+    assert len(alt) == 2                              # down0/down1 各一条 mode=0
+    # 赋值级断言：确实驱动 mode=0 线控路径
+    b = exp["bindings"]
+    nv = {b[k].base.lower(): val for k, val in alt[0].assignments.items() if k in b}
+    assert nv.get("d_mode") == 0                      # 第2层 mode mux 驱到 mode=0 case
+    assert "d_mm_line" in nv                          # RO 线控载体被 force
+    assert "d_mm_local" not in nv                     # mode=0 不写 RW 主载体
