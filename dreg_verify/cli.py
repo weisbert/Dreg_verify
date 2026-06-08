@@ -270,6 +270,7 @@ VERIF_STATUS = {
     "wire-fallback": ("⚠ 存疑(按名 force，elaboration 最易 CUVUNF)", "warn"),
     "unresolved":    ("✗ 不可验证(输入未解析)", "bad"),
     "parse-err":     ("✗ 表达式解析失败", "bad"),
+    "spec-collision": ("✗ 规格冲突·待 designer 核对(同选择值选不同源)", "bad"),
 }
 
 
@@ -721,11 +722,14 @@ def _write_report_html(path, rep, excel):
                 '<b class="vstat ok">✅ 可验证 %d</b>'
                 '<b class="vstat warn">⚠ 存疑(按名 force) %d</b>'
                 '<b class="vstat bad">✗ 不可验证 %d</b>'
-                '<b class="vstat bad">✗ 表达式错误 %d</b></p>'
+                '<b class="vstat bad">✗ 表达式错误 %d</b>'
+                '<b class="vstat bad">✗ 规格冲突(待 designer 核对) %d</b></p>'
                 '<p class="ex">⚠/✗ 的信号最可能在 elaboration 阶段 CUVUNF 失败：'
-                '"存疑"=表里查无、按信号名直接 force；"不可验证"=输入未能解析到 force/RF_WRITE。</p>'
+                '"存疑"=表里查无、按信号名直接 force；"不可验证"=输入未能解析到 force/RF_WRITE；'
+                '"规格冲突"=mux 同选择值却选不同源(撞车行号/两源/owner 见下表)，需 designer 核对改表。</p>'
                 % (c.get("clean", 0), c.get("wire-fallback", 0),
-                   c.get("unresolved", 0), c.get("parse-err", 0)))
+                   c.get("unresolved", 0), c.get("parse-err", 0),
+                   c.get("spec-collision", 0)))
         th = "".join("<th>%s</th>" % esc(h) for _k, h in VERIF_COLS)
         items = []
         for r in verif["signals"]:
@@ -938,9 +942,10 @@ def _dispatch(args, opts):
                  sum(1 for r in rep["detail"] if r.get("neg") == "是")))
         vc = rep.get("verifiability", {}).get("counts", {})
         if vc:
-            print("  可验证性：可验证 %d / 存疑(按名force) %d / 不可验证 %d / 表达式错误 %d"
+            print("  可验证性：可验证 %d / 存疑(按名force) %d / 不可验证 %d / 表达式错误 %d / 规格冲突 %d"
                   % (vc.get("clean", 0), vc.get("wire-fallback", 0),
-                     vc.get("unresolved", 0), vc.get("parse-err", 0)))
+                     vc.get("unresolved", 0), vc.get("parse-err", 0),
+                     vc.get("spec-collision", 0)))
         if args.out is None:
             return 0   # 只要报告
 

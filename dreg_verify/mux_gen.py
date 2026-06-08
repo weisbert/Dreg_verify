@@ -749,10 +749,15 @@ def expand_mux_group(wb, resolver, group):
             redundant_pairs.append((group.cases[ci].row, group.cases[owners[0][0]].row))
         for v in vals:
             claimed.setdefault(v, (ci, base_low))      # 首次匹配认领（不覆盖更早拥有者）
+    owner = (getattr(group, "owner", "") or "").strip()
     for later, first, lb, fb in contradictions:
         issues.append("mux 页第 %s 行与第 %s 行有相同的控制选择值却选不同数据源（%s vs %s）——"
-                      "同一选择值 RTL 只能输出一个，规格矛盾，请核对 Excel"
-                      % (later, first, lb, fb))
+                      "同一选择值 RTL 只能输出一个，规格矛盾，请核对 Excel%s"
+                      % (later, first, lb, fb, ("（owner: %s）" % owner) if owner else ""))
+    # 结构化导出规格冲突：账目/报告/GUI 据此把"规格冲突"和缺前缀/假绿等其它跳过区分开（不靠串匹配）
+    spec_conflicts = [{"later_row": lr, "first_row": fr, "later_src": ls,
+                       "first_src": fs, "owner": owner}
+                      for (lr, fr, ls, fs) in contradictions]
     note_bits = []
     if shadow_pairs:
         note_bits.append("死分支 %d 条（%s）：控制值被更靠前的同源 case 完全覆盖，Verilog 先到先得轮不到，已跳过其测试"
@@ -768,7 +773,7 @@ def expand_mux_group(wb, resolver, group):
     return {"bindings": bindings, "used_vars": used_vars, "data_keys": data_keys,
             "ctrl_drivers": ctrl_drivers, "contradiction_note": contradiction_note,
             "ctrl_sig": ctrl_sig, "ctrl_node": ctrl_node, "line": line, "local": local,
-            "parsed_cases": parsed_cases, "issues": issues,
+            "parsed_cases": parsed_cases, "issues": issues, "spec_conflicts": spec_conflicts,
             "shadowed": shadowed, "shadowed_note": shadowed_note}
 
 

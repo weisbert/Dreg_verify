@@ -1827,3 +1827,68 @@ def test_wl_iddq_dft_skip_surfaced(tmp_path):
     rep = generator.report(wb, generator.GenOptions(mux_mode="max"))
     assert any("未补 DFT 拍" in (r.get("detail") or "")          # 报告可验证性 detail 也透出（Fix E）
                for r in rep["verifiability"]["signals"]), rep["verifiability"]["signals"]
+
+
+# ───────────── 第二十三轮：规格冲突(同 case 不同源)单列 + owner 透出（P1 = 1+3）─────────────
+def test_spec_collision_distinct_surfacing(tmp_path):
+    """designer 表里同一控制选择值却选不同数据源(如 lctune off 段 case 错写成 on 段) → 整组跳过，
+    但与缺前缀/假绿等其它跳过【区分开】：expand 出结构化 spec_conflicts(带行号/两源/owner)、
+    issue 文案带 owner、analyze 状态=spec-collision、账目去向=跳过·规格冲突。保持跳过(不硬生成假红)。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "coll.xlsx"),
+        tmm_fields=[
+            ("CTRL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("A0", "h20", "d_a0[1:0]", "1:0", "N", "RW"),
+            ("B0", "h21", "d_b0[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            # 第 3 行 case 2'b00 选 d_a0；第 5 行 case 2'b00 又选【不同源】d_b0 → 规格冲突
+            _mrow("d_a0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_coll[1:0]", 1),
+            _mrow("d_a0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_coll[1:0]", 1),
+            _mrow("d_b0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_coll[1:0]", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    grp = _grp(wb, "d_coll")
+    exp = mux_gen.expand_mux_group(wb, r, grp)
+    # ① 结构化导出（不靠串匹配）：行号 + 两源 + owner（_mrow 默认 owner=O1）
+    assert exp["spec_conflicts"], "应导出 spec_conflicts"
+    sc = exp["spec_conflicts"][0]
+    assert sc["later_row"] == 5 and sc["first_row"] == 3      # 第5行(后)撞第3行(先)
+    assert sc["later_src"] == "d_b0" and sc["first_src"] == "d_a0"
+    assert sc["owner"] == "O1"
+    # ② issue 文案带 owner（报告/account reason 全文可见）
+    assert any("owner: O1" in m for m in exp["issues"])
+    assert any("选不同数据源" in m for m in exp["issues"])
+    # ③ analyze（GUI 状态源）= spec-collision（区别于普通 unresolved）
+    a = generator.analyze_mux_group(r, wb, grp)
+    assert a["status"] == "spec-collision"
+    # ④ 账目去向单列「跳过·规格冲突」+ build 结果带 spec_conflicts 通道
+    res = generator.build(wb, generator.GenOptions())
+    assert any(s["name"] == grp.out_name and s["owner"] == "O1"
+               for s in res["spec_conflicts"])
+    items = generator.compose_account(wb, generator.GenOptions(), res)
+    it = next(x for x in items if x["name"] == grp.out_name)
+    assert it["disposition"] == "跳过·规格冲突"
+    assert "owner: O1" in it["reason"]
+
+
+def test_spec_collision_does_not_taint_normal_skip(tmp_path):
+    """对照：普通缺前缀/正常组不应被误标 spec_conflicts；shadowed 同源死分支(同 case 同源)不算冲突。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "ok.xlsx"),
+        tmm_fields=[
+            ("CTRL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("A0", "h20", "d_a0[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            # 同 case 同源(纯死分支/冗余) → 不是规格冲突
+            _mrow("d_a0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_ok[1:0]", 1),
+            _mrow("d_a0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_ok[1:0]", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_ok"))
+    assert exp["spec_conflicts"] == []                       # 同源重复不算规格冲突
+    res = generator.build(wb, generator.GenOptions())
+    assert res["spec_conflicts"] == []

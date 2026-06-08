@@ -164,12 +164,16 @@ HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态
 NO_OWNER = "（无 owner）"          # owner 下拉的特殊项：Excel owner 列留空(P/L/AE)的信号
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "unresolved": "✗未解析", "parse-err": "✗解析错",
+                "spec-collision": "✗规格冲突·待designer核对",
                 "needs-prefix": "⚠输入缺前缀·跳过", "bare-probe": "输出裸名·已生成",
                 "false-green": "⚠字段太窄·假绿"}
 STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE 驱动",
                "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
                "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
                "parse-err": "表达式或输入解析出错",
+               "spec-collision": "【表数据矛盾·非工具能修】mux 页有两行控制选择值相同却选不同数据源——"
+                                 "同一选择值 RTL 物理上只能输出一个，无法生成确定真值表，已整组跳过。"
+                                 "tooltip/明细里有撞车的 Excel 行号、两个源、owner，请对应 designer 核对改表。",
                "needs-prefix": "【输入侧·硬阻断】要 force 的某根输入网埋在子模块里（级联 _to_mux 衔接网 / "
                                "wire 兜底），force 基名钉不住——没配前缀就 force 必 CUVUNF，所以默认【跳过】"
                                "整组。先跑 scan_rtl 配好探针前缀，这组才会生成。",
@@ -183,7 +187,8 @@ STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE
 # 状态列颜色：红=信号坏掉(会 elaboration 失败)；橙=要前缀否则跳过；蓝=信息(裸名探针已生成,可选配前缀)；
 # 琥珀(false-green)=能解析但字段太窄、硬生成是假绿——保护性跳过，不是故障，刻意不用红
 STATUS_FG = {"needs-prefix": QtGui.QColor("#cc7a00"), "bare-probe": QtGui.QColor("#2a7ab0"),
-             "false-green": QtGui.QColor("#9a5b00")}
+             "false-green": QtGui.QColor("#9a5b00"),
+             "spec-collision": QtGui.QColor("#b5179e")}
 # 输入来源(found_in)的中文标签——明细面板用；未映射的原样显示
 FOUND_IN_LABEL = {"tmm": "tmm命中", "regmap": "regmap命中", "logic": "级联前级",
                   "logic-internal": "内部信号", "wire": "wire兜底",
@@ -929,7 +934,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 tip = STATUS_HELP.get(st, st)
                 err = self._analysis.get(r, {}).get("error")
                 if err and st in ("needs-prefix", "bare-probe", "unresolved", "parse-err",
-                                  "false-green"):
+                                  "false-green", "spec-collision"):
                     tip = "%s\n\n%s" % (tip, err)        # 缺前缀/坏掉/裸名提示时把后端 error 全文带上
                 # 嵌套 mux 自动折叠：状态格加 ⚙ 标记 + tooltip 带全文，让 designer 一眼能复核
                 nnote = getattr(sig, "normalized_note", "")

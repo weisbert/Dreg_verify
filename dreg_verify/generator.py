@@ -535,6 +535,7 @@ def build(wb, opts):
     blocks = []
     errors = []
     skipped = []        # 含不可驱动输入(wire兜底/未解析)的信号，默认跳过(与 VBA 一致)
+    spec_conflicts = []  # mux 规格冲突跳过(同 case 不同源)——单列, 账目/报告/GUI 据此区别于普通跳过
     mux_warnings = []   # 照常生成但有提示的 mux 组（如 top_out=0 用裸名探针，可能要前缀）
     cone_fallbacks = [] # cone 成环 → 回退 force 基名的信号（for_test 那招），可见性用
     n_total_vectors = 0
@@ -671,6 +672,11 @@ def build(wb, opts):
         if exp["issues"] and not opts.include_risky:
             skipped.append((grp.out_name, grp.assert_id,
                             [("mux", _mux_ctrl_desc(grp), "; ".join(exp["issues"]))]))
+            if exp.get("spec_conflicts"):
+                spec_conflicts.append({"name": grp.out_name, "aid": grp.assert_id,
+                                       "owner": grp.owner or "",
+                                       "conflicts": exp["spec_conflicts"],
+                                       "reason": "; ".join(exp["issues"])})
             continue
 
         # force 阻断：要 force 子模块内部网（级联衔接网 / wire 兜底）但没配前缀 → 跳过给原因
@@ -821,7 +827,8 @@ def build(wb, opts):
     dft_preamble, dft_warnings = dft_force_preamble(wb, resolver, gen_bases, opts)
     summary["n_dft_forced"] = sum(1 for x in dft_preamble if x.startswith("force"))
     return {"blocks": blocks, "selected": selected, "errors": errors,
-            "skipped": skipped, "mux_warnings": mux_warnings,
+            "skipped": skipped, "spec_conflicts": spec_conflicts,
+            "mux_warnings": mux_warnings,
             "cone_fallbacks": cone_fallbacks,
             "filtered_internal": filtered_internal,
             "dft_preamble": dft_preamble, "dft_warnings": dft_warnings,
@@ -866,9 +873,12 @@ def compose_account(wb, opts, res):
                       "disposition": disp, "reason": reason})
 
     mux_selected_names = {g.out_name for g in select_mux_groups(wb, opts)}
+    spec_conflict_names = {sc["name"] for sc in res.get("spec_conflicts", [])}
     for grp in wb.mux:
         n = grp.out_name
-        if n in skipped_map:
+        if n in spec_conflict_names:
+            disp, reason = "跳过·规格冲突", skipped_map.get(n, "")
+        elif n in skipped_map:
             disp, reason = "跳过", skipped_map[n]
         elif n in gen_names and n in bare:
             disp, reason = "生成(裸名探针)", bare[n]
@@ -1149,7 +1159,12 @@ def report(wb, opts):
                             unresolved="", error=skip_reason, warning=warn_full))
         # 可验证性行：issues/碰撞 → unresolved；top_out=0 裸名 → bare-probe（生成了，建议配前缀）；
         # 其余 clean。（与 GUI analyze_mux_group 同口径；note 只进 detail，不改状态色）
-        verif_status = "unresolved" if skip_reason else ("bare-probe" if row_warn else "clean")
+        if skip_reason and exp.get("spec_conflicts"):
+            verif_status = "spec-collision"
+        elif skip_reason:
+            verif_status = "unresolved"
+        else:
+            verif_status = "bare-probe" if row_warn else "clean"
         mux_verif_rows.append({
             "R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
             "type": "mux", "top": grp.top_output,
@@ -1270,7 +1285,8 @@ def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None)
                      "found_in": b.found_in, "net": net, "resolved": b.resolved,
                      "note": b.note})
     if exp["issues"]:
-        return {"status": "unresolved", "inputs": rows, "out_net": out_net,
+        status = "spec-collision" if exp.get("spec_conflicts") else "unresolved"
+        return {"status": status, "inputs": rows, "out_net": out_net,
                 "error": "; ".join(exp["issues"]), "cone": False}
     vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mode,
                                           data_overrides=(mux_data_for(opts, grp) if opts else None))
