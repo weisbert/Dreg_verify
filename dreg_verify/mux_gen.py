@@ -397,6 +397,25 @@ def _is_linectrl_base(b):
     return ("tsensor" in nm) or ("linectrl" in nm)
 
 
+def _looks_like_twins(a, b):
+    """两数据源名是否像『孪生』：共同前后缀占大头、仅中段一小处不同(如 1st↔2nd / 2g↔5g)。
+    命中 → 规格冲突多半是 designer 把一个输出名复制粘贴到本该是【另一个 mux】的行上、漏改输出名
+    （那其实是合法的『一个控制管多个 mux』），而非真矛盾。只作软提示，不改『跳过·待核对』去向。"""
+    a, b = (a or "").lower(), (b or "").lower()
+    if not a or not b or a == b:
+        return False
+    p = 0
+    while p < len(a) and p < len(b) and a[p] == b[p]:
+        p += 1
+    s = 0
+    while s < len(a) - p and s < len(b) - p and a[-1 - s] == b[-1 - s]:
+        s += 1
+    mid_a, mid_b = a[p:len(a) - s], b[p:len(b) - s]   # 各自的差异中段
+    common = p + s
+    return (common >= 6 and common >= 0.6 * max(len(a), len(b))
+            and len(mid_a) <= 4 and len(mid_b) <= 4)
+
+
 def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
     """上游 mux 的『驱到任意目标值』配方（mux 级联，cone「展开上游」思路）。
 
@@ -750,14 +769,24 @@ def expand_mux_group(wb, resolver, group):
         for v in vals:
             claimed.setdefault(v, (ci, base_low))      # 首次匹配认领（不覆盖更早拥有者）
     owner = (getattr(group, "owner", "") or "").strip()
+    # 结构化导出规格冲突：账目/报告/GUI 据此把"规格冲突"和缺前缀/假绿等其它跳过区分开（不靠串匹配）。
+    # 两种成因都报给 designer：①真矛盾(同一 mux 同选择值两期望)→改数据源；②两个 mux 撞了同一输出名
+    # (合法的『一个控制管多个 mux』，被复制粘贴漏改名)→改输出名。源名孪生时优先提示 ②(实证占多数)。
+    spec_conflicts = []
     for later, first, lb, fb in contradictions:
-        issues.append("mux 页第 %s 行与第 %s 行有相同的控制选择值却选不同数据源（%s vs %s）——"
-                      "同一选择值 RTL 只能输出一个，规格矛盾，请核对 Excel%s"
-                      % (later, first, lb, fb, ("（owner: %s）" % owner) if owner else ""))
-    # 结构化导出规格冲突：账目/报告/GUI 据此把"规格冲突"和缺前缀/假绿等其它跳过区分开（不靠串匹配）
-    spec_conflicts = [{"later_row": lr, "first_row": fr, "later_src": ls,
-                       "first_src": fs, "owner": owner}
-                      for (lr, fr, ls, fs) in contradictions]
+        twins = _looks_like_twins(lb, fb)
+        if twins:
+            hint = ("两源名形如孪生——多半是同一输出名被复制粘贴到本该是【另一个 mux】的行上、漏改了输出名"
+                    "（『一个控制信号管多个 mux』本身合法）：若属实，把靠后那段的输出名改对即可；"
+                    "否则才是真规格矛盾，应改数据源。")
+        else:
+            hint = ("同一选择值 RTL 只能输出一个，规格矛盾：要么是真冲突(改数据源)，"
+                    "要么是两个 mux 撞了同一输出名(『一个控制管多个 mux』合法，改输出名即可)。")
+        issues.append("mux 页第 %s 行与第 %s 行有相同的控制选择值却选不同数据源（%s vs %s）——%s请核对 Excel%s"
+                      % (later, first, lb, fb, hint, ("（owner: %s）" % owner) if owner else ""))
+        spec_conflicts.append({"later_row": later, "first_row": first, "later_src": lb,
+                               "first_src": fb, "owner": owner,
+                               "likely_dup_name": twins, "hint": hint})
     note_bits = []
     if shadow_pairs:
         note_bits.append("死分支 %d 条（%s）：控制值被更靠前的同源 case 完全覆盖，Verilog 先到先得轮不到，已跳过其测试"

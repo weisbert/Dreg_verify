@@ -171,8 +171,10 @@ STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE
                "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
                "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
                "parse-err": "表达式或输入解析出错",
-               "spec-collision": "【表数据矛盾·非工具能修】mux 页有两行控制选择值相同却选不同数据源——"
-                                 "同一选择值 RTL 物理上只能输出一个，无法生成确定真值表，已整组跳过。"
+               "spec-collision": "【表数据·非工具能修】mux 页有两行控制选择值相同却选不同数据源——"
+                                 "同一选择值 RTL 物理上只能输出一个，已整组跳过。两种成因都可能："
+                                 "①真规格矛盾→改数据源；②两个 mux 撞了同一输出名(『一个控制管多个 mux』本身合法，"
+                                 "designer 多半复制粘贴漏改名)→改输出名。源名孪生时明细会优先提示成因②。"
                                  "tooltip/明细里有撞车的 Excel 行号、两个源、owner，请对应 designer 核对改表。",
                "needs-prefix": "【输入侧·硬阻断】要 force 的某根输入网埋在子模块里（级联 _to_mux 衔接网 / "
                                "wire 兜底），force 基名钉不住——没配前缀就 force 必 CUVUNF，所以默认【跳过】"

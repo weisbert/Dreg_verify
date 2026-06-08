@@ -726,7 +726,8 @@ def _write_report_html(path, rep, excel):
                 '<b class="vstat bad">✗ 规格冲突(待 designer 核对) %d</b></p>'
                 '<p class="ex">⚠/✗ 的信号最可能在 elaboration 阶段 CUVUNF 失败：'
                 '"存疑"=表里查无、按信号名直接 force；"不可验证"=输入未能解析到 force/RF_WRITE；'
-                '"规格冲突"=mux 同选择值却选不同源(撞车行号/两源/owner 见下表)，需 designer 核对改表。</p>'
+                '"规格冲突"=mux 同选择值却选不同源(撞车行号/两源/owner 见下表)，需 designer 核对改表'
+                '——可能是真矛盾(改数据源)，也可能是两个 mux 撞了同一输出名(『一个控制管多个 mux』合法，改输出名即可)。</p>'
                 % (c.get("clean", 0), c.get("wire-fallback", 0),
                    c.get("unresolved", 0), c.get("parse-err", 0),
                    c.get("spec-collision", 0)))

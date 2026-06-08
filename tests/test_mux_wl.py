@@ -1892,3 +1892,32 @@ def test_spec_collision_does_not_taint_normal_skip(tmp_path):
     assert exp["spec_conflicts"] == []                       # 同源重复不算规格冲突
     res = generator.build(wb, generator.GenOptions())
     assert res["spec_conflicts"] == []
+
+
+def test_spec_collision_twin_sources_hint_dup_name(tmp_path):
+    """孪生源名(1st↔2nd 等仅一小段不同) → likely_dup_name=True + 提示『疑似两个 mux 撞同一输出名/
+    漏改名』(那是合法的"一个控制管多个 mux")，而非一口咬定真矛盾。仍保持跳过·待核对。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "twin.xlsx"),
+        tmm_fields=[
+            ("CTRL", "h10", "d_sel[3:0]", "3:0", "N", "RW"),
+            ("G1", "h20", "d_slna_1st_bias_g0[3:0]", "3:0", "N", "RW"),
+            ("G2", "h21", "d_slna_2nd_bias_g0[3:0]", "3:0", "N", "RW"),
+        ],
+        mux_rows=[
+            # 同 case 4'b0000、同输出名 d_slna_1st_bias，却分别选 1st / 2nd 孪生源 → 疑似撞名漏改
+            _mrow("d_slna_1st_bias_g0_to_mux[3:0]", "d_sel_to_mux[3:0]", "4'b0000",
+                  "d_slna_1st_bias[3:0]", 1),
+            _mrow("d_slna_2nd_bias_g0_to_mux[3:0]", "d_sel_to_mux[3:0]", "4'b0000",
+                  "d_slna_1st_bias[3:0]", 1),
+        ],
+    )
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, _grp(wb, "d_slna_1st_bias"))
+    sc = exp["spec_conflicts"][0]
+    assert sc["likely_dup_name"] is True
+    assert "另一个 mux" in sc["hint"]
+    assert any("孪生" in m for m in exp["issues"])
+    # 对照：d_a0 vs d_b0 不孪生 → likely_dup_name=False（沿用上面的通用提示）
+    assert mux_gen._looks_like_twins("d_a0", "d_b0") is False
+    assert mux_gen._looks_like_twins("d_wl_rf_2g_pfb", "d_wl_rf_5g_pfb") is True
