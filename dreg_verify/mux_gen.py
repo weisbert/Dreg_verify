@@ -439,7 +439,7 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
     out = {"upstream": upstream, "prefix": prefix,
            "carrier_ci": None, "carrier_key": None, "carrier_eff_width": 0,
            "carrier_alt_ci": None, "carrier_alt_key": None, "carrier_alt_eff_width": 0,
-           "alt_skipped_reason": "",
+           "alt_skipped_reason": "", "alt_bare_prefix": "",
            "ctrl_drivers": [], "ctrl_values": [], "ctrl_values_alt": [],
            "bindings": {}, "keys": [], "issues": issues}
     low = upstream.out_base.lower()
@@ -454,9 +454,10 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
     # ── ① 载体 case：『位宽足够、稳定可写』的数据输入；优先 RW(RF_WRITE)，RO(force) 兜底 ──
     #    designer 风格：要让上游 mux 输出 = N，走 local/lut 寄存器路径（软件可写），线控 force 是后备。
     candidates = []      # (是否RW, ci, key, binding, eff_width)
-    alt_prefix_needed = []   # (ci, key, binding) —— mode=0 备用载体是 logic→mux/级联衔接网(needs-prefix)：
-                             #   force 基名钉不住，但它【正是 mode=0 要 force 的线控网】。配好 scan_rtl 探针前缀
-                             #   后会解析成 prefixed-wire、自动落进下面 candidates 当 alt 载体；没配则记缺口让可见。
+    alt_prefix_needed = []   # 同形 5-tuple —— mode=0 备用载体是 logic→mux/级联衔接网(needs-prefix)：
+                             #   force 基名钉不住准确层级，但它【正是 mode=0 要 force 的线控网】。配了 scan_rtl
+                             #   探针前缀→解析成 prefixed-wire 落进 candidates；没配也【按裸名 force 生成】mode=0
+                             #   (与 bare-probe 同口径：先出 testcase, 仿真真 CUVUNF 再配前缀)，下面标 alt_bare_prefix。
     for ci, case in enumerate(upstream.cases):
         key = prefix + (DATA_KEY % ci)
         info = {"raw": case.input_raw, "base": case.input_base, "width": case.input_width,
@@ -466,13 +467,13 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
             continue
         if b.found_in in ("needs-prefix", "mux-output", "wire"):
             # 主载体必须稳定可写，这类网不当【主】载体；但非 RW 的线控/级联衔接网恰是 mode=0 force 的对象——
-            # 留作"待前缀的 alt 候选"(band_trim 实证：mode=0 源 linectrl_band_sel 是 logic→mux 网)，
-            # 没配前缀时下面据此记 alt_skipped_reason（不再静默漏掉 mode=0 那半张表）。
+            # 留作"待前缀的 alt 候选"，没干净 alt 时用它【裸名 force 生成】mode=0(band_trim/mixer2g_cap_sw 实证)。
+            eff_np = _effective_width(case, 0, {key: b}, [key])
             if (b.found_in in ("needs-prefix", "mux-output")
                     and not (b.kind == "RW" and b.address is not None)
-                    and _effective_width(case, 0, {key: b}, [key]) >= upstream.out_width):
-                alt_prefix_needed.append((ci, key, b))
-            continue            # 级联网/查无的 wire 不当载体——载体必须稳定可写
+                    and eff_np >= upstream.out_width):
+                alt_prefix_needed.append((False, ci, key, b, eff_np))   # 与 candidates 同形 5-tuple
+            continue            # 级联网/查无的 wire 不当【主】载体——主载体必须稳定可写
         # 有效位宽 = min(声明位宽, 寄存器实际字段位宽)。bindings/data_keys 是单元素 {key}/[key]，
         # 唯一项的索引固定是 0——绝不能传 ci（上游 case 序号），否则 ci>=1 时 _effective_width
         # 的 i<len(data_keys) 守卫为假、字段位宽截断被跳过 → 窄字段载体被误判够宽 → 假向量。
@@ -509,14 +510,21 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
         out["alt_skipped_reason"] = (
             "上游 mux%s 有 %d 个非 RW 载体候选，mode=0 备用分支(item④ RO 线控)无法判别，已跳过 alt 轮"
             % (upstream.group_no, len(alt_cands)))
-    # 没有干净 alt 载体、但 mode=0 源是 logic→mux/级联衔接网(needs-prefix) → 记缺口(M2 可见性)，
-    # 别再像以前那样静默漏掉 mode=0（band_trim 实证：mode=0 源 linectrl_band_sel 是 logic 页输出）。
+    # 没有干净 alt 载体、但 mode=0 源是 logic→mux/级联衔接网(needs-prefix) → 仍【生成】mode=0：
+    # 按裸名 force 该线控网(与 bare-probe 同口径——先把正确 testcase 出给 designer 看，仿真真 CUVUNF 再跑
+    # scan_rtl 配前缀)，并标 alt_bare_prefix 警告(不静默、不跳过)。用户拍板"没前缀也要看见正确 testcase"。
     if alt_pick is None and not out["alt_skipped_reason"] and alt_prefix_needed:
-        cand = next((c for c in alt_prefix_needed if _is_linectrl_base(c[2])), alt_prefix_needed[0])
-        out["alt_skipped_reason"] = (
-            "上游 mux%s 的 mode=0 备用载体 %s 是 logic→mux/级联衔接网(force 基名钉不住)——"
-            "配好 scan_rtl 探针前缀后即可生成 mode=0 那半张表(force 该线控网)"
-            % (upstream.group_no, cand[2].base))
+        named_np = [c for c in alt_prefix_needed if _is_linectrl_base(c[3])]
+        if len(named_np) == 1:
+            alt_pick = named_np[0]
+        elif not named_np and len(alt_prefix_needed) == 1:
+            alt_pick = alt_prefix_needed[0]
+        else:
+            out["alt_skipped_reason"] = (
+                "上游 mux%s 有 %d 个 needs-prefix 线控载体候选，mode=0 无法判别，已跳过 alt 轮"
+                % (upstream.group_no, len(alt_prefix_needed)))
+        if alt_pick is not None:
+            out["alt_bare_prefix"] = alt_pick[3].base
 
     # ── ② 上游控制驱到载体 case 的值（递归三来源解析）；alt 载体同算一份上游子值 ──
     carrier_case = upstream.cases[out["carrier_ci"]]
@@ -683,6 +691,19 @@ def _recipe_alt_skips(recipe):
     for d in recipe.get("ctrl_drivers", []):
         if d.get("source") == "mux":
             out.extend(_recipe_alt_skips(d.get("recipe")))
+    return out
+
+
+def _recipe_alt_bare(recipe):
+    """递归收集级联树里『mode=0 用裸名 force 的线控源』基名（需 scan_rtl 配前缀确认层级）。"""
+    if not recipe:
+        return []
+    out = []
+    if recipe.get("alt_bare_prefix"):
+        out.append(recipe["alt_bare_prefix"])
+    for d in recipe.get("ctrl_drivers", []):
+        if d.get("source") == "mux":
+            out.extend(_recipe_alt_bare(d.get("recipe")))
     return out
 
 
@@ -1245,7 +1266,14 @@ def _make_general_vectors(group, expansion, mode, max_tests, data_overrides=None
                     break
             if stop:
                 break
-    # alt 被跳过(多 RO 候选无法判别 / mode=0 case 不可解析 / 深层线控源需前缀)的原因汇总进 meta（M2 可见性）
+    # mode=0 用裸名 force 的线控源（需 scan_rtl 配前缀确认层级）汇总进 meta（.sv 块顶 + 报告警告用）
+    alt_bare = []
+    for d in drivers:
+        if d["source"] == "mux":
+            alt_bare.extend(_recipe_alt_bare(d["recipe"]))
+    if alt_bare:
+        meta["cascade_alt_bare"] = "、".join(sorted(set(alt_bare)))
+    # alt 被跳过(多候选无法判别 / mode=0 case 不可解析)的原因汇总进 meta（M2 可见性）
     alt_skips = []
     for d in drivers:
         if d["source"] == "mux":

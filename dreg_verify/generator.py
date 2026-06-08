@@ -790,6 +790,14 @@ def build(wb, opts):
         if cnote:
             lines = ["// ⚠ %s" % cnote] + lines
             mux_warnings.append((grp.out_name, grp.assert_id, cnote))
+        # mode=0 用裸名 force 线控网（第二十四轮）：testcase 已出，仅层级前缀待补——块顶留 ⚠，
+        # 仿真 elaboration 若在该 force 报 CUVUNF，跑 scan_rtl 配 --probe-prefix 后重生成即为正确层级。
+        abare = meta.get("cascade_alt_bare")
+        if abare:
+            amsg = ("mode=0 那半张表 force 线控网 %s 用的是裸名(层级前缀待补)——若仿真 CUVUNF，"
+                    "跑 scan_rtl 配 --probe-prefix %s=<层级> 后重生成即为正确路径" % (abare, abare))
+            lines = ["// ⚠ %s" % amsg] + lines
+            mux_warnings.append((grp.out_name, grp.assert_id, amsg))
         stats["is_mux"] = True
         stats["scan_path"] = meta.get("scan_path")
         blocks.append((lines, stats))
@@ -1145,6 +1153,10 @@ def report(wb, opts):
         # 缺口可见（M2）：alt 分支跳过 / iddq DFT 拍补不上 → 报告也透出（与 .sv 的 // ⚠ 同口径）
         gap = "；".join(meta.get(k) for k in ("cascade_alt_skipped", "iddq_skipped")
                         if meta and meta.get(k))
+        # mode=0 裸名 force 线控网（第二十四轮）：testcase 已生成，仅层级前缀待补 → 报告也透出
+        abare = meta.get("cascade_alt_bare") if meta else ""
+        if abare:
+            gap = (gap + "；" if gap else "") + ("mode=0 force 线控网 %s 用裸名(待 scan_rtl 配前缀)" % abare)
         warn_full = "；".join(x for x in [("⚙ %s" % nnote) if nnote else "",
                                           ("⚙ %s" % snote) if snote else "",
                                           ("⚠ %s" % ocoll) if ocoll else "",

@@ -1928,7 +1928,8 @@ def test_cascade_alt_mode0_logic_carrier_visible_and_generatable(tmp_path):
     """band_trim 形态回归：级联 mux 的 mode=0 备用载体是【logic 页输出经 _to_mux 衔接网】(needs-prefix)、
     不是 RO 寄存器(对比 mixer5g_trim 的 tsensor)。修前：载体扫描把它静默排除 → mode=0 那半张表无声漏掉
     (carrier_alt=None 且无 skip 原因)；这正是『有些 mux freq_sel_mode 能出 0、band_trim 只剩 1』的根因。
-    修后：①没配探针前缀 → cascade_alt_skipped 记缺口(提示配 scan_rtl)；②配了前缀(→prefixed-wire) → 正常出 mode=0。"""
+    修后(第二十四轮终版,用户拍板"没前缀也要看见正确 testcase")：①没配前缀 → mode=0 照样【生成】(裸名 force
+    线控网,与 bare-probe 同口径) + 标 cascade_alt_bare 警告;②配了前缀(→prefixed-wire) → mode=0 走带前缀层级、无警告。"""
     wb = _build_mux_wb(
         str(tmp_path / "band_trim.xlsx"),
         tmm_fields=[
@@ -1958,21 +1959,32 @@ def test_cascade_alt_mode0_logic_carrier_visible_and_generatable(tmp_path):
         ],
     )
     g = _grp(wb, "d_pfb_band_trim")
-    # ① 没配前缀：mode=0 缺口【可见】(cascade_alt_skipped 记原因+提示前缀)，且这档确实没生成 mode=0
+    # ① 没配前缀：mode=0 照样【生成】(裸名 force 线控网) + cascade_alt_bare 警告(不跳过、不静默)
     r = resolver.Resolver(wb)
     exp = mux_gen.expand_mux_group(wb, r, g)
     vecs, meta = mux_gen.make_mux_vectors(g, exp, mode="max", max_tests=256)
-    assert exp["ctrl_drivers"][0]["recipe"]["carrier_alt_ci"] is None
-    skip = meta.get("cascade_alt_skipped") or ""
-    assert "d_linectrl_band_sel" in skip and "前缀" in skip       # 不再静默漏掉
-    assert not any("alt" in (v.note or "") for v in vecs)         # 没配前缀这档没 mode=0
-    # ② 配了 scan_rtl 探针前缀：linectrl 网解析成 prefixed-wire → 自动当 alt 载体 → 生成 mode=0
+    assert exp["ctrl_drivers"][0]["recipe"]["carrier_alt_ci"] is not None   # 裸名网也当 alt 载体
+    assert meta.get("cascade_alt") is True
+    assert meta.get("cascade_alt_bare") == "d_linectrl_band_sel"            # 警告:裸名 force、待配前缀
+    assert not meta.get("cascade_alt_skipped")                              # 不再"跳过"
+    altv = [v for v in vecs if "alt" in (v.note or "")]
+    assert len(altv) == 4                                                   # 没前缀也出 4 条 mode=0
+    # 裸名 force 的就是线控网本身(wire 不带层级前缀)
+    b = exp["bindings"]
+    wires = [b[k].wire for k in altv[0].assignments if k in b and "linectrl_band_sel" in (b[k].base or "").lower()]
+    assert wires and all("d_linectrl_band_sel_to_mux" in w and "ENV_RF" not in w for w in wires)
+    # ② 配了 scan_rtl 探针前缀：linectrl 网解析成 prefixed-wire → 走带前缀层级、无裸名警告
     r2 = resolver.Resolver(wb, wire_prefixes={"d_linectrl_band_sel": "ENV_RF.U_WL"})
     exp2 = mux_gen.expand_mux_group(wb, r2, g)
     vecs2, meta2 = mux_gen.make_mux_vectors(g, exp2, mode="max", max_tests=256)
     assert exp2["ctrl_drivers"][0]["recipe"]["carrier_alt_ci"] is not None
     assert meta2.get("cascade_alt") is True
-    assert sum(1 for v in vecs2 if "alt" in (v.note or "")) == 4  # b0..b3 各一条 mode=0
+    assert not meta2.get("cascade_alt_bare")                      # 配了前缀就不再是裸名
+    altv2 = [v for v in vecs2 if "alt" in (v.note or "")]
+    assert len(altv2) == 4                                        # b0..b3 各一条 mode=0
+    b2 = exp2["bindings"]
+    wires2 = [b2[k].wire for k in altv2[0].assignments if k in b2 and "linectrl_band_sel" in (b2[k].base or "").lower()]
+    assert wires2 and all(w.startswith("ENV_RF.U_WL.") for w in wires2)   # 带层级前缀
 
 
 def test_cascade_alt_mode0_depth2_ro_register(tmp_path):
