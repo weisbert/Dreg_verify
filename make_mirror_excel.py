@@ -50,6 +50,13 @@ ADDR_IDDQ = 500          # dft iddq_mode RO（门控）
 ADDR_FREQSEL = 70        # freq_sel_mode RW（band_2g_sel 上游 mode 选择）
 ADDR_BAND2G = 71         # band_2g_sel_local[3:0] RW（mode=1 主载体）
 ADDR_PFB_TRIM = 72       # pfb b0..b3_trim 4×4bit 打包（band_trim 的数据源）
+# 第二十四轮 audit 揭示的两个【新】形态（前半文件实证）：
+ADDR_RX5GEN = 80         # rx5g_en_mode(bit0) + rx5g_en_local(bit1) RW —— *_en 型 mode mux
+ADDR_GM = 81             # lp5g_gm_itrim off/on 数据源（4bit×2 打包）RW
+ADDR_BWCTRL = 90         # bwctrl_mode(bit0) + bwctrl_local[2:1] RW —— 深层(第2层)级联的 mode mux
+ADDR_BWLINE = 91         # linectrl_rfabb_bwctrl[1:0] RO【寄存器】(force 名即可,不需前缀——这是 [~] 与 [XX] 的关键差别)
+ADDR_CORNER = 92         # lpf_corner_sel 数据源（2bit×2 打包）RW —— 中间层 mux 载体
+ADDR_CMAIN = 93          # lpf_cmain 数据源（4bit×2 打包）RW —— 最下游数据
 
 
 def _d(n):
@@ -108,6 +115,10 @@ def build(path):
     # linectrl_band_sel：线控 band 选择，由管脚线控输入透传 → 喂 mux(to_mux)。top_output=0(内部网)。
     _set(ws, 3, {"A": "d_wl_rf_band_sel_line_to_logic[3:0]", "K": "d_wl_rf_linectrl_band_sel[3:0]",
                  "L": "A", "M": "to_mux", "N": "0", "O": "线控 band 选择(管脚)", "P": "yangteng", "R": "1"})
+    # rx5g_en_line：*_en 型 mode mux 的 mode=0 源，也是 logic→mux 网，但命名是 *_line(非 linectrl_*)——
+    # 验证修复对【非 linectrl 命名】的线控源也成立(audit [XX] 里 rx5g_en_line/txcal5g_en_line/... 这一族)。
+    _set(ws, 4, {"A": "d_wl_rf_rx5g_en_pin_to_logic", "K": "d_wl_rf_rx5g_en_line",
+                 "L": "A", "M": "to_mux", "N": "0", "O": "线控 rx5g 使能(管脚)", "P": "shenzheng", "R": "2"})
 
     # ========================= mux 页 =========================
     mx = wb.create_sheet("mux")
@@ -189,6 +200,33 @@ def build(path):
                   "d_wl_rf_band_2g_sel_to_mux[1:0]", "2'b" + format(k, "02b"),
                   "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim[3:0]", 200, dest="to_dft", owner="law/chenhao")
 
+    # ── 【新形态A：*_en 型 mode mux + *_line 线控源】mux32 rx5g_en = rx5g_en_mode? local(RW) : rx5g_en_line(logic→mux) ──
+    #    下游 gm_itrim 由 rx5g_en(1bit) 级联控制 → [XX] mode=0 缺失(rx5g_en_line 需前缀)；命名 *_line 非 linectrl_*。
+    r = _mrow(mx, r, "d_wl_rf_rx5g_en_line_to_mux", "d_wl_rf_rx5g_en_mode_to_mux",
+              "1'b0", "d_wl_rf_rx5g_en", 32, dest="to_mux", owner="shenzheng")
+    r = _mrow(mx, r, "d_wl_rf_rx5g_en_local_to_mux", "d_wl_rf_rx5g_en_mode_to_mux",
+              "1'b1", "d_wl_rf_rx5g_en", 32, dest="to_mux", owner="shenzheng")
+    for k, onoff in ((0, "off"), (1, "on")):
+        r = _mrow(mx, r, "d_wl_rf_lp5g_gm_itrim_%s_to_mux[3:0]" % onoff,
+                  "d_wl_rf_rx5g_en_to_mux", "1'b%d" % k,
+                  "d_wl_rf_lp5g_gm_itrim[3:0]", 201, dest="to_dft", owner="shenzheng")
+
+    # ── 【新形态B：深层(第2层)级联 + RO 寄存器 mode=0 源】lpf_cmain ← lpf_corner_sel ← bwctrl(mode mux) ──
+    #    mode=0 源 linectrl_rfabb_bwctrl 是【RO 寄存器】(force 名即可,不需前缀)——audit 标 [~]：
+    #    根因不是前缀，而是两分支只展开【最近一层】，深层 mode mux 的 mode=0 没被驱动。这是【代码可修】的桶。
+    r = _mrow(mx, r, "d_wl_rf_linectrl_rfabb_bwctrl_to_mux[1:0]", "d_wl_rf_bwctrl_mode_to_mux",
+              "1'b0", "d_wl_rf_bwctrl[1:0]", 57, dest="to_mux", owner="luqi")
+    r = _mrow(mx, r, "d_wl_rf_bwctrl_local_to_mux[1:0]", "d_wl_rf_bwctrl_mode_to_mux",
+              "1'b1", "d_wl_rf_bwctrl[1:0]", 57, dest="to_mux", owner="luqi")
+    for k in range(2):    # 中间层 mux58：lpf_corner_sel[1:0] = case(bwctrl[1:0]) → corner RW 源
+        r = _mrow(mx, r, "d_wl_rf_lpf_corner%d_to_mux[1:0]" % k,
+                  "d_wl_rf_bwctrl_to_mux[1:0]", "2'b" + format(k, "02b"),
+                  "d_wl_rf_lpf_corner_sel[1:0]", 58, dest="to_mux", owner="luqi")
+    for k in range(2):    # 最下游 mux202：lpf_cmain[3:0] = case(lpf_corner_sel[0] 切片) → cmain RW 源
+        r = _mrow(mx, r, "d_wl_rf_lpf_cmain%d_to_mux[3:0]" % k,
+                  "d_wl_rf_lpf_corner_sel_to_mux[0]", "1'b%d" % k,
+                  "d_wl_rf_lpf_cmain[3:0]", 202, dest="to_dft", owner="luqi")
+
     # ========================= dft 页（4 个输出被 iddq_mode 门控，B?0:A）=========================
     dft = wb.create_sheet("dft")
     _set(dft, 2, {"A": "A", "B": "gate(to_dft)", "C": "C", "D": "observed_out", "E": "gate_expr"})
@@ -229,6 +267,19 @@ def build(path):
     for k in range(4):    # b0..b3_trim 4bit 打包进 d72（band_trim 的数据源，RW）
         r = _regmap(rm, r, "PFB_TRIM", "RW", "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_b%d_trim[3:0]" % k,
                     4 * k + 3, 4 * k, ADDR_PFB_TRIM, "law/chenhao")
+    # 新形态A：rx5g_en mode mux + gm_itrim 数据
+    r = _regmap(rm, r, "RX5GEN", "RW", "d_wl_rf_rx5g_en_mode", 0, 0, ADDR_RX5GEN, "shenzheng")
+    r = _regmap(rm, r, "RX5GEN", "RW", "d_wl_rf_rx5g_en_local", 1, 1, ADDR_RX5GEN, "shenzheng")
+    r = _regmap(rm, r, "GM", "RW", "d_wl_rf_lp5g_gm_itrim_off[3:0]", 3, 0, ADDR_GM, "shenzheng")
+    r = _regmap(rm, r, "GM", "RW", "d_wl_rf_lp5g_gm_itrim_on[3:0]", 7, 4, ADDR_GM, "shenzheng")
+    # 新形态B：bwctrl mode mux(深层) + 中间/下游数据；linectrl_rfabb_bwctrl 是 RO【寄存器】(force 名即可)
+    r = _regmap(rm, r, "BWCTRL", "RW", "d_wl_rf_bwctrl_mode", 0, 0, ADDR_BWCTRL, "luqi")
+    r = _regmap(rm, r, "BWCTRL", "RW", "d_wl_rf_bwctrl_local[1:0]", 2, 1, ADDR_BWCTRL, "luqi")
+    r = _regmap(rm, r, "BWLINE", "RO", "d_wl_rf_linectrl_rfabb_bwctrl[1:0]", 1, 0, ADDR_BWLINE, "luqi")
+    for k in range(2):
+        r = _regmap(rm, r, "CORNER", "RW", "d_wl_rf_lpf_corner%d[1:0]" % k, 2 * k + 1, 2 * k, ADDR_CORNER, "luqi")
+    for k in range(2):
+        r = _regmap(rm, r, "CMAIN", "RW", "d_wl_rf_lpf_cmain%d[3:0]" % k, 4 * k + 3, 4 * k, ADDR_CMAIN, "luqi")
 
     # ========================= total_memory_map 页 =========================
     tmm = wb.create_sheet("total_memory_map")
@@ -263,6 +314,27 @@ def build(path):
         r = _tmm_field(tmm, r, "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_b%d_trim" % k,
                        "%d:%d" % (4 * k + 3, 4 * k), ADDR_PFB_TRIM, "N", "RW",
                        "lcbufc0 2g pfb b%d trim" % k)
+    # 新形态A：rx5g_en mode mux + gm_itrim
+    r = _tmm_reg(tmm, r, "RX5GEN", ADDR_RX5GEN)
+    r = _tmm_field(tmm, r, "d_wl_rf_rx5g_en_mode", "0", ADDR_RX5GEN, "N", "RW", "rx5g en mode(1:reg 0:line)")
+    r = _tmm_field(tmm, r, "d_wl_rf_rx5g_en_local", "1", ADDR_RX5GEN, "N", "RW", "rx5g en local")
+    r = _tmm_reg(tmm, r, "GM", ADDR_GM)
+    r = _tmm_field(tmm, r, "d_wl_rf_lp5g_gm_itrim_off[3:0]", "3:0", ADDR_GM, "N", "RW", "lp5g gm itrim off")
+    r = _tmm_field(tmm, r, "d_wl_rf_lp5g_gm_itrim_on[3:0]", "7:4", ADDR_GM, "N", "RW", "lp5g gm itrim on")
+    # 新形态B：bwctrl mode mux(深层) + linectrl_rfabb_bwctrl 是 RO 寄存器(force 名即可,不需前缀) + 中间/下游
+    r = _tmm_reg(tmm, r, "BWCTRL", ADDR_BWCTRL)
+    r = _tmm_field(tmm, r, "d_wl_rf_bwctrl_mode", "0", ADDR_BWCTRL, "N", "RW", "rfabb bwctrl mode(1:reg 0:line)")
+    r = _tmm_field(tmm, r, "d_wl_rf_bwctrl_local[1:0]", "2:1", ADDR_BWCTRL, "N", "RW", "rfabb bwctrl local")
+    r = _tmm_reg(tmm, r, "BWLINE", ADDR_BWLINE)
+    r = _tmm_field(tmm, r, "d_wl_rf_linectrl_rfabb_bwctrl[1:0]", "1:0", ADDR_BWLINE, "Y", "RO", "rfabb bwctrl 线控(RO寄存器,force名)")
+    r = _tmm_reg(tmm, r, "CORNER", ADDR_CORNER)
+    for k in range(2):
+        r = _tmm_field(tmm, r, "d_wl_rf_lpf_corner%d[1:0]" % k, "%d:%d" % (2 * k + 1, 2 * k),
+                       ADDR_CORNER, "N", "RW", "lpf corner sel src %d" % k)
+    r = _tmm_reg(tmm, r, "CMAIN", ADDR_CMAIN)
+    for k in range(2):
+        r = _tmm_field(tmm, r, "d_wl_rf_lpf_cmain%d[3:0]" % k, "%d:%d" % (4 * k + 3, 4 * k),
+                       ADDR_CMAIN, "N", "RW", "lpf cmain data %d" % k)
 
     # ========================= for_test 页（留空：真表这份文件 for_test 也是空的）=========================
     ft = wb.create_sheet("for_test")
