@@ -16,6 +16,13 @@
   · dft 页(行188/192/193/194)：上面 4 个输出都被 d_wl_rf_trx_reg_dft_iddq_mode 门控，表达式 B?0:A。
   真实地址：temp_code@d60(bit0=mode,7:4=local)；mixer2g_trim@d388；mixer5g_trim@d389/d390。
 
+第二十四轮新增（band_trim mode=0 漏生成）：
+  · band_trim mux(真表行1170-1173)：控制 = d_wl_rf_band_2g_sel[1:0] 切片，4 选 1 → b0..b3_trim，后缀 to_dft。
+  · band_2g_sel 上游 mux(真表行15-16,N=7)：freq_sel_mode? local(RW) : linectrl_band_sel。
+    关键差异(vs mixer5g_trim 的 tsensor)：mode=0 源 d_wl_rf_linectrl_band_sel 是【logic 页输出】(SECTION 3 实证)、
+    经 _to_mux 衔接网喂上游 mux —— resolver 判它 needs-prefix，被载体扫描静默排除 → mode=0 那半张表无声漏掉。
+    修后：没配探针前缀 → cascade_alt_skipped 记缺口；配了 scan_rtl 前缀(→prefixed-wire) → 正常出 mode=0。
+
 它严格按 excel_model 的列约定造 5 页(logic/regmap/total_memory_map/mux/dft)。
 for_test 页【留空】——真表这份文件里 for_test 也是空的(designer 真值表在另一个 .xlsx)。
 
@@ -40,6 +47,9 @@ ADDR_M2G = 388           # mixer2g_trim t0..t7（2bit 打包进一个寄存器�
 ADDR_M5G_A = 389         # mixer5g_trim t0..t3（3bit，4位对齐）
 ADDR_M5G_B = 390         # mixer5g_trim t4..t7
 ADDR_IDDQ = 500          # dft iddq_mode RO（门控）
+ADDR_FREQSEL = 70        # freq_sel_mode RW（band_2g_sel 上游 mode 选择）
+ADDR_BAND2G = 71         # band_2g_sel_local[3:0] RW（mode=1 主载体）
+ADDR_PFB_TRIM = 72       # pfb b0..b3_trim 4×4bit 打包（band_trim 的数据源）
 
 
 def _d(n):
@@ -86,12 +96,18 @@ def _mrow(ws, r, mux_input, ctrls, case, out, group_no, dest="to_mux", owner="WL
 def build(path):
     wb = openpyxl.Workbook()
 
-    # ========================= logic 页（4 个问题信号都是 mux 输出，logic 仅占位表头）=========================
+    # ========================= logic 页 =========================
+    #   4 个问题信号都是 mux 输出，logic 不直接产它们；但 band_2g_sel 的 mode=0 备用源
+    #   d_wl_rf_linectrl_band_sel 是【logic 页输出】(SECTION 3 实证：在 logic.K，M 列含 to_mux)——
+    #   不是 RO 寄存器。这正是 band_trim mode=0 漏生成的根因：它被 resolver 判 needs-prefix(logic→mux 衔接网)。
     ws = wb.active
     ws.title = "logic"
     _set(ws, 1, {"A": "<<输入信号(列字母=表达式变量)>>", "K": "<<输出>>", "L": "<<真值表达式>>"})
     _set(ws, 2, {"A": "in_A", "B": "in_B", "K": "logic输出名", "L": "表达式",
                  "M": "type", "N": "top_output", "O": "Notes", "P": "owner", "R": "no"})
+    # linectrl_band_sel：线控 band 选择，由管脚线控输入透传 → 喂 mux(to_mux)。top_output=0(内部网)。
+    _set(ws, 3, {"A": "d_wl_rf_band_sel_line_to_logic[3:0]", "K": "d_wl_rf_linectrl_band_sel[3:0]",
+                 "L": "A", "M": "to_mux", "N": "0", "O": "线控 band 选择(管脚)", "P": "yangteng", "R": "1"})
 
     # ========================= mux 页 =========================
     mx = wb.create_sheet("mux")
@@ -159,6 +175,20 @@ def build(path):
                   "d_wl_rf_temp_code_to_mux[3:1]", "3'b" + format(k, "03b"),
                   "d_wl_rf_lo2g5g_mixer5g_trim[2:0]", 158, dest="to_dft", owner="law/chenhao")
 
+    # ── mux7：band_2g_sel[3:0] = case(freq_sel_mode){0:线控 linectrl_band_sel(logic→mux 网); 1:band_2g_sel_local(RW)} ──
+    #    与 mux56(temp_code) 同形，但 mode=0 源是【logic 页输出】而非 RO 寄存器 —— 这是 band_trim mode=0 漏生成的根因。
+    r = _mrow(mx, r, "d_wl_rf_linectrl_band_sel_to_mux[3:0]", "d_wl_rf_freq_sel_mode_to_mux",
+              "1'b0", "d_wl_rf_band_2g_sel[3:0]", 7, dest="to_mux", owner="yangteng")
+    r = _mrow(mx, r, "d_wl_rf_band_2g_sel_local_to_mux[3:0]", "d_wl_rf_freq_sel_mode_to_mux",
+              "1'b1", "d_wl_rf_band_2g_sel[3:0]", 7, dest="to_mux", owner="yangteng")
+
+    # ── mux200：lcbufc0_2g_pfb_band_trim[3:0] = case(band_2g_sel[1:0] 切片) 4 选 1 → b0..b3_trim，后缀 to_dft ──
+    #    控制是上游 mux7 输出的 [1:0] 切片（两级级联：band_trim ← band_2g_sel ← freq_sel_mode）。
+    for k in range(4):
+        r = _mrow(mx, r, "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_b%d_trim_to_mux[3:0]" % k,
+                  "d_wl_rf_band_2g_sel_to_mux[1:0]", "2'b" + format(k, "02b"),
+                  "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim[3:0]", 200, dest="to_dft", owner="law/chenhao")
+
     # ========================= dft 页（4 个输出被 iddq_mode 门控，B?0:A）=========================
     dft = wb.create_sheet("dft")
     _set(dft, 2, {"A": "A", "B": "gate(to_dft)", "C": "C", "D": "observed_out", "E": "gate_expr"})
@@ -166,7 +196,8 @@ def build(path):
     for out_sig in ("d_bt_rx_slna_1st_bias_trim_gain_cal_wl[3:0]",
                     "d_wl_rf_lp5g_rxrf_lna_lctune[5:0]",
                     "d_wl_rf_lo2g5g_mixer2g_trim[1:0]",
-                    "d_wl_rf_lo2g5g_mixer5g_trim[2:0]"):
+                    "d_wl_rf_lo2g5g_mixer5g_trim[2:0]",
+                    "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim[3:0]"):   # 真表 dft 行 203 也门控它
         _set(dft, r, {"A": out_sig.split("[")[0] + "_to_dft",
                       "B": "d_wl_rf_trx_reg_dft_iddq_mode_to_dft",
                       "D": out_sig, "E": "B?0:A"})
@@ -192,6 +223,12 @@ def build(path):
         r = _regmap(rm, r, "MIXER_CTRL3", "RW", "d_wl_rf_lo2g5g_mixer5g_trim_t%d[2:0]" % k,
                     4 * (k - 4) + 2, 4 * (k - 4), ADDR_M5G_B, "law/chenhao")
     r = _regmap(rm, r, "DFT_IDDQ", "RO", "d_wl_rf_trx_reg_dft_iddq_mode", 0, 0, ADDR_IDDQ, "yangteng")
+    # band_trim 级联链：freq_sel_mode(RW) + band_2g_sel_local(RW)；mode=0 源 linectrl_band_sel 不在此(它是 logic 输出)
+    r = _regmap(rm, r, "LO_CTRL_mode", "RW", "d_wl_rf_freq_sel_mode", 0, 0, ADDR_FREQSEL, "yangteng")
+    r = _regmap(rm, r, "BAND2G_LOCAL", "RW", "d_wl_rf_band_2g_sel_local[3:0]", 3, 0, ADDR_BAND2G, "yangteng")
+    for k in range(4):    # b0..b3_trim 4bit 打包进 d72（band_trim 的数据源，RW）
+        r = _regmap(rm, r, "PFB_TRIM", "RW", "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_b%d_trim[3:0]" % k,
+                    4 * k + 3, 4 * k, ADDR_PFB_TRIM, "law/chenhao")
 
     # ========================= total_memory_map 页 =========================
     tmm = wb.create_sheet("total_memory_map")
@@ -216,6 +253,16 @@ def build(path):
                        "lo2g5g mixer5g gain trim t%d" % k)
     r = _tmm_reg(tmm, r, "DFT_IDDQ", ADDR_IDDQ)
     r = _tmm_field(tmm, r, "d_wl_rf_trx_reg_dft_iddq_mode", "0", ADDR_IDDQ, "Y", "RO", "IDDQ DFT 门控(管脚,只读,force)")
+    # band_trim 级联链寄存器
+    r = _tmm_reg(tmm, r, "LO_CTRL_mode", ADDR_FREQSEL)
+    r = _tmm_field(tmm, r, "d_wl_rf_freq_sel_mode", "0", ADDR_FREQSEL, "N", "RW", "WL freq mode(1:RF reg 0:line control)")
+    r = _tmm_reg(tmm, r, "BAND2G_LOCAL", ADDR_BAND2G)
+    r = _tmm_field(tmm, r, "d_wl_rf_band_2g_sel_local[3:0]", "3:0", ADDR_BAND2G, "N", "RW", "band 2g select local(mode=1)")
+    r = _tmm_reg(tmm, r, "PFB_TRIM", ADDR_PFB_TRIM)
+    for k in range(4):
+        r = _tmm_field(tmm, r, "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_b%d_trim" % k,
+                       "%d:%d" % (4 * k + 3, 4 * k), ADDR_PFB_TRIM, "N", "RW",
+                       "lcbufc0 2g pfb b%d trim" % k)
 
     # ========================= for_test 页（留空：真表这份文件 for_test 也是空的）=========================
     ft = wb.create_sheet("for_test")

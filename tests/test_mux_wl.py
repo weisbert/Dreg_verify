@@ -1921,3 +1921,55 @@ def test_spec_collision_twin_sources_hint_dup_name(tmp_path):
     # 对照：d_a0 vs d_b0 不孪生 → likely_dup_name=False（沿用上面的通用提示）
     assert mux_gen._looks_like_twins("d_a0", "d_b0") is False
     assert mux_gen._looks_like_twins("d_wl_rf_2g_pfb", "d_wl_rf_5g_pfb") is True
+
+
+# ───────── 第二十四轮：级联 mode=0 备用载体是 logic→mux 网(needs-prefix) → 缺口可见 + 配前缀可生成 ─────────
+def test_cascade_alt_mode0_logic_carrier_visible_and_generatable(tmp_path):
+    """band_trim 形态回归：级联 mux 的 mode=0 备用载体是【logic 页输出经 _to_mux 衔接网】(needs-prefix)、
+    不是 RO 寄存器(对比 mixer5g_trim 的 tsensor)。修前：载体扫描把它静默排除 → mode=0 那半张表无声漏掉
+    (carrier_alt=None 且无 skip 原因)；这正是『有些 mux freq_sel_mode 能出 0、band_trim 只剩 1』的根因。
+    修后：①没配探针前缀 → cascade_alt_skipped 记缺口(提示配 scan_rtl)；②配了前缀(→prefixed-wire) → 正常出 mode=0。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "band_trim.xlsx"),
+        tmm_fields=[
+            ("FREQSEL", "h70", "d_freq_sel_mode", "0", "N", "RW"),
+            ("BANDLOC", "h71", "d_band_sel_local[3:0]", "3:0", "N", "RW"),
+            ("PFB0", "h72", "d_pfb_b0_trim[3:0]", "3:0", "N", "RW"),
+            ("PFB1", "h73", "d_pfb_b1_trim[3:0]", "3:0", "N", "RW"),
+            ("PFB2", "h74", "d_pfb_b2_trim[3:0]", "3:0", "N", "RW"),
+            ("PFB3", "h75", "d_pfb_b3_trim[3:0]", "3:0", "N", "RW"),
+        ],
+        logic_rows=[
+            # mode=0 备用源 d_linectrl_band_sel 是 logic 输出(M=to_mux)→ 被 mux 引用时判 needs-prefix
+            {"A": "d_band_sel_line_to_logic[3:0]", "K": "d_linectrl_band_sel[3:0]",
+             "L": "A", "M": "to_mux", "N": 0, "R": 1},
+        ],
+        mux_rows=[
+            # 上游 mux7 band_sel[3:0] = freq_sel_mode? local(RW) : linectrl(logic→mux 网)
+            _mrow("d_linectrl_band_sel_to_mux[3:0]", "d_freq_sel_mode_to_mux", "1'b0",
+                  "d_band_sel[3:0]", 7, h="to_mux"),
+            _mrow("d_band_sel_local_to_mux[3:0]", "d_freq_sel_mode_to_mux", "1'b1",
+                  "d_band_sel[3:0]", 7, h="to_mux"),
+            # 下游 mux8 band_trim[3:0] = case(band_sel[1:0] 切片) 4 选 1 → b0..b3 trim
+            _mrow("d_pfb_b0_trim_to_mux[3:0]", "d_band_sel_to_mux[1:0]", "2'b00", "d_pfb_band_trim[3:0]", 8),
+            _mrow("d_pfb_b1_trim_to_mux[3:0]", "d_band_sel_to_mux[1:0]", "2'b01", "d_pfb_band_trim[3:0]", 8),
+            _mrow("d_pfb_b2_trim_to_mux[3:0]", "d_band_sel_to_mux[1:0]", "2'b10", "d_pfb_band_trim[3:0]", 8),
+            _mrow("d_pfb_b3_trim_to_mux[3:0]", "d_band_sel_to_mux[1:0]", "2'b11", "d_pfb_band_trim[3:0]", 8),
+        ],
+    )
+    g = _grp(wb, "d_pfb_band_trim")
+    # ① 没配前缀：mode=0 缺口【可见】(cascade_alt_skipped 记原因+提示前缀)，且这档确实没生成 mode=0
+    r = resolver.Resolver(wb)
+    exp = mux_gen.expand_mux_group(wb, r, g)
+    vecs, meta = mux_gen.make_mux_vectors(g, exp, mode="max", max_tests=256)
+    assert exp["ctrl_drivers"][0]["recipe"]["carrier_alt_ci"] is None
+    skip = meta.get("cascade_alt_skipped") or ""
+    assert "d_linectrl_band_sel" in skip and "前缀" in skip       # 不再静默漏掉
+    assert not any("alt" in (v.note or "") for v in vecs)         # 没配前缀这档没 mode=0
+    # ② 配了 scan_rtl 探针前缀：linectrl 网解析成 prefixed-wire → 自动当 alt 载体 → 生成 mode=0
+    r2 = resolver.Resolver(wb, wire_prefixes={"d_linectrl_band_sel": "ENV_RF.U_WL"})
+    exp2 = mux_gen.expand_mux_group(wb, r2, g)
+    vecs2, meta2 = mux_gen.make_mux_vectors(g, exp2, mode="max", max_tests=256)
+    assert exp2["ctrl_drivers"][0]["recipe"]["carrier_alt_ci"] is not None
+    assert meta2.get("cascade_alt") is True
+    assert sum(1 for v in vecs2 if "alt" in (v.note or "")) == 4  # b0..b3 各一条 mode=0

@@ -454,6 +454,9 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
     # ── ① 载体 case：『位宽足够、稳定可写』的数据输入；优先 RW(RF_WRITE)，RO(force) 兜底 ──
     #    designer 风格：要让上游 mux 输出 = N，走 local/lut 寄存器路径（软件可写），线控 force 是后备。
     candidates = []      # (是否RW, ci, key, binding, eff_width)
+    alt_prefix_needed = []   # (ci, key, binding) —— mode=0 备用载体是 logic→mux/级联衔接网(needs-prefix)：
+                             #   force 基名钉不住，但它【正是 mode=0 要 force 的线控网】。配好 scan_rtl 探针前缀
+                             #   后会解析成 prefixed-wire、自动落进下面 candidates 当 alt 载体；没配则记缺口让可见。
     for ci, case in enumerate(upstream.cases):
         key = prefix + (DATA_KEY % ci)
         info = {"raw": case.input_raw, "base": case.input_base, "width": case.input_width,
@@ -462,6 +465,13 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
         if not b.resolved:
             continue
         if b.found_in in ("needs-prefix", "mux-output", "wire"):
+            # 主载体必须稳定可写，这类网不当【主】载体；但非 RW 的线控/级联衔接网恰是 mode=0 force 的对象——
+            # 留作"待前缀的 alt 候选"(band_trim 实证：mode=0 源 linectrl_band_sel 是 logic→mux 网)，
+            # 没配前缀时下面据此记 alt_skipped_reason（不再静默漏掉 mode=0 那半张表）。
+            if (b.found_in in ("needs-prefix", "mux-output")
+                    and not (b.kind == "RW" and b.address is not None)
+                    and _effective_width(case, 0, {key: b}, [key]) >= upstream.out_width):
+                alt_prefix_needed.append((ci, key, b))
             continue            # 级联网/查无的 wire 不当载体——载体必须稳定可写
         # 有效位宽 = min(声明位宽, 寄存器实际字段位宽)。bindings/data_keys 是单元素 {key}/[key]，
         # 唯一项的索引固定是 0——绝不能传 ci（上游 case 序号），否则 ci>=1 时 _effective_width
@@ -499,6 +509,14 @@ def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
         out["alt_skipped_reason"] = (
             "上游 mux%s 有 %d 个非 RW 载体候选，mode=0 备用分支(item④ RO 线控)无法判别，已跳过 alt 轮"
             % (upstream.group_no, len(alt_cands)))
+    # 没有干净 alt 载体、但 mode=0 源是 logic→mux/级联衔接网(needs-prefix) → 记缺口(M2 可见性)，
+    # 别再像以前那样静默漏掉 mode=0（band_trim 实证：mode=0 源 linectrl_band_sel 是 logic 页输出）。
+    if alt_pick is None and not out["alt_skipped_reason"] and alt_prefix_needed:
+        cand = next((c for c in alt_prefix_needed if _is_linectrl_base(c[2])), alt_prefix_needed[0])
+        out["alt_skipped_reason"] = (
+            "上游 mux%s 的 mode=0 备用载体 %s 是 logic→mux/级联衔接网(force 基名钉不住)——"
+            "配好 scan_rtl 探针前缀后即可生成 mode=0 那半张表(force 该线控网)"
+            % (upstream.group_no, cand[2].base))
 
     # ── ② 上游控制驱到载体 case 的值（递归三来源解析）；alt 载体同算一份上游子值 ──
     carrier_case = upstream.cases[out["carrier_ci"]]
