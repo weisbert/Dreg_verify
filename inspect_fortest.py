@@ -23,7 +23,13 @@ inspect_fortest.py — 摸清 for_test(测试用例)页的真实排版。
         [--span 5]            每个锚点往下连带 dump 多少行(默认 5)
         [--cols 80]           列画像/扫描最多看前多少列(默认 80，T 向量列很多)
         [--rows 10000]        最多扫描多少行(默认 10000)
+        [--groups]            打印测试组目录(每输出一组：组号/行范围/colA case名/输出/期望)
+        [--out-sig 名,名]     对 col D 输出名子串命中的组 dump 完整真值表(含 T 向量)
+        [--raw]               配合 --out-sig：命中组再【原始逐格】dump(col字母=值)——
+                              补 curate 视图漏掉的 colA(case名)/输出行/期望列/空档列/尾部 test 名字行
         [--out 文件]          默认 <excel名>_fortest.txt
+  锁 for_test 完整列排版的推荐命令(回填功能要用)：
+    python inspect_fortest.py 真表.xlsx --groups --out-sig <某输出名> --raw
 
 依赖：openpyxl。仅支持 .xlsx。
 """
@@ -317,14 +323,56 @@ def dump_group_directory(out, grid, groups, maxc):
     out.append("")
     out.append("=" * 72)
     out.append("==== SECTION 3: 测试组目录(每输出一组，共 %d 组) ====" % len(groups))
-    out.append("  组号N | 行范围 | 输入数 | 标记 | 输出(col D) | 期望(col E)")
+    out.append("  组号N | 行范围 | 输入数 | 标记 | colA(case名) | 输出(col D) | 期望(col E)")
     for (s, e) in groups:
         info = _group_info(grid, s, e, maxc)
         tagmark = ("<" + ",".join(sorted(info["tags"])) + ">") if info["tags"] else ""
-        out.append("  N=%-3s 行%d..%d (%d行) 输入%d %-22s 输出=%s 期望=%s"
+        case_a = cell_str(grid[s][COL_A]) if COL_A < len(grid[s]) else ""
+        out.append("  N=%-3s 行%d..%d (%d行) 输入%d %-16s colA=%s 输出=%s 期望=%s"
                    % (info["N"], s + 1, e, e - s, len(info["inputs"]), tagmark,
-                      ";".join(info["out"])[:60] or "(无)",
-                      ";".join(info["exp"])[:40] or "(无)"))
+                      case_a[:24] or "(空)",
+                      ";".join(info["out"])[:50] or "(无)",
+                      ";".join(info["exp"])[:36] or "(无)"))
+
+
+def dump_groups_raw(out, grid, groups, maxc, match_subs, peek=1):
+    """--raw：对匹配组逐行 dump【每个非空单元格 col字母=值】——不做任何过滤/curate。
+    专门补 dump_groups_full 漏掉的东西：col A(case 组名)、输出行(名在 col D 不在 col F)、
+    col E(期望)、空档列 G/H/I/L/M、以及每组最下面那行 per-test 名字。
+    T 向量列(>=O)额外标 T1/T2…；并多看 peek 行越过组尾，便于看清边界/尾部名字行。"""
+    out.append("")
+    out.append("=" * 72)
+    out.append("==== SECTION 5: 命中组【原始逐格】dump (匹配: %s) ====" % match_subs)
+    out.append("  说明：col字母=值；col O 起的 T 向量列额外标 (T1)(T2)…。空格不显示。")
+    hit = 0
+    for (s, e) in groups:
+        info = _group_info(grid, s, e, maxc)
+        outname = ";".join(info["out"]).lower()
+        if not any(sub in outname for sub in match_subs):
+            continue
+        hit += 1
+        out.append("")
+        out.append("-" * 72)
+        out.append("【组 N=%s  行 %d..%d (%d行)】 输出=%s"
+                   % (info["N"], s + 1, e, e - s, ";".join(info["out"]) or "(无)"))
+        for r in range(s, min(e + peek, len(grid))):
+            mark = "  ←下一组起/越界" if r >= e else ""
+            cells = []
+            for c in range(maxc):
+                v = grid[r][c] if c < len(grid[r]) else None
+                if is_blank(v):
+                    continue
+                letter = get_column_letter(c + 1)
+                if c >= T_START:
+                    cells.append("%s(T%d)=%s" % (letter, c - T_START + 1, cell_str(v, 30)))
+                else:
+                    cells.append("%s=%s" % (letter, cell_str(v, 40)))
+            out.append("  [row %d]%s %s" % (r + 1, mark, " | ".join(cells) if cells else "(整行空)"))
+    if hit == 0:
+        out.append("  ⚠ 没有 col D 输出名匹配 %s 的组。" % match_subs)
+    else:
+        out.append("")
+        out.append("(共 raw dump %d 组)" % hit)
 
 
 def dump_groups_full(out, grid, groups, maxc, match_subs):
@@ -375,6 +423,9 @@ def main():
     ap.add_argument("--out-sig", default="",
                     help="逗号分隔的输出名子串(对 col D)；命中组 dump 完整真值表(含 T 向量)。"
                          "如 --out-sig mixer2g_trim,mixer5g_trim")
+    ap.add_argument("--raw", action="store_true",
+                    help="配合 --out-sig：命中组再做【原始逐格】dump(每个非空单元格 col字母=值)，"
+                         "补 curate 视图漏掉的 col A(case名)/输出行/期望列/空档列 G-M/尾部 test 名字行")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -427,6 +478,11 @@ def main():
             dump_group_directory(out, grid, groups, maxc)
         if match_subs:
             dump_groups_full(out, grid, groups, maxc, match_subs)
+            if args.raw:
+                dump_groups_raw(out, grid, groups, maxc, match_subs)
+        elif args.raw:
+            out.append("")
+            out.append("⚠ --raw 需配合 --out-sig 指定要逐格 dump 哪些组(否则全表过大)。")
 
     wb.close()
     out_path = args.out if args.out else os.path.splitext(args.excel)[0] + "_fortest.txt"
