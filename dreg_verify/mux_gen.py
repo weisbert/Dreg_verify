@@ -985,7 +985,7 @@ def make_mux_vectors(group, expansion, mode="min", max_tests=256, data_overrides
             return True
         assignments = _path_assignments(path, alt_path, cv, widths, data_keys, values)
         vectors.append(V.TestVector(state["idx"], assignments, values[ci] & out_mask,
-                                    group.out_width, note=note))
+                                    group.out_width, note=note, case_index=ci))
         state["idx"] += 1
         return True
 
@@ -1197,7 +1197,7 @@ def _make_general_vectors(group, expansion, mode, max_tests, data_overrides=None
                 return True
             by_base[b.base.lower()] = v
         vectors.append(V.TestVector(state["idx"], assignments, vals[ci] & out_mask,
-                                    group.out_width, note=note))
+                                    group.out_width, note=note, case_index=ci))
         state["idx"] += 1
         return True
 

@@ -19,11 +19,15 @@ from . import expr as E
 class TestVector:
     def __init__(self, index, assignments, exp_value, exp_width,
                  is_negative=False, neg_value=None, neg_mode=None, note="", name=None,
-                 designer_expected=None):
+                 designer_expected=None, case_index=None):
         self.index = index                  # T 编号(默认命名 T<index> 用)
         self.assignments = assignments       # {字母: int}
         self.exp_value = exp_value           # auto_out：程序按表达式算出的期望值
         self.exp_width = exp_width
+        # mux 向量：它路由的 case 序号(与 expansion['data_keys']/group.cases 对齐)。
+        # 用户手编 mux 测试列(第二十八轮)据此重算 auto_out=该 case 路由源的值
+        # (= assignments[data_keys[case_index]])，无需复跑选路逻辑。logic 向量为 None。
+        self.case_index = case_index
         self.is_negative = is_negative
         self.neg_value = neg_value           # 负向时实际写入断言的(错误)期望
         self.neg_mode = neg_mode
@@ -288,6 +292,7 @@ def make_negative(vec, mode="invert", fixed_value=None):
         exp_value=correct, exp_width=w,
         is_negative=True, neg_value=wrong, neg_mode=mode,
         note="故意填错期望值(%s)，此断言预期应 FAIL，用于自检 checker 能否抓错" % mode,
+        case_index=vec.case_index,    # 保留路由 case：负向列/由负向再转正向(加正向列)时 auto_out 仍可重算
     )
 
 
@@ -304,6 +309,20 @@ def add_negatives(vectors, mode="invert", which="first", fixed_value=None):
     for vec in targets:
         out.append(make_negative(vec, mode=mode, fixed_value=fixed_value))
     return out
+
+
+def clone_vector(v):
+    """拷贝一条 TestVector（assignments/列表属性新建）。注入用户手编 mux 列时用——
+    build/report 会重排 index、可能追加负向，克隆避免改到 GUI 持有的原对象。"""
+    nv = TestVector(v.index, dict(v.assignments), v.exp_value, v.exp_width,
+                    is_negative=v.is_negative, neg_value=v.neg_value, neg_mode=v.neg_mode,
+                    note=v.note, name=v.name, designer_expected=v.designer_expected,
+                    case_index=v.case_index)
+    nv.dft_pitch = v.dft_pitch
+    nv.extra_forces = list(v.extra_forces)
+    nv.release_nets = list(v.release_nets)
+    nv.restore_forces = list(v.restore_forces)
+    return nv
 
 
 # ───────────────────────────── 测试项编辑辅助（GUI 逐输入表格用） ─────────────────────────────

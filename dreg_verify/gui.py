@@ -115,6 +115,46 @@ def _deserialize_rows(rows_json):
     return out
 
 
+def _serialize_mux_vecs(vecs):
+    """mux 用户手编/复制/负向列(TestVector) → 可 JSON 化结构（第二十八轮）。
+    存 assignments(取值) + auto_out/期望/负向错值 + case_index(路由 case) + 名字。"""
+    out = []
+    for v in vecs or []:
+        out.append({
+            "assignments": {str(k): int(x) for k, x in v.assignments.items()},
+            "exp_value": int(v.exp_value), "exp_width": int(v.exp_width),
+            "is_negative": bool(v.is_negative),
+            "neg_value": None if v.neg_value is None else int(v.neg_value),
+            "neg_mode": v.neg_mode,
+            "name": v.name, "note": v.note or "",
+            "designer_expected": None if v.designer_expected is None else int(v.designer_expected),
+            "case_index": None if v.case_index is None else int(v.case_index),
+        })
+    return out
+
+
+def _deserialize_mux_vecs(lst):
+    """JSON 结构 → mux 用户列 TestVector 列表（损坏项跳过，不崩——每次加载 Excel 都跑）。"""
+    out = []
+    for d in (lst or []):
+        if not isinstance(d, dict):
+            continue
+        try:
+            assigns = {str(k): int(x) for k, x in (d.get("assignments") or {}).items()}
+            v = V.TestVector(0, assigns, int(d.get("exp_value", 0)), int(d.get("exp_width", 1)),
+                             is_negative=bool(d.get("is_negative")),
+                             neg_value=None if d.get("neg_value") is None else int(d["neg_value"]),
+                             neg_mode=d.get("neg_mode"),
+                             note=d.get("note", "") or "", name=d.get("name"),
+                             designer_expected=None if d.get("designer_expected") is None
+                             else int(d["designer_expected"]),
+                             case_index=None if d.get("case_index") is None else int(d["case_index"]))
+        except (ValueError, TypeError):
+            continue
+        out.append(v)
+    return out
+
+
 def _load_settings():
     """读取持久化配置(上次的 Excel、上次的导出选项等)。返回 dict。"""
     try:
@@ -208,6 +248,7 @@ HL_NEG_BG = QtGui.QColor("#ffdca0")     # 负向列又被选中：琥珀+高亮�
 DSGN_BG = QtGui.QColor("#e2f2e2")       # 已手填且 == auto_out（绿：designer 审过且与表达式一致）
 DIFF_BG = QtGui.QColor("#ffd9d9")       # 已手填但 != auto_out（红：表达式可能与 designer 意图不符）
 FB_FG = QtGui.QColor("#999999")         # 未手填（灰字显示兜底的 auto_out 值）
+USER_BG = QtGui.QColor("#eef3fb")       # mux 用户手编/复制列（第二十八轮）的整列淡底色，与自动生成列区分
 
 # 「级联 ?」内置帮助的兜底内容：仓库根目录的 级联模式说明.md 缺失时显示(正常显示完整 .md)
 CASCADE_DOC_FALLBACK = """\
@@ -347,8 +388,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # logic 的清空走 _edited[name]["rows"]=[]（空 override → build 跳过给原因）。两者都随桶存盘/导入导出。
         self._mux_dropped = {}
         self._mux_cleared = set()
-        self._ti_mux_data_rows = {}   # 当前 mux 表里可手填数据行 row -> (物理基名小写, 位宽)
-        self._ti_mux_vecs = []    # 当前 mux 信号的向量（期望行编辑时对号入座）
+        # mux 用户手编/复制的测试列（第二十八轮，mux 与 logic 平级）：{信号名小写: [TestVector]}。
+        # 自动生成列只能删/改值/改期望；用户列是【新增】的(加正向列/复制列/逐case加负向)，可改名。
+        # 每条 vec 的 case_index 标它路由的 case → auto_out=该 case 路由源值(改数据值即时重算)。
+        # 经 GenOptions.mux_user_vecs 注入 build/report；随桶存盘/导入导出。
+        self._mux_user_vecs = {}
+        self._ti_mux_data_rows = {}   # 当前 mux 表里可手填数据行 row -> (物理基名小写, 位宽, 绑定键)
+        self._ti_mux_vecs = []    # 当前 mux 信号的向量（生成列 + 用户列；期望行编辑时对号入座）
+        self._ti_mux_user_start = 1 << 30  # 当前 mux 表里用户列的起始列号(>=此=用户手编列，可编辑/改名)
         self._ti_mux_exp_row = -1 # 当前 mux 表里"期望"行的行号
         # 真值表列宽：用户手动拖过 → 重建表格时保留手动宽度(换信号才恢复自动)
         self._ti_user_widths = False
@@ -659,11 +706,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ti_btns[text] = b
             self._ti_btn_tips[text] = tip       # 存原 tooltip，选回 logic 信号时恢复
             bar.addWidget(b)
-        # 选 mux 信号时置灰的按钮：这些没有 mux 分支（点了只会弹"先选信号"=误导，见 _set_ti_buttons_for_mux）。
-        # mux 也支持的(第二十六轮加「删除列/清空本信号」、「重新生成」给 mux 当撤销；
-        # 第二十八轮加「导出CSV」给 mux)：保持可用。
-        self._ti_mux_enabled_btns = ("auto→期望", "预览本信号.sv", "删除列", "清空本信号", "重新生成",
-                                     "导出CSV")
+        # 第二十八轮：mux 与 logic 平级——全部列编辑按钮都给了 mux 分支(加正向列=按 case 加用户列、
+        # 复制列/重命名列/逐 case 加负向/全部加负向/删负向/导出CSV)，故 mux 选中时【全部可用】，
+        # 不再有"无 mux 分支"的置灰按钮。_ti_mux_disabled_btns 留空(保留机制以备将来)。
+        self._ti_mux_enabled_btns = tuple(self._ti_btns.keys())
         self._ti_mux_disabled_btns = [t for t in self._ti_btns
                                       if t not in self._ti_mux_enabled_btns]
         lay.addWidget(bar_box)
@@ -1003,6 +1049,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mux_data = {}
         self._mux_dropped = {}
         self._mux_cleared = set()
+        self._mux_user_vecs = {}        # ★必须随换表清空：恢复用 .extend，不清会跨表叠加/泄漏到错的桶
         # 编辑持久化按"已加载"的 Excel 路径分桶（不能用 path_edit 实时文本——
         # 用户改了路径还没点加载时，编辑仍属于旧表）
         self._loaded_excel_path = path
@@ -1280,14 +1327,35 @@ class MainWindow(QtWidgets.QMainWindow):
         # mux 信号：负向不走编辑器 override（无表达式可编辑），勾选状态在生成时经 neg_signals 生效。
         # 记进 _mux_neg 并存盘——否则关 GUI 重开后 mux 负向勾选会丢(这正是用户碰到的 bug)。
         if isinstance(sig, excel_model.MuxGroup):
+            name_low = sig.out_name.lower()
             want_mux = item.checkState() == QtCore.Qt.Checked
             if want_mux:
-                self._mux_neg.add(sig.out_name.lower())
-            else:
-                self._mux_neg.discard(sig.out_name.lower())
+                self._mux_neg.add(name_low)
+                self._persist_edits()
+                self.status.showMessage("%s（mux）已标记负向——生成时追加 1 条故意填错的自检断言(_NEG)"
+                                        % sig.out_name)
+                return
+            # 取消勾选 = 本信号不要负向：清整信号标记 + 删用户手编负向列(有手编负向先确认防误删)。
+            user_negs = [v for v in self._mux_user_vecs.get(name_low, []) if v.is_negative]
+            if user_negs and QtWidgets.QMessageBox.question(
+                    self, "确认取消负向",
+                    "%s 有 %d 条手编负向列，取消勾选会一并删除。确定？" % (sig.out_name, len(user_negs))
+                    ) != QtWidgets.QMessageBox.Yes:
+                self._set_left_neg_check(sig, True)        # 用户放弃 → 因仍有负向，勾选恢复
+                return
+            self._mux_neg.discard(name_low)
+            if user_negs:
+                kept = [v for v in self._mux_user_vecs.get(name_low, []) if not v.is_negative]
+                if kept:
+                    self._mux_user_vecs[name_low] = kept
+                else:
+                    self._mux_user_vecs.pop(name_low, None)
+                if getattr(self, "_ti_mux_sig", None) is sig:   # 正看该信号 → 重渲编辑器去掉 _NEG 列
+                    self._load_mux_test_items(sig)
             self._persist_edits()
-            self.status.showMessage("%s（mux）已%s负向——生成时追加 1 条故意填错的自检断言(_NEG)"
-                                    % (sig.out_name, "标记" if want_mux else "清除"))
+            self.status.showMessage("%s（mux）已清除负向%s"
+                                    % (sig.out_name,
+                                       "(含 %d 条手编负向列)" % len(user_negs) if user_negs else ""))
             return
         name_low = sig.out_name.lower()
         want = item.checkState() == QtCore.Qt.Checked
@@ -1718,23 +1786,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_test_items(sig)
 
     # ───────────── 测试项编辑器 ─────────────
+    # 选 mux 信号时若干列编辑按钮的 tooltip 换成 mux 语义说明（第二十八轮 mux 与 logic 平级，全部可用，
+    # 但 mux 的"加列/复制/负向"是按 case 走、不是按表达式输入，故 tooltip 单独说明；选 logic 恢复原文）。
+    _MUX_BTN_TIPS = {
+        "加正向列": "mux：基于当前选中列的 case 新增一条【用户列】(双击数据行改本列取值，auto_out 随路由源重算；可改名)",
+        "复制列": "mux：把当前列整列克隆成一条用户列(数据值/期望一并带走，可改名)",
+        "重命名列…": "mux：给你新增的【用户列】改名(自动生成列名不可改，与 logic 的 T0/T1 同规则)",
+        "加负向(选中)": "mux：给选中列各加一条负向【用户列】(错值=路由源取反，显示为 _NEG 列)",
+        "全部用例加负向": "mux：给每条正向列(自动+用户)各加一条负向用户列",
+        "删负向": "mux：删掉本信号全部负向用户列 + 清整信号负向标记(左表)",
+        "导出CSV": "把本 mux 信号测试项导出为真值表 CSV(Excel 可开)",
+    }
+
     def _set_ti_buttons_for_mux(self, is_mux):
-        """选 mux 信号 → 置灰对 mux 无意义的列结构/CSV 按钮 + 给准确 tooltip（避免点了只弹"先选信号"=误导）；
-        选 logic 信号或无信号 → 恢复可用 + 原 tooltip。根因：mux 走 _ti_mux_sig、_ti_sig=None，
-        这些 on_ti_* 都在开头 `if not self._ti_sig` 直接返回，按钮看着能点其实没反应。"""
+        """第二十八轮起 mux 与 logic 平级：全部列编辑按钮都有 mux 分支 → mux 选中时【全部可用】，
+        只把"加列/复制/负向"等的 tooltip 换成 mux 语义说明；选 logic/无信号恢复原 tooltip。"""
         btns = getattr(self, "_ti_btns", None)
         if not btns:
             return
-        mux_tip = ("mux 测试项由 case 结构自动生成、整列只读：\n"
-                   "  · 改选哪条路 / 几条 case → 改 Excel mux 页，或切「覆盖度」\n"
-                   "  · 负向 → 用左侧信号表的「负向」勾选\n"
-                   "  · 「期望」行可双击手填；数据值可双击编辑")
-        for t in getattr(self, "_ti_mux_disabled_btns", []):
-            b = btns.get(t)
-            if b is None:
-                continue
-            b.setEnabled(not is_mux)
-            b.setToolTip(mux_tip if is_mux else self._ti_btn_tips.get(t, ""))
+        for t, b in btns.items():
+            b.setEnabled(True)
+            if is_mux and t in self._MUX_BTN_TIPS:
+                b.setToolTip(self._MUX_BTN_TIPS[t])
+            else:
+                b.setToolTip(self._ti_btn_tips.get(t, b.toolTip()))
 
     def _clear_test_items(self, header_text):
         self._ti_sig = None; self._ti_node = None
@@ -1744,6 +1819,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_name_low = None
         self._ti_hl_col = -1
         self._ti_mux_vecs = []; self._ti_mux_exp_row = -1   # mux 期望编辑状态一并清(防陈旧引用)
+        self._ti_mux_user_start = 1 << 30                   # 用户列起始(无信号=无用户列)
         self._ti_mux_exp = None                             # mux 展开缓存(导出CSV/用户向量复用)
         self._set_ti_buttons_for_mux(False)                 # 无信号：列编辑按钮恢复可用(原行为)
         self._set_sig_cov_combo(None)                       # 无信号：单点覆盖下拉禁用并复位
@@ -1864,8 +1940,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # 已手填的期望按输入取值键回填到向量（与生成/报告同一逻辑）
         generator.apply_mux_expected(vecs, self._mux_expected.get(grp.out_name.lower()))
-        self._ti_mux_vecs = vecs
         used = exp["used_vars"]
+        # 追加用户手编/复制的测试列（第二十八轮，mux 与 logic 平级）：放自动生成列之后，
+        # 列号 >= gen_n = 用户列(可编辑本列数据/改名)。正向用户列按 case_index 重算 auto_out=路由源值
+        # (与当前展开一致)；负向用户列原样保留(改错值)。
+        gen_n = len(vecs)
+        for uv in self._mux_user_vecs.get(name_low, []):
+            if not uv.is_negative:
+                self._recompute_mux_user_exp(uv, grp, exp)
+            vecs.append(uv)
+        self._ti_mux_user_start = gen_n
+        self._ti_mux_vecs = vecs
         self._ti_mux_exp_row = len(used) + 1
         self._update_mux_header(grp, vecs, mux_mode, meta)
         if meta.get("override_collision"):     # B2：手填值撞值（非阻断，用户负责）
@@ -1880,8 +1965,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_table.setRowCount(len(used) + 2)
             vlabels = []
             data_key_set = set(exp.get("data_keys", []))   # 真·数据输入（d:*）；控制/上游配方键不在内
-            self._ti_mux_data_rows = {}                     # 可手填数据行 row -> (物理基名小写, 位宽)
+            self._ti_mux_data_rows = {}                     # 可手填数据行 row -> (物理基名小写, 位宽, 绑定键)
             ov_bases = set((data_ov or {}).keys())
+            ustart = self._ti_mux_user_start
             for ri, key in enumerate(used):
                 b = exp["bindings"][key]
                 is_data = key in data_key_set               # 只有真数据输入可手填（控制/级联配方只读）
@@ -1890,10 +1976,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 for ci, v in enumerate(vecs):
                     val = v.assignments.get(key, 0)
                     it = QtWidgets.QTableWidgetItem(self._cell_text(val, b.width))
-                    if is_data and base_low:                # B2：数据行可双击手填（按物理寄存器）
+                    is_user = ci >= ustart
+                    # 数据行可手填；负向列输入只读(负向=同输入·改错值)。
+                    # 用户列：改【本列】该数据源(auto_out 随路由源值重算)；自动列：按物理寄存器 by_base 同步。
+                    if is_data and base_low and not v.is_negative:
                         it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
                                     | QtCore.Qt.ItemIsEditable)
-                        if base_low in ov_bases:            # 已手填：加粗+底色，与"已填期望"呼应
+                        if is_user:
+                            it.setBackground(USER_BG)
+                            it.setToolTip("用户手编列：双击改【本列】该数据源的值(只影响这一列)。\n"
+                                          "auto_out 随路由 case(case_index)的源值重算。")
+                        elif base_low in ov_bases:          # 已手填：加粗+底色，与"已填期望"呼应
                             it.setBackground(DSGN_BG)
                             f = it.font(); f.setBold(True); it.setFont(f)
                             it.setToolTip("手填数据值(替换自动互异/标记值)。清空可恢复自动；"
@@ -1903,10 +1996,12 @@ class MainWindow(QtWidgets.QMainWindow):
                                           "按物理寄存器(%s)生效、整行同步；两路撞值会提示假绿(你负责)。"
                                           % b.base)
                     else:
-                        it.setFlags(QtCore.Qt.ItemIsEnabled)        # 控制/级联配方行只读
+                        it.setFlags(QtCore.Qt.ItemIsEnabled)        # 控制/级联配方行 + 负向列输入只读
+                        if is_user:
+                            it.setBackground(USER_BG)               # 用户列整列着色(含只读的控制行)
                     self.ti_table.setItem(ri, ci, it)
                 if is_data and base_low:
-                    self._ti_mux_data_rows[ri] = (base_low, b.width)
+                    self._ti_mux_data_rows[ri] = (base_low, b.width, key)
             # auto_out 行(只读) + 期望 行(可手填)——与 logic 编辑器同语义/同配色
             vlabels.append("auto_out")
             vlabels.append("期望(进.sv)")
@@ -1949,17 +2044,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_header.setText(self.ti_header.text() + "　|　⚙ " + snote)
 
     def _render_mux_exp_col(self, ci, n_inputs):
-        """渲染 mux 表第 ci 列的 auto_out + 期望 两格（手填状态变化时单列重绘）。"""
+        """渲染 mux 表第 ci 列的 auto_out + 期望 两格（手填状态变化时单列重绘）。
+        用户负向列（第二十八轮）：auto_out 行仍显路由源的正确值(只读参考)，「期望」行=故意填错的错值(可改)。"""
         v = self._ti_mux_vecs[ci]
+        is_user = ci >= getattr(self, "_ti_mux_user_start", 1 << 30)
         de = v.designer_expected
         # auto_out 格（只读）
         autoit = QtWidgets.QTableWidgetItem(W.fmt_bin(v.exp_value, v.exp_width))
         autoit.setFlags(QtCore.Qt.ItemIsEnabled)
         fa = autoit.font(); fa.setItalic(True); autoit.setFont(fa)
         autoit.setForeground(QtGui.QColor("#555555"))
+        if is_user:
+            autoit.setBackground(USER_BG)
         autoit.setToolTip("auto_out：程序按 case 结构算出的值（只读参考）。\n"
                           ".sv 断言对比的是下面 designer 手填的「期望」(未填→兜底用此值)。")
         self.ti_table.setItem(n_inputs, ci, autoit)
+        # 用户负向列：期望格 = 故意填错的错值(琥珀，可改)；auto_out 仍是正确值供对照
+        if v.is_negative:
+            negit = QtWidgets.QTableWidgetItem(W.fmt_bin(v.asserted_value, v.exp_width))
+            negit.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
+                           | QtCore.Qt.ItemIsEditable)
+            negit.setForeground(NEG_FG)
+            negit.setToolTip("负向(故意填错)：.sv 断言用此【错值】，仿真应 FAIL=负向生效。\n"
+                             "双击改错值；清空=恢复默认(正确值取反)。")
+            self.ti_table.setItem(n_inputs + 1, ci, negit)
+            return
         # 期望 格（可手填；显示语义与 logic 编辑器一致：未填=空白灰、一致=绿、不一致=红）
         exp_text = "" if de is None else W.fmt_bin(de, v.exp_width)
         expit = QtWidgets.QTableWidgetItem(exp_text)
@@ -2108,7 +2217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         checked = self._collect_checked()    # 信号勾选(哪些输出参与生成)——第二十六轮起也存盘+启动恢复
         # 单点覆盖度【不进桶】——它是会话内临时档，存盘会被静默恢复、暗中盖过全局下拉(用户实测 bug)。
         has_edits = bool(self._edited or self._mux_expected or self._mux_neg or self._mux_data
-                         or self._mux_dropped or self._mux_cleared)
+                         or self._mux_dropped or self._mux_cleared or self._mux_user_vecs)
         if has_edits or checked:
             allbuckets[path] = {
                 "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
@@ -2122,6 +2231,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 # mux 删除的个别测试列(签名) / 一键清空的整组(第二十六轮)
                 "mux_dropped": {name: sorted(s) for name, s in self._mux_dropped.items() if s},
                 "mux_cleared": sorted(self._mux_cleared),
+                # mux 用户手编/复制/负向列（第二十八轮）：{信号名: [序列化 TestVector]}
+                "mux_user_vecs": {name: _serialize_mux_vecs(vv)
+                                  for name, vv in self._mux_user_vecs.items() if vv},
                 # 信号勾选：原样信号名(保留大小写，恢复时按小写匹配)
                 "signals_checked": checked,
             }
@@ -2157,7 +2269,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if sig is None:
                     continue
                 if isinstance(sig, excel_model.MuxGroup):
-                    checked = sig.out_name.lower() in self._mux_neg
+                    # 有负向就勾：整信号负向标记 OR 用户逐 case 负向列(第二十八轮)——否则左表会误示"无负向"
+                    checked = (sig.out_name.lower() in self._mux_neg
+                               or self._mux_has_user_neg(sig.out_name.lower()))
                 else:
                     checked = self._signal_has_negative(sig.out_name.lower())
                 cell = self.table.item(r, COL_NEG)
@@ -2235,6 +2349,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 n_restored += 1
             else:
                 missing.append(name_low + "（mux 清空：mux 页不存在）")
+        # mux 用户手编/复制/负向列（第二十八轮）：仍在 mux 页的才恢复（损坏项 _deserialize 内部跳过）
+        for name_low, vlst in (bucket.get("mux_user_vecs") or {}).items():
+            if name_low not in mux_by_name:
+                missing.append(name_low + "（mux 用户列：mux 页不存在）")
+                continue
+            uv = _deserialize_mux_vecs(vlst)
+            if uv:
+                self._mux_user_vecs[name_low] = uv   # 赋值(非 extend)：恢复=权威状态，二次调用不叠加
+                n_restored += 1
         # 单点覆盖度【不恢复】——会话内临时档，旧桶里残留的 sig_cov 一律忽略(见 _persist_edits 注释)。
         return n_restored, missing
 
@@ -2261,6 +2384,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "mux_data": {name: dict(d) for name, d in self._mux_data.items() if d},
             "mux_dropped": {name: sorted(s) for name, s in self._mux_dropped.items() if s},
             "mux_cleared": sorted(self._mux_cleared),
+            "mux_user_vecs": {name: _serialize_mux_vecs(vv)
+                              for name, vv in self._mux_user_vecs.items() if vv},
         }
 
     def _apply_global_settings(self, g):
@@ -2295,7 +2420,7 @@ class MainWindow(QtWidgets.QMainWindow):
         不碰已加载的 wb/signals/解析画像——只清用户配置层。"""
         self._edited = {}; self._customized = set(); self._neg_only = {}
         self._mux_expected = {}; self._mux_neg = set(); self._mux_data = {}
-        self._mux_dropped = {}; self._mux_cleared = set()
+        self._mux_dropped = {}; self._mux_cleared = set(); self._mux_user_vecs = {}
         self._sig_cov = {}
         self._probe_prefixes = {}; self._force_signals = set()
 
@@ -2863,7 +2988,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._ti_loading:
             return
         if not self._ti_sig:
-            # mux 信号：数据行手填（B2，按物理基名）/「期望」行手填（按输入取值键）
+            # mux 信号：先按列分流——用户手编列(>= _ti_mux_user_start)走本列编辑，自动生成列走原 by-base/取值键。
+            if item.column() >= getattr(self, "_ti_mux_user_start", 1 << 30):
+                if item.row() == self._ti_mux_exp_row:
+                    self._on_mux_user_exp_changed(item)
+                elif item.row() in getattr(self, "_ti_mux_data_rows", {}):
+                    self._on_mux_user_data_changed(item)
+                return
+            # 自动生成列：数据行手填（B2，按物理基名）/「期望」行手填（按输入取值键）
             if item.row() in getattr(self, "_ti_mux_data_rows", {}):
                 self._on_mux_data_changed(item)
             else:
@@ -2940,7 +3072,7 @@ class MainWindow(QtWidgets.QMainWindow):
         grp = getattr(self, "_ti_mux_sig", None)
         if grp is None or item.row() not in self._ti_mux_data_rows:
             return
-        base_low, width = self._ti_mux_data_rows[item.row()]
+        base_low, width, _key = self._ti_mux_data_rows[item.row()]
         name_low = grp.out_name.lower()
         try:
             txt = item.text().strip()
@@ -2965,7 +3097,175 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         self.status.showMessage("已手填 mux 数据值（物理寄存器 %s）并按 by_base 同步；清空可恢复自动" % base_low)
 
+    # ───────────── mux 用户手编列（第二十八轮，mux 与 logic 平级）─────────────
+    def _recompute_mux_user_exp(self, vec, grp, exp=None):
+        """重算用户正向列的 auto_out = 它路由 case(case_index) 的数据源值。
+        无需复跑选路：vec 克隆自某真实 case，case_index 即路由 case，data_keys[ci] 即路由源键。"""
+        exp = exp or getattr(self, "_ti_mux_exp", None)
+        out_w = grp.out_width or 1
+        ci = getattr(vec, "case_index", None)
+        dkeys = (exp or {}).get("data_keys") or []
+        if ci is not None and 0 <= ci < len(dkeys):
+            vec.exp_value = vec.assignments.get(dkeys[ci], 0) & E.mask(out_w)
+
+    def _unique_mux_user_name(self, name_low, prefix="U"):
+        """给用户列起一个不与现有列(自动 T<n> / 已有用户名)冲突的名字 U1/U2…。"""
+        taken = set()
+        for v in (self._ti_mux_vecs or []):
+            taken.add((v.name or "").upper())
+            taken.add(W.test_label(v).upper())
+        for v in self._mux_user_vecs.get(name_low, []):
+            taken.add((v.name or "").upper())
+        k = 1
+        while ("%s%d" % (prefix, k)).upper() in taken:
+            k += 1
+        return "%s%d" % (prefix, k)
+
+    def _add_mux_user_vec(self, grp, vec):
+        """把一条用户 vec 收进 _mux_user_vecs[name] + 落盘 + 整表重渲（注入经 build/report 生效）。"""
+        name_low = grp.out_name.lower()
+        self._mux_user_vecs.setdefault(name_low, []).append(vec)
+        self._persist_edits()
+        self._load_mux_test_items(grp)
+
+    def _mux_src_vec_for_col(self, c):
+        """取第 c 列对应的 vec（用户加列/复制列/加负向的克隆源）；越界则取首列。"""
+        vecs = self._ti_mux_vecs
+        if not vecs:
+            return None
+        if not (0 <= c < len(vecs)):
+            c = 0
+        return vecs[c]
+
+    def _mux_add_col(self, grp):
+        """加正向列(mux)：克隆当前选中列的 case(控制+数据)为一条【新】用户正向列，可改名/改本列数据值。
+        mux 没有自由控制位空间——一列必须路由一条真实 case，故以选中列的 case 为基(默认首列)。"""
+        src = self._mux_src_vec_for_col(self.ti_table.currentColumn())
+        if src is None:
+            QtWidgets.QMessageBox.information(self, "提示", "本 mux 信号没有可作基准的测试列")
+            return
+        name_low = grp.out_name.lower()
+        nv = V.clone_vector(src)
+        nv.is_negative = False; nv.neg_value = None; nv.neg_mode = None
+        nv.designer_expected = None                       # 新列默认未填期望(auto_out 兜底)
+        nv.name = self._unique_mux_user_name(name_low)
+        nv.note = "用户手编(mux)"
+        self._recompute_mux_user_exp(nv, grp)
+        self._add_mux_user_vec(grp, nv)
+        self.status.showMessage("已加一条 mux 正向列 %s（基于 case「%s」；双击数据行改本列取值/双击列头改名）"
+                                % (nv.name, getattr(grp.cases[nv.case_index], "case_raw", "?")
+                                   if nv.case_index is not None and nv.case_index < len(grp.cases) else "?"))
+
+    def _mux_copy_col(self, grp):
+        """复制列(mux)：把当前选中列(自动或用户)整列克隆为一条用户列(数据值/期望一并带走，改名)。"""
+        c = self.ti_table.currentColumn()
+        if not (0 <= c < len(self._ti_mux_vecs)):
+            QtWidgets.QMessageBox.information(self, "提示", "请先选中要复制的测试列")
+            return
+        name_low = grp.out_name.lower()
+        nv = V.clone_vector(self._ti_mux_vecs[c])
+        nv.name = self._unique_mux_user_name(name_low)    # 不复制原名(避免 .sv 标号冲突)
+        nv.note = "用户复制(mux)"
+        self._add_mux_user_vec(grp, nv)
+        self.status.showMessage("已复制为 mux 用户列 %s" % nv.name)
+
+    def _mux_add_neg(self, grp, cols):
+        """加负向(mux)：给指定列(正向)各克隆一条负向用户列(错值=路由源取反)；已存在相同负向则跳过。"""
+        vecs = self._ti_mux_vecs
+        name_low = grp.out_name.lower()
+        out_w = grp.out_width or 1
+        existing = {(tuple(sorted(v.assignments.items())), v.neg_value)
+                    for v in self._mux_user_vecs.get(name_low, []) if v.is_negative}
+        added = skipped = 0
+        for c in cols:
+            if not (0 <= c < len(vecs)) or vecs[c].is_negative:
+                continue
+            nv = V.make_negative(V.clone_vector(vecs[c]))
+            key = (tuple(sorted(nv.assignments.items())), nv.neg_value)
+            if key in existing:
+                skipped += 1
+                continue
+            existing.add(key)
+            nv.name = self._unique_mux_user_name(name_low)
+            nv.note = "用户负向(mux)"
+            self._mux_user_vecs.setdefault(name_low, []).append(nv)
+            added += 1
+        if not added:
+            self.status.showMessage("选中的列都已有相同负向，未重复添加")
+            return
+        self._persist_edits()
+        self._load_mux_test_items(grp)
+        self._set_left_neg_check(grp, True)      # 左表「负向」指示同步成"有负向"(否则误示无负向)
+        msg = "已为 %s 加 %d 条 mux 负向列" % (grp.out_name, added)
+        if skipped:
+            msg += "；%d 列已有相同负向已跳过" % skipped
+        self.status.showMessage(msg)
+
+    def _on_mux_user_data_changed(self, item):
+        """用户列数据行手填：只改【本列】该绑定键的取值 + 重算 auto_out（路由源值）。"""
+        grp = getattr(self, "_ti_mux_sig", None)
+        c = item.column()
+        vecs = self._ti_mux_vecs
+        info = self._ti_mux_data_rows.get(item.row())
+        if grp is None or info is None or not (self._ti_mux_user_start <= c < len(vecs)):
+            return
+        _base_low, width, key = info
+        vec = vecs[c]
+        try:
+            vec.assignments[key] = self._parse_int(item.text()) & E.mask(width)
+        except ValueError as ex:
+            self.status.showMessage("数值解析失败: %s（已还原）" % ex)
+            self._load_mux_test_items(grp)
+            return
+        self._recompute_mux_user_exp(vec, grp)
+        self._persist_edits()
+        self._load_mux_test_items(grp)
+        self.status.showMessage("已改 mux 用户列数据值（仅本列）；auto_out 已按路由源重算")
+
+    def _on_mux_user_exp_changed(self, item):
+        """用户列「期望」行手填：正向列存 designer_expected；负向列存错值(neg_value)。清空=恢复默认。"""
+        grp = getattr(self, "_ti_mux_sig", None)
+        c = item.column()
+        vecs = self._ti_mux_vecs
+        if grp is None or item.row() != self._ti_mux_exp_row \
+                or not (self._ti_mux_user_start <= c < len(vecs)):
+            return
+        vec = vecs[c]
+        out_w = grp.out_width or 1
+        m = E.mask(out_w)
+        txt = item.text().strip()
+        try:
+            if vec.is_negative:
+                if txt == "":
+                    vec.neg_value = (~vec.exp_value) & m          # 空=恢复默认(正确值取反)
+                else:
+                    wrong = self._parse_int(txt) & m
+                    if wrong == (vec.exp_value & m):              # 错值==正确值→负向必 PASS(无意义)，翻一位逼真错
+                        wrong = (~wrong) & m
+                        if wrong == (vec.exp_value & m):
+                            wrong = wrong ^ 1
+                        self.status.showMessage("负向错值不能等于正确值(否则断言会 PASS)，已自动改成 %s"
+                                                % W.fmt_bin(wrong, out_w))
+                    vec.neg_value = wrong
+            else:
+                vec.designer_expected = None if txt == "" else (self._parse_int(txt) & m)
+        except ValueError as ex:
+            self.status.showMessage("数值解析失败: %s（已还原）" % ex)
+            self._load_mux_test_items(grp)
+            return
+        self._persist_edits()
+        self._ti_loading = True
+        try:
+            self._render_mux_exp_col(c, self._ti_mux_exp_row - 1)
+        finally:
+            self._ti_loading = False
+        self._update_mux_header(grp, vecs, self._sig_cov_collapsed(grp))
+
     def on_ti_add(self):
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:        # mux：加一条用户正向列(基于选中列的 case)
+            self._mux_add_col(grp)
+            return
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
@@ -3040,6 +3340,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_ti_add_neg_selected(self):
         """给选中的测试列各加一条负向(精确控制)；未选中则取首条正向。正向测试不动。
         这是"手挑哪几条加负向"的入口——属手工定制，切换覆盖度时会保留(不被重算冲掉)。"""
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:    # mux：给选中列各加一条用户负向列
+            cols = sorted({i.column() for i in self.ti_table.selectedItems()})
+            if not cols:
+                c = self.ti_table.currentColumn()
+                cols = [c] if c >= 0 else [0]
+            self._mux_add_neg(grp, cols)
+            return
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
@@ -3085,6 +3393,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_ti_add_neg_all(self):
         """每条正向测试各追加一条负向(全覆盖)：复制每条正向为故意填错的副本，正向测试不动。"""
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:    # mux：给每条正向列(自动+用户)各加一条用户负向列
+            pos_cols = [c for c, v in enumerate(self._ti_mux_vecs) if not v.is_negative]
+            if not pos_cols:
+                self.status.showMessage("本 mux 信号没有可作负向来源的正向列")
+                return
+            self._mux_add_neg(grp, pos_cols)
+            return
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
@@ -3096,6 +3412,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_ti_del_neg(self):
         """删除本信号所有负向测试，保留正向。含命名/手填错值的负向先确认(防误删)。"""
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:    # mux：删用户负向列 + 清整信号负向标记(左表)
+            name_low = grp.out_name.lower()
+            user_negs = [v for v in self._mux_user_vecs.get(name_low, []) if v.is_negative]
+            had_flag = name_low in self._mux_neg
+            if not user_negs and not had_flag:
+                self.status.showMessage("%s 没有负向测试可删" % grp.out_name)
+                return
+            kept = [v for v in self._mux_user_vecs.get(name_low, []) if not v.is_negative]
+            if kept:
+                self._mux_user_vecs[name_low] = kept
+            else:
+                self._mux_user_vecs.pop(name_low, None)
+            if had_flag:                            # 整信号负向标记一并清掉
+                self._mux_neg.discard(name_low)
+            self._persist_edits()
+            self._load_mux_test_items(grp)
+            self._set_left_neg_check(grp, False)    # 负向已全删 → 左表指示同步成"无负向"
+            self.status.showMessage("已删除 %s 的全部 mux 负向(用户负向列 %d 条%s)"
+                                    % (grp.out_name, len(user_negs),
+                                       " + 整信号负向标记" if had_flag else ""))
+            return
         if not self._ti_sig:
             return
         if self._signal_has_named_negative(self._ti_name_low):
@@ -3123,8 +3461,47 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.on_ti_rename_col(c)
 
+    def _mux_rename_col(self, grp, col):
+        """改 mux 用户列的名字（自动生成列拒绝，与 logic 的 T0/T1 同规则）。"""
+        import re
+        vecs = self._ti_mux_vecs
+        if not (0 <= col < len(vecs)):
+            return
+        if col < self._ti_mux_user_start:
+            QtWidgets.QMessageBox.information(
+                self, "不可改名", "这是自动生成的 mux 测试列，名字不可改。\n"
+                "只有你新增的用户列(加正向列/复制列/加负向)可以改名。")
+            return
+        vec = vecs[col]
+        cur = vec.name or W.test_label(vec)
+        text, ok = QtWidgets.QInputDialog.getText(self, "重命名 mux 测试列",
+                                                  "新名字(字母/数字/下划线)：", text=cur)
+        if not ok:
+            return
+        nm = self._sanitize_name(text)
+        if not nm:
+            QtWidgets.QMessageBox.warning(self, "改名失败", "名字为空或全是非法字符")
+            return
+        if re.match(r"(?i)^t\d+(_neg)?$", nm):
+            QtWidgets.QMessageBox.warning(self, "改名失败", "名字 %s 与自动测试命名(T<编号>)冲突，请换个名字" % nm)
+            return
+        final = nm + ("_NEG" if vec.is_negative and not nm.upper().endswith("NEG") else "")
+        for j, other in enumerate(vecs):
+            if j != col and W.test_label(other) == final:
+                QtWidgets.QMessageBox.warning(self, "改名失败",
+                                              "名字与列 %s 重复(会造成 .sv 标号冲突)" % final)
+                return
+        vec.name = nm
+        self._persist_edits()
+        self._load_mux_test_items(grp)
+        self.status.showMessage("mux 测试列已改名为 %s" % final)
+
     def on_ti_rename_col(self, col):
         """改第 col 个测试列的名字。仅用户新增的列可改；自动生成的 T0/T1 拒绝。"""
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:    # mux 用户列改名
+            self._mux_rename_col(grp, col)
+            return
         if not self._ti_sig or col < 0 or col >= len(self._ti_rows):
             return
         rd = self._ti_rows[col]
@@ -3164,6 +3541,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return True, final
 
     def on_ti_copy(self):
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:    # mux：整列克隆为用户列(数据值/期望带走，改名)
+            self._mux_copy_col(grp)
+            return
         if not self._ti_sig:
             return
         c = self.ti_table.currentColumn()    # 复制当前选中列(测试)
@@ -3206,7 +3587,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_populate()
 
     def _mux_del_cols(self, grp):
-        """删除选中的 mux 测试列：按向量签名记进 _mux_dropped（build/report/真值表同口径过滤）。"""
+        """删除选中的 mux 测试列：自动生成列 → 记签名进 _mux_dropped(可「重新生成」恢复)；
+        用户手编列 → 从 _mux_user_vecs 按身份直接移除(不经签名，避免与自动列签名混淆)。"""
         cols = sorted({i.column() for i in self.ti_table.selectedItems()})
         if not cols:
             c = self.ti_table.currentColumn()
@@ -3215,17 +3597,26 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "请先选中要删除的 mux 测试列")
             return
         name_low = grp.out_name.lower()
+        ustart = self._ti_mux_user_start
         sigs = self._mux_dropped.setdefault(name_low, set())
+        # 用户列按【对象身份】删（先取出，避免删自动列签名时索引错乱）
+        del_user = [self._ti_mux_vecs[c] for c in cols if ustart <= c < len(self._ti_mux_vecs)]
         n = 0
         for c in cols:
-            if 0 <= c < len(self._ti_mux_vecs):
+            if 0 <= c < ustart:                      # 自动生成列：签名过滤
                 sigs.add(generator.mux_assign_key(self._ti_mux_vecs[c].assignments))
                 n += 1
+        if del_user:
+            cur = self._mux_user_vecs.get(name_low, [])
+            self._mux_user_vecs[name_low] = [v for v in cur if v not in del_user]
+            if not self._mux_user_vecs.get(name_low):
+                self._mux_user_vecs.pop(name_low, None)
+            n += len(del_user)
         if not sigs:
             self._mux_dropped.pop(name_low, None)
         self._persist_edits()
         self._load_mux_test_items(grp)
-        self.status.showMessage("已删除 %s 的 %d 条 mux 测试列（可点「重新生成」恢复默认）" % (grp.out_name, n))
+        self.status.showMessage("已删除 %s 的 %d 条 mux 测试列（自动列可「重新生成」恢复）" % (grp.out_name, n))
 
     def on_ti_clear(self):
         """一键清空当前信号的所有测试 = 零用例（logic：空 override；mux：入 _mux_cleared）。可「重新生成」恢复。"""
@@ -3246,9 +3637,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ti_mark_customized()            # 写 _edited[name]={"rows":[]} + 存盘
             self._ti_populate()
         else:                                     # mux：入 _mux_cleared（零用例，与覆盖度无关）
+            had_neg = (grp.out_name.lower() in self._mux_neg
+                       or self._mux_has_user_neg(grp.out_name.lower()))
             self._mux_cleared.add(grp.out_name.lower())
+            self._mux_user_vecs.pop(grp.out_name.lower(), None)   # 清空连用户手编列一并清(零用例)
             self._persist_edits()
             self._load_mux_test_items(grp)
+            if had_neg:
+                self._set_left_neg_check(grp, False)              # 零用例 → 无负向，左表指示同步
         self.status.showMessage("已清空 %s 的测试（零用例，可点「重新生成」恢复默认）" % name)
 
     def _set_left_neg_check(self, sig, checked):
@@ -3275,12 +3671,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mux_dropped.pop(name_low, None)
             self._mux_expected.pop(name_low, None)
             self._mux_data.pop(name_low, None)
-            if name_low in self._mux_neg:          # mux 负向走左表勾选，一并清掉并同步左表
-                self._mux_neg.discard(name_low)
-                self._set_left_neg_check(grp, False)
+            self._mux_user_vecs.pop(name_low, None)   # 丢弃用户手编/复制/负向列(第二十八轮)
+            self._mux_neg.discard(name_low)        # 整信号负向标记一并清
+            self._set_left_neg_check(grp, False)   # 出厂态无负向 → 左表指示同步
             self._persist_edits()
             self._load_mux_test_items(grp)
-            self.status.showMessage("已重新生成 %s 的 mux 测试项（丢弃自定义：清空/删列/手填期望/数据值/负向）"
+            self.status.showMessage("已重新生成 %s 的 mux 测试项（丢弃自定义：清空/删列/手填期望/数据值/用户列/负向）"
                                     % grp.out_name)
             return
         if not self._ti_sig:
@@ -3400,12 +3796,14 @@ class MainWindow(QtWidgets.QMainWindow):
         used = exp["used_vars"]
         bindings = exp["bindings"]
         data_key_set = set(exp.get("data_keys", []))
-        # 忠于 build：勾了「负向」的 mux 信号在生成时追加负向(which=first，见 generator.build mux 分支)
-        vecs = list(pos)
+        # 忠于 build：克隆(不改 live 的 _ti_mux_vecs 对象)后按 build 同口径补整信号负向(which=first)+
+        # 去重(全局负向与用户逐 case 负向重叠时与 build 一致)+ 重排号。
+        vecs = [V.clone_vector(v) for v in pos]
         if grp.out_name.lower() in self._mux_neg:
             vecs = V.add_negatives(vecs, mode="invert", which="first")
-            for i, v in enumerate(vecs):
-                v.index = i
+        vecs = generator._dedup_negatives(vecs)
+        for i, v in enumerate(vecs):
+            v.index = i
         default = "%s_mux_tests.csv" % (grp.out_base or "mux")
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出本 mux 信号测试项 CSV", default,
                                                         "CSV (*.csv)")
@@ -3536,6 +3934,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # mux 删除/清空（第二十六轮）：删掉的个别测试列(按签名) / 一键清空的整组(零用例)
             mux_dropped={k: sorted(v) for k, v in self._mux_dropped.items() if v},
             mux_cleared=sorted(self._mux_cleared),
+            # mux 用户手编/复制/负向列（第二十八轮）：注入 build/report(make_mux_vectors 之后)，与 logic 平级
+            mux_user_vecs={k: list(v) for k, v in self._mux_user_vecs.items() if v},
             # DFT 观测模式（续②）：产物开头 force iddq 门到透传值，使 _to_dft 输出反映功能值
             dft_observe=(self.dft_observe_chk.isChecked()
                          if hasattr(self, "dft_observe_chk") else False))
@@ -3576,6 +3976,10 @@ class MainWindow(QtWidgets.QMainWindow):
                                    else QtCore.Qt.Unchecked)
         finally:
             self._sig_loading = False
+
+    def _mux_has_user_neg(self, name_low):
+        """该 mux 信号是否有用户手编的负向列（第二十八轮）。"""
+        return any(v.is_negative for v in self._mux_user_vecs.get(name_low, []))
 
     def _mux_neg_checked(self):
         """勾了"负向"列的 mux 信号名（mux 负向经 neg_signals 在生成时追加，不走 override）。"""

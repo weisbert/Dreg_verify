@@ -323,26 +323,25 @@ def test_wl_gui_mux_negatives_persist_across_reload(gui_app, tmp_path, monkeypat
 
 
 # ───────────── ⑧ 第二十轮 B1：mux 编辑器按钮态 + 级联切换重渲 ─────────────
-def test_b1_mux_greys_logic_only_buttons(lpbt_win):
-    """[B1a] 选 mux 信号 → 无 mux 分支的列结构按钮置灰(点了只弹"先选信号"=误导) + 准确 tooltip；
-    有 mux 分支的「auto→期望」「预览本信号.sv」+ 第二十六轮新增的「删除列」「清空本信号」「重新生成」
-    + 第二十八轮新增的「导出CSV」保持可用；切回 logic 信号恢复全可用。"""
+def test_b1_mux_buttons_all_enabled_peer_with_logic(lpbt_win):
+    """[B1a] 第二十八轮 mux 与 logic 平级：选 mux 信号 → 列编辑按钮【全部可用】(不再置灰)，
+    "加列/复制/负向"等的 tooltip 换成 mux 语义说明；切回 logic 恢复原 tooltip。"""
     w = lpbt_win
     mux = next(s for s in w.signals if isinstance(s, excel_model.MuxGroup))
     w._load_test_items(mux)
     assert w._ti_mux_sig is mux and w._ti_sig is None
-    for t in ("加正向列", "复制列", "加负向(选中)",
-              "全部用例加负向", "删负向", "重命名列…"):
-        assert not w._ti_btns[t].isEnabled(), t
-        assert "case 结构" in w._ti_btns[t].toolTip(), t      # 准确说明，不是"先选信号"
-    for t in ("auto→期望", "预览本信号.sv", "删除列", "清空本信号", "重新生成", "导出CSV"):
-        assert w._ti_btns[t].isEnabled(), t                  # 有 mux 分支 → 保持可用
+    for t in ("加正向列", "复制列", "重命名列…", "加负向(选中)",
+              "全部用例加负向", "删负向", "导出CSV", "auto→期望", "预览本信号.sv",
+              "删除列", "清空本信号", "重新生成"):
+        assert w._ti_btns[t].isEnabled(), t                  # 全部可用
+    assert "mux" in w._ti_btns["加正向列"].toolTip()          # mux 语义 tooltip
+    assert "case" in w._ti_btns["加正向列"].toolTip()
     # 切回 logic 信号 → 列编辑按钮恢复可用 + 原 tooltip
     logic = next(s for s in w.signals if not isinstance(s, excel_model.MuxGroup))
     w._load_test_items(logic)
     assert w._ti_sig is logic
     assert w._ti_btns["加正向列"].isEnabled()
-    assert "case 结构" not in w._ti_btns["加正向列"].toolTip()
+    assert "mux：" not in w._ti_btns["加正向列"].toolTip()     # 恢复 logic 原文
 
 
 def test_b1_cascade_toggle_rerenders_mux(wl_win):
@@ -381,7 +380,7 @@ def test_b2_mux_data_cell_editable_persist_reload(gui_app, tmp_path, monkeypatch
     assert grp is not None, "没有任何 mux 组有可手填数据行"
     name_low = grp.out_name.lower()
     drow = min(w._ti_mux_data_rows)
-    base_low, width = w._ti_mux_data_rows[drow]
+    base_low, width, _key = w._ti_mux_data_rows[drow]   # 第二十八轮起带绑定键(供用户列按列改)
     # 数据格可编辑；控制行(行0)若是控制则只读
     dcell = w.ti_table.item(drow, 0)
     assert dcell.flags() & QtCore.Qt.ItemIsEditable
@@ -493,3 +492,181 @@ def test_mux_drop_clear_persist_reopen(gui_app, tmp_path, monkeypatch):
     assert sig0 in w2._mux_dropped.get(m_drop.out_name.lower(), set())
     assert m_clear.out_name.lower() in w2._mux_cleared
     w2.close()
+
+
+# ───────────── 第二十八轮：mux 用户手编列（mux 与 logic 平级）─────────────
+def test_mux_add_positive_user_col(lpbt_win):
+    """加正向列(mux)：基于选中列的 case 新增一条用户正向列 → _mux_user_vecs +1、编辑器多一列、
+    带 case_index、auto_out=路由源值；build 也多出该列(带自定义名)。"""
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    nl = grp.out_name.lower()
+    n0 = len(w._ti_mux_vecs)
+    w.ti_table.setCurrentCell(0, 0)
+    w.on_ti_add()
+    assert len(w._mux_user_vecs.get(nl, [])) == 1
+    uv = w._mux_user_vecs[nl][0]
+    assert uv.case_index is not None and not uv.is_negative and uv.name
+    assert len(w._ti_mux_vecs) == n0 + 1                  # 多一列(用户列在最后)
+    assert w._ti_mux_user_start == n0
+    # build 注入该用户列
+    res = generator.build(w.wb, w._opts([grp.out_name]))
+    blk = next((l, s) for l, s in res["blocks"] if s.get("is_mux") and s.get("out_name") == grp.out_name)
+    assert uv.name in "\n".join(blk[0])
+
+
+def test_mux_user_col_data_editable_per_column(lpbt_win):
+    """用户列数据格可双击改【本列】值 → 只动这列 + auto_out 随路由源重算(不 by_base 整行同步)。"""
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    nl = grp.out_name.lower()
+    if not w._ti_mux_data_rows:
+        pytest.skip("该 mux 组没有可手填数据行")
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_add()
+    ucol = w._ti_mux_user_start                          # 新用户列列号
+    drow = min(w._ti_mux_data_rows)
+    _base, width, key = w._ti_mux_data_rows[drow]
+    cell = w.ti_table.item(drow, ucol)
+    from PySide6 import QtCore
+    assert cell.flags() & QtCore.Qt.ItemIsEditable        # 用户列数据格可编辑
+    newv = (w._ti_mux_vecs[ucol].assignments.get(key, 0) ^ 0x1) & ((1 << width) - 1)
+    w.ti_table.item(drow, ucol).setText(w._cell_text(newv, width))
+    uv = w._mux_user_vecs[nl][0]
+    assert uv.assignments.get(key) == newv                # 本列被改
+    # auto_out（exp_value）= 路由 case 数据键的值
+    exp = w._ti_mux_exp
+    dk = exp["data_keys"][uv.case_index]
+    assert uv.exp_value == (uv.assignments.get(dk, 0) & ((1 << (grp.out_width or 1)) - 1))
+
+
+def test_mux_copy_col_makes_user_col(lpbt_win):
+    """复制列(mux)：整列克隆为用户列(唯一名)。"""
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    nl = grp.out_name.lower()
+    n0 = len(w._ti_mux_vecs)
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_copy()
+    assert len(w._mux_user_vecs.get(nl, [])) == 1
+    assert len(w._ti_mux_vecs) == n0 + 1
+    assert w._mux_user_vecs[nl][0].name                    # 有唯一名(不复制原名)
+
+
+def test_mux_rename_user_col(lpbt_win, monkeypatch):
+    """重命名列(mux)：用户列可改名；自动生成列拒绝。"""
+    from PySide6 import QtWidgets
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    nl = grp.out_name.lower()
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_add()
+    ucol = w._ti_mux_user_start
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("MY_CASE", True)))
+    w.on_ti_rename_col(ucol)
+    assert w._mux_user_vecs[nl][0].name == "MY_CASE"
+    # 自动生成列改名被拒（不抛、名字不变）
+    seen = {"info": False}
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: seen.__setitem__("info", True)))
+    w.on_ti_rename_col(0)
+    assert seen["info"]
+
+
+def test_mux_add_neg_selected_and_del(lpbt_win):
+    """加负向(选中)(mux)：选中列加负向用户列(显示 _NEG)；删负向清掉它。"""
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    nl = grp.out_name.lower()
+    n0 = len(w._ti_mux_vecs)
+    w.ti_table.setCurrentCell(0, 0)
+    w.on_ti_add_neg_selected()
+    negs = [v for v in w._mux_user_vecs.get(nl, []) if v.is_negative]
+    assert len(negs) == 1 and len(w._ti_mux_vecs) == n0 + 1
+    from dreg_verify import sv_writer as W
+    assert W.test_label(w._ti_mux_vecs[-1]).endswith("_NEG")
+    # build 里多一条负向
+    res = generator.build(w.wb, w._opts([grp.out_name]))
+    blk = next((l, s) for l, s in res["blocks"] if s.get("is_mux") and s.get("out_name") == grp.out_name)
+    assert blk[1]["n_negative"] >= 1
+    # 删负向
+    w.on_ti_del_neg()
+    assert not [v for v in w._mux_user_vecs.get(nl, []) if v.is_negative]
+
+
+def test_mux_add_neg_selected_dedup(lpbt_win):
+    """加负向(选中)对同一条列重复点 → 不重复添加相同负向。"""
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    nl = grp.out_name.lower()
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_add_neg_selected()
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_add_neg_selected()   # 再点同一列
+    assert len([v for v in w._mux_user_vecs.get(nl, []) if v.is_negative]) == 1
+
+
+def test_mux_user_vec_persist_reopen(gui_app, tmp_path, monkeypatch):
+    """用户手编列跨 GUI 重开持久化（随 EDITS 桶存盘/恢复，含 case_index/name）。"""
+    from dreg_verify import gui as G
+    monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
+    excel = tmp_path / "lpbt.xlsx"
+    fixtures.build_workbook(str(excel), with_mux=True)
+    w1 = G.MainWindow(); w1.path_edit.setText(str(excel)); w1.on_load()
+    grp = _load_buildable_mux(w1)
+    nl = grp.out_name.lower()
+    w1.ti_table.setCurrentCell(0, 0); w1.on_ti_add()
+    nm = w1._mux_user_vecs[nl][0].name
+    ci = w1._mux_user_vecs[nl][0].case_index
+    w1.close()
+    w2 = G.MainWindow(); w2.path_edit.setText(str(excel)); w2.on_load()
+    restored = w2._mux_user_vecs.get(nl, [])
+    assert len(restored) == 1 and restored[0].name == nm and restored[0].case_index == ci
+    w2.close()
+
+
+def test_mux_regen_drops_user_vecs(lpbt_win):
+    """重新生成(撤销)清掉用户手编列。"""
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    nl = grp.out_name.lower()
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_add()
+    assert w._mux_user_vecs.get(nl)
+    w.on_ti_regen()
+    assert nl not in w._mux_user_vecs
+
+
+def test_mux_user_vec_no_dup_on_reload(gui_app, tmp_path, monkeypatch):
+    """对抗评审 C1（blocker）：换表/重载同一表时 _mux_user_vecs 必须先清空——否则恢复用 .extend 会叠加。"""
+    from dreg_verify import gui as G
+    monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
+    excel = tmp_path / "lpbt.xlsx"
+    fixtures.build_workbook(str(excel), with_mux=True)
+    w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
+    grp = _load_buildable_mux(w)
+    nl = grp.out_name.lower()
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_add()
+    assert len(w._mux_user_vecs[nl]) == 1
+    w.on_load()                                  # 重新加载同一表(同窗口)
+    assert len(w._mux_user_vecs.get(nl, [])) == 1, "重载不应叠加用户手编列"
+    w.close()
+
+
+def test_mux_user_neg_wrong_value_forced_mismatch(lpbt_win):
+    """对抗评审 B4：用户给 mux 负向列填的错值若 == 正确值(auto_out)，自动改成不同值(否则断言会 PASS)。"""
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_add_neg_selected()
+    ncol = w._ti_mux_user_start                  # 负向用户列
+    nvec = w._ti_mux_vecs[ncol]
+    assert nvec.is_negative
+    # 把错值设成 == 正确值(exp_value) → 应被改成 != 正确值
+    w.ti_table.item(w._ti_mux_exp_row, ncol).setText(w._cell_text(nvec.exp_value, grp.out_width or 1))
+    assert nvec.neg_value != nvec.exp_value
+
+
+def test_mux_left_neg_indicator_reflects_user_neg(lpbt_win):
+    """对抗评审 B1：左表「负向」勾选反映用户逐 case 负向(不再误示无负向)；编辑器加负向后同步勾上。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    r = _mux_idx(w, grp.out_base)
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_add_neg_selected()
+    assert w.table.item(r, G.COL_NEG).checkState() == QtCore.Qt.Checked   # 左表已勾(有负向)

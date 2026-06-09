@@ -25,7 +25,7 @@ class GenOptions:
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
                  cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None,
                  dft_observe=False, logic_mode=None, mux_mode=None, sig_cov=None,
-                 mux_dropped=None, mux_cleared=None):
+                 mux_dropped=None, mux_cleared=None, mux_user_vecs=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -107,6 +107,12 @@ class GenOptions:
         # 走 vector_overrides 空列表(见 build() 空 override 跳过)。
         self.mux_dropped = {str(k).lower(): set(v) for k, v in (mux_dropped or {}).items() if v}
         self.mux_cleared = {str(x).lower() for x in (mux_cleared or [])}
+        # {mux信号名(小写): [TestVector,...]} —— 用户在 mux 真值表里【手编/复制】的额外测试列（第二十八轮，
+        # 让 mux 与 logic 平级：能加正向列/复制列/重命名列/逐 case 加负向）。在 make_mux_vectors 之后、
+        # mux_dropped 过滤之前注入(故也能被删列签名过滤)；正向参与 designer 期望/全局负向追加，负向用户列
+        # 原样保留。与全局负向重叠的相同负向由 _dedup_negatives 去重。每条 vec 的 case_index 标它路由的 case。
+        self.mux_user_vecs = {str(k).lower(): list(v) for k, v in
+                              (mux_user_vecs or {}).items() if v}
 
     def logic_vec_params(self, name=None):
         """logic 向量生成参数 (mode, exhaustive)，供 V.generate_vectors。
@@ -272,6 +278,23 @@ def mux_assign_key(assignments):
     return ";".join("%s=%d" % (k, v) for k, v in sorted(assignments.items()))
 
 
+def _dedup_negatives(vecs):
+    """去掉完全相同的负向向量（同 assignments + 同错值）。第二十八轮起 mux 可同时有
+    全局负向(add_negatives/which=first)与用户逐 case 加的负向——二者可能对同一条正向各生成
+    一条相同负向，去重保留先出现的，避免重复断言。正向不去重（用户复制列=有意的重复测试）。
+    无用户负向时(常规路径)负向 assignments 天然互异 → 此函数为恒等，逐字节不变。"""
+    seen = set()
+    out = []
+    for v in vecs:
+        if v.is_negative:
+            key = (tuple(sorted(v.assignments.items())), v.neg_value)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(v)
+    return out
+
+
 def apply_mux_expected(vecs, exp_map):
     """把 designer 手填期望写到 mux 向量上（按输入取值键匹配；负向不碰）。
 
@@ -280,6 +303,10 @@ def apply_mux_expected(vecs, exp_map):
         return
     for v in vecs:
         if v.is_negative:
+            continue
+        # 已有 designer_expected 的不覆盖：用户手编 mux 列(第二十八轮)自带期望，其 assignments 可能与
+        # 某自动生成列相同(=同 mux_assign_key)；若覆盖会用自动列的期望盖掉用户在自己那列填的值。
+        if v.designer_expected is not None:
             continue
         de = exp_map.get(mux_assign_key(v.assignments))
         if de is not None:
@@ -746,10 +773,16 @@ def build(wb, opts):
         _dropped = opts.mux_dropped.get(grp.out_name.lower())
         if _dropped:
             vecs = [v for v in vecs if mux_assign_key(v.assignments) not in _dropped]
-            if not vecs:
-                skipped.append((grp.out_name, grp.assert_id,
-                                [("clear", _mux_ctrl_desc(grp), "用户已删除全部测试列(零用例)")]))
-                continue
+        # 注入用户手编/复制的 mux 测试列（第二十八轮，mux 与 logic 平级）：在删列过滤【之后】——避免
+        # "复制某列又删原列"时同签名把用户副本一起误删，也让"删光自动列后仅余用户列"仍能产出。
+        # 正向参与下面的 designer 期望/全局负向追加；负向用户列原样保留（与全局负向重叠的由去重处理）。
+        _uvecs = opts.mux_user_vecs.get(grp.out_name.lower())
+        if _uvecs:
+            vecs = list(vecs) + [V.clone_vector(uv) for uv in _uvecs]
+        if not vecs:
+            skipped.append((grp.out_name, grp.assert_id,
+                            [("clear", _mux_ctrl_desc(grp), "用户已删除全部测试列(零用例)")]))
+            continue
 
         # designer 手填期望（mux，第十一轮续）：按输入取值键对号入座。须在反例之前——
         # make_negative 的错值防撞要看到 designer_expected。
@@ -768,6 +801,7 @@ def build(wb, opts):
                                         opts.mux_cov_mode(grp.out_name), opts.dft_observe)
         if _dft_skip:
             meta["iddq_skipped"] = _dft_skip
+        vecs = _dedup_negatives(vecs)        # 全局负向 vs 用户逐 case 负向去重（无用户负向时恒等）
         for i, v in enumerate(vecs):
             v.index = i
 
@@ -1210,6 +1244,10 @@ def report(wb, opts):
                 _dropped = opts.mux_dropped.get(grp.out_name.lower())
                 if _dropped:                               # 用户删掉的个别测试列(与 build() 同口径过滤)
                     vecs = [v for v in vecs if mux_assign_key(v.assignments) not in _dropped]
+                # 注入用户手编/复制的 mux 测试列（与 build() 双轨同步；删列过滤之后，理由同 build）
+                _uvecs = opts.mux_user_vecs.get(grp.out_name.lower())
+                if _uvecs:
+                    vecs = list(vecs) + [V.clone_vector(uv) for uv in _uvecs]
                 if not vecs:                               # 删光所有测试列 → 零用例(给原因，与 build 对称)
                     skip_reason = "用户已删除全部测试列(零用例)"
                 else:
@@ -1226,6 +1264,9 @@ def report(wb, opts):
                                                  opts.mux_cov_mode(grp.out_name), opts.dft_observe)
                     if _rskip:
                         meta["iddq_skipped"] = _rskip
+                    vecs = _dedup_negatives(vecs)          # 与 build 同口径：全局/逐 case 负向去重
+                    for i, v in enumerate(vecs):
+                        v.index = i
 
         # 警告只在【真生成】时显示（被跳过的组用 error 列说明，警告无意义）
         row_warn = out_warn if not skip_reason else ""
