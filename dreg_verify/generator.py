@@ -24,7 +24,7 @@ class GenOptions:
                  vector_overrides=None, probe_prefixes=None,
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
                  cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None,
-                 dft_observe=False, logic_mode=None, mux_mode=None):
+                 dft_observe=False, logic_mode=None, mux_mode=None, sig_cov=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -90,17 +90,32 @@ class GenOptions:
         # logic_vec_params()/mux_cov_mode()，build()/report()/GUI 同口径。
         self.logic_mode = logic_mode if logic_mode in ("min", "max", "exhaustive") else None
         self.mux_mode = mux_mode if mux_mode in ("min", "max", "exhaustive") else None
+        # 单点覆盖度（per-signal，用户拍板「既要全局也要单点」）：{信号名(小写): 档位}，
+        # 档位 ∈ {min,max,exhaustive}。某信号在此 → 该信号的覆盖档以此为准、压过全局
+        # logic_mode/mux_mode；不在此 → 跟随全局（行为与旧版逐字节一致）。logic 与 mux
+        # 共用一张表（一个信号只属一类），build/report/GUI 经 logic_vec_params(name)/
+        # mux_cov_mode(name) 同口径读取，name 缺省则纯走全局（保旧调用方不变）。
+        self.sig_cov = {str(k).lower(): v for k, v in (sig_cov or {}).items()
+                        if v in ("min", "max", "exhaustive")}
 
-    def logic_vec_params(self):
+    def logic_vec_params(self, name=None):
         """logic 向量生成参数 (mode, exhaustive)，供 V.generate_vectors。
-        未解耦(logic_mode=None)时 = 原 (self.mode, self.exhaustive)，逐字节不变。"""
+        name 命中单点覆盖 → 用单点档；否则未解耦(logic_mode=None)时 = 原 (self.mode,
+        self.exhaustive)，逐字节不变。"""
+        ov = self.sig_cov.get(name.lower()) if name else None
+        if ov:
+            return _decompose_cov(ov)
         if self.logic_mode is None:
             return self.mode, self.exhaustive
         return _decompose_cov(self.logic_mode)
 
-    def mux_cov_mode(self):
+    def mux_cov_mode(self, name=None):
         """mux 覆盖档 {min,max,exhaustive}，供 mux_gen.make_mux_vectors。
-        未解耦(mux_mode=None)时 = coverage_mode(self.mode, self.exhaustive)，与旧行为一致。"""
+        name 命中单点覆盖 → 用单点档；否则未解耦(mux_mode=None)时 =
+        coverage_mode(self.mode, self.exhaustive)，与旧行为一致。"""
+        ov = self.sig_cov.get(name.lower()) if name else None
+        if ov:
+            return ov
         if self.mux_mode is None:
             return mux_gen.coverage_mode(self.mode, self.exhaustive)
         return self.mux_mode
@@ -603,7 +618,7 @@ def build(wb, opts):
             meta = {"control": [], "data": [], "truncated": False}
         else:
             try:
-                _lmode, _lexh = opts.logic_vec_params()
+                _lmode, _lexh = opts.logic_vec_params(sig.out_name)
                 vecs, meta = V.generate_vectors(
                     node, bindings, sig.out_width,
                     mode=_lmode, max_tests=opts.max_tests, exhaustive=_lexh)
@@ -621,7 +636,7 @@ def build(wb, opts):
         # 仅自动向量路径补（override=用户全定制，不注入工具拍）；放在负向之后 → DFT 拍不被自动负向翻倍。
         if override is None:
             _dft_skip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
-                                            mux_gen.coverage_mode(*opts.logic_vec_params()),
+                                            mux_gen.coverage_mode(*opts.logic_vec_params(sig.out_name)),
                                             opts.dft_observe)
             if _dft_skip:
                 meta["iddq_skipped"] = _dft_skip
@@ -689,7 +704,7 @@ def build(wb, opts):
 
         # 覆盖度三档（2026-06-03 第十一轮）：精简=每case一值；全面=+x位展开+反码数据轮；
         # 穷举=+另一条控制路径全扫。第二十二轮起 mux 侧档位与 logic 解耦，走 opts.mux_cov_mode()。
-        mux_mode = opts.mux_cov_mode()
+        mux_mode = opts.mux_cov_mode(grp.out_name)
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode, max_tests=opts.max_tests,
                                               data_overrides=mux_data_for(opts, grp))
         # ⭐ 互异值碰撞 = 选路不可验证（两条数据路同值 → 选错路也测不出 = 假绿）。
@@ -719,7 +734,7 @@ def build(wb, opts):
 
         # item③ iddq DFT 态拍（mux 被门控输出，如 mixer2g_en）：全面/穷举补、精简不补；放负向之后。
         _dft_skip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
-                                        opts.mux_cov_mode(), opts.dft_observe)
+                                        opts.mux_cov_mode(grp.out_name), opts.dft_observe)
         if _dft_skip:
             meta["iddq_skipped"] = _dft_skip
         for i, v in enumerate(vecs):
@@ -1011,7 +1026,7 @@ def report(wb, opts):
             meta = {"control": [], "data": []}
         else:
             try:
-                _lmode, _lexh = opts.logic_vec_params()
+                _lmode, _lexh = opts.logic_vec_params(sig.out_name)
                 vecs, meta = V.generate_vectors(node, bindings, sig.out_width,
                                                 mode=_lmode, max_tests=opts.max_tests,
                                                 exhaustive=_lexh)
@@ -1026,7 +1041,7 @@ def report(wb, opts):
                                        fixed_value=opts.neg_value)
             # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 logic 挂点；override 路径不注入）
             _lskip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
-                                         mux_gen.coverage_mode(*opts.logic_vec_params()),
+                                         mux_gen.coverage_mode(*opts.logic_vec_params(sig.out_name)),
                                          opts.dft_observe)
             if _lskip:
                 meta["iddq_skipped"] = _lskip   # 缺口可见(M2)：报告 error 列透出（.sv 已有 // ⚠）
@@ -1112,7 +1127,7 @@ def report(wb, opts):
         elif blockers and not opts.include_risky:
             skip_reason = "; ".join(r[2] for r in blockers)
         else:
-            mux_mode = opts.mux_cov_mode()
+            mux_mode = opts.mux_cov_mode(grp.out_name)
             vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                                   max_tests=opts.max_tests,
                                                   data_overrides=mux_data_for(opts, grp))
@@ -1133,7 +1148,7 @@ def report(wb, opts):
                         v.index = i
                 # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 mux 挂点）；skip 原因进 meta 供透出
                 _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
-                                             opts.mux_cov_mode(), opts.dft_observe)
+                                             opts.mux_cov_mode(grp.out_name), opts.dft_observe)
                 if _rskip:
                     meta["iddq_skipped"] = _rskip
 

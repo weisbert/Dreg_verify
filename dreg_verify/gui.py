@@ -313,6 +313,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._customized = set() # 被用户改过的信号名(小写)，仅这些走 vector_overrides
         self._neg_only = {}      # {信号名小写: 负向规则"first"/"all"} —— 正向全自动、仅加了负向的信号；
                                  # 记规则是为了切覆盖度重算时按原规则补回(默认1条不会被炸成每条一条)；清负向时可整体撤销定制
+        self._sig_cov = {}       # 单点覆盖度 {信号名小写: 档位"min"/"max"/"exhaustive"}——该信号专属覆盖档，
+                                 # 压过全局 logic/mux 下拉；不在表里=跟随全局。随测试项编辑按 Excel 路径存盘
+        self._sig_cov_loading = False  # 程序化设单点覆盖下拉时屏蔽其 changed 信号，防加载信号时误触重算
         self._ti_sig = None      # 当前在编辑器里的信号
         self._ti_node = None
         self._ti_bindings = {}
@@ -581,6 +584,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_header.setStyleSheet("color:#445;")
         lay.addWidget(self.ti_header)
 
+        # 单点覆盖度：给【当前这一个信号】单独设覆盖档，压过工具栏的全局 logic/mux 下拉。
+        # 「跟随全局」=不设单点、用全局档（默认）。按信号名记忆、随测试项编辑存盘/导入导出。
+        sigcov_box = QtWidgets.QWidget()
+        sigcov = QtWidgets.QHBoxLayout(sigcov_box)
+        sigcov.setContentsMargins(0, 0, 0, 0)
+        sigcov.addWidget(QtWidgets.QLabel("本信号覆盖度:"))
+        self.sig_cov_combo = QtWidgets.QComboBox()
+        self.sig_cov_combo.addItems(["跟随全局", "精简", "全面", "穷举"])
+        self.sig_cov_combo.setEnabled(False)        # 未选信号时不可用
+        self.sig_cov_combo.setToolTip(
+            "给【当前选中的这一个信号】单独设覆盖档，压过上方工具栏的全局 logic/mux 覆盖下拉：\n"
+            "  跟随全局 = 用全局档（默认）——改全局档对所有'跟随全局'的信号生效\n"
+            "  精简/全面/穷举 = 只有此信号用该档（真值表/预览/生成/报告都按此）\n"
+            "用法：先调全局档定大盘，再对个别要重点验/要省用例的信号单独设单点档。\n"
+            "（按信号名记忆，随测试项编辑一起存盘，也随『导出/导入测试项编辑』走）")
+        self.sig_cov_combo.currentIndexChanged.connect(self.on_sig_cov_changed)
+        sigcov.addWidget(self.sig_cov_combo)
+        self.sig_cov_tag = QtWidgets.QLabel("")     # 生效来源提示（单点/跟随全局），随信号刷新
+        self.sig_cov_tag.setStyleSheet("color:#667;")
+        sigcov.addWidget(self.sig_cov_tag)
+        sigcov.addStretch(1)
+        lay.addWidget(sigcov_box)
+
         bar_box = QtWidgets.QWidget()
         bar = FlowLayout(bar_box)        # 按钮多，窄屏自动换行，避免给右面板强加大最小宽度
         defs = [("重新生成", self.on_ti_regen, "丢弃本信号自定义，按当前向量选项从表达式重新生成"),
@@ -708,6 +734,68 @@ class MainWindow(QtWidgets.QMainWindow):
     def _mux_cov_mode(self):
         """mux 覆盖档 {min,max,exhaustive}（与 generator/report 同口径）。"""
         return mux_gen.coverage_mode(*self._mux_coverage())
+
+    # 单点覆盖度档位 ↔ 中文标签互转（与全局下拉同口径：精简=min/全面=max/穷举=exhaustive）
+    _COV_LABEL2MODE = {"精简": "min", "全面": "max", "穷举": "exhaustive"}
+    _COV_MODE2LABEL = {"min": "精简", "max": "全面", "exhaustive": "穷举"}
+
+    def _sig_cov_collapsed(self, sig):
+        """该信号【实际生效】的覆盖档(min/max/exhaustive)：单点设置优先，否则跟随全局
+        （mux 信号→mux 全局档，logic 信号→logic 全局档）。生成/预览/报告全经此口径。"""
+        name_low = sig.out_name.lower() if sig is not None else None
+        ov = self._sig_cov.get(name_low) if name_low else None
+        if ov in ("min", "max", "exhaustive"):
+            return ov
+        if isinstance(sig, excel_model.MuxGroup):
+            return self._mux_cov_mode()
+        return mux_gen.coverage_mode(*self._coverage())
+
+    def _set_sig_cov_combo(self, sig):
+        """加载信号时把「本信号覆盖度」下拉置到该信号已存的单点档（无则"跟随全局"），不触发重算。
+        同时刷新生效来源提示。无信号 → 禁用下拉并清空提示。"""
+        if not hasattr(self, "sig_cov_combo"):
+            return
+        name_low = sig.out_name.lower() if sig is not None else None
+        ov = self._sig_cov.get(name_low) if name_low else None
+        label = self._COV_MODE2LABEL.get(ov, "跟随全局")
+        self._sig_cov_loading = True
+        try:
+            self.sig_cov_combo.setEnabled(sig is not None)
+            self.sig_cov_combo.setCurrentText(label)
+        finally:
+            self._sig_cov_loading = False
+        if sig is None:
+            self.sig_cov_tag.setText("")
+        elif ov:
+            self.sig_cov_tag.setText("（单点档，已压过全局）")
+        else:
+            gl = "mux" if isinstance(sig, excel_model.MuxGroup) else "logic"
+            self.sig_cov_tag.setText("（跟随全局 %s 档=%s）"
+                                     % (gl, self._COV_MODE2LABEL[self._sig_cov_collapsed(sig)]))
+
+    def on_sig_cov_changed(self, *args):
+        """「本信号覆盖度」下拉变化：记进 _sig_cov（"跟随全局"=删除该信号的单点设置），
+        按新档重算【当前信号】的测试项并存盘。加载信号时由 _sig_cov_loading 守卫避免误触。"""
+        if (self._sig_cov_loading or self._sig_loading
+                or getattr(self, "_ti_loading", False)):
+            return
+        sig = self._ti_sig if self._ti_sig is not None else getattr(self, "_ti_mux_sig", None)
+        if sig is None:
+            return
+        name_low = sig.out_name.lower()
+        collapsed = self._COV_LABEL2MODE.get(self.sig_cov_combo.currentText())
+        if collapsed is None:                 # 跟随全局
+            self._sig_cov.pop(name_low, None)
+        else:
+            self._sig_cov[name_low] = collapsed
+        self._persist_edits()
+        if self._ti_sig is not None:
+            self._load_test_items(self._ti_sig)
+        elif getattr(self, "_ti_mux_sig", None) is not None:
+            self._load_mux_test_items(self._ti_mux_sig)
+        else:
+            self._set_sig_cov_combo(sig)       # 兜底刷新提示
+        self._update_cov_hint()
 
     def _persist_coverage(self):
         """持久化两侧覆盖档（第二十二轮解耦），下次启动恢复。pytest 下 _save_settings 为 no-op。"""
@@ -855,6 +943,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._edited = {}
         self._customized = set()
         self._neg_only = {}
+        self._sig_cov = {}
         self._mux_expected = {}
         self._mux_neg = set()
         self._mux_data = {}
@@ -1334,7 +1423,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                         mux_data={k: dict(v) for k, v in self._mux_data.items()})
             return generator.analyze_mux_group(
                 self._resolver, self.wb, sig,
-                mode=self._mux_cov_mode(),
+                mode=self._sig_cov_collapsed(sig),     # 单点优先，与右侧编辑器/生成同口径
                 probe_prefix=self._prefix_of(sig), opts=opts)
         return generator.analyze_signal(self._resolver, sig, wb=self.wb,
                                         probe_prefix=self._prefix_of(sig))
@@ -1552,6 +1641,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_hl_col = -1
         self._ti_mux_vecs = []; self._ti_mux_exp_row = -1   # mux 期望编辑状态一并清(防陈旧引用)
         self._set_ti_buttons_for_mux(False)                 # 无信号：列编辑按钮恢复可用(原行为)
+        self._set_sig_cov_combo(None)                       # 无信号：单点覆盖下拉禁用并复位
         self.ti_header.setText(header_text)
         self._ti_loading = True
         try:
@@ -1582,6 +1672,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._ti_sig = sig; self._ti_node = node
         self._set_ti_buttons_for_mux(False)   # logic 信号：列编辑按钮全可用
+        self._set_sig_cov_combo(sig)          # 单点覆盖下拉置到本信号档（不触发重算）
         self._ti_bindings = bindings; self._ti_groups = groups
         self._ti_cone = bool(chain)       # 头部/输入表据此标注"已展开上游"
         self._ti_chain = chain            # 展开链(本行+逐层代入的上游行)，cone 信号显示
@@ -1612,6 +1703,7 @@ class MainWindow(QtWidgets.QMainWindow):
         old_widths = [self.ti_table.columnWidth(c) for c in range(self.ti_table.columnCount())]
         self._clear_test_items("")
         self._ti_mux_sig = grp
+        self._set_sig_cov_combo(grp)          # 单点覆盖下拉置到本信号档（不触发重算）
         self._set_ti_buttons_for_mux(True)    # mux 信号：置灰列结构/CSV 按钮(无 mux 分支)，给准确 tooltip
         exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
         # 『输入信号』表：解析有问题也照样填（哪个输入坏了一眼看到）——修"mux 点开输入信号框空白"
@@ -1620,7 +1712,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_header.setText("mux 信号 %s：无法生成测试 — %s"
                                    % (grp.out_name, "；".join(exp["issues"])))
             return
-        mux_mode = self._mux_cov_mode()
+        mux_mode = self._sig_cov_collapsed(grp)                # 单点优先，否则跟随全局 mux 档
         data_ov = self._mux_data.get(grp.out_name.lower())     # B2 用户手填数据值（按物理基名）
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                               max_tests=self.max_tests.value(),
@@ -1708,11 +1800,15 @@ class MainWindow(QtWidgets.QMainWindow):
                         "exhaustive": "每 case×x位展开 + 反码数据轮 + 另一条控制路径全扫"}[mux_mode]
         pos = [v for v in vecs if not v.is_negative]
         n_filled = sum(1 for v in pos if v.designer_expected is not None)
+        # 覆盖档标签取【实际生效】的 mux_mode（单点优先），单点时加标记——否则切单点档头部看着不动
+        cov_lab = self._COV_MODE2LABEL.get(mux_mode, mux_mode)
+        if grp.out_name.lower() in self._sig_cov:
+            cov_lab += "·单点"
         self.ti_header.setText(
             "mux 信号: %s = case(%s) %d 选 1　|　覆盖度=%s → 测试 %d 个（%s）　|　"
             "期望已手填 %d/%d　|　输入由 case 结构自动生成（只读）；期望行可手填，数据值可手填，负向勾选照常"
             % (grp.out_name, generator._mux_ctrl_desc(grp), len(grp.cases),
-               self.coverage_mux.currentText(), len(vecs), cov_desc, n_filled, len(pos)))
+               cov_lab, len(vecs), cov_desc, n_filled, len(pos)))
         snote = (meta or {}).get("shadowed_note")        # A2 死分支：靠后重复 case 已跳过，标注出来
         if snote:
             self.ti_header.setText(self.ti_header.text() + "　|　⚙ " + snote)
@@ -1752,8 +1848,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_table.setItem(n_inputs + 1, ci, expit)
 
     def _auto_rows(self, sig, node, bindings, groups):
-        """按当前向量选项自动生成测试项 → rowdict 列表。"""
-        mode, exhaustive = self._coverage()
+        """按当前向量选项自动生成测试项 → rowdict 列表。覆盖档走单点优先口径。"""
+        mode, exhaustive = generator._decompose_cov(self._sig_cov_collapsed(sig))
         try:
             vecs, _meta = V.generate_vectors(
                 node, bindings, sig.out_width,
@@ -1874,7 +1970,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         allbuckets = _load_edits_file()
-        if self._edited or self._mux_expected or self._mux_neg or self._mux_data:
+        if (self._edited or self._mux_expected or self._mux_neg or self._mux_data
+                or self._sig_cov):
             allbuckets[path] = {
                 "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
                 "neg_only": dict(self._neg_only),
@@ -1884,6 +1981,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "mux_neg": sorted(self._mux_neg),
                 # mux 数据值手填（B2）：{信号名: {物理基名: int}}
                 "mux_data": {name: dict(d) for name, d in self._mux_data.items() if d},
+                # 单点覆盖度：{信号名: 档位 min/max/exhaustive}（logic/mux 共用）
+                "sig_cov": dict(self._sig_cov),
             }
         else:
             allbuckets.pop(path, None)        # 编辑全清空 → 桶也删掉
@@ -1981,13 +2080,23 @@ class MainWindow(QtWidgets.QMainWindow):
                     n_restored += 1
                 if bad:
                     missing.append(name_low + "（mux 数据值：%d 个数值非法，已跳过）" % bad)
+        # 单点覆盖度：信号(logic 或 mux)仍在当前表、且档位合法的才恢复
+        valid_names = set(by_name) | set(mux_by_name)
+        for name_low, mode in (bucket.get("sig_cov") or {}).items():
+            if mode not in ("min", "max", "exhaustive"):
+                continue
+            if name_low in valid_names:
+                self._sig_cov[name_low] = mode
+            else:
+                missing.append(name_low + "（单点覆盖度：信号不存在）")
         return n_restored, missing
 
     def on_export_edits(self):
         """把当前 Excel 的全部测试项编辑(logic 行编辑 + mux 手填期望)导出为 .json（给同事/版本库/跨机器）。"""
-        if not self._edited and not self._mux_expected and not self._mux_data:
+        if (not self._edited and not self._mux_expected and not self._mux_data
+                and not self._sig_cov):
             QtWidgets.QMessageBox.information(self, "提示", "当前没有任何测试项编辑可导出。\n"
-                                              "(手填期望/加负向/自定义列/手填数据值之后再导出)")
+                                              "(手填期望/加负向/自定义列/手填数据值/单点覆盖度之后再导出)")
             return
         excel = (self.path_edit.text() or "").strip()
         default = os.path.splitext(os.path.basename(excel) or "dreg")[0] + "_edits.json"
@@ -2002,6 +2111,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "neg_only": dict(self._neg_only),
             "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
             "mux_data": {name: dict(d) for name, d in self._mux_data.items() if d},
+            "sig_cov": dict(self._sig_cov),
         }
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -2032,9 +2142,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "导入失败", "无法读取/解析 %s：\n%s" % (path, ex))
             return
         if not isinstance(payload, dict) or not any(
-                k in payload for k in ("edits", "mux_expected", "mux_data")):
+                k in payload for k in ("edits", "mux_expected", "mux_data", "sig_cov")):
             QtWidgets.QMessageBox.critical(self, "导入失败",
-                                           "%s 不是测试项编辑文件(缺少 edits/mux_expected/mux_data 段)。" % path)
+                                           "%s 不是测试项编辑文件(缺少 edits/mux_expected/mux_data/sig_cov 段)。" % path)
             return
         n_restored, missing = self._apply_edits_bucket(payload)
         self._sync_neg_checks_from_edits()
@@ -2582,7 +2692,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._render_mux_exp_col(c, n_inputs)
         finally:
             self._ti_loading = False
-        self._update_mux_header(grp, vecs, self._mux_cov_mode())
+        self._update_mux_header(grp, vecs, self._sig_cov_collapsed(grp))   # 单点优先，与表格同档
         self._update_cov_hint()
 
     def _on_mux_data_changed(self, item):
@@ -3001,6 +3111,9 @@ class MainWindow(QtWidgets.QMainWindow):
             mode=mode, max_tests=self.max_tests.value(), exhaustive=exhaustive,
             # 覆盖档位解耦（第二十二轮）：logic 侧走 mode/exhaustive（=logic 下拉），mux 侧独立。
             mux_mode=self._mux_cov_mode(),
+            # 单点覆盖度：个别信号专属覆盖档，build/report 经 logic_vec_params(name)/
+            # mux_cov_mode(name) 压过全局——所见(右侧编辑器)即所得(导出/报告)。
+            sig_cov=dict(self._sig_cov),
             top_output_only=False,   # GUI 已按表勾选，不再二次过滤
             probe_prefixes=dict(self._probe_prefixes),
             force_overrides=set(self._force_signals),

@@ -501,6 +501,83 @@ def test_coverage_decouple_build_independent(lpbt_wb):
     assert counts(mode="max") == (l_max, m_max)
 
 
+def test_sig_cov_genoptions():
+    """⭐ 单点覆盖度：GenOptions.sig_cov 按信号名压过全局；name 缺省/未命中=纯走全局(逐字节不变)。"""
+    G = generator
+    o = G.GenOptions(mode="min", exhaustive=False,
+                     sig_cov={"d_foo": "exhaustive", "D_BAR": "max"})
+    # 命中单点：logic 与 mux 都以单点档为准；键大小写不敏感
+    assert o.logic_vec_params("d_foo") == ("max", True)      # exhaustive→(max,True)
+    assert o.mux_cov_mode("d_foo") == "exhaustive"
+    assert o.logic_vec_params("D_BAR") == ("max", False)
+    assert o.mux_cov_mode("d_bar") == "max"
+    # 未命中 / name 缺省：回退全局(=旧行为，与不传 sig_cov 逐字节一致)
+    assert o.logic_vec_params("d_other") == ("min", False)
+    assert o.mux_cov_mode("d_other") == "min"
+    assert o.logic_vec_params() == ("min", False)
+    assert o.mux_cov_mode() == "min"
+    # 单点压过【解耦的】全局档；未命中信号仍跟随解耦全局
+    d = G.GenOptions(logic_mode="min", mux_mode="min", sig_cov={"d_x": "max"})
+    assert d.logic_vec_params("d_x") == ("max", False)
+    assert d.mux_cov_mode("d_x") == "max"
+    assert d.logic_vec_params("d_y") == ("min", False)
+    assert d.mux_cov_mode("d_y") == "min"
+    # 非法档位忽略 → 回退全局，不抛错
+    bad = G.GenOptions(mode="min", sig_cov={"d_z": "bogus", "d_w": ""})
+    assert bad.logic_vec_params("d_z") == ("min", False)
+    assert bad.mux_cov_mode("d_w") == "min"
+
+
+def test_sig_cov_build_per_signal(lpbt_wb):
+    """⭐ build() 端到端：单点覆盖度只改【指定信号】用例数，其余信号跟随全局不动；logic+mux 各举一例。"""
+    G = generator
+
+    def counts(**kw):
+        res = G.build(lpbt_wb, G.GenOptions(**kw))
+        return {st["out_name"]: (st["n_vectors"], bool(st.get("is_mux")))
+                for _l, st in res["blocks"]}
+
+    cmin = {n: v for n, (v, _m) in counts(mode="min").items()}
+    full = counts(mode="max")
+    cmax = {n: v for n, (v, _m) in full.items()}
+
+    def pick(is_mux):
+        for n, (v, m) in full.items():
+            if m == is_mux and cmax[n] > cmin.get(n, 0):
+                return n
+        return None
+
+    lname, mname = pick(False), pick(True)
+    assert lname and mname, "需要至少一个 logic + 一个 mux 信号在全面档用例更多"
+
+    # 全局精简 + 只给这两个信号设单点全面
+    res = G.build(lpbt_wb, G.GenOptions(mode="min", sig_cov={lname: "max", mname: "max"}))
+    c = {st["out_name"]: st["n_vectors"] for _l, st in res["blocks"]}
+    assert c[lname] == cmax[lname], "单点 logic 信号应取全面用例数"
+    assert c[mname] == cmax[mname], "单点 mux 信号应取全面用例数"
+    others = [n for n in cmin if n not in (lname, mname)]
+    assert others, "需要旁证信号"
+    assert all(c[n] == cmin[n] for n in others), "未设单点的信号应仍跟随全局精简"
+
+
+def test_sig_cov_report_per_signal(lpbt_wb):
+    """⭐ report() 与 build() 双轨一致：报告里单点信号的用例数也按单点档（HTML 真值表不漏档）。"""
+    G = generator
+
+    def rep_counts(**kw):
+        rep = G.report(lpbt_wb, G.GenOptions(**kw))
+        return {r["signal"]: r["n_tests"] for r in rep["summary"]}
+
+    rmin = rep_counts(mode="min")
+    rmax = rep_counts(mode="max")
+    lname = next((n for n, v in rmax.items() if v > rmin.get(n, 0)), None)
+    assert lname, "需要一个全面档用例更多的信号"
+    r = rep_counts(mode="min", sig_cov={lname: "max"})
+    assert r[lname] == rmax[lname]
+    other = next(n for n in rmin if n != lname)
+    assert r[other] == rmin[other]
+
+
 def test_wl_key_role():
     """键角色判断（generator/gui/report 共用）。"""
     assert mux_gen.key_role("c:A") == "ctrl"

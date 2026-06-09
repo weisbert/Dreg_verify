@@ -658,6 +658,91 @@ def test_gui_coverage_live_update_neg_only(qapp, wb, tmp_path_factory):
     assert sig.out_name.lower() in w._neg_only   # 仍是仅负向定制
 
 
+def test_gui_sig_cov_per_signal(qapp, tmp_path_factory):
+    """⭐ 单点覆盖度：本信号下拉只改该信号、压过全局；存进 _sig_cov；_opts/build 带出 sig_cov。"""
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("sigcov") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    sig = next(s for s in w.signals if s.out_name == "d_logic_bt_lp_lna_agc[2:0]")
+    row = next(r for r in range(w.table.rowCount())
+               if w._sig_of_row(r).out_name == sig.out_name)
+    name_low = sig.out_name.lower()
+    # 全局精简，选中信号
+    w.coverage.setCurrentText("精简")
+    w.on_row_focus(row, gui.COL_K, -1, -1)
+    assert w.sig_cov_combo.isEnabled()
+    assert w.sig_cov_combo.currentText() == "跟随全局"
+    n_min = len(w._ti_rows)
+    # 本信号设单点穷举 → 即时重算变多；全局下拉没动
+    w.sig_cov_combo.setCurrentText("穷举")
+    assert w._sig_cov.get(name_low) == "exhaustive"
+    assert w.coverage.currentText() == "精简"
+    n_one = len(w._ti_rows)
+    assert n_one > n_min, "单点穷举应比全局精简用例多"
+    # _opts 把单点覆盖带进 GenOptions；build 该信号用例数 == 单点穷举数
+    opts = w._opts([sig.out_name])
+    assert opts.sig_cov.get(name_low) == "exhaustive"
+    res = generator.build(w.wb, opts)
+    nv = next(st["n_vectors"] for _l, st in res["blocks"] if st["out_name"] == sig.out_name)
+    assert nv == n_one
+    # 切回"跟随全局" → 从 _sig_cov 删除、用例数回到精简
+    w.sig_cov_combo.setCurrentText("跟随全局")
+    assert name_low not in w._sig_cov
+    assert len(w._ti_rows) == n_min
+
+
+def test_gui_sig_cov_isolated_to_signal(qapp, tmp_path_factory):
+    """⭐ 用户报的 bug：切到别的信号，单点档不应跨信号串——A 设穷举，B 仍跟随全局精简。"""
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("sigcoviso") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    sigA = next(s for s in w.signals if s.out_name == "d_logic_bt_lp_lna_agc[2:0]")
+    sigB = next(s for s in w.signals if s.out_name != sigA.out_name
+                and not isinstance(s, excel_model.MuxGroup))
+    rowA = next(r for r in range(w.table.rowCount())
+                if w._sig_of_row(r).out_name == sigA.out_name)
+    rowB = next(r for r in range(w.table.rowCount())
+                if w._sig_of_row(r).out_name == sigB.out_name)
+    w.coverage.setCurrentText("精简")
+    # A 设单点穷举
+    w.on_row_focus(rowA, gui.COL_K, -1, -1)
+    w.sig_cov_combo.setCurrentText("穷举")
+    assert w._sig_cov.get(sigA.out_name.lower()) == "exhaustive"
+    # 切到 B：下拉回到"跟随全局"，B 不被 A 的单点档带动
+    w.on_row_focus(rowB, gui.COL_K, -1, -1)
+    assert w.sig_cov_combo.currentText() == "跟随全局"
+    assert sigB.out_name.lower() not in w._sig_cov
+    # 改全局到全面 → B 跟着变、A 仍是单点穷举（回 A 验证）
+    res_min = generator.build(w.wb, w._opts([sigA.out_name, sigB.out_name],
+                                            None))  # 全局仍精简
+    # A 是单点穷举、B 跟随全局精简
+    cmap = {st["out_name"]: st["n_vectors"] for _l, st in res_min["blocks"]}
+    # A 用例数 = 穷举（独立重算对照）
+    a_ex = generator.build(w.wb, generator.GenOptions(mode="max", exhaustive=True,
+                                                      signals=[sigA.out_name]))
+    a_ex_n = next(st["n_vectors"] for _l, st in a_ex["blocks"])
+    assert cmap[sigA.out_name] == a_ex_n
+
+
+def test_gui_sig_cov_restore_bucket(qapp, tmp_path_factory):
+    """单点覆盖度随 _apply_edits_bucket 恢复：合法档恢复；信号不存在→跳过并列名；非法档静默忽略。"""
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("sigcovr") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    real = next(s for s in w.signals if s.out_name == "d_logic_bt_lp_lna_agc[2:0]")
+    bucket = {"sig_cov": {real.out_name.lower(): "exhaustive",
+                          "d_nonexistent_signal": "max",       # 表里没有
+                          "d_logic_bt_lp_reserve": "bogus"}}   # 档位非法
+    n, missing = w._apply_edits_bucket(bucket)
+    assert w._sig_cov.get(real.out_name.lower()) == "exhaustive"
+    assert "d_nonexistent_signal" not in w._sig_cov
+    assert "d_logic_bt_lp_reserve" not in w._sig_cov          # 非法档不进
+    assert any("单点覆盖度" in m for m in missing)
+
+
 # ───────────── 导出范围：仅负向 / 仅正向 ─────────────
 def test_gui_export_negative_only(qapp, wb, tmp_path_factory):
     """'仅负向'导出：override 只剩负向向量、无负向的信号被略过；build 出的全是负向。"""

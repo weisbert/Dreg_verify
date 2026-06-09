@@ -794,6 +794,23 @@ def test_gui_mux_cov_hint_shows_count(qapp, tmp_path_factory):
     assert ("当前信号 %d 条" % n) in w.cov_hint.text()
 
 
+def test_gui_mux_sig_cov_header_after_exp_edit(qapp, tmp_path_factory):
+    """⭐回归：mux 信号设单点覆盖后，手填期望触发的单列刷新里头部仍按单点档（不退回全局档）。
+    （对抗评审 wf 抓到的 _on_mux_exp_changed 用全局 mode 刷头部 → 头部档位与表格不一致）。"""
+    gui, w, grp = _mux_window(tmp_path_factory, "demux_sigcov")
+    w.coverage_mux.setCurrentText("精简")          # 全局 mux=精简
+    w._load_test_items(grp)
+    w.sig_cov_combo.setCurrentText("穷举")          # 本信号单点=穷举
+    assert w._sig_cov.get(grp.out_name.lower()) == "exhaustive"
+    n = len(w._ti_mux_vecs)
+    # 手填一个期望（走 _on_mux_exp_changed 的单列刷新路径）
+    v0 = w._ti_mux_vecs[0]
+    w.ti_table.item(w._ti_mux_exp_row, 0).setText("0x%X" % v0.exp_value)
+    # 头部覆盖度标签仍是穷举·单点，且条数与表格一致（不被全局精简污染）
+    assert "覆盖度=穷举·单点" in w.ti_header.text()
+    assert ("测试 %d 个" % n) in w.ti_header.text()
+
+
 def test_gui_mux_auto_fill_button(qapp, tmp_path_factory, monkeypatch):
     """「auto→期望」按钮对 mux 信号也生效（只填未填的列）。"""
     from PySide6 import QtWidgets
