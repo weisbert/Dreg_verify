@@ -759,21 +759,50 @@ def test_gui_sig_cov_global_clears_displayed_override(qapp, tmp_path_factory):
     assert w._sig_cov.get(A.lower()) == "exhaustive", "改 max_tests 不该清单点档"
 
 
-def test_gui_sig_cov_restore_bucket(qapp, tmp_path_factory):
-    """单点覆盖度随 _apply_edits_bucket 恢复：合法档恢复；信号不存在→跳过并列名；非法档静默忽略。"""
+def test_gui_sig_cov_session_only_not_persisted(qapp, tmp_path_factory, monkeypatch):
+    """⭐用户报的真bug根因+修法：单点档是【会话内临时档】，不存盘、不恢复。
+    否则上次留的单点档(如设成精简)会被静默恢复、暗中盖过全局下拉→'刚开GUI改全局对某些信号无效'。"""
+    from dreg_verify import gui
+    monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("sigcovp") / "edits.json"))
+    path = tmp_path_factory.mktemp("sigcovs") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    A = "d_logic_bt_lp_lna_agc[2:0]"
+    # 会话1：全局穷举，把 A 单点设成精简（= 用户上一会话往下调的残留），存盘
+    w1 = gui.MainWindow(); w1.path_edit.setText(str(path)); w1.on_load()
+    w1.coverage.setCurrentText("穷举")
+    r = next(i for i in range(w1.table.rowCount()) if w1._sig_of_row(i).out_name == A)
+    w1.on_row_focus(r, gui.COL_K, -1, -1)
+    w1.sig_cov_combo.setCurrentText("精简")
+    assert w1._sig_cov.get(A) == "min"
+    w1._persist_edits()
+    # 存盘文件里不该有 sig_cov（哪怕被写了别的编辑）
+    import json, os
+    if os.path.exists(gui.EDITS_PATH):
+        bucket = json.load(open(gui.EDITS_PATH)).get(str(path), {})
+        assert "sig_cov" not in bucket, "单点档不该进存盘桶"
+    # 会话2：全新打开（什么都没干）→ 不该恢复任何单点档；全局穷举对 A 生效
+    w2 = gui.MainWindow(); w2.path_edit.setText(str(path)); w2.on_load()
+    assert w2._sig_cov == {}, "单点档不该从磁盘恢复（会话内临时）"
+    w2.coverage.setCurrentText("穷举")
+    r = next(i for i in range(w2.table.rowCount()) if w2._sig_of_row(i).out_name == A)
+    w2.on_row_focus(r, gui.COL_K, -1, -1)
+    n_exh = len(w2._ti_rows)
+    w2.coverage.setCurrentText("精简")
+    w2.on_row_focus(r, gui.COL_K, -1, -1)   # 重新读
+    # 验证 A 现在完全跟随全局（穷举 > 精简），没有被残留单点档钉死
+    assert n_exh > len(w2._ti_rows), "新会话 A 应跟随全局(穷举>精简)，不被上次残留单点档盖住"
+
+
+def test_gui_sig_cov_bucket_sig_cov_ignored(qapp, tmp_path_factory):
+    """旧桶里残留的 sig_cov 段一律忽略（会话内临时档不恢复）。"""
     from dreg_verify import gui
     path = tmp_path_factory.mktemp("sigcovr") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
     real = next(s for s in w.signals if s.out_name == "d_logic_bt_lp_lna_agc[2:0]")
-    bucket = {"sig_cov": {real.out_name.lower(): "exhaustive",
-                          "d_nonexistent_signal": "max",       # 表里没有
-                          "d_logic_bt_lp_reserve": "bogus"}}   # 档位非法
-    n, missing = w._apply_edits_bucket(bucket)
-    assert w._sig_cov.get(real.out_name.lower()) == "exhaustive"
-    assert "d_nonexistent_signal" not in w._sig_cov
-    assert "d_logic_bt_lp_reserve" not in w._sig_cov          # 非法档不进
-    assert any("单点覆盖度" in m for m in missing)
+    bucket = {"sig_cov": {real.out_name.lower(): "exhaustive"}}   # 旧版残留
+    w._apply_edits_bucket(bucket)
+    assert w._sig_cov == {}, "旧桶 sig_cov 应被忽略"
 
 
 # ───────────── 导出范围：仅负向 / 仅正向 ─────────────

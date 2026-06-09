@@ -314,7 +314,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._neg_only = {}      # {信号名小写: 负向规则"first"/"all"} —— 正向全自动、仅加了负向的信号；
                                  # 记规则是为了切覆盖度重算时按原规则补回(默认1条不会被炸成每条一条)；清负向时可整体撤销定制
         self._sig_cov = {}       # 单点覆盖度 {信号名小写: 档位"min"/"max"/"exhaustive"}——该信号专属覆盖档，
-                                 # 压过全局 logic/mux 下拉；不在表里=跟随全局。随测试项编辑按 Excel 路径存盘
+                                 # 压过全局 logic/mux 下拉；不在表里=跟随全局。
+                                 # ⚠ 仅【会话内】临时档，【不存盘、不恢复】：否则上次留下的单点档会被静默恢复、
+                                 # 暗中盖过全局下拉，让"刚打开 GUI 改全局却对某些信号无效"(用户实测的 bug)。
+                                 # 开 GUI 即一张白纸，全局下拉对所有信号生效；要个别不同当场调，关掉即忘。
         self._sig_cov_loading = False  # 程序化设单点覆盖下拉时屏蔽其 changed 信号，防加载信号时误触重算
         self._ti_sig = None      # 当前在编辑器里的信号
         self._ti_node = None
@@ -598,7 +601,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "  跟随全局 = 用全局档（默认）——改全局档对所有'跟随全局'的信号生效\n"
             "  精简/全面/穷举 = 只有此信号用该档（真值表/预览/生成/报告都按此）\n"
             "用法：先调全局档定大盘，再对个别要重点验/要省用例的信号单独设单点档。\n"
-            "（按信号名记忆，随测试项编辑一起存盘，也随『导出/导入测试项编辑』走）")
+            "⚠ 只是【本次开着 GUI 期间】的临时档，不存盘——关掉重开即忘，开 GUI 永远是\n"
+            "  全局档当家（避免上次留的单点档静默盖过全局下拉）。改全局下拉会清掉当前信号的单点档。")
         self.sig_cov_combo.currentIndexChanged.connect(self.on_sig_cov_changed)
         sigcov.addWidget(self.sig_cov_combo)
         self.sig_cov_tag = QtWidgets.QLabel("")     # 生效来源提示（单点/跟随全局），随信号刷新
@@ -775,7 +779,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_sig_cov_changed(self, *args):
         """「本信号覆盖度」下拉变化：记进 _sig_cov（"跟随全局"=删除该信号的单点设置），
-        按新档重算【当前信号】的测试项并存盘。加载信号时由 _sig_cov_loading 守卫避免误触。"""
+        按新档重算【当前信号】的测试项。单点档是会话内临时档、不存盘。
+        加载信号时由 _sig_cov_loading 守卫避免误触。"""
         if (self._sig_cov_loading or self._sig_loading
                 or getattr(self, "_ti_loading", False)):
             return
@@ -788,7 +793,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sig_cov.pop(name_low, None)
         else:
             self._sig_cov[name_low] = collapsed
-        self._persist_edits()
+        # 单点档不存盘（会话内临时），故这里不调 _persist_edits
         if self._ti_sig is not None:
             self._load_test_items(self._ti_sig)
         elif getattr(self, "_ti_mux_sig", None) is not None:
@@ -912,8 +917,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return            # 改的是另一类的全局下拉，与当前信号无关
         name_low = sig.out_name.lower()
         if name_low in self._sig_cov:
-            self._sig_cov.pop(name_low, None)
-            self._persist_edits()
+            self._sig_cov.pop(name_low, None)   # 单点档不存盘，无需 _persist_edits
             # 立刻回显单点下拉/tag 为「跟随全局」——自定义信号那条 on_coverage_changed 不重渲，
             # 否则下拉会停在旧的「单点档」直到重选(对抗评审 minor)。
             self._set_sig_cov_combo(sig)
@@ -2001,8 +2005,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         allbuckets = _load_edits_file()
-        if (self._edited or self._mux_expected or self._mux_neg or self._mux_data
-                or self._sig_cov):
+        # 单点覆盖度【不进桶】——它是会话内临时档，存盘会被静默恢复、暗中盖过全局下拉(用户实测 bug)。
+        if self._edited or self._mux_expected or self._mux_neg or self._mux_data:
             allbuckets[path] = {
                 "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
                 "neg_only": dict(self._neg_only),
@@ -2012,8 +2016,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "mux_neg": sorted(self._mux_neg),
                 # mux 数据值手填（B2）：{信号名: {物理基名: int}}
                 "mux_data": {name: dict(d) for name, d in self._mux_data.items() if d},
-                # 单点覆盖度：{信号名: 档位 min/max/exhaustive}（logic/mux 共用）
-                "sig_cov": dict(self._sig_cov),
             }
         else:
             allbuckets.pop(path, None)        # 编辑全清空 → 桶也删掉
@@ -2111,23 +2113,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     n_restored += 1
                 if bad:
                     missing.append(name_low + "（mux 数据值：%d 个数值非法，已跳过）" % bad)
-        # 单点覆盖度：信号(logic 或 mux)仍在当前表、且档位合法的才恢复
-        valid_names = set(by_name) | set(mux_by_name)
-        for name_low, mode in (bucket.get("sig_cov") or {}).items():
-            if mode not in ("min", "max", "exhaustive"):
-                continue
-            if name_low in valid_names:
-                self._sig_cov[name_low] = mode
-            else:
-                missing.append(name_low + "（单点覆盖度：信号不存在）")
+        # 单点覆盖度【不恢复】——会话内临时档，旧桶里残留的 sig_cov 一律忽略(见 _persist_edits 注释)。
         return n_restored, missing
 
     def on_export_edits(self):
-        """把当前 Excel 的全部测试项编辑(logic 行编辑 + mux 手填期望)导出为 .json（给同事/版本库/跨机器）。"""
-        if (not self._edited and not self._mux_expected and not self._mux_data
-                and not self._sig_cov):
+        """把当前 Excel 的全部测试项编辑(logic 行编辑 + mux 手填期望)导出为 .json（给同事/版本库/跨机器）。
+        单点覆盖度不导出——它是会话内临时档，不属于"劳动成果"。"""
+        if not self._edited and not self._mux_expected and not self._mux_data:
             QtWidgets.QMessageBox.information(self, "提示", "当前没有任何测试项编辑可导出。\n"
-                                              "(手填期望/加负向/自定义列/手填数据值/单点覆盖度之后再导出)")
+                                              "(手填期望/加负向/自定义列/手填数据值之后再导出)")
             return
         excel = (self.path_edit.text() or "").strip()
         default = os.path.splitext(os.path.basename(excel) or "dreg")[0] + "_edits.json"
@@ -2142,7 +2136,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "neg_only": dict(self._neg_only),
             "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
             "mux_data": {name: dict(d) for name, d in self._mux_data.items() if d},
-            "sig_cov": dict(self._sig_cov),
         }
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -2173,9 +2166,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "导入失败", "无法读取/解析 %s：\n%s" % (path, ex))
             return
         if not isinstance(payload, dict) or not any(
-                k in payload for k in ("edits", "mux_expected", "mux_data", "sig_cov")):
+                k in payload for k in ("edits", "mux_expected", "mux_data")):
             QtWidgets.QMessageBox.critical(self, "导入失败",
-                                           "%s 不是测试项编辑文件(缺少 edits/mux_expected/mux_data/sig_cov 段)。" % path)
+                                           "%s 不是测试项编辑文件(缺少 edits/mux_expected/mux_data 段)。" % path)
             return
         n_restored, missing = self._apply_edits_bucket(payload)
         self._sync_neg_checks_from_edits()
