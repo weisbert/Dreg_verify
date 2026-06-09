@@ -872,6 +872,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._persist_coverage()
         if self._sig_loading or getattr(self, "_ti_loading", False):
             return
+        self._clear_displayed_sig_cov_on_global()    # 「动全局=对当前信号生效」(用户拍板)
         sig, name_low = self._ti_sig, self._ti_name_low
         if sig is not None and name_low is not None:
             if name_low not in self._customized:
@@ -888,6 +889,36 @@ class MainWindow(QtWidgets.QMainWindow):
         elif getattr(self, "_ti_mux_sig", None) is not None:
             self._load_mux_test_items(self._ti_mux_sig)   # mux：按新覆盖度重算(手填期望按取值键自动回填)
         self._update_cov_hint()
+
+    def _clear_displayed_sig_cov_on_global(self):
+        """「动全局=对当前信号生效」(用户拍板)：当用户改动【与当前信号同类】的全局覆盖下拉时，
+        清掉当前正在看的这个信号的单点档(若有)，让全局改动立刻可见——你伸手去拧哪个旋钮都对
+        眼前信号生效。其它没在看的信号各自保留单点档（下次点开经 tag 可见）。
+
+        · 只认覆盖下拉(logic→self.coverage / mux→self.coverage_mux)，按信号类型对号；
+          改了不相干那侧的下拉不清档。
+        · 不认 max_tests：那是用例数上限(对单点档照样生效)，不该清档。
+        · 经 self.sender() 辨别触发控件；非信号触发(直接调用)时 sender 为 None，不清档。
+        """
+        sender = self.sender()
+        if sender not in (self.coverage, self.coverage_mux):
+            return
+        sig = self._ti_sig if self._ti_sig is not None else getattr(self, "_ti_mux_sig", None)
+        if sig is None:
+            return
+        relevant = (self.coverage_mux if isinstance(sig, excel_model.MuxGroup)
+                    else self.coverage)
+        if sender is not relevant:
+            return            # 改的是另一类的全局下拉，与当前信号无关
+        name_low = sig.out_name.lower()
+        if name_low in self._sig_cov:
+            self._sig_cov.pop(name_low, None)
+            self._persist_edits()
+            # 立刻回显单点下拉/tag 为「跟随全局」——自定义信号那条 on_coverage_changed 不重渲，
+            # 否则下拉会停在旧的「单点档」直到重选(对抗评审 minor)。
+            self._set_sig_cov_combo(sig)
+            self.status.showMessage("已清除 %s 的单点覆盖档，改回跟随全局『%s』"
+                                    % (sig.out_name, sender.currentText()))
 
     def _update_cov_hint(self):
         """工具栏「覆盖度」旁实时显示当前信号的用例条数，把抽象档位变具体。logic 与 mux 信号都显示。"""

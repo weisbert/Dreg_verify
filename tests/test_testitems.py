@@ -726,6 +726,39 @@ def test_gui_sig_cov_isolated_to_signal(qapp, tmp_path_factory):
     assert cmap[sigA.out_name] == a_ex_n
 
 
+def test_gui_sig_cov_global_clears_displayed_override(qapp, tmp_path_factory):
+    """⭐用户报的bug + 拍板修法(Option A)：单点档会暗中盖过全局下拉(还从磁盘恢复)→全局看着'失效'。
+    修=改【与当前信号同类】的全局下拉时,清掉【当前正在看】那个信号的单点档,让全局立刻生效；
+    其它没在看的信号保留各自单点档；max_tests / 另一类下拉 不清档。"""
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("sigcovglobal") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    A = "d_logic_bt_lp_lna_agc[2:0]"; B = "d_logic_bt_lp_reserve"
+    def select(name):
+        r = next(i for i in range(w.table.rowCount()) if w._sig_of_row(i).out_name == name)
+        w.on_row_focus(r, gui.COL_K, -1, -1)
+    w.coverage.setCurrentText("精简")
+    # A、B 都设单点穷举（模拟探索/磁盘恢复后两个信号都有 override）
+    select(A); w.sig_cov_combo.setCurrentText("穷举")
+    select(B); w.sig_cov_combo.setCurrentText("穷举")
+    select(A)
+    n_exh = len(w._ti_rows)
+    # 看着 A 拧全局下拉到【不同】档位（同值 Qt 不发信号；必须 setCurrentText 真改变，self.sender() 才辨控件）
+    w.coverage.setCurrentText("全面")
+    assert A.lower() not in w._sig_cov, "看A时拧全局→应清掉A的单点档"
+    assert len(w._ti_rows) < n_exh, "清档后A应跟随全局全面、用例变少"
+    assert B.lower() in w._sig_cov, "没在看的B应保留单点档"
+    # 点开 B：单点档仍在，下拉回显穷举
+    select(B)
+    assert w._sig_cov.get(B.lower()) == "exhaustive"
+    assert w.sig_cov_combo.currentText() == "穷举"
+    # max_tests 变化不清档
+    select(A); w.coverage.setCurrentText("精简"); w.sig_cov_combo.setCurrentText("穷举")
+    w.max_tests.setValue(64)
+    assert w._sig_cov.get(A.lower()) == "exhaustive", "改 max_tests 不该清单点档"
+
+
 def test_gui_sig_cov_restore_bucket(qapp, tmp_path_factory):
     """单点覆盖度随 _apply_edits_bucket 恢复：合法档恢复；信号不存在→跳过并列名；非法档静默忽略。"""
     from dreg_verify import gui
