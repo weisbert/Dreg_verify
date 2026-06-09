@@ -880,16 +880,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._clear_displayed_sig_cov_on_global()    # 「动全局=对当前信号生效」(用户拍板)
         sig, name_low = self._ti_sig, self._ti_name_low
         if sig is not None and name_low is not None:
-            if name_low not in self._customized:
-                self._load_test_items(sig)               # 纯自动：按新覆盖度重算
-            elif name_low in self._neg_only:
-                # 仅负向定制(无手改) → 撤销定制、按新覆盖度重算正向、再按原规则补回负向
-                rule = self._neg_only[name_low]   # "first"/"all"——保住"默认1条不被炸成每条一条"
-                self._customized.discard(name_low)
-                self._neg_only.pop(name_low, None)
-                self._edited.pop(name_low, None)
-                self._load_test_items(sig)
-                self._set_signal_negatives(sig, True, rule)
+            # 纯自动信号、或 neg_only 信号(_load_test_items 内会按新覆盖度重算正向+补回负向) → 重载；
+            # 手工编辑过测试项的信号(_customized 但非 neg_only)保留编辑、不重算(避免冲掉用户工作)。
+            if name_low not in self._customized or name_low in self._neg_only:
                 self._load_test_items(sig)
         elif getattr(self, "_ti_mux_sig", None) is not None:
             self._load_mux_test_items(self._ti_mux_sig)   # mux：按新覆盖度重算(手填期望按取值键自动回填)
@@ -1520,7 +1513,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._neg_only.pop(name_low, None)
             self._persist_edits()
             return
-        rows = (self._edited[name_low]["rows"] if name_low in self._edited
+        # neg_only 信号(正向全自动、只加了负向)：正向永远取【当前覆盖度】的新 auto 行，不要用
+        # _edited 里冻结的旧行——否则它的正向被钉死在"加负向时"的档，切到它看着不跟全局(用户实测 bug)。
+        # 仅手工编辑过测试项的信号(hand_edited)才沿用 _edited 缓存(保住编辑)。
+        use_cached = name_low in self._edited and name_low not in self._neg_only
+        rows = (self._edited[name_low]["rows"] if use_cached
                 else self._auto_rows(sig, node, bindings, groups))
         pos_rows = [rd for rd in rows if rd.get("kind") != "neg"]
         if not pos_rows:
@@ -1712,6 +1709,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_cone = bool(chain)       # 头部/输入表据此标注"已展开上游"
         self._ti_chain = chain            # 展开链(本行+逐层代入的上游行)，cone 信号显示
         self._ti_name_low = name_low
+        # neg_only 信号(正向全自动、只加了负向)：每次加载都按【当前全局覆盖度】重算正向 + 按原规则
+        # 补回负向，刷新 _edited 缓存。否则切到它会显示"加负向时"那档的冻结正向、不跟全局(用户实测 bug)。
+        # 重算是确定性的(由覆盖度决定)，故抑制此处的逐次存盘(每点一个信号写一次盘没必要)。
+        # ★不变式(保证 reflow 不丢用户负向)：一旦给负向【命名/手填错值/精挑加负向】，都会经
+        #   _ti_mark_customized 把信号【移出 _neg_only】→变冻结(hand_edited)→走下面 _edited 缓存分支、
+        #   不再 reflow。故还留在 _neg_only 的信号其负向必为自动取反(无名/无手填值)，重算只是确定性再生。
+        if name_low in self._neg_only:
+            prev_susp = getattr(self, "_persist_suspended", False)
+            self._persist_suspended = True
+            try:
+                self._set_signal_negatives(sig, True, self._neg_only[name_low])
+            finally:
+                self._persist_suspended = prev_susp
         if name_low in self._edited:
             self._ti_rows = self._edited[name_low]["rows"]
             custom = True

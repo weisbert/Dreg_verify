@@ -658,6 +658,53 @@ def test_gui_coverage_live_update_neg_only(qapp, wb, tmp_path_factory):
     assert sig.out_name.lower() in w._neg_only   # 仍是仅负向定制
 
 
+def test_gui_neg_only_switch_follows_global_coverage(qapp, tmp_path_factory, monkeypatch):
+    """⭐用户实测bug：全选+加负向(在精简下)后，改全局覆盖度只对【当前看的】信号生效，
+    切到【别的】neg_only信号还是精简。修=neg_only信号每次加载都按当前全局覆盖度重算正向+补负向。
+    覆盖①会话内切换 ②退出重开 两条路径。"""
+    from dreg_verify import gui
+    monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("negp") / "edits.json"))
+    path = tmp_path_factory.mktemp("negsw") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    A = "d_logic_bt_lp_lna_agc[2:0]"; B = "d_logic_bt_lp_reserve"
+
+    def pos_neg(w):
+        pos = sum(1 for rd in w._ti_rows if rd.get("kind") != "neg")
+        neg = sum(1 for rd in w._ti_rows if rd.get("kind") == "neg")
+        return pos, neg
+
+    def select(w, name):
+        w._ti_loaded_idx = None
+        r = next(i for i in range(w.table.rowCount()) if w._sig_of_row(i).out_name == name)
+        w.on_row_focus(r, gui.COL_K, -1, -1)
+
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    # 全局精简 + 全选 + 加负向（用户的确切操作）
+    w.coverage.setCurrentText("精简")
+    w.set_all_visible(True)
+    w.on_all_signals_neg(True)
+    assert A.lower() in w._neg_only and B.lower() in w._neg_only
+    # 看着 A 改全局到全面（A 跟着变）
+    select(w, A)
+    w.coverage.setCurrentText("全面")
+    a_pos, a_neg = pos_neg(w)
+    # 基准：B 纯自动全面的正向数
+    w2 = gui.MainWindow(); w2.path_edit.setText(str(path)); w2.on_load()
+    w2.coverage.setCurrentText("全面"); select(w2, B)
+    b_auto_full = pos_neg(w2)[0]
+    # 关键：在原窗口切到 B（没在改全局时看它），应=全面、不是精简，且负向仍在
+    select(w, B)
+    b_pos, b_neg = pos_neg(w)
+    assert b_pos == b_auto_full, "切到未在改全局时看的 neg_only 信号 B 应跟随全局全面(%d)，实得 %d" % (b_auto_full, b_pos)
+    assert b_neg >= 1, "负向应保留"
+    # ② 退出重开：global 全面恢复后，B 选中应仍是全面（不被磁盘冻结行钉死）
+    w.coverage.setCurrentText("精简")              # 故意改回精简再重开，验证重开按重开时的全局走
+    w3 = gui.MainWindow(); w3.path_edit.setText(str(path)); w3.on_load()
+    w3.coverage.setCurrentText("全面"); select(w3, B)
+    assert pos_neg(w3)[0] == b_auto_full, "重开后 B 选中应跟随当前全局全面"
+    assert B.lower() in w3._neg_only and pos_neg(w3)[1] >= 1, "重开后负向定制应恢复"
+
+
 def test_gui_sig_cov_per_signal(qapp, tmp_path_factory):
     """⭐ 单点覆盖度：本信号下拉只改该信号、压过全局；存进 _sig_cov；_opts/build 带出 sig_cov。"""
     from dreg_verify import gui
