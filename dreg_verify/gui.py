@@ -660,8 +660,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ti_btn_tips[text] = tip       # 存原 tooltip，选回 logic 信号时恢复
             bar.addWidget(b)
         # 选 mux 信号时置灰的按钮：这些没有 mux 分支（点了只会弹"先选信号"=误导，见 _set_ti_buttons_for_mux）。
-        # mux 也支持的(第二十六轮加「删除列/清空本信号」、「重新生成」给 mux 当撤销)：保持可用。
-        self._ti_mux_enabled_btns = ("auto→期望", "预览本信号.sv", "删除列", "清空本信号", "重新生成")
+        # mux 也支持的(第二十六轮加「删除列/清空本信号」、「重新生成」给 mux 当撤销；
+        # 第二十八轮加「导出CSV」给 mux)：保持可用。
+        self._ti_mux_enabled_btns = ("auto→期望", "预览本信号.sv", "删除列", "清空本信号", "重新生成",
+                                     "导出CSV")
         self._ti_mux_disabled_btns = [t for t in self._ti_btns
                                       if t not in self._ti_mux_enabled_btns]
         lay.addWidget(bar_box)
@@ -1742,6 +1744,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_name_low = None
         self._ti_hl_col = -1
         self._ti_mux_vecs = []; self._ti_mux_exp_row = -1   # mux 期望编辑状态一并清(防陈旧引用)
+        self._ti_mux_exp = None                             # mux 展开缓存(导出CSV/用户向量复用)
         self._set_ti_buttons_for_mux(False)                 # 无信号：列编辑按钮恢复可用(原行为)
         self._set_sig_cov_combo(None)                       # 无信号：单点覆盖下拉禁用并复位
         self.ti_header.setText(header_text)
@@ -1821,6 +1824,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_sig_cov_combo(grp)          # 单点覆盖下拉置到本信号档（不触发重算）
         self._set_ti_buttons_for_mux(True)    # mux 信号：置灰列结构/CSV 按钮(无 mux 分支)，给准确 tooltip
         exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
+        self._ti_mux_exp = exp                # 缓存：导出CSV/用户向量编辑复用(避免重复展开)
         # 『输入信号』表：解析有问题也照样填（哪个输入坏了一眼看到）——修"mux 点开输入信号框空白"
         self._populate_mux_inputs(grp, exp)
         if exp["issues"]:
@@ -3322,6 +3326,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("已预览信号 %s 的 .sv 片段（%d 用例）" % (sig.out_name, len(vecs)))
 
     def on_ti_export_csv(self):
+        # mux 信号（第二十八轮）：导出真值表 CSV——与 logic 同排版(每列一条测试，行=输入/auto_out/期望/驱动)。
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:
+            self._export_mux_csv(grp)
+            return
         if not self._ti_sig:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
             return
@@ -3364,6 +3373,74 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "完成", "已导出 %d 条测试项：\n%s"
                                           % (len(self._ti_rows), path))
         self.status.showMessage("已导出测试项 CSV：%s" % path)
+
+    def _mux_drive_strs(self, vec, bindings, used_vars):
+        """mux 向量的 force / RF_WRITE 驱动文本（与 logic 的 _drive_strs 对称，供 CSV 展示）。"""
+        try:
+            forces, writes, _unres = W.compute_drives(vec, bindings, used_vars)
+        except Exception:  # noqa: BLE001
+            return "", ""
+        fs = "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces)
+        ws = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
+        return fs, ws
+
+    def _export_mux_csv(self, grp):
+        """导出 mux 信号测试项为真值表 CSV（给 designer 看 / 复制粘贴）。
+
+        与 logic 的 on_ti_export_csv 同排版：第一列=信号/字段名，其后每列一条测试。
+        忠于生成产物：若该信号勾了「负向」(左表，build 走 neg_signals/which=first 追加 1 条)，
+        CSV 一并带上负向列；行=控制/数据输入 + auto_out + 期望(进.sv) + 期望来源 + 负向标记 + force/RF_WRITE。"""
+        pos = self._ti_mux_vecs
+        if not pos:
+            QtWidgets.QMessageBox.information(self, "提示", "本 mux 信号当前没有可导出的测试列（见编辑器头部原因）")
+            return
+        exp = getattr(self, "_ti_mux_exp", None)
+        if exp is None:
+            exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
+        used = exp["used_vars"]
+        bindings = exp["bindings"]
+        data_key_set = set(exp.get("data_keys", []))
+        # 忠于 build：勾了「负向」的 mux 信号在生成时追加负向(which=first，见 generator.build mux 分支)
+        vecs = list(pos)
+        if grp.out_name.lower() in self._mux_neg:
+            vecs = V.add_negatives(vecs, mode="invert", which="first")
+            for i, v in enumerate(vecs):
+                v.index = i
+        default = "%s_mux_tests.csv" % (grp.out_base or "mux")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出本 mux 信号测试项 CSV", default,
+                                                        "CSV (*.csv)")
+        if not path:
+            return
+        import csv
+        out_w = grp.out_width or 1
+        wsuf = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                wr = csv.writer(f)
+                wr.writerow(["信号\\测试"] + [W.test_label(v) for v in vecs])
+                for key in used:
+                    b = bindings.get(key)
+                    width = b.width if b is not None else 1
+                    role = "数据" if key in data_key_set else "控制"
+                    label = "%s (%s)" % ((b.base if b is not None else key), role)
+                    wr.writerow([label] + [self._fmt_val(v.assignments.get(key, 0), width) for v in vecs])
+                wr.writerow(["auto_out%s" % wsuf] + [self._fmt_val(v.exp_value & E.mask(out_w), out_w)
+                                                     for v in vecs])
+                wr.writerow(["期望(进.sv)%s" % wsuf] + [self._fmt_val(v.asserted_value & E.mask(out_w), out_w)
+                                                       for v in vecs])
+                wr.writerow(["期望(bin)"] + [W.fmt_bin(v.asserted_value, out_w) for v in vecs])
+                wr.writerow(["期望来源"] + [("负向(故意填错)" if v.is_negative else
+                                            ("designer手填" if v.designer_expected is not None
+                                             else "auto_out兜底")) for v in vecs])
+                wr.writerow(["负向?"] + ["是" if v.is_negative else "" for v in vecs])
+                drives = [self._mux_drive_strs(v, bindings, used) for v in vecs]
+                wr.writerow(["force"] + [fs for fs, _ in drives])
+                wr.writerow(["RF_WRITE"] + [ws for _, ws in drives])
+        except OSError as ex:
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
+            return
+        QtWidgets.QMessageBox.information(self, "完成", "已导出 %d 条 mux 测试项：\n%s" % (len(vecs), path))
+        self.status.showMessage("已导出 mux 测试项 CSV：%s" % path)
 
     def _rows_to_vectors(self, node, bindings, groups, out_width, rows):
         """把 rowdict 列表构造成 TestVector 列表（负向行用 expected 作 override 编码；

@@ -826,6 +826,57 @@ def test_gui_mux_auto_fill_button(qapp, tmp_path_factory, monkeypatch):
     assert len(w._mux_expected[name_low]) == n
 
 
+def test_gui_mux_export_csv(qapp, tmp_path_factory, tmp_path, monkeypatch):
+    """⭐第二十八轮：mux 信号「导出CSV」不再置灰——与 logic 同真值表排版
+    (第一列=信号/字段名，其后每列一条测试；行=控制/数据输入 + auto_out + 期望 + 来源 + 负向 + force/RF_WRITE)。"""
+    from PySide6 import QtWidgets
+    gui, w, grp = _mux_window(tmp_path_factory, "demux_csv")
+    w._load_test_items(grp)
+    n = len(w._ti_mux_vecs)
+    assert n >= 1
+    assert w._ti_btns["导出CSV"].isEnabled()          # mux 选中时不再置灰
+    out = str(tmp_path / "mux_tests.csv")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (out, "CSV (*.csv)")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    w.on_ti_export_csv()
+    import csv
+    import os
+    assert os.path.exists(out)
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f))
+    header = rows[0]
+    assert header[0] == "信号\\测试" and len(header) == n + 1     # 表头 + n 条测试
+    labels = [r[0] for r in rows]
+    assert any(l.startswith("auto_out") for l in labels)
+    assert any(l.startswith("期望(进.sv)") for l in labels)
+    for must in ("期望来源", "负向?", "force", "RF_WRITE"):
+        assert must in labels
+    assert any("(数据)" in l or "(控制)" in l for l in labels)    # 输入行带角色标注
+
+
+def test_gui_mux_export_csv_includes_negative(qapp, tmp_path_factory, tmp_path, monkeypatch):
+    """忠于生成：勾了「负向」的 mux 信号导出 CSV 时一并带负向列(build 走 which=first 追加 1 条)。"""
+    from PySide6 import QtWidgets
+    gui, w, grp = _mux_window(tmp_path_factory, "demux_csv_neg")
+    w._mux_neg.add(grp.out_name.lower())              # 模拟勾了左表「负向」
+    w._load_test_items(grp)
+    n_pos = len(w._ti_mux_vecs)
+    out = str(tmp_path / "mux_tests_neg.csv")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (out, "CSV (*.csv)")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    w.on_ti_export_csv()
+    import csv
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f))
+    header = rows[0]
+    assert len(header) == n_pos + 1 + 1               # 表头 + n 正向 + 1 负向(which=first)
+    assert any(l.endswith("_NEG") for l in header[1:])
+    neg_row = next(r for r in rows if r[0] == "负向?")
+    assert neg_row.count("是") == 1
+
+
 def test_gui_mux_expected_persists(qapp, tmp_path_factory, monkeypatch):
     """mux 手填期望持久化：关 GUI 重开自动恢复 + .sv 用恢复值。"""
     from dreg_verify import gui

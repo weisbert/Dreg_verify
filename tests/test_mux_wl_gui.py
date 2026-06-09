@@ -324,18 +324,18 @@ def test_wl_gui_mux_negatives_persist_across_reload(gui_app, tmp_path, monkeypat
 
 # ───────────── ⑧ 第二十轮 B1：mux 编辑器按钮态 + 级联切换重渲 ─────────────
 def test_b1_mux_greys_logic_only_buttons(lpbt_win):
-    """[B1a] 选 mux 信号 → 无 mux 分支的列结构/CSV 按钮置灰(点了只弹"先选信号"=误导) + 准确 tooltip；
+    """[B1a] 选 mux 信号 → 无 mux 分支的列结构按钮置灰(点了只弹"先选信号"=误导) + 准确 tooltip；
     有 mux 分支的「auto→期望」「预览本信号.sv」+ 第二十六轮新增的「删除列」「清空本信号」「重新生成」
-    保持可用；切回 logic 信号恢复全可用。"""
+    + 第二十八轮新增的「导出CSV」保持可用；切回 logic 信号恢复全可用。"""
     w = lpbt_win
     mux = next(s for s in w.signals if isinstance(s, excel_model.MuxGroup))
     w._load_test_items(mux)
     assert w._ti_mux_sig is mux and w._ti_sig is None
     for t in ("加正向列", "复制列", "加负向(选中)",
-              "全部用例加负向", "删负向", "导出CSV", "重命名列…"):
+              "全部用例加负向", "删负向", "重命名列…"):
         assert not w._ti_btns[t].isEnabled(), t
         assert "case 结构" in w._ti_btns[t].toolTip(), t      # 准确说明，不是"先选信号"
-    for t in ("auto→期望", "预览本信号.sv", "删除列", "清空本信号", "重新生成"):
+    for t in ("auto→期望", "预览本信号.sv", "删除列", "清空本信号", "重新生成", "导出CSV"):
         assert w._ti_btns[t].isEnabled(), t                  # 有 mux 分支 → 保持可用
     # 切回 logic 信号 → 列编辑按钮恢复可用 + 原 tooltip
     logic = next(s for s in w.signals if not isinstance(s, excel_model.MuxGroup))
