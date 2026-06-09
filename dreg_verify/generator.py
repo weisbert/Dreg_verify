@@ -24,7 +24,8 @@ class GenOptions:
                  vector_overrides=None, probe_prefixes=None,
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
                  cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None,
-                 dft_observe=False, logic_mode=None, mux_mode=None, sig_cov=None):
+                 dft_observe=False, logic_mode=None, mux_mode=None, sig_cov=None,
+                 mux_dropped=None, mux_cleared=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -97,6 +98,15 @@ class GenOptions:
         # mux_cov_mode(name) 同口径读取，name 缺省则纯走全局（保旧调用方不变）。
         self.sig_cov = {str(k).lower(): v for k, v in (sig_cov or {}).items()
                         if v in ("min", "max", "exhaustive")}
+        # mux 删除/清空（第二十六轮，用户拍板「mux 也要能删、logic+mux 都要一键清空」）：
+        #   mux_dropped = {mux信号名(小写): {向量签名,...}} —— 用户在 mux 真值表里删掉的【个别测试列】，
+        #     签名 = mux_assign_key(v.assignments)(与手填期望同口径的稳定键)；切覆盖度后对不上签名的
+        #     自然失效(那列本就不存在)。
+        #   mux_cleared = {mux信号名(小写)} —— 用户「一键清空」的 mux 信号 = 零用例(与覆盖度无关，整组不产出)。
+        # 二者只作用于 mux 正向向量(负向由 add_negatives 在过滤后的正向上再生，连带消失)；logic 的清空
+        # 走 vector_overrides 空列表(见 build() 空 override 跳过)。
+        self.mux_dropped = {str(k).lower(): set(v) for k, v in (mux_dropped or {}).items() if v}
+        self.mux_cleared = {str(x).lower() for x in (mux_cleared or [])}
 
     def logic_vec_params(self, name=None):
         """logic 向量生成参数 (mode, exhaustive)，供 V.generate_vectors。
@@ -574,6 +584,13 @@ def build(wb, opts):
         override = (opts.vector_overrides.get(sig.out_name.lower())
                     if opts.vector_overrides else None)
 
+        # 用户「一键清空」(删空所有列)→ 空 override 列表(非 None) = 零用例：整个信号不产出，
+        # 但列名字+原因(尊重清空意图、不静默、也不回退自动)。与 mux_cleared 行为对称。
+        if override is not None and len(override) == 0:
+            skipped.append((sig.out_name, sig.assert_id,
+                            [("clear", sig.out_base, "用户已清空(零用例，本信号不产出测试)")]))
+            continue
+
         # 默认跳过含"不可驱动输入"的信号：wire兜底(表里查无,force 不存在的 net→CUVUNF) 或 未解析。
         # 这与 VBA 行为一致(它直接跳过这类信号)。--include-risky 可强制生成。
         # 但用户已显式定制(override)的信号尊重其选择，不跳过(可能正是为了验那类信号而手造的)。
@@ -682,6 +699,11 @@ def build(wb, opts):
     n_logic_blocks = len(blocks)
     mux_selected = select_mux_groups(wb, opts)
     for grp in mux_selected:
+        # 用户「一键清空」该 mux 信号 → 零用例(与覆盖度无关)：整组不产出，但列名字+原因(对称 logic 清空)。
+        if grp.out_name.lower() in opts.mux_cleared:
+            skipped.append((grp.out_name, grp.assert_id,
+                            [("clear", _mux_ctrl_desc(grp), "用户已清空(零用例，本信号不产出测试)")]))
+            continue
         exp = mux_gen.expand_mux_group(wb, resolver, grp)
         # 有解析问题 → 跳过并给原因（与 logic risky-skip 同理念：保证产物能 elaborate、跳过必有名字+原因）
         if exp["issues"] and not opts.include_risky:
@@ -719,6 +741,15 @@ def build(wb, opts):
             skipped.append((grp.out_name, grp.assert_id,
                             [("mux", _mux_ctrl_desc(grp), _empty_vector_reason(meta))]))
             continue
+
+        # 用户在 mux 真值表里删掉的【个别测试列】：按签名过滤正向向量（负向尚未追加，连带消失）。
+        _dropped = opts.mux_dropped.get(grp.out_name.lower())
+        if _dropped:
+            vecs = [v for v in vecs if mux_assign_key(v.assignments) not in _dropped]
+            if not vecs:
+                skipped.append((grp.out_name, grp.assert_id,
+                                [("clear", _mux_ctrl_desc(grp), "用户已删除全部测试列(零用例)")]))
+                continue
 
         # designer 手填期望（mux，第十一轮续）：按输入取值键对号入座。须在反例之前——
         # make_negative 的错值防撞要看到 designer_expected。
@@ -1105,7 +1136,11 @@ def report(wb, opts):
             "n_tests": len(vecs), "n_neg": sum(1 for v in vecs if v.is_negative),
             "control": ",".join(meta.get("control", [])), "data": ",".join(meta.get("data", [])),
             "unresolved": ";".join(sorted(unresolved_bases)),
-            "error": ("⚠覆盖缺口: %s" % meta["iddq_skipped"]) if meta.get("iddq_skipped") else "",
+            # 用户一键清空(空 override) → 报告也透出原因(与 build 跳过、mux 清空同口径)
+            "error": ("用户已清空(零用例，本信号不产出测试)"
+                      if (override is not None and len(override) == 0)
+                      else ("⚠覆盖缺口: %s" % meta["iddq_skipped"]) if meta.get("iddq_skipped")
+                      else ""),
         })
 
     # ───────────── mux 组（与 build() 双轨同步——报告里必须能看到 .sv 里的每个 mux 块）─────────────
@@ -1122,7 +1157,9 @@ def report(wb, opts):
         out_warn = mux_output_warning(grp, opts)   # top_out=0 裸名探针提示（不阻断，照常生成）
         vecs, meta = [], {}
         blockers = mux_prefix_risks(grp, exp, opts)
-        if exp["issues"] and not opts.include_risky:
+        if grp.out_name.lower() in opts.mux_cleared:
+            skip_reason = "用户已清空(零用例，本信号不产出测试)"   # 与 build() 对称
+        elif exp["issues"] and not opts.include_risky:
             skip_reason = "; ".join(exp["issues"])
         elif blockers and not opts.include_risky:
             skip_reason = "; ".join(r[2] for r in blockers)
@@ -1131,6 +1168,8 @@ def report(wb, opts):
             vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                                   max_tests=opts.max_tests,
                                                   data_overrides=mux_data_for(opts, grp))
+            # 过滤顺序与 build() 一致：先判生成器是否本就没向量(给真实原因)，再按 dropped 过滤——
+            # 否则"生成器空 + 残留旧档 dropped"会被误标成"用户删了全部"(自审 Finding 1)。
             if meta.get("value_collision"):
                 skip_reason = ("数据寄存器位宽装不下 %d 个 case 的互异值——选错路也测不出(假绿)"
                                % len(grp.cases))
@@ -1138,19 +1177,25 @@ def report(wb, opts):
             elif not vecs:
                 skip_reason = _empty_vector_reason(meta)
             else:
-                # designer 手填期望（与 build() 双轨同步——报告必须反映 .sv 真实断言值）
-                apply_mux_expected(vecs, opts.mux_expected.get(grp.out_name.lower())
-                                   or opts.mux_expected.get(grp.out_base.lower()))
-                if _neg_enabled_for(grp, opts):
-                    vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
-                                           fixed_value=opts.neg_value)
-                    for i, v in enumerate(vecs):
-                        v.index = i
-                # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 mux 挂点）；skip 原因进 meta 供透出
-                _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
-                                             opts.mux_cov_mode(grp.out_name), opts.dft_observe)
-                if _rskip:
-                    meta["iddq_skipped"] = _rskip
+                _dropped = opts.mux_dropped.get(grp.out_name.lower())
+                if _dropped:                               # 用户删掉的个别测试列(与 build() 同口径过滤)
+                    vecs = [v for v in vecs if mux_assign_key(v.assignments) not in _dropped]
+                if not vecs:                               # 删光所有测试列 → 零用例(给原因，与 build 对称)
+                    skip_reason = "用户已删除全部测试列(零用例)"
+                else:
+                    # designer 手填期望（与 build() 双轨同步——报告必须反映 .sv 真实断言值）
+                    apply_mux_expected(vecs, opts.mux_expected.get(grp.out_name.lower())
+                                       or opts.mux_expected.get(grp.out_base.lower()))
+                    if _neg_enabled_for(grp, opts):
+                        vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
+                                               fixed_value=opts.neg_value)
+                        for i, v in enumerate(vecs):
+                            v.index = i
+                    # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 mux 挂点）；skip 原因进 meta 供透出
+                    _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
+                                                 opts.mux_cov_mode(grp.out_name), opts.dft_observe)
+                    if _rskip:
+                        meta["iddq_skipped"] = _rskip
 
         # 警告只在【真生成】时显示（被跳过的组用 error 列说明，警告无意义）
         row_warn = out_warn if not skip_reason else ""

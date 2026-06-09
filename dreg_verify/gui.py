@@ -341,6 +341,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # mux 数据值手填（B2，第二十轮）：{信号名小写: {物理基名小写: int}}。替换自动互异/标记值，
         # 按物理寄存器键（与 by_base/点名法同口径，覆盖度切换/case 重排都稳）。单独存盘。
         self._mux_data = {}
+        # mux 删除/清空（第二十六轮，用户拍板「mux 也要能删、logic+mux 都要一键清空」）：
+        #   _mux_dropped = {信号名小写: {向量签名,...}} 用户删掉的【个别 mux 测试列】(签名=mux_assign_key)；
+        #   _mux_cleared = {信号名小写} 用户「一键清空」的 mux 信号 = 零用例(与覆盖度无关)。
+        # logic 的清空走 _edited[name]["rows"]=[]（空 override → build 跳过给原因）。两者都随桶存盘/导入导出。
+        self._mux_dropped = {}
+        self._mux_cleared = set()
         self._ti_mux_data_rows = {}   # 当前 mux 表里可手填数据行 row -> (物理基名小写, 位宽)
         self._ti_mux_vecs = []    # 当前 mux 信号的向量（期望行编辑时对号入座）
         self._ti_mux_exp_row = -1 # 当前 mux 表里"期望"行的行号
@@ -434,14 +440,20 @@ class MainWindow(QtWidgets.QMainWindow):
                            "用于覆盖工具的自动判断：撞名 RO 寄存器的内部信号(如 d_wl_rf_linectrl_band_sel)\n"
                            "等价于 for_test 的 force `ENV_RF.<基名>。cone 成环时工具已会自动回退，这里是手动指定。")
         b_force.clicked.connect(self.on_set_force_signals)
-        # 测试项编辑(含 designer 手填期望)的导出/导入：给同事复用、入版本库、跨机器迁移
-        b_exp_edits = QtWidgets.QPushButton("导出编辑…")
-        b_exp_edits.setToolTip("把当前 Excel 的全部测试项编辑(手填期望/负向/自定义列)导出为 .json 文件，\n"
-                               "可给同事导入复用、入版本库存档。编辑本来就会自动存盘(关 GUI 不丢)，导出是为了共享。")
+        # 完整配置的导出/导入：给同事复用、入版本库、跨机器迁移（第二十六轮：不只测试编辑，
+        # 信号勾选/全局档/探针前缀/强制force 等所有配置一起带走）
+        b_exp_edits = QtWidgets.QPushButton("导出配置…")
+        b_exp_edits.setToolTip("把当前【完整配置】导出为 .json 文件，可给同事导入复用、入版本库存档：\n"
+                               "  · 勾选了哪些信号、全局覆盖度/用例上限/级联/DFT\n"
+                               "  · 探针前缀、强制 force 信号\n"
+                               "  · 全部测试编辑(手填期望/负向/自定义列/数据值/删除列/清空)\n"
+                               "配置本来就会自动存盘(关 GUI 不丢、下次自动恢复)，导出是为了共享/迁移。")
         b_exp_edits.clicked.connect(self.on_export_edits)
-        b_imp_edits = QtWidgets.QPushButton("导入编辑…")
-        b_imp_edits.setToolTip("从 .json 文件导入测试项编辑(手填期望/负向/自定义列)，与现有编辑合并：\n"
-                               "同名信号以导入为准。文件里有、当前表里没有的信号会列出名字并跳过。")
+        b_imp_edits = QtWidgets.QPushButton("导入配置…")
+        b_imp_edits.setToolTip("从 .json 文件导入配置 = 加载这份工作状态：\n"
+                               "  · 完整配置文件：信号勾选/全局档/探针/force/全部测试编辑 全部套用(先清后载)\n"
+                               "  · 旧版『测试项编辑』文件：仍按合并语义只并入测试编辑\n"
+                               "文件里有、当前表里没有的信号会列出名字并跳过。")
         b_imp_edits.clicked.connect(self.on_import_edits)
         for b in (b_check, b_selall, b_selnone):
             bulk.addWidget(b)
@@ -525,6 +537,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cov_hint.setStyleSheet("color:#1558d6;")
         self.max_tests = QtWidgets.QSpinBox(); self.max_tests.setRange(1, 100000); self.max_tests.setValue(256)
         self.max_tests.setToolTip("用例数上限(安全阀，防止穷举/全面产生过多用例)")
+        if "pytest" not in sys.modules:          # 恢复上次用例上限(连信号前设值，避免初始化误触)；pytest 不恢复
+            _mt = _load_settings().get("max_tests")
+            if isinstance(_mt, int) and 1 <= _mt <= 100000:
+                self.max_tests.setValue(_mt)
         self.max_tests.valueChanged.connect(self.on_coverage_changed)
         # 级联模式：输入引用"上游 logic 计算网"(如 d_ndiv_n 的 mode_sel_to_logic)时怎么驱动
         self.cascade_combo = QtWidgets.QComboBox()
@@ -616,7 +632,9 @@ class MainWindow(QtWidgets.QMainWindow):
         defs = [("重新生成", self.on_ti_regen, "丢弃本信号自定义，按当前向量选项从表达式重新生成"),
                 ("加正向列", self.on_ti_add, "新增一条正向(真实)测试(输入全 0，auto_out 自动算，期望留空待填)"),
                 ("复制列", self.on_ti_copy, "复制当前选中的测试列"),
-                ("删除列", self.on_ti_del, "删除选中的测试列"),
+                ("删除列", self.on_ti_del, "删除选中的测试列(logic/mux 都可；mux 删的是个别 case 测试列)"),
+                ("清空本信号", self.on_ti_clear, "一键清空本信号的所有测试 = 零用例(生成 .sv 时本信号不产出)。\n"
+                 "可逆：点「重新生成」按当前覆盖度恢复默认。"),
                 ("重命名列…", self.on_ti_rename_current, "给用户新增的测试列改名(双击列头亦可；自动生成的 T0/T1 不可改)"),
                 ("auto→期望", self.on_ti_fill_expected,
                  "把 auto_out 填进「期望」行（只填未填的列，已手填的不动）。\n"
@@ -638,9 +656,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ti_btn_tips[text] = tip       # 存原 tooltip，选回 logic 信号时恢复
             bar.addWidget(b)
         # 选 mux 信号时置灰的按钮：这些没有 mux 分支（点了只会弹"先选信号"=误导，见 _set_ti_buttons_for_mux）。
-        # 「auto→期望」「预览本信号.sv」有 mux 分支，mux 选中时保持可用。
+        # mux 也支持的(第二十六轮加「删除列/清空本信号」、「重新生成」给 mux 当撤销)：保持可用。
+        self._ti_mux_enabled_btns = ("auto→期望", "预览本信号.sv", "删除列", "清空本信号", "重新生成")
         self._ti_mux_disabled_btns = [t for t in self._ti_btns
-                                      if t not in ("auto→期望", "预览本信号.sv")]
+                                      if t not in self._ti_mux_enabled_btns]
         lay.addWidget(bar_box)
 
         # 「展开链」(仅 cone 信号显示)：本行 + 逐层代入的上游行。每行两种形式：
@@ -803,10 +822,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_cov_hint()
 
     def _persist_coverage(self):
-        """持久化两侧覆盖档（第二十二轮解耦），下次启动恢复。pytest 下 _save_settings 为 no-op。"""
+        """持久化两侧覆盖档（第二十二轮解耦）+ 用例上限（第二十六轮），下次启动恢复。pytest 下 no-op。"""
         st = _load_settings()
         st["coverage_logic"] = self.coverage.currentText()
         st["coverage_mux"] = self.coverage_mux.currentText()
+        st["max_tests"] = self.max_tests.value()
         _save_settings(st)
 
     # ───────────── 级联模式（展开上游 / force级联网） ─────────────
@@ -975,6 +995,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mux_expected = {}
         self._mux_neg = set()
         self._mux_data = {}
+        self._mux_dropped = {}
+        self._mux_cleared = set()
         # 编辑持久化按"已加载"的 Excel 路径分桶（不能用 path_edit 实时文本——
         # 用户改了路径还没点加载时，编辑仍属于旧表）
         self._loaded_excel_path = path
@@ -1170,10 +1192,17 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.signals[self._idx_of_row(r)]
 
     def set_all_visible(self, checked):
-        for r in range(self.table.rowCount()):
-            if not self.table.isRowHidden(r):
-                self.table.item(r, COL_SEL).setCheckState(
-                    QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+        # 批量勾选：挂起逐格存盘(否则每个 checkbox 触发一次 _persist_edits 文件写=全选时几百次)，循环后存一次
+        prev = getattr(self, "_persist_suspended", False)
+        self._persist_suspended = True
+        try:
+            for r in range(self.table.rowCount()):
+                if not self.table.isRowHidden(r):
+                    self.table.item(r, COL_SEL).setCheckState(
+                        QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+        finally:
+            self._persist_suspended = prev
+        self._persist_edits()
 
     def on_check_selected_rows(self):
         """把信号表里当前『选中的行』(框选/Ctrl/Shift)一次性勾上『选』——省去逐个点小复选框。"""
@@ -1181,10 +1210,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if not rows:
             self.status.showMessage("先在信号表里选中若干行(鼠标框选 / Ctrl·Shift 点)，再点『勾选选中行』")
             return
-        for r in rows:
-            cell = self.table.item(r, COL_SEL)
-            if cell is not None:
-                cell.setCheckState(QtCore.Qt.Checked)
+        prev = getattr(self, "_persist_suspended", False)
+        self._persist_suspended = True
+        try:
+            for r in rows:
+                cell = self.table.item(r, COL_SEL)
+                if cell is not None:
+                    cell.setCheckState(QtCore.Qt.Checked)
+        finally:
+            self._persist_suspended = prev
+        self._persist_edits()
         self.status.showMessage("已把选中的 %d 行勾上『选』" % len(rows))
 
     def _checked_rows(self):
@@ -1227,7 +1262,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """勾/取消左侧"负向"列：勾=确保该信号至少有 1 条负向自检(已有更多的保持不动，不塌成1条)；
         取消=清掉全部负向(若含命名/手填错值的负向，先确认防误删)。
         想要更多/更精确，去右侧编辑器「加负向(选中)」或「全部用例加负向」。左右联动。"""
-        if self._sig_loading or item is None or item.column() != COL_NEG:
+        if self._sig_loading or item is None:
+            return
+        if item.column() == COL_SEL:
+            self._persist_edits()        # 勾选变化也存盘（第二十六轮：启动恢复信号勾选）
+            return
+        if item.column() != COL_NEG:
             return
         r = item.row()
         sig = self._sig_of_row(r)
@@ -1762,6 +1802,18 @@ class MainWindow(QtWidgets.QMainWindow):
         vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode=mux_mode,
                                               max_tests=self.max_tests.value(),
                                               data_overrides=data_ov)
+        name_low = grp.out_name.lower()
+        # 用户「一键清空」该 mux 信号（第二十六轮）→ 零用例：优先于其它"无向量"提示，表保持空。
+        if name_low in self._mux_cleared:
+            self._ti_mux_vecs = []
+            self.ti_header.setText("mux 信号 %s：已清空(零用例，本信号不产出测试)。点「重新生成」按当前覆盖度恢复默认。"
+                                   % grp.out_name)
+            self._update_cov_hint()
+            return
+        # 用户删掉的【个别 mux 测试列】：按签名过滤（与 build/report 同口径 mux_assign_key）。
+        dropped = self._mux_dropped.get(name_low)
+        if dropped:
+            vecs = [v for v in vecs if generator.mux_assign_key(v.assignments) not in dropped]
         if meta.get("value_collision"):
             self.ti_header.setText(
                 "mux 信号 %s：⚠字段太窄·假绿 —— 结构解析通了，但数据寄存器字段装不下 %d 条 case 的"
@@ -1769,8 +1821,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "上方『输入信号』表可看各数据寄存器的实际字段位宽。" % (grp.out_name, len(grp.cases)))
             return
         if not vecs:
-            self.ti_header.setText("mux 信号 %s：控制信号没有可用的驱动路径，无法生成测试向量（见左表状态列）"
-                                   % grp.out_name)
+            if dropped:
+                self.ti_header.setText("mux 信号 %s：已删除全部测试列(零用例)。点「重新生成」按当前覆盖度恢复默认。"
+                                       % grp.out_name)
+            else:
+                self.ti_header.setText("mux 信号 %s：控制信号没有可用的驱动路径，无法生成测试向量（见左表状态列）"
+                                       % grp.out_name)
             return
         # 已手填的期望按输入取值键回填到向量（与生成/报告同一逻辑）
         generator.apply_mux_expected(vecs, self._mux_expected.get(grp.out_name.lower()))
@@ -2015,8 +2071,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         allbuckets = _load_edits_file()
+        checked = self._collect_checked()    # 信号勾选(哪些输出参与生成)——第二十六轮起也存盘+启动恢复
         # 单点覆盖度【不进桶】——它是会话内临时档，存盘会被静默恢复、暗中盖过全局下拉(用户实测 bug)。
-        if self._edited or self._mux_expected or self._mux_neg or self._mux_data:
+        has_edits = bool(self._edited or self._mux_expected or self._mux_neg or self._mux_data
+                         or self._mux_dropped or self._mux_cleared)
+        if has_edits or checked:
             allbuckets[path] = {
                 "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
                 "neg_only": dict(self._neg_only),
@@ -2026,9 +2085,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "mux_neg": sorted(self._mux_neg),
                 # mux 数据值手填（B2）：{信号名: {物理基名: int}}
                 "mux_data": {name: dict(d) for name, d in self._mux_data.items() if d},
+                # mux 删除的个别测试列(签名) / 一键清空的整组(第二十六轮)
+                "mux_dropped": {name: sorted(s) for name, s in self._mux_dropped.items() if s},
+                "mux_cleared": sorted(self._mux_cleared),
+                # 信号勾选：原样信号名(保留大小写，恢复时按小写匹配)
+                "signals_checked": checked,
             }
         else:
-            allbuckets.pop(path, None)        # 编辑全清空 → 桶也删掉
+            allbuckets.pop(path, None)        # 啥都没有 → 桶也删掉
         _save_edits_file(allbuckets)
 
     def _restore_edits(self):
@@ -2040,6 +2104,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0
         n_restored, missing = self._apply_edits_bucket(bucket)
         self._sync_neg_checks_from_edits()
+        self._apply_signal_checks(bucket.get("signals_checked"))   # 恢复信号勾选(第二十六轮)
         if missing:
             # 追加(不覆盖)——on_load 可能已往预览页写了"分析异常"清单，两份信息都要保留
             self.preview.appendPlainText(
@@ -2048,7 +2113,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return n_restored
 
     def _sync_neg_checks_from_edits(self):
-        """把含负向的信号在左表勾上"负向"列（恢复/导入编辑后调用）。
+        """把左表"负向"列同步成与编辑状态一致（恢复/导入后调用）——【权威】：有负向的勾上、
+        没有的取消（导入完整配置时清掉上一会话残留的负向勾选；on_load 时表本就全空，取消无副作用）。
         logic：_edited 里有 kind==neg 行；mux：在 _mux_neg 集合里。"""
         self._sig_loading = True
         try:
@@ -2060,10 +2126,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     checked = sig.out_name.lower() in self._mux_neg
                 else:
                     checked = self._signal_has_negative(sig.out_name.lower())
-                if checked:
-                    cell = self.table.item(r, COL_NEG)
-                    if cell is not None:
-                        cell.setCheckState(QtCore.Qt.Checked)
+                cell = self.table.item(r, COL_NEG)
+                if cell is not None:
+                    cell.setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
         finally:
             self._sig_loading = False
 
@@ -2123,30 +2188,97 @@ class MainWindow(QtWidgets.QMainWindow):
                     n_restored += 1
                 if bad:
                     missing.append(name_low + "（mux 数据值：%d 个数值非法，已跳过）" % bad)
+        # mux 删除的个别测试列(签名) / 一键清空（第二十六轮）：仍在 mux 页的才恢复
+        for name_low, sigs in (bucket.get("mux_dropped") or {}).items():
+            if name_low not in mux_by_name:
+                missing.append(name_low + "（mux 删除列：mux 页不存在）")
+            elif sigs:
+                self._mux_dropped[name_low] = set(sigs)
+                n_restored += 1
+        for name_low in (bucket.get("mux_cleared") or []):
+            if name_low in mux_by_name:
+                self._mux_cleared.add(name_low)
+                n_restored += 1
+            else:
+                missing.append(name_low + "（mux 清空：mux 页不存在）")
         # 单点覆盖度【不恢复】——会话内临时档，旧桶里残留的 sig_cov 一律忽略(见 _persist_edits 注释)。
         return n_restored, missing
 
-    def on_export_edits(self):
-        """把当前 Excel 的全部测试项编辑(logic 行编辑 + mux 手填期望)导出为 .json（给同事/版本库/跨机器）。
-        单点覆盖度不导出——它是会话内临时档，不属于"劳动成果"。"""
-        if not self._edited and not self._mux_expected and not self._mux_data:
-            QtWidgets.QMessageBox.information(self, "提示", "当前没有任何测试项编辑可导出。\n"
-                                              "(手填期望/加负向/自定义列/手填数据值之后再导出)")
-            return
-        excel = (self.path_edit.text() or "").strip()
-        default = os.path.splitext(os.path.basename(excel) or "dreg")[0] + "_edits.json"
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出测试项编辑", default,
-                                                        "JSON (*.json)")
-        if not path:
-            return
-        payload = {
-            "dreg_verify_edits": 1,
-            "excel": os.path.basename(excel),
+    def _collect_config(self):
+        """收集【完整配置】(第二十六轮，用户拍板「不只mux，logic/勾选/全局/测试编辑等所有配置一键带走」)：
+        信号勾选 + 全局工具栏设置 + 探针前缀 + 强制force + 全部 per-signal 测试编辑(含 mux 删除/清空)。
+        单点覆盖度【不含】——会话内临时档(见 _persist_edits 注释)。"""
+        return {
+            "dreg_verify_config": 2,
+            "signals_checked": self._collect_checked(),
+            "global": {
+                "coverage_logic": self.coverage.currentText(),
+                "coverage_mux": self.coverage_mux.currentText(),
+                "max_tests": self.max_tests.value(),
+                "cascade_mode": self._cascade_mode(),
+                "dft_observe": bool(self.dft_observe_chk.isChecked()),
+            },
+            "probe_prefixes": dict(self._probe_prefixes),
+            "force_signals": sorted(self._force_signals),
             "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
             "neg_only": dict(self._neg_only),
             "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
+            "mux_neg": sorted(self._mux_neg),
             "mux_data": {name: dict(d) for name, d in self._mux_data.items() if d},
+            "mux_dropped": {name: sorted(s) for name, s in self._mux_dropped.items() if s},
+            "mux_cleared": sorted(self._mux_cleared),
         }
+
+    def _apply_global_settings(self, g):
+        """导入：套用全局工具栏设置(覆盖度/上限/级联/DFT)。blockSignals 设值，避免逐项触发联动
+        (resolver 重建/编辑器重载由调用方统一做一次)；并写入 settings 持久化。"""
+        if not isinstance(g, dict):
+            return
+        for combo, key in ((self.coverage, "coverage_logic"), (self.coverage_mux, "coverage_mux")):
+            v = g.get(key)
+            if v in ("精简", "全面", "穷举"):
+                combo.blockSignals(True); combo.setCurrentText(v); combo.blockSignals(False)
+        mt = g.get("max_tests")
+        if isinstance(mt, int) and 1 <= mt <= 100000:
+            self.max_tests.blockSignals(True); self.max_tests.setValue(mt); self.max_tests.blockSignals(False)
+        cm = g.get("cascade_mode")
+        if cm in ("cone", "force"):
+            self.cascade_combo.blockSignals(True)
+            self.cascade_combo.setCurrentIndex(1 if cm == "force" else 0)
+            self.cascade_combo.blockSignals(False)
+        dft = g.get("dft_observe")
+        if isinstance(dft, bool):
+            self.dft_observe_chk.blockSignals(True); self.dft_observe_chk.setChecked(dft)
+            self.dft_observe_chk.blockSignals(False)
+        self._persist_coverage()                 # coverage_logic/mux + max_tests
+        st = _load_settings()
+        st["cascade_mode"] = self._cascade_mode()
+        st["dft_observe"] = bool(self.dft_observe_chk.isChecked())
+        _save_settings(st)
+
+    def _reset_all_config_state(self):
+        """导入【完整配置】前清空全部可编辑状态(= 加载这份工作状态，而非叠加在现有之上)。
+        不碰已加载的 wb/signals/解析画像——只清用户配置层。"""
+        self._edited = {}; self._customized = set(); self._neg_only = {}
+        self._mux_expected = {}; self._mux_neg = set(); self._mux_data = {}
+        self._mux_dropped = {}; self._mux_cleared = set()
+        self._sig_cov = {}
+        self._probe_prefixes = {}; self._force_signals = set()
+
+    def on_export_edits(self):
+        """导出【完整配置】为 .json（给同事/版本库/跨机器）：信号勾选 + 全局设置 + 探针前缀 +
+        强制force + 全部测试编辑(含 mux 删除/清空)。单点覆盖度不导出(会话内临时档)。"""
+        if not self.wb:
+            QtWidgets.QMessageBox.information(self, "提示", "请先加载 Excel")
+            return
+        excel = (self.path_edit.text() or "").strip()
+        default = os.path.splitext(os.path.basename(excel) or "dreg")[0] + "_config.json"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出完整配置", default,
+                                                        "JSON (*.json)")
+        if not path:
+            return
+        payload = self._collect_config()
+        payload["excel"] = os.path.basename(excel)
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=1)
@@ -2157,15 +2289,23 @@ class MainWindow(QtWidgets.QMainWindow):
                    for rd in ed["rows"] if rd.get("designer_expected") is not None)
         n_mux = sum(len(m) for m in self._mux_expected.values())
         QtWidgets.QMessageBox.information(
-            self, "完成", "已导出 %d 个信号的测试项编辑（logic 手填期望 %d 条，mux 手填期望 %d 条）：\n%s"
-            % (len(self._edited) + len(self._mux_expected), n_de, n_mux, path))
+            self, "完成",
+            "已导出完整配置：\n"
+            "  · 勾选信号 %d 个；全局档 logic=%s/mux=%s，上限 %d\n"
+            "  · 探针前缀 %d 条，强制force %d 个\n"
+            "  · 测试编辑：logic %d 信号(手填期望 %d)、mux 手填期望 %d、删除列 %d、清空 %d\n%s"
+            % (len(payload["signals_checked"]), payload["global"]["coverage_logic"],
+               payload["global"]["coverage_mux"], payload["global"]["max_tests"],
+               len(self._probe_prefixes), len(self._force_signals),
+               len(self._edited), n_de, n_mux, len(self._mux_dropped), len(self._mux_cleared), path))
 
     def on_import_edits(self):
-        """从 .json 导入测试项编辑，与现有合并（同名信号以导入为准）。跳过的信号列名字+原因。"""
+        """导入配置。v2【完整配置】= 先清空再照单恢复(信号勾选/全局/探针/force/全部测试编辑)；
+        v1 旧【测试项编辑】文件 = 沿用合并语义(只并 per-signal 编辑)。跳过的信号列名字+原因。"""
         if not self.wb:
             QtWidgets.QMessageBox.information(self, "提示", "请先加载 Excel")
             return
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "导入测试项编辑", "",
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "导入配置", "",
                                                         "JSON (*.json);;全部文件 (*)")
         if not path:
             return
@@ -2175,26 +2315,56 @@ class MainWindow(QtWidgets.QMainWindow):
         except (OSError, ValueError) as ex:
             QtWidgets.QMessageBox.critical(self, "导入失败", "无法读取/解析 %s：\n%s" % (path, ex))
             return
-        if not isinstance(payload, dict) or not any(
-                k in payload for k in ("edits", "mux_expected", "mux_data")):
-            QtWidgets.QMessageBox.critical(self, "导入失败",
-                                           "%s 不是测试项编辑文件(缺少 edits/mux_expected/mux_data 段)。" % path)
+        is_full = isinstance(payload, dict) and bool(payload.get("dreg_verify_config"))
+        is_legacy = isinstance(payload, dict) and (
+            payload.get("dreg_verify_edits")
+            or any(k in payload for k in ("edits", "mux_expected", "mux_data")))
+        if not (is_full or is_legacy):
+            QtWidgets.QMessageBox.critical(
+                self, "导入失败",
+                "%s 不是 dreg_verify 配置/编辑文件(缺少 dreg_verify_config 或 edits/mux_* 段)。" % path)
             return
+        if is_full:
+            # 完整配置：清空全部可编辑状态后照单恢复(= 加载这份工作状态)；先套全局/探针/force 并
+            # 重建 resolver，再恢复编辑(编辑重算依赖正确的 resolver)，最后恢复勾选。
+            self._reset_all_config_state()
+            self._apply_global_settings(payload.get("global") or {})
+            pp = payload.get("probe_prefixes")
+            if isinstance(pp, dict):
+                self._probe_prefixes = {str(k).strip().lower(): str(v).strip()
+                                        for k, v in pp.items() if v and str(v).strip()}
+                self._save_probe_prefixes()
+            fs = payload.get("force_signals")
+            if isinstance(fs, list):
+                self._force_signals = {str(x).strip().lower() for x in fs if str(x).strip()}
+                self._save_force_signals()
+            self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
+                                        force_overrides=self._force_signals,
+                                        cascade_mode=self._cascade_mode())
         n_restored, missing = self._apply_edits_bucket(payload)
         self._sync_neg_checks_from_edits()
-        self._persist_edits()                      # 导入的编辑也进入自动存盘
-        if self._ti_sig is not None:               # 当前编辑器里的信号若被导入覆盖 → 刷新显示
-            self._load_test_items(self._ti_sig)
-        elif getattr(self, "_ti_mux_sig", None) is not None:   # mux 信号同理
-            self._load_mux_test_items(self._ti_mux_sig)
-        msg = "已导入 %d 个信号的测试项编辑。" % n_restored
+        if is_full:
+            self._reanalyze_all()                  # 重析全表(用新探针/force/级联) + 重建左表 + 刷新 logic 编辑器
+            if getattr(self, "_ti_mux_sig", None) is not None:   # mux 编辑器也刷新(自审 Finding 3，_reanalyze_all 只管 logic)
+                self._load_mux_test_items(self._ti_mux_sig)
+            self._apply_signal_checks(payload.get("signals_checked"))   # 勾选权威：列出的勾上、其余清空
+        else:
+            if self._ti_sig is not None:           # legacy 合并：编辑器若停在某信号 → 刷新
+                self._load_test_items(self._ti_sig)
+            elif getattr(self, "_ti_mux_sig", None) is not None:
+                self._load_mux_test_items(self._ti_mux_sig)
+        self._persist_edits()                      # 导入结果进入自动存盘
+        kind = "完整配置" if is_full else "测试项编辑"
+        msg = "已导入%s（%d 个信号的测试编辑）。" % (kind, n_restored)
+        if is_full:
+            msg += "\n勾选信号、全局档、探针前缀、强制force 均已套用。"
         if missing:
-            msg += "\n\n以下信号在文件里有编辑、但当前 Excel 里找不到(已跳过)：\n" + \
+            msg += "\n\n以下信号在文件里有配置、但当前 Excel 里找不到(已跳过)：\n" + \
                    "\n".join("  %s" % n for n in missing[:30])
             if len(missing) > 30:
                 msg += "\n  …等共 %d 个" % len(missing)
         QtWidgets.QMessageBox.information(self, "导入完成", msg)
-        self.status.showMessage("已导入测试项编辑：%s（%d 个信号）" % (path, n_restored))
+        self.status.showMessage("已导入%s：%s（%d 个信号）" % (kind, path, n_restored))
 
     # 纵向(真值表)布局：每个输入/输出一行(纵表头)，每条测试一列 T0/T1...。
     #   行: 0..G-1 = 各输入(base)；R_AUTO = auto_out(表达式计算，只读)；R_EXP = 期望(designer 手填)。
@@ -2981,6 +3151,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_table.setCurrentCell(0, c + 1)
 
     def on_ti_del(self):
+        # mux 信号（第二十六轮）：删的是个别 case 测试列 → 记签名进 _mux_dropped，与 logic 删列对称。
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:
+            self._mux_del_cols(grp)
+            return
         if not self._ti_sig:
             return
         cols = sorted({i.column() for i in self.ti_table.selectedItems()}, reverse=True)
@@ -2996,7 +3171,84 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_mark_customized()
         self._ti_populate()
 
+    def _mux_del_cols(self, grp):
+        """删除选中的 mux 测试列：按向量签名记进 _mux_dropped（build/report/真值表同口径过滤）。"""
+        cols = sorted({i.column() for i in self.ti_table.selectedItems()})
+        if not cols:
+            c = self.ti_table.currentColumn()
+            cols = [c] if c >= 0 else []
+        if not cols:
+            QtWidgets.QMessageBox.information(self, "提示", "请先选中要删除的 mux 测试列")
+            return
+        name_low = grp.out_name.lower()
+        sigs = self._mux_dropped.setdefault(name_low, set())
+        n = 0
+        for c in cols:
+            if 0 <= c < len(self._ti_mux_vecs):
+                sigs.add(generator.mux_assign_key(self._ti_mux_vecs[c].assignments))
+                n += 1
+        if not sigs:
+            self._mux_dropped.pop(name_low, None)
+        self._persist_edits()
+        self._load_mux_test_items(grp)
+        self.status.showMessage("已删除 %s 的 %d 条 mux 测试列（可点「重新生成」恢复默认）" % (grp.out_name, n))
+
+    def on_ti_clear(self):
+        """一键清空当前信号的所有测试 = 零用例（logic：空 override；mux：入 _mux_cleared）。可「重新生成」恢复。"""
+        sig = self._ti_sig
+        grp = getattr(self, "_ti_mux_sig", None)
+        if sig is None and grp is None:
+            QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个信号")
+            return
+        name = sig.out_name if sig is not None else grp.out_name
+        if QtWidgets.QMessageBox.question(
+                self, "确认清空",
+                "清空 %s 的所有测试 = 该信号零用例（生成 .sv 时本信号不产出任何测试）。\n"
+                "可点「重新生成」按当前覆盖度恢复默认。确定？" % name
+                ) != QtWidgets.QMessageBox.Yes:
+            return
+        if sig is not None:                       # logic：空 rows = 空 override（build 跳过给原因）
+            self._ti_rows = []
+            self._ti_mark_customized()            # 写 _edited[name]={"rows":[]} + 存盘
+            self._ti_populate()
+        else:                                     # mux：入 _mux_cleared（零用例，与覆盖度无关）
+            self._mux_cleared.add(grp.out_name.lower())
+            self._persist_edits()
+            self._load_mux_test_items(grp)
+        self.status.showMessage("已清空 %s 的测试（零用例，可点「重新生成」恢复默认）" % name)
+
+    def _set_left_neg_check(self, sig, checked):
+        """直接设左表某信号的「负向」勾选（_sig_loading 守卫，不触发 on_signal_table_item_changed）。"""
+        name_low = sig.out_name.lower()
+        self._sig_loading = True
+        try:
+            for r in range(self.table.rowCount()):
+                s = self._sig_of_row(r)
+                if s is not None and s.out_name.lower() == name_low:
+                    cell = self.table.item(r, COL_NEG)
+                    if cell is not None:
+                        cell.setCheckState(QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+                    break
+        finally:
+            self._sig_loading = False
+
     def on_ti_regen(self):
+        # mux 信号（第二十六轮）：重新生成 = 丢弃本信号全部 mux 自定义（清空/删列/手填期望/数据值/负向）→ 回到出厂。
+        grp = getattr(self, "_ti_mux_sig", None)
+        if grp is not None and not self._ti_sig:
+            name_low = grp.out_name.lower()
+            self._mux_cleared.discard(name_low)
+            self._mux_dropped.pop(name_low, None)
+            self._mux_expected.pop(name_low, None)
+            self._mux_data.pop(name_low, None)
+            if name_low in self._mux_neg:          # mux 负向走左表勾选，一并清掉并同步左表
+                self._mux_neg.discard(name_low)
+                self._set_left_neg_check(grp, False)
+            self._persist_edits()
+            self._load_mux_test_items(grp)
+            self.status.showMessage("已重新生成 %s 的 mux 测试项（丢弃自定义：清空/删列/手填期望/数据值/负向）"
+                                    % grp.out_name)
+            return
         if not self._ti_sig:
             return
         self._customized.discard(self._ti_name_low)
@@ -3117,9 +3369,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if positive_only:
                 vecs = [v for v in vecs if not v.is_negative]
             elif negative_only:
+                # 已清空(rows==[])的信号：保留空 override = 零用例，别在"仅负向"导出里回退自动重生(自审 Finding 2)。
+                # 有正向但无负向的信号才整个略过。
+                if not rows:
+                    ov[name_low] = []
+                    continue
                 vecs = [v for v in vecs if v.is_negative]
                 if not vecs:
-                    continue                 # 该信号无负向 → "仅负向"导出里整个略过
+                    continue                 # 该信号有正向但无负向 → "仅负向"导出里整个略过
             ov[name_low] = vecs          # 空列表也保留：删空=零用例，不回退自动
         return ov or None
 
@@ -3161,6 +3418,9 @@ class MainWindow(QtWidgets.QMainWindow):
             mux_expected={k: dict(v) for k, v in self._mux_expected.items()},
             # mux 手填数据值（B2）：替换自动互异/标记值，预览/生成/报告都按此走
             mux_data={k: dict(v) for k, v in self._mux_data.items()},
+            # mux 删除/清空（第二十六轮）：删掉的个别测试列(按签名) / 一键清空的整组(零用例)
+            mux_dropped={k: sorted(v) for k, v in self._mux_dropped.items() if v},
+            mux_cleared=sorted(self._mux_cleared),
             # DFT 观测模式（续②）：产物开头 force iddq 门到透传值，使 _to_dft 输出反映功能值
             dft_observe=(self.dft_observe_chk.isChecked()
                          if hasattr(self, "dft_observe_chk") else False))
@@ -3173,6 +3433,34 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.table.item(r, COL_SEL).checkState() == QtCore.Qt.Checked:
                 sel.append(self._sig_of_row(r).out_name)
         return sel
+
+    def _collect_checked(self):
+        """勾选信号的原始名(存盘/导出用)，对 None 项健壮——持久化可能在表未完全就绪时触发。"""
+        out = []
+        for r in range(self.table.rowCount()):
+            cell = self.table.item(r, COL_SEL)
+            sig = self._sig_of_row(r)
+            if cell is not None and sig is not None and cell.checkState() == QtCore.Qt.Checked:
+                out.append(sig.out_name)
+        return out
+
+    def _apply_signal_checks(self, names):
+        """按信号名列表恢复左表「选」勾选(大小写不敏感)——列出的勾上、其余清空(配置即权威)。
+        names 为 None → 不动(无该段配置时保持现状，向后兼容旧桶)。"""
+        if names is None:
+            return
+        want = {str(n).lower() for n in names}
+        self._sig_loading = True
+        try:
+            for r in range(self.table.rowCount()):
+                sig = self._sig_of_row(r)
+                cell = self.table.item(r, COL_SEL)
+                if sig is None or cell is None:
+                    continue
+                cell.setCheckState(QtCore.Qt.Checked if sig.out_name.lower() in want
+                                   else QtCore.Qt.Unchecked)
+        finally:
+            self._sig_loading = False
 
     def _mux_neg_checked(self):
         """勾了"负向"列的 mux 信号名（mux 负向经 neg_signals 在生成时追加，不走 override）。"""

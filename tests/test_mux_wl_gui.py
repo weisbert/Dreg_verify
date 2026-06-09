@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fixtures                                       # noqa: E402
-from dreg_verify import excel_model                   # noqa: E402
+from dreg_verify import excel_model, generator         # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -324,18 +324,19 @@ def test_wl_gui_mux_negatives_persist_across_reload(gui_app, tmp_path, monkeypat
 
 # ───────────── ⑧ 第二十轮 B1：mux 编辑器按钮态 + 级联切换重渲 ─────────────
 def test_b1_mux_greys_logic_only_buttons(lpbt_win):
-    """[B1a] 选 mux 信号 → 列结构/CSV 按钮置灰(无 mux 分支，点了只弹"先选信号"=误导) + 准确 tooltip；
-    有 mux 分支的「auto→期望」「预览本信号.sv」保持可用；切回 logic 信号恢复全可用。"""
+    """[B1a] 选 mux 信号 → 无 mux 分支的列结构/CSV 按钮置灰(点了只弹"先选信号"=误导) + 准确 tooltip；
+    有 mux 分支的「auto→期望」「预览本信号.sv」+ 第二十六轮新增的「删除列」「清空本信号」「重新生成」
+    保持可用；切回 logic 信号恢复全可用。"""
     w = lpbt_win
     mux = next(s for s in w.signals if isinstance(s, excel_model.MuxGroup))
     w._load_test_items(mux)
     assert w._ti_mux_sig is mux and w._ti_sig is None
-    for t in ("加正向列", "复制列", "删除列", "重新生成", "加负向(选中)",
+    for t in ("加正向列", "复制列", "加负向(选中)",
               "全部用例加负向", "删负向", "导出CSV", "重命名列…"):
         assert not w._ti_btns[t].isEnabled(), t
         assert "case 结构" in w._ti_btns[t].toolTip(), t      # 准确说明，不是"先选信号"
-    assert w._ti_btns["auto→期望"].isEnabled()                # 有 mux 分支 → 保持可用
-    assert w._ti_btns["预览本信号.sv"].isEnabled()
+    for t in ("auto→期望", "预览本信号.sv", "删除列", "清空本信号", "重新生成"):
+        assert w._ti_btns[t].isEnabled(), t                  # 有 mux 分支 → 保持可用
     # 切回 logic 信号 → 列编辑按钮恢复可用 + 原 tooltip
     logic = next(s for s in w.signals if not isinstance(s, excel_model.MuxGroup))
     w._load_test_items(logic)
@@ -400,4 +401,95 @@ def test_b2_mux_data_cell_editable_persist_reload(gui_app, tmp_path, monkeypatch
     # 重开 → _mux_data 恢复
     w2 = G.MainWindow(); w2.path_edit.setText(str(excel)); w2.on_load()
     assert w2._mux_data.get(name_low, {}).get(base_low) == 2
+    w2.close()
+
+
+# ───────────── 第二十六轮：mux 删除测试列 / 一键清空 / 重新生成(撤销) ─────────────
+def _load_buildable_mux(w):
+    """加载第一个 min 档 >=2 条向量的 mux 信号到编辑器，返回该组。"""
+    for s in w.signals:
+        if isinstance(s, excel_model.MuxGroup):
+            w._load_test_items(s)
+            if len(w._ti_mux_vecs) >= 2:
+                return s
+    raise AssertionError("无可建 mux 组")
+
+
+def test_mux_delete_column(lpbt_win):
+    """删除选中的 mux 测试列 → 记签名进 _mux_dropped；编辑器少一列；_opts/build 同口径过滤。"""
+    w = lpbt_win
+    mux = _load_buildable_mux(w)
+    n0 = len(w._ti_mux_vecs)
+    sig0 = generator.mux_assign_key(w._ti_mux_vecs[0].assignments)
+    w.ti_table.setCurrentCell(0, 0)
+    w.on_ti_del()
+    assert sig0 in w._mux_dropped[mux.out_name.lower()]
+    assert len(w._ti_mux_vecs) == n0 - 1
+    opts = w._opts([mux.out_name])
+    assert sig0 in opts.mux_dropped[mux.out_name.lower()]
+    res = generator.build(w.wb, opts)
+    n_build = sum(st["n_vectors"] for _l, st in res["blocks"] if st.get("out_name") == mux.out_name)
+    assert n_build == n0 - 1
+
+
+def test_mux_clear_and_regen(lpbt_win, monkeypatch):
+    """一键清空 mux → _mux_cleared + 编辑器零向量 + build 跳过；重新生成 → 撤销恢复。"""
+    from PySide6 import QtWidgets
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    w = lpbt_win
+    mux = _load_buildable_mux(w)
+    w.on_ti_clear()
+    assert mux.out_name.lower() in w._mux_cleared
+    assert w._ti_mux_vecs == []
+    res = generator.build(w.wb, w._opts([mux.out_name]))
+    assert mux.out_name not in {st.get("out_name") for _l, st in res["blocks"]}
+    # 重新生成 = 撤销清空，回到默认
+    w.on_ti_regen()
+    assert mux.out_name.lower() not in w._mux_cleared
+    assert len(w._ti_mux_vecs) >= 2
+
+
+def test_mux_regen_discards_all_customizations(lpbt_win, monkeypatch):
+    """mux「重新生成」丢弃全部自定义：删列/清空/手填期望/数据值/负向 全清，回到出厂。"""
+    from PySide6 import QtWidgets
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    w = lpbt_win
+    mux = _load_buildable_mux(w)
+    nl = mux.out_name.lower()
+    w.ti_table.setCurrentCell(0, 0); w.on_ti_del()       # 删一列
+    w._mux_neg.add(nl)                                    # 假装勾了负向
+    w._mux_expected[nl] = {"x": 1}                        # 假装手填了期望
+    w.on_ti_regen()
+    assert nl not in w._mux_dropped and nl not in w._mux_cleared
+    assert nl not in w._mux_neg and nl not in w._mux_expected
+
+
+def test_mux_drop_clear_persist_reopen(gui_app, tmp_path, monkeypatch):
+    """删列 + 清空 跨 GUI 重开持久化（随 EDITS 桶存盘/恢复）。"""
+    from PySide6 import QtWidgets
+    from dreg_verify import gui as G
+    monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    excel = tmp_path / "lpbt.xlsx"
+    fixtures.build_workbook(str(excel), with_mux=True)
+    w1 = G.MainWindow(); w1.path_edit.setText(str(excel)); w1.on_load()
+    muxes = [s for s in w1.signals if isinstance(s, excel_model.MuxGroup)]
+    m_drop, sig0 = None, None
+    for s in muxes:
+        w1._load_test_items(s)
+        if len(w1._ti_mux_vecs) >= 2:
+            m_drop = s
+            sig0 = generator.mux_assign_key(w1._ti_mux_vecs[0].assignments)
+            w1.ti_table.setCurrentCell(0, 0); w1.on_ti_del()
+            break
+    assert m_drop is not None
+    m_clear = next(s for s in muxes if s is not m_drop)
+    w1._load_test_items(m_clear); w1.on_ti_clear()
+    w1.close()
+    w2 = G.MainWindow(); w2.path_edit.setText(str(excel)); w2.on_load()
+    assert sig0 in w2._mux_dropped.get(m_drop.out_name.lower(), set())
+    assert m_clear.out_name.lower() in w2._mux_cleared
     w2.close()

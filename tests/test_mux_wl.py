@@ -2108,3 +2108,65 @@ def test_cascade_alt_mode0_depth2_ro_register(tmp_path):
     assert nv.get("d_mode") == 0                      # 第2层 mode mux 驱到 mode=0 case
     assert "d_mm_line" in nv                          # RO 线控载体被 force
     assert "d_mm_local" not in nv                     # mode=0 不写 RW 主载体
+
+
+# ───────────── 第二十六轮：mux 删除测试列 / 一键清空（generator 层） ─────────────
+def _first_buildable_mux(wb):
+    """挑一个能建 min 档 >=2 条向量的 mux 组（generator 层删除/清空测试用）。"""
+    r = resolver.Resolver(wb)
+    for grp in wb.mux:
+        try:
+            exp = mux_gen.expand_mux_group(wb, r, grp)
+            if exp["issues"]:
+                continue
+            vecs, meta = mux_gen.make_mux_vectors(grp, exp, mode="min")
+            if len(vecs) >= 2 and not meta.get("value_collision"):
+                return grp, vecs
+        except Exception:  # noqa: BLE001
+            continue
+    raise AssertionError("无可建 mux 组")
+
+
+def test_mux_cleared_skips_in_build(lpbt_wb):
+    """mux_cleared → 整组零用例：不进 blocks、进 skipped 且原因带「清空」。"""
+    grp, _vecs = _first_buildable_mux(lpbt_wb)
+    name = grp.out_name
+    res = generator.build(lpbt_wb, generator.GenOptions(signals=[name], mux_cleared=[name]))
+    assert name not in {st.get("out_name") for _l, st in res["blocks"]}
+    reasons = [rs for n, _a, rs in res["skipped"] if n == name]
+    assert reasons and "清空" in "; ".join(str(w) for *_h, w in reasons[0])
+
+
+def test_mux_dropped_filters_in_build(lpbt_wb):
+    """mux_dropped(按 mux_assign_key) → 删一条测试列就少一条向量；删光 → 跳过给原因。"""
+    grp, vecs = _first_buildable_mux(lpbt_wb)
+    name = grp.out_name
+    base = generator.build(lpbt_wb, generator.GenOptions(signals=[name]))
+    base_n = sum(st["n_vectors"] for _l, st in base["blocks"] if st.get("out_name") == name)
+    assert base_n == len(vecs)                      # min 档无负向
+    sig0 = generator.mux_assign_key(vecs[0].assignments)
+    dr = generator.build(lpbt_wb, generator.GenOptions(signals=[name], mux_dropped={name: [sig0]}))
+    dr_n = sum(st["n_vectors"] for _l, st in dr["blocks"] if st.get("out_name") == name)
+    assert dr_n == base_n - 1
+    # 删光所有签名 → 整组跳过(零用例)，原因带「删除全部」
+    allsigs = [generator.mux_assign_key(v.assignments) for v in vecs]
+    dz = generator.build(lpbt_wb, generator.GenOptions(signals=[name], mux_dropped={name: allsigs}))
+    assert name not in {st.get("out_name") for _l, st in dz["blocks"]}
+    reasons = [rs for n, _a, rs in dz["skipped"] if n == name]
+    assert reasons and "删除全部" in "; ".join(str(w) for *_h, w in reasons[0])
+
+
+def test_mux_cleared_dropped_in_report(lpbt_wb):
+    """报告与 build 同口径：mux_cleared → summary 行 error 带「清空」；mux_dropped → n_tests 减少。"""
+    grp, vecs = _first_buildable_mux(lpbt_wb)
+    name = grp.out_name
+    rep0 = generator.report(lpbt_wb, generator.GenOptions(signals=[name]))
+    row0 = next(r for r in rep0["summary"] if r["signal"] == name)
+    base_n = row0["n_tests"]
+    repc = generator.report(lpbt_wb, generator.GenOptions(signals=[name], mux_cleared=[name]))
+    rowc = next(r for r in repc["summary"] if r["signal"] == name)
+    assert "清空" in rowc["error"]
+    sig0 = generator.mux_assign_key(vecs[0].assignments)
+    repd = generator.report(lpbt_wb, generator.GenOptions(signals=[name], mux_dropped={name: [sig0]}))
+    rowd = next(r for r in repd["summary"] if r["signal"] == name)
+    assert rowd["n_tests"] == base_n - 1

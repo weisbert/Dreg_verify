@@ -192,12 +192,21 @@ def test_unequal_width_same_base_roundtrip():
 
 
 def test_empty_override_means_zero_tests(wb):
-    """#1: 空 override 列表 = 该信号零用例，而非回退自动生成。"""
+    """#1: 空 override 列表 = 该信号零用例(一键清空)，而非回退自动生成；
+    且不静默——整组进 skipped 并给「用户已清空」原因(第二十六轮：与 mux 清空对称、可见)。"""
     opts = generator.GenOptions(signals=["d_logic_bt_lp_reserve"], top_output_only=False,
                                 vector_overrides={"d_logic_bt_lp_reserve": []})
     res = generator.build(wb, opts)
-    assert res["summary"]["n_generated"] == 1
+    assert res["summary"]["n_generated"] == 0
     assert res["summary"]["n_vectors"] == 0
+    skipped_names = {n for n, _aid, _r in res["skipped"]}
+    assert "d_logic_bt_lp_reserve" in skipped_names
+    reason = next(r for n, _aid, r in res["skipped"] if n == "d_logic_bt_lp_reserve")
+    assert "清空" in "; ".join(str(w) for *_h, w in reason)
+    # 报告侧同口径：summary 行 n_tests=0 且 error 带「清空」(双轨一致)
+    rep = generator.report(wb, opts)
+    row = next(r for r in rep["summary"] if r["signal"] == "d_logic_bt_lp_reserve")
+    assert row["n_tests"] == 0 and "清空" in row["error"]
 
 
 def test_negative_sv_has_neg_suffix(wb):
@@ -1151,3 +1160,162 @@ def test_gui_cascade_help_is_builtin_dialog(qapp, wb, tmp_path_factory):
     w._open_cascade_doc()
     assert w._cascade_doc_dlg is dlg
     dlg.close()
+
+
+# ───────────── 第二十六轮：一键清空(logic) + 完整配置导入导出 + 信号勾选/上限持久化 ─────────────
+def test_gui_clear_logic_zero_tests(qapp, wb, tmp_path_factory, monkeypatch):
+    """logic「一键清空」= 空 override → build 跳过给「清空」原因；「重新生成」可恢复。"""
+    from PySide6 import QtWidgets
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    gui, w, sig = _reserve_window(tmp_path_factory, "clr")
+    w._load_test_items(sig)
+    assert len(w._ti_rows) >= 1
+    w.on_ti_clear()
+    nl = sig.out_name.lower()
+    assert w._ti_rows == []
+    assert nl in w._edited and w._edited[nl]["rows"] == []
+    res = generator.build(w.wb, w._opts([sig.out_name]))
+    assert sig.out_name not in {st.get("out_name") for _l, st in res["blocks"]}
+    assert any(n == sig.out_name and "清空" in "; ".join(str(x) for *_h, x in rs)
+               for n, _a, rs in res["skipped"])
+    w.on_ti_regen()
+    assert len(w._ti_rows) >= 1
+
+
+def test_gui_signal_selection_persisted(qapp, tmp_path_factory, monkeypatch):
+    """信号勾选(COL_SEL)跨 GUI 重开自动恢复（第二十六轮：进 EDITS 桶）。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui
+    monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("selp") / "edits.json"))
+    path = tmp_path_factory.mktemp("selw") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    names = ["d_logic_bt_lp_reserve", "d_logic_bt_lp_lna_agc[2:0]"]
+    w1 = gui.MainWindow(); w1.path_edit.setText(str(path)); w1.on_load()
+    for nm in names:
+        r = next(i for i in range(w1.table.rowCount()) if w1._sig_of_row(i).out_name == nm)
+        w1.table.item(r, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
+    assert set(w1._collect_checked()) == set(names)
+    w1.close()
+    w2 = gui.MainWindow(); w2.path_edit.setText(str(path)); w2.on_load()
+    assert set(w2._collect_checked()) == set(names)
+    w2.close()
+
+
+def test_gui_max_tests_persisted(qapp, tmp_path_factory, monkeypatch):
+    """用例上限 max_tests 改动 → 写进 settings（第二十六轮；__init__ 恢复走与 coverage 同款
+    pytest 守卫，恢复路径由 coverage 那套已验证的 settings 机制保证）。"""
+    from dreg_verify import gui
+    store = {}
+    monkeypatch.setattr(gui, "_load_settings", lambda: dict(store))
+    monkeypatch.setattr(gui, "_save_settings", lambda d: store.update(d))
+    path = tmp_path_factory.mktemp("mtw") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w1 = gui.MainWindow(); w1.path_edit.setText(str(path)); w1.on_load()
+    w1.max_tests.setValue(99)
+    assert store.get("max_tests") == 99
+    w1.close()
+
+
+def test_full_config_export_import_roundtrip(qapp, tmp_path_factory, monkeypatch):
+    """完整配置导出→导入：信号勾选/全局档/上限/探针前缀/强制force 全部还原（第二十六轮）。"""
+    import json
+    from PySide6 import QtCore
+    from dreg_verify import gui
+    monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("cfgp") / "edits.json"))
+    monkeypatch.setattr(gui.QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    path = tmp_path_factory.mktemp("cfgw") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    nm = "d_logic_bt_lp_reserve"
+    r = next(i for i in range(w.table.rowCount()) if w._sig_of_row(i).out_name == nm)
+    w.table.item(r, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
+    w.coverage.setCurrentText("全面"); w.coverage_mux.setCurrentText("穷举")
+    w.max_tests.setValue(77)
+    w._probe_prefixes = {"d_foo": "U_X.U_Y"}
+    w._force_signals = {"d_bar"}
+    cfg = tmp_path_factory.mktemp("cfgout") / "cfg.json"
+    monkeypatch.setattr(gui.QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(cfg), "")))
+    w.on_export_edits()
+    saved = json.load(open(str(cfg), encoding="utf-8"))
+    assert saved["dreg_verify_config"] == 2
+    assert saved["global"]["max_tests"] == 77
+    assert nm in saved["signals_checked"]
+    w.close()
+    # 新窗口导入 → 全部还原
+    w2 = gui.MainWindow(); w2.path_edit.setText(str(path)); w2.on_load()
+    monkeypatch.setattr(gui.QtWidgets.QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(cfg), "")))
+    w2.on_import_edits()
+    assert set(w2._collect_checked()) == {nm}
+    assert w2.max_tests.value() == 77
+    assert w2.coverage.currentText() == "全面" and w2.coverage_mux.currentText() == "穷举"
+    assert w2._probe_prefixes.get("d_foo") == "U_X.U_Y"
+    assert "d_bar" in w2._force_signals
+    w2.close()
+
+
+def test_legacy_edits_import_still_merges(qapp, tmp_path_factory, monkeypatch):
+    """向后兼容：旧版 v1『测试项编辑』文件仍能导入(合并语义)，不碰勾选/全局。"""
+    import json
+    from dreg_verify import gui
+    monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("legp") / "edits.json"))
+    monkeypatch.setattr(gui.QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    path = tmp_path_factory.mktemp("legw") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    legacy = tmp_path_factory.mktemp("legf") / "old.json"
+    json.dump({"dreg_verify_edits": 1,
+               "edits": {"d_logic_bt_lp_reserve": [{"base_values": {}, "kind": "pos"}]}},
+              open(str(legacy), "w", encoding="utf-8"))
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    monkeypatch.setattr(gui.QtWidgets.QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(legacy), "")))
+    w.on_import_edits()
+    assert "d_logic_bt_lp_reserve" in w._edited
+    w.close()
+
+
+def test_full_config_import_clears_stale_negatives(qapp, tmp_path_factory, monkeypatch):
+    """导入完整配置 = 加载该状态：上一会话残留的负向勾选被清掉(权威同步，第二十六轮自审修)。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui
+    monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("stp") / "edits.json"))
+    monkeypatch.setattr(gui.QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    path = tmp_path_factory.mktemp("stw") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    # 导出一份"干净无负向"的配置
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    cfg = tmp_path_factory.mktemp("stout") / "clean.json"
+    monkeypatch.setattr(gui.QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(cfg), "")))
+    w.on_export_edits()
+    w.close()
+    # 新会话：给某信号加负向，再导入干净配置 → 负向被清
+    w2 = gui.MainWindow(); w2.path_edit.setText(str(path)); w2.on_load()
+    nm = "d_logic_bt_lp_reserve"
+    r = next(i for i in range(w2.table.rowCount()) if w2._sig_of_row(i).out_name == nm)
+    w2.table.item(r, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    assert w2._signal_has_negative(nm.lower())
+    monkeypatch.setattr(gui.QtWidgets.QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(cfg), "")))
+    w2.on_import_edits()
+    rr = next(i for i in range(w2.table.rowCount()) if w2._sig_of_row(i).out_name == nm)
+    assert w2.table.item(rr, gui.COL_NEG).checkState() == QtCore.Qt.Unchecked
+    assert not w2._signal_has_negative(nm.lower())
+    w2.close()
+
+
+def test_cleared_logic_stays_zero_in_negative_only_export(qapp, tmp_path_factory, monkeypatch):
+    """自审 Finding2：清空的 logic 信号在『仅负向』导出里仍是零用例(空 override 保留，不回退自动重生)。"""
+    from PySide6 import QtWidgets
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    gui, w, sig = _reserve_window(tmp_path_factory, "negclr")
+    w._load_test_items(sig)
+    w.on_ti_clear()
+    nl = sig.out_name.lower()
+    ov = w._vector_overrides(negative_only=True)
+    assert ov is not None and ov.get(nl) == []          # 保留空 override，不在仅负向导出里略过
+    res = generator.build(w.wb, w._opts([sig.out_name], negative_only=True))
+    assert sig.out_name not in {st.get("out_name") for _l, st in res["blocks"]}
