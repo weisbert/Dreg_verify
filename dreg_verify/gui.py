@@ -581,14 +581,18 @@ class MainWindow(QtWidgets.QMainWindow):
         prev = QtWidgets.QPushButton("预览选中"); prev.clicked.connect(self.on_preview)
         prev.setShortcut("Ctrl+P")
         prev.setToolTip("预览所有已勾选信号合并生成的 .sv (Ctrl+P)；只看单信号用右侧『预览本信号.sv』")
-        rep = QtWidgets.QPushButton("导出报告(HTML/CSV)…"); rep.clicked.connect(self.on_report)
+        rep = QtWidgets.QPushButton("导出报告(HTML/Excel/CSV)…"); rep.clicked.connect(self.on_report)
         rep.setShortcut("Ctrl+R")
         rep.setToolTip("出'给人看'的测试用例报告(汇总+每信号真值表+完整明细)，自动带上你的编辑；"
-                       "未勾选则覆盖全部信号 (Ctrl+R)")
+                       "未勾选则覆盖全部信号。可选 HTML/Excel/CSV (Ctrl+R)")
+        ft = QtWidgets.QPushButton("回填 for_test…"); ft.clicked.connect(self.on_fortest)
+        ft.setToolTip("把当前测试项按 for_test 真值表排版回填到 Excel：复制源 Excel 全部 sheet、"
+                      "只替换 for_test 页(源文件不动)。给 designer 看/复制粘贴；未勾选则覆盖全部信号")
         gen = QtWidgets.QPushButton("生成 .sv …"); gen.clicked.connect(self.on_generate)
         gen.setShortcut("Ctrl+G")
         gen.setToolTip("点开后可选导出范围(全部/仅正向/仅负向)与是否加注释 (Ctrl+G)")
-        btns.addStretch(1); btns.addWidget(prev); btns.addWidget(rep); btns.addWidget(gen)
+        btns.addStretch(1); btns.addWidget(prev); btns.addWidget(rep)
+        btns.addWidget(ft); btns.addWidget(gen)
         root.addLayout(btns)
 
         self.status = self.statusBar()
@@ -3734,6 +3738,44 @@ class MainWindow(QtWidgets.QMainWindow):
             self, "完成", "已导出报告(%s信号，用例 %d 条，负向 %d 条)：\n%s"
             % (scope, n_tc, n_neg, "\n".join(written)))
         self.status.showMessage("已导出报告：%s" % "  ".join(written))
+
+    def on_fortest(self):
+        """把当前测试项按 for_test 真值表排版回填到 Excel：复制源 Excel 全部 sheet、只替换
+        for_test 页(源文件不动)。给 designer 看/复制粘贴；自动带上测试项编辑/负向。
+        勾选了信号则只回填这些，否则覆盖全部 logic 信号(mux 表结构不同，不进 for_test)。"""
+        if not self.wb:
+            return
+        src = self.path_edit.text().strip()
+        if not src or not os.path.isfile(src):
+            QtWidgets.QMessageBox.warning(self, "提示", "请先加载有效的源 .xlsx —— 回填要复制它的全部 sheet")
+            return
+        from dreg_verify import fortest_writer
+        sel = self._collect()
+        default = os.path.splitext(os.path.basename(src))[0] + "_fortest.xlsx"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "回填 for_test 到新 Excel", default, "Excel 工作簿 (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        if os.path.abspath(path) == os.path.abspath(src):
+            QtWidgets.QMessageBox.warning(self, "提示", "输出文件不能是源 Excel 本身(回填产物是新文件，源文件不动)")
+            return
+        try:
+            rep = generator.report(self.wb, self._opts(sel or None))
+            n_grp = fortest_writer.write_fortest(src, path, rep)
+        except Exception as ex:  # noqa: BLE001
+            QtWidgets.QMessageBox.critical(self, "回填失败", str(ex))
+            return
+        scope = "勾选的" if sel else "全部"
+        n_logic = sum(1 for t in rep.get("tables", []) if t.get("is_logic") and t.get("tests"))
+        n_mux = sum(1 for t in rep.get("tables", []) if not t.get("is_logic"))
+        mux_note = ("；mux 信号 %d 个未回填(for_test 是 logic cone 真值表排版，mux 结构不同)" % n_mux) if n_mux else ""
+        QtWidgets.QMessageBox.information(
+            self, "完成", "已回填 %s logic 信号(%d 组)到 for_test 页%s：\n%s\n\n"
+            "(源 Excel 各 sheet 数据已复制，源文件未改；图表/图片等非数据元素可能不保留)"
+            % (scope, n_grp, mux_note, path))
+        self.status.showMessage("已回填 for_test：%s（%d 组）" % (path, n_grp))
 
     def _write(self, path, text):
         with open(path, "w", encoding="utf-8") as f:

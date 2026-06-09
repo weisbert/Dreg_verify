@@ -1019,6 +1019,29 @@ def _exp_src(vec):
     return "auto_out兜底"
 
 
+def _input_meta(g, bindings):
+    """report 真值表 inputs[] 的逐输入元数据。除显示用的 label/letters 外，带上回填 for_test
+    所需的驱动元数据：kind(RO/RW)、寄存器地址 addr、bit 位 reg_lsb/reg_msb、force 网名 wire、
+    位宽 width。纯附加字段——HTML/CSV/Excel 只读 label/letters，不受影响。"""
+    b = bindings.get(g.get("rep"))
+    return {
+        "label": g["label"],
+        "letters": ",".join(g.get("xl_letters") or g.get("letters") or []),
+        "base": (b.base if (b and b.base) else g.get("base", "")),
+        "kind": (b.kind if b else g.get("kind", "")),
+        "ro": bool(b and b.kind == "RO"),
+        "addr": (b.address if b else None),
+        "reg_lsb": (b.reg_lsb if b else None),
+        "reg_msb": (b.reg_msb if b else None),
+        # slice_*：该输入引用的是字段的哪几位(如 x[15:1])——bit 拆分字段回填 for_test 时
+        # K/L/M 要按 reg_lsb+slice 偏移显示真实寄存器 bit 位(否则两片显示成同一整字段)
+        "slice_lsb": (b.slice_lsb if b else None),
+        "slice_msb": (b.slice_msb if b else None),
+        "wire": (b.wire if b else ""),
+        "width": g.get("width", 1),
+    }
+
+
 def report(wb, opts):
     """
     生成"给人看"的测试用例清单（结构化），CLI 负责写成 CSV/HTML。
@@ -1079,13 +1102,14 @@ def report(wb, opts):
         groups = V.input_groups(node, bindings)
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
+                 # is_logic：本表是 logic cone 真值表(回填 for_test 只处理它，mux 表结构不同跳过)
+                 "is_logic": True, "out_width": sig.out_width or 1,
                  # chain = cone 展开链：[{"out","expr","subst"},...]，非 cone 信号为空 list
                  "chain": chain,
                  # letters = 该输入的 Excel 来源坐标(普通信号=A/B/C…；cone 展开叶子=
                  # "上游行名.字母"如 pll_n1.A)，让报告里的真值表能对回表达式/Excel
-                 "inputs": [{"label": g["label"],
-                             "letters": ",".join(g.get("xl_letters") or g.get("letters") or [])}
-                            for g in groups], "tests": []}
+                 # 逐输入还带回填 for_test 用的驱动元数据(addr/RO/bit/wire)，见 _input_meta
+                 "inputs": [_input_meta(g, bindings) for g in groups], "tests": []}
         unresolved_bases = set()
         for vec in vecs:
             forces, writes, unres = W.compute_drives(vec, bindings, used)
@@ -1103,14 +1127,20 @@ def report(wb, opts):
                 "name": W.test_label(vec),
                 "neg": vec.is_negative,
                 "values": [_fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups],
+                # raw = 逐输入原始整数值(回填 for_test 的 T 向量列/G/H 计算要用；values 是格式化串)
+                "raw": [bv.get(g["key"], 0) for g in groups],
                 # auto_out = 表达式计算值；expected = 进 .sv 的对比值(designer 手填 > auto_out 兜底 > 负向错值)
                 "auto_out": _fmt_cell(vec.exp_value, vec.exp_width),
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
+                "exp_num": vec.asserted_value,      # 进 .sv 的期望整数值(回填 for_test 输出行/E 列用)
                 "designer_filled": vec.designer_filled,
                 "correct": _fmt_cell(vec.exp_value, vec.exp_width),
                 # 数值/位宽（HTML「真值表检查」tab 的 JS 比对用）
                 "auto_num": vec.exp_value, "width": vec.exp_width,
                 "force": force_str, "rfwrite": write_str,
+                # writes = compute_drives 的结构化 RF_WRITE(权威：已处理 bit 拆分字段/位宽裁剪)。
+                # 回填 for_test 的 B/C(寄存器写值)/H 直接用它，避免自己重算 regval 出错(与 .sv 一致)。
+                "writes": writes,
             })
             detail.append({
                 "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
