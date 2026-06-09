@@ -279,6 +279,9 @@ def write_report(path, rep, excel):
     if ext.lower() in (".html", ".htm"):
         _write_report_html(path, rep, excel)
         return [path]
+    if ext.lower() == ".xlsx":
+        _write_report_xlsx(path, rep, excel)
+        return [path]
     # CSV：明细写到给定路径，汇总写到 *_summary.csv
     import csv
     detail_path = path if ext.lower() == ".csv" else base + ".csv"
@@ -395,6 +398,7 @@ _REPORT_JS = """
   function $(id){return document.getElementById(id);}
   function jget(id){var el=$(id);return el?JSON.parse(el.textContent):[];}
   var q=$('q'),ow=$('owner'),no=$('negonly'),cnt=$('count');
+  var sig=$('sig'),typ=$('typ'),topf=$('topf');
   var PER=[30,50,100,200];
   /* 每个 tab 一份数据 + 当前页/每页。重的真值表(②③)共用一份(check=True 标记)，③ 不再复制第二份 DOM。
      渲染只把"当前窗"注入 body，DOM 节点数恒定 ⇒ 6000 组也不卡。 */
@@ -409,11 +413,15 @@ _REPORT_JS = """
   var KEYS=['sum','tt','chk','det','ver'];
 
   function flt(){
-    var qq=(q.value||'').toLowerCase(),oo=ow.value,nn=no.checked;
+    var qq=(q.value||'').toLowerCase(),oo=ow.value,nn=no.checked,
+        ss=sig.value,tt=typ.value,tp=topf.value;
     return function(it){
       if(qq&&it.t.indexOf(qq)<0)return false;
       if(oo==='__no_owner__'){if(it.o!=='')return false;}   /* 「（无 owner）」专项 */
       else if(oo&&it.o!==oo)return false;
+      if(ss&&it.s!==ss)return false;                        /* 信号名下拉(逐字匹配) */
+      if(tt&&it.ty!==tt)return false;                       /* 类型下拉 */
+      if(tp!==''&&String(it.tp)!==tp)return false;          /* top_output 下拉 */
       if(nn&&it.n!==1)return false;
       return true;
     };
@@ -477,6 +485,7 @@ _REPORT_JS = """
     cnt.textContent='匹配信号 '+filtered('sum').length;
   }
   q.oninput=applyAll;ow.onchange=applyAll;no.onchange=applyAll;
+  sig.onchange=applyAll;typ.onchange=applyAll;topf.onchange=applyAll;
 
   /* ===== 真值表检查（designer 自测：遮 auto_out、期望变填空、回车判定）。按当前页进行。 ===== */
   var chkbtn=$('chkbtn'),chkscore=$('chkscore');
@@ -592,6 +601,115 @@ _REPORT_JS = """
 """
 
 
+def _write_report_xlsx(path, rep, excel):
+    """导出为 Excel（给 designer 看、复制粘贴）：
+      ① 真值表 sheet —— 每信号一块(输入做行、各测试做列；auto_out / 期望(进.sv) / force / RF_WRITE
+         分行)，块间空行；冻结首列让信号/输入标签随右滚恒可见。
+      ② 汇总 ③ 明细 (④ 可验证性，有则出) —— 扁平表 + Excel 自动筛选(autofilter) + 冻结表头，
+         designer 可在 Excel 内按 owner / 信号名 / 类型直接筛。
+    期望格配色与 HTML 报告一致：绿=手填且=auto_out，红=手填但≠auto_out(表达式存疑)，灰=auto_out 兜底，
+    橙=负向(故意填错)。"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    HEAD_FILL = PatternFill("solid", fgColor="DCE6F1")   # 表头淡蓝
+    SIG_FILL = PatternFill("solid", fgColor="C6D9F1")    # 真值表信号/测试标题行
+    NEG_FILL = PatternFill("solid", fgColor="F8CBAD")    # 负向列/格 橙
+    DSGN_FILL = PatternFill("solid", fgColor="C6EFCE")   # 手填且与 auto_out 一致 绿
+    DIFF_FILL = PatternFill("solid", fgColor="FFC7CE")   # 手填但不一致 红
+    FB_FILL = PatternFill("solid", fgColor="F2F2F2")     # auto_out 兜底 灰
+    BOLD = Font(bold=True)
+
+    wb = Workbook()
+
+    # ───────── ① 真值表 sheet ─────────
+    ws = wb.active
+    ws.title = "真值表"
+    r = 1
+    max_test_col = 1
+    for t in rep.get("tables", []):
+        tests = t["tests"]
+        max_test_col = max(max_test_col, 1 + len(tests))
+        # 信号标题行：A=信号名(粗)，B+=测试名(负向列橙)
+        c = ws.cell(r, 1, t["signal"]); c.font = BOLD; c.fill = SIG_FILL
+        for ci, tc in enumerate(tests):
+            cc = ws.cell(r, 2 + ci, tc["name"]); cc.font = BOLD
+            cc.fill = NEG_FILL if tc["neg"] else SIG_FILL
+        if not tests:
+            ws.cell(r, 2, "(无测试用例)")
+        r += 1
+        # 表达式行
+        ws.cell(r, 1, "表达式").font = BOLD
+        ws.cell(r, 2, t.get("expr", ""))
+        r += 1
+        # 输入行（A=「字母 → 信号名[位宽]」，B+=各测试的输入取值）
+        for ii, inp in enumerate(t["inputs"]):
+            ltr = inp.get("letters") or ""
+            rh = ("%s → %s" % (ltr, inp["label"])) if ltr else inp["label"]
+            ws.cell(r, 1, rh).font = BOLD
+            for ci, tc in enumerate(tests):
+                ws.cell(r, 2 + ci, tc["values"][ii] if ii < len(tc["values"]) else "")
+            r += 1
+        # auto_out 行（表达式计算值，参考）
+        c = ws.cell(r, 1, t.get("auto_label", "auto_out")); c.font = BOLD; c.fill = FB_FILL
+        for ci, tc in enumerate(tests):
+            cc = ws.cell(r, 2 + ci, tc.get("auto_out", tc.get("correct", "")))
+            cc.fill = NEG_FILL if tc["neg"] else FB_FILL
+        r += 1
+        # 期望 行（.sv 断言对比值；配色同 HTML）
+        ws.cell(r, 1, t.get("exp_label", "期望(out)")).font = BOLD
+        for ci, tc in enumerate(tests):
+            cc = ws.cell(r, 2 + ci, tc.get("expected", ""))
+            if tc["neg"]:
+                cc.fill = NEG_FILL
+            elif tc.get("designer_filled"):
+                same = tc.get("expected") == tc.get("auto_out", tc.get("correct"))
+                cc.fill = DSGN_FILL if same else DIFF_FILL
+            else:
+                cc.fill = FB_FILL
+        r += 1
+        # force / RF_WRITE 驱动行
+        for label, key in (("force", "force"), ("RF_WRITE", "rfwrite")):
+            ws.cell(r, 1, label).font = BOLD
+            for ci, tc in enumerate(tests):
+                ws.cell(r, 2 + ci, tc.get(key, ""))
+            r += 1
+        r += 1   # 块间空行
+    ws.freeze_panes = "B1"               # 冻结首列：右滚看测试列时，信号/输入标签恒可见
+    ws.column_dimensions["A"].width = 40
+    for ci in range(2, max_test_col + 1):
+        ws.column_dimensions[get_column_letter(ci)].width = 16
+
+    # ───────── 扁平表（汇总/明细/可验证性）：autofilter + 冻结表头 ─────────
+    def flat_sheet(title, cols, rows, value_of=None):
+        s = wb.create_sheet(title)
+        for ci, (_k, h) in enumerate(cols, 1):
+            cc = s.cell(1, ci, h); cc.font = BOLD; cc.fill = HEAD_FILL
+        for ri, row in enumerate(rows, 2):
+            for ci, (k, _h) in enumerate(cols, 1):
+                s.cell(ri, ci, value_of(row, k) if value_of else row.get(k, ""))
+        ncol = len(cols)
+        s.auto_filter.ref = "A1:%s%d" % (get_column_letter(ncol), max(len(rows) + 1, 1))
+        s.freeze_panes = "A2"
+        for ci, (k, _h) in enumerate(cols, 1):
+            wide = k in ("expr", "signal", "detail", "force", "rfwrite", "unresolved", "out_net")
+            s.column_dimensions[get_column_letter(ci)].width = 44 if wide else 14
+        return s
+
+    flat_sheet("汇总", SUMMARY_COLS, rep["summary"])
+    flat_sheet("明细", DETAIL_COLS, rep["detail"])
+    verif = rep.get("verifiability")
+    if verif and verif.get("signals"):
+        def _vstat(row, k):
+            if k == "status_label":
+                return VERIF_STATUS.get(row.get("status", ""), (row.get("status", ""), ""))[0]
+            return row.get(k, "")
+        flat_sheet("可验证性", VERIF_COLS, verif["signals"], value_of=_vstat)
+
+    wb.save(path)
+
+
 def _write_report_html(path, rep, excel):
     import html
     import json
@@ -599,24 +717,35 @@ def _write_report_html(path, rep, excel):
     def esc(x):
         return html.escape(str(x))
 
+    # 信号 → top_output（明细/真值表 item 自身没有 top 字段，从汇总查；汇总/可验证性各有自带字段）
+    _top_by_sig = {r.get("signal"): (1 if r.get("top") else 0) for r in rep["summary"]}
+
+    def _top_of(sig):
+        return _top_by_sig.get(sig, 0)
+
     def flat_rows(rows, cols, kind):
-        """① 汇总 / ④ 明细：返回 (表头 HTML, 行 item 列表)。
-        每个 item = {h:<tr>串, t:搜索文本(小写), o:owner, n:负向0/1}，供 JS 过滤+窗口化渲染。"""
+        """① 汇总 / ④ 明细：返回 (表头 HTML, 行 item 列表)。每个 item =
+        {h:<tr>串, t:搜索文本(小写), o:owner, n:负向0/1, s:信号名, ty:类型, tp:top0/1}，供 JS 过滤+窗口化渲染。"""
         th = "".join("<th>%s</th>" % esc(h) for _k, h in cols)
         items = []
         for r in rows:
+            sname = r.get("signal", "") or ""
+            ty = r.get("type", "") or ""
             if kind == "sum":
                 neg = bool(r.get("n_neg"))
-                text = "%s %s %s" % (r.get("signal", ""), r.get("owner", ""), r.get("expr", ""))
+                text = "%s %s %s" % (sname, r.get("owner", ""), r.get("expr", ""))
                 cls = "err" if r.get("error") else ("neg" if neg else "")
+                tp = 1 if r.get("top") else 0
             else:
                 neg = r.get("neg") == "是"
-                text = "%s %s %s %s" % (r.get("signal", ""), r.get("owner", ""),
+                text = "%s %s %s %s" % (sname, r.get("owner", ""),
                                         r.get("test", ""), r.get("expr", ""))
                 cls = "neg" if neg else ""
+                tp = _top_of(sname)
             tds = "".join("<td>%s</td>" % esc(r.get(k, "")) for k, _h in cols)
             items.append({"h": '<tr class="%s">%s</tr>' % (cls, tds),
-                          "t": text.lower(), "o": r.get("owner", "") or "", "n": 1 if neg else 0})
+                          "t": text.lower(), "o": r.get("owner", "") or "", "n": 1 if neg else 0,
+                          "s": sname, "ty": ty, "tp": tp})
         return th, items
 
     def _exp_cell(tc, check):
@@ -710,7 +839,8 @@ def _write_report_html(path, rep, excel):
                  % (esc(rlabel), esc(t["signal"]), esc(t["expr"]), chain_html,
                     "".join(hdr), "".join(body)))
             items.append({"h": h, "t": text.lower(), "o": t.get("owner", "") or "",
-                          "n": 1 if neg_block else 0})
+                          "n": 1 if neg_block else 0,
+                          "s": t["signal"], "ty": t.get("type", "") or "", "tp": _top_of(t["signal"])})
         return items
 
     def verif_rows(verif):
@@ -743,7 +873,9 @@ def _write_report_html(path, rep, excel):
                 else:
                     cells.append("<td>%s</td>" % esc(r.get(k, "")))
             items.append({"h": '<tr class="vrow %s">%s</tr>' % (lvl, "".join(cells)),
-                          "t": text.lower(), "o": r.get("owner", "") or "", "n": 0})
+                          "t": text.lower(), "o": r.get("owner", "") or "", "n": 0,
+                          "s": r.get("signal", "") or "", "ty": r.get("type", "") or "",
+                          "tp": 1 if r.get("top") else 0})
         return head, th, items
 
     def js_blob(el_id, items):
@@ -759,6 +891,17 @@ def _write_report_html(path, rep, excel):
     no_owner_opt = ('<option value="__no_owner__">（无 owner） ×%d</option>' % n_no_owner) if n_no_owner else ""
     owner_opts = ('<option value="">全部 owner</option>' + no_owner_opt + "".join(
         '<option value="%s">%s</option>' % (esc(o), esc(o)) for o in owners))
+    # 信号名下拉：列全部信号(含 mux 组)，按名排序；选项 value=原始信号名(与 item.s 逐字匹配)
+    sig_names = sorted({(r.get("signal") or "") for r in rep["summary"] if r.get("signal")})
+    sig_opts = ('<option value="">全部信号</option>' + "".join(
+        '<option value="%s">%s</option>' % (esc(s), esc(s)) for s in sig_names))
+    # 类型下拉：to_logic / to_mux / ls / mux 等(去重排序)
+    types = sorted({(r.get("type") or "") for r in rep["summary"] if r.get("type")})
+    typ_opts = ('<option value="">全部类型</option>' + "".join(
+        '<option value="%s">%s</option>' % (esc(t), esc(t)) for t in types))
+    top_opts = ('<option value="">全部 top</option>'
+                '<option value="1">仅 top_output</option>'
+                '<option value="0">仅非 top</option>')
     n_sig = len(rep["summary"])
     n_tc = len(rep["detail"])
     n_neg = sum(1 for r in rep["detail"] if r.get("neg") == "是")
@@ -816,6 +959,9 @@ def _write_report_html(path, rep, excel):
         '<div class="toolbar">'
         '<input type="text" id="q" placeholder="搜索 信号名 / owner / 表达式…">'
         '<select id="owner">%s</select>'
+        '<select id="sig" title="按信号名筛选">%s</select>'
+        '<select id="typ" title="按类型(to_logic/to_mux/ls/mux)筛选">%s</select>'
+        '<select id="topf" title="按 top_output 筛选">%s</select>'
         '<label><input type="checkbox" id="negonly"> 只看负向</label>'
         '<span id="count"></span>'
         '</div>'
@@ -835,7 +981,7 @@ def _write_report_html(path, rep, excel):
         '</main>'
     ) % (
         esc(os.path.basename(excel)), n_sig, n_tc, n_neg, n_designer, n_pos_tc - n_designer,
-        owner_opts, sum_sec, tt_sec, chk_sec, det_sec, ver_sec,
+        owner_opts, sig_opts, typ_opts, top_opts, sum_sec, tt_sec, chk_sec, det_sec, ver_sec,
     )
     # 各 tab 数据：JSON 嵌在页面里，由前端 JS 解析后窗口化渲染（②③ 共用 tt-data）。
     blobs = (js_blob("sum-data", sum_items) + js_blob("tt-data", tt_items)

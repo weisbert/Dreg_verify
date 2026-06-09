@@ -1536,6 +1536,50 @@ class MainWindow(QtWidgets.QMainWindow):
             return None, None, None, [], "cone 展开失败: %s" % ex
         return node, bindings, V.input_groups(node, bindings), chain, None
 
+    def _append_negatives(self, pos_rows, which, src_rows):
+        """在 pos_rows 之上按 first/all 追加正向的"故意填错"负向副本，继承 src_rows 里同源
+        负向(按输入取值键)的改名/手填错值(不静默丢失)。返回 [正向… + 负向…]（未 recompute）。"""
+        old_negs = {}
+        for rd in src_rows:
+            if rd.get("kind") == "neg":
+                old_negs.setdefault(tuple(sorted(rd["base_values"].items())), []).append(rd)
+        new_rows = list(pos_rows)                      # 正向测试原样保留
+        targets = pos_rows if which == "all" else pos_rows[:1]
+        for prd in targets:                            # 每个(或首个)正向 → 追加一条负向副本
+            neg = {"base_values": dict(prd["base_values"]),
+                   "kind": "neg", "wrong_value": None, "user_added": True,
+                   "note": "负向(真实测试的故意填错副本)"}
+            bucket = old_negs.get(tuple(sorted(prd["base_values"].items())))
+            if bucket:                                 # 继承同源旧负向的自定义名与手填错值
+                old = bucket.pop(0)
+                if old.get("name") is not None:
+                    neg["name"] = old["name"]
+                if old.get("wrong_value") is not None:
+                    neg["wrong_value"] = old["wrong_value"]
+            new_rows.append(neg)
+        return new_rows
+
+    def _neg_only_rows_now(self, sig, name_low):
+        """neg_only 信号(正向全自动、仅加了负向)在【build 时】按当前全局覆盖度重算正向，
+        再按记住的 first/all 规则补回负向 → recompute 后的 rows。
+
+        设计哲学(用户反馈)：纯加负向不该把信号冻结成自定义——全局『精简/全面/穷举』对它
+        依然生效。neg_only 信号必无手改正向(任何手改都会把它移出 neg_only 变冻结)，故负向
+        都是自动取反副本、重算无损。_load_test_items(GUI 显示侧)早已 reflow，本函数是 build
+        /report/导出侧的对应补丁，闭合『加负向后切覆盖度对它失效』的缺口。"""
+        node, bindings, groups, _chain, _err = self._expand_sig(sig)
+        if node is None:
+            return None
+        pos_rows = self._auto_rows(sig, node, bindings, groups)   # 当前覆盖度的正向
+        if not pos_rows:
+            return []
+        which = self._neg_only.get(name_low, "first")
+        src = self._edited.get(name_low, {}).get("rows", [])      # 继承旧负向改名/错值(neg_only 通常无)
+        new_rows = self._append_negatives(pos_rows, which, src)
+        for rd in new_rows:
+            self._recompute_row(node, bindings, groups, sig.out_width, rd)
+        return new_rows
+
     def _set_signal_negatives(self, sig, want_neg, which):
         """给某信号(重新)设置负向测试：保留全部正向测试，按 first/all 追加正向测试的"故意填错"
         副本作为负向；want_neg=False 则删除所有负向。可作用于未显示的信号(存进 override)。"""
@@ -1562,26 +1606,8 @@ class MainWindow(QtWidgets.QMainWindow):
         pos_rows = [rd for rd in rows if rd.get("kind") != "neg"]
         if not pos_rows:
             return
-        # 现存负向行按其输入取值建索引，重建时继承用户对负向列的改名/手填错值(不静默丢失)
-        old_negs = {}
-        for rd in rows:
-            if rd.get("kind") == "neg":
-                old_negs.setdefault(tuple(sorted(rd["base_values"].items())), []).append(rd)
-        new_rows = list(pos_rows)                      # 正向测试原样保留
-        if want_neg:
-            targets = pos_rows if which == "all" else pos_rows[:1]
-            for prd in targets:                        # 每个(或首个)正向 → 追加一条负向副本
-                neg = {"base_values": dict(prd["base_values"]),
-                       "kind": "neg", "wrong_value": None, "user_added": True,
-                       "note": "负向(真实测试的故意填错副本)"}
-                bucket = old_negs.get(tuple(sorted(prd["base_values"].items())))
-                if bucket:                             # 继承同源旧负向的自定义名与手填错值
-                    old = bucket.pop(0)
-                    if old.get("name") is not None:
-                        neg["name"] = old["name"]
-                    if old.get("wrong_value") is not None:
-                        neg["wrong_value"] = old["wrong_value"]
-                new_rows.append(neg)
+        new_rows = (self._append_negatives(pos_rows, which, rows) if want_neg
+                    else list(pos_rows))               # 继承旧负向改名/错值见 _append_negatives
         for rd in new_rows:
             self._recompute_row(node, bindings, groups, sig.out_width, rd)
         self._edited[name_low] = {"sig": sig, "rows": new_rows}
@@ -3361,7 +3387,15 @@ class MainWindow(QtWidgets.QMainWindow):
             ed = self._edited.get(name_low)
             if not ed:
                 continue
-            sig, rows = ed["sig"], ed["rows"]
+            sig = ed["sig"]
+            # neg_only 信号(纯加负向)：build 时按【当前全局覆盖度】重算正向+补负向，不冻结——
+            # 否则切覆盖度对它失效(用户实测的设计哲学 bug)。手改过测试项的信号才用冻结 _edited 行。
+            if name_low in self._neg_only:
+                rows = self._neg_only_rows_now(sig, name_low)
+                if rows is None:
+                    continue
+            else:
+                rows = ed["rows"]
             node, bindings, groups, _chain, _err = self._expand_sig(sig)
             if node is None:
                 continue
@@ -3662,16 +3696,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("已生成：%s%s" % (path, scope_msg))
 
     def on_report(self):
-        """导出'给人看'的测试用例报告(HTML 三段：汇总+每信号真值表+完整明细；或 CSV)。
+        """导出'给人看'的测试用例报告。三种格式(按扩展名/所选筛选器分派)：
+        · HTML —— 汇总+每信号真值表(可筛 owner/信号名/类型/top)+完整明细+可验证性；
+        · Excel —— 真值表 sheet(给 designer 看与复制粘贴) + 汇总/明细/可验证性(autofilter+冻结表头)；
+        · CSV —— 明细 + 汇总(+可验证性)三份扁平表。
         勾选了信号则只报告这些，否则覆盖全部信号；自动带上测试项编辑/负向。"""
         if not self.wb:
             return
-        from dreg_verify import cli            # 复用 CLI 的报告写出器(按扩展名出 HTML/CSV)
+        from dreg_verify import cli            # 复用 CLI 的报告写出器(按扩展名出 HTML/Excel/CSV)
         sel = self._collect()
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出测试用例报告", "dreg_report.html", "HTML 网页 (*.html);;CSV 表格 (*.csv)")
+        fmts = [("HTML 网页 (*.html)", ".html"),
+                ("Excel 工作簿 (*.xlsx)", ".xlsx"),
+                ("CSV 表格 (*.csv)", ".csv")]
+        path, selfilter = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出测试用例报告", "dreg_report.html", ";;".join(f for f, _ in fmts))
         if not path:
             return
+        # 按所选筛选器补正扩展名（筛选器=显式格式选择，权威）：先剥掉任何已知报告扩展名，
+        # 再补所选格式的扩展名。这样「默认名 dreg_report.html + 选 Excel」→ .xlsx；不会出双扩展名。
+        want_ext = next((e for f, e in fmts if f == selfilter), None)
+        if want_ext:
+            base = path
+            for e in (".html", ".htm", ".xlsx", ".csv"):
+                if base.lower().endswith(e):
+                    base = base[:-len(e)]
+                    break
+            path = base + want_ext
         try:
             rep = generator.report(self.wb, self._opts(sel or None))
             written = cli.write_report(path, rep, self.path_edit.text() or "excel")

@@ -714,6 +714,44 @@ def test_gui_neg_only_switch_follows_global_coverage(qapp, tmp_path_factory, mon
     assert B.lower() in w3._neg_only and pos_neg(w3)[1] >= 1, "重开后负向定制应恢复"
 
 
+def test_gui_neg_only_build_follows_global_coverage(qapp, tmp_path_factory):
+    """⭐用户实测【设计哲学】bug(R27)：全选+加负向后，全局『精简/全面/穷举』对已加负向信号在
+    【生成/报告/导出】里失效——build 用 _edited 冻结行(加负向那刻的档)而非按当前全局覆盖度重算。
+    R25 只修了 GUI 显示侧(_load_test_items 切到信号才 reflow)；本测试盯的是 build 侧
+    (generator.report / _opts / _vector_overrides)：不点开任一信号、直接切全局覆盖度再生成，
+    报告里正向数必须跟随全局。修=_vector_overrides 对 neg_only 信号调 _neg_only_rows_now 重算。"""
+    from dreg_verify import gui
+    path = tmp_path_factory.mktemp("negbuild") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)   # 多输入信号 → 覆盖度差异明显
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    w.set_all_visible(True)
+
+    def build_pos_neg():
+        rep = generator.report(w.wb, w._opts(w._collect() or None))
+        pos = sum((r.get("n_tests", 0) or 0) - (r.get("n_neg", 0) or 0) for r in rep["summary"])
+        neg = sum(r.get("n_neg", 0) or 0 for r in rep["summary"])
+        return pos, neg
+
+    # 基准：纯自动两档，穷举正向应明显多于精简
+    w.coverage.setCurrentText("精简"); clean_min, _ = build_pos_neg()
+    w.coverage.setCurrentText("穷举"); clean_exh, _ = build_pos_neg()
+    assert clean_exh > clean_min, "纯自动：穷举(%d)应>精简(%d)" % (clean_exh, clean_min)
+
+    # 精简下全选加负向（用户确切动作）
+    w.coverage.setCurrentText("精简")
+    w.on_all_signals_neg(True)
+    neg_min_pos, neg_min_neg = build_pos_neg()
+    assert neg_min_pos == clean_min, "加负向后精简正向应=纯自动精简(%d)，实得 %d" % (clean_min, neg_min_pos)
+    assert neg_min_neg >= 1, "确实加了负向"
+
+    # 关键：不点开任一信号，直接切穷举再 build → 正向应跟随全局穷举(=clean_exh)，不是冻结的精简
+    w.coverage.setCurrentText("穷举")
+    neg_exh_pos, neg_exh_neg = build_pos_neg()
+    assert neg_exh_pos == clean_exh, \
+        "加负向后切穷举，build 正向应=clean穷举(%d)，实得 %d(冻结bug)" % (clean_exh, neg_exh_pos)
+    assert neg_exh_neg == neg_min_neg, "负向数(first 规则=每信号1条)不应因切覆盖度丢失"
+
+
 def test_gui_sig_cov_per_signal(qapp, tmp_path_factory):
     """⭐ 单点覆盖度：本信号下拉只改该信号、压过全局；存进 _sig_cov；_opts/build 带出 sig_cov。"""
     from dreg_verify import gui

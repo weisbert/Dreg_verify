@@ -139,3 +139,50 @@ def test_wl_cli_html_report_contains_mux(wl_excel, tmp_path):
     assert "d_wl_rf_tx_rc_code[5:0]" in html
     # 多控制拼接表达式（HTML 转义后逗号/花括号仍是字面量）
     assert "case({d_wl_rf_rc_code_lut_en,d_wl_rf_bwctrl})" in html
+
+
+def test_wl_cli_html_report_has_more_filters(wl_excel, tmp_path):
+    """R27：HTML 报告除 owner/搜索/只看负向外，再加 信号名/类型/top_output 三个下拉。
+    既要有控件，也要 JS 过滤逻辑用到对应 item 字段(s/ty/tp)，且下拉里能列出真实信号名。"""
+    from dreg_verify import cli
+    html_path = tmp_path / "report.html"
+    cli.main(["--excel", str(wl_excel), "--report", str(html_path)])
+    html = html_path.read_text(encoding="utf-8")
+    # 三个新控件
+    assert 'id="sig"' in html and 'id="typ"' in html and 'id="topf"' in html
+    assert "全部信号" in html and "全部类型" in html and "仅 top_output" in html
+    # JS 过滤用到新字段
+    assert "it.s!==ss" in html and "it.ty!==tt" in html and "String(it.tp)!==tp" in html
+    # 信号名下拉里有真实信号（mux 组）
+    assert '<option value="d_wl_rf_tx_rc_code[5:0]">' in html
+
+
+def test_wl_cli_xlsx_report_sheets_and_layout(wl_excel, tmp_path):
+    """R27：--report 写 .xlsx → 真值表(分块) + 汇总/明细(autofilter+冻结表头)。
+    给 designer 看：真值表 sheet 首列冻结、信号名做块标题；扁平表带自动筛选。"""
+    import openpyxl
+    from dreg_verify import cli
+    xlsx_path = tmp_path / "report.xlsx"
+    cli.main(["--excel", str(wl_excel), "--report", str(xlsx_path)])
+    assert xlsx_path.exists()
+    wb = openpyxl.load_workbook(str(xlsx_path))
+    assert "真值表" in wb.sheetnames and "汇总" in wb.sheetnames and "明细" in wb.sheetnames
+
+    # 汇总：表头 = SUMMARY_COLS、有自动筛选、冻结表头行
+    s = wb["汇总"]
+    assert [c.value for c in s[1]] == [h for _k, h in cli.SUMMARY_COLS]
+    assert s.auto_filter.ref and s.auto_filter.ref.startswith("A1:")
+    assert s.freeze_panes == "A2"
+    sum_signals = {s.cell(r, 2).value for r in range(2, s.max_row + 1)}
+    assert "d_wl_rf_tx_rc_code[5:0]" in sum_signals
+
+    # 明细：autofilter + 冻结表头
+    d = wb["明细"]
+    assert d.freeze_panes == "A2" and d.auto_filter.ref
+
+    # 真值表：冻结首列；信号名作为块标题出现在 A 列
+    tt = wb["真值表"]
+    assert tt.freeze_panes == "B1"
+    col_a = {tt.cell(r, 1).value for r in range(1, tt.max_row + 1)}
+    assert "d_wl_rf_tx_rc_code[5:0]" in col_a            # 块标题
+    assert "表达式" in col_a and "force" in col_a and "RF_WRITE" in col_a
