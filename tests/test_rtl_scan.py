@@ -193,6 +193,37 @@ def test_infer_from_dreg_env(monkeypatch, tmp_path):
     assert args2.top == "x.v" and args2.rtl_dirs == "rtl" and args2.nets == "n.txt"
 
 
+def test_resolve_top_module(tmp_path, capsys):
+    """顶层模块名容错（2026-06-10 Hi1108 实地反馈：$dreg_top 大小写/名字与 RTL 实际声明不符
+    时，5 万模块全解析成功却报「顶层不在已解析模块里」让人无从下手）。"""
+    import pytest
+    import scan_rtl
+    top_v = tmp_path / "wl_trx_dreg_top.v"
+    top_v.write_text("module wl_trx_dreg_top;\nwire a;\nendmodule\n", encoding="utf-8")
+    modules = {"wl_trx_dreg_top": {"signals": {"a"}, "instances": []}}
+
+    # 精确命中：原样返回，无告警
+    assert scan_rtl.resolve_top_module("wl_trx_dreg_top", modules, str(top_v)) == "wl_trx_dreg_top"
+
+    # 自救①：$dreg_top 给了大写，RTL 实际是小写 → 自动改用 RTL 真名
+    assert scan_rtl.resolve_top_module("WL_TRX_DREG_TOP", modules, str(top_v)) == "wl_trx_dreg_top"
+    assert "大小写不同" in capsys.readouterr().out
+
+    # 自救②：名字完全对不上 → 用顶层文件里实际定义的第一个模块
+    assert scan_rtl.resolve_top_module("NO_SUCH_TOP", modules, str(top_v)) == "wl_trx_dreg_top"
+    assert "实际定义的是" in capsys.readouterr().out
+
+    # 顶层文件不存在 → 直指 $dreg_dir/$dreg_file 配错
+    with pytest.raises(SystemExit, match="顶层文件不存在"):
+        scan_rtl.resolve_top_module("NO_SUCH_TOP", modules, str(tmp_path / "ghost.v"))
+
+    # 顶层文件里也解析不出 module → 提示宏/转义名写法，让用户 --top-module 指定
+    bad_v = tmp_path / "macro_top.v"
+    bad_v.write_text("`MODULE_DECL(foo)\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="解析不出任何 module"):
+        scan_rtl.resolve_top_module("NO_SUCH_TOP", modules, str(bad_v))
+
+
 def test_collect_mux_nets(tmp_path):
     """mux 环境核查（2026-06-03 第十四轮）：从已装载的 wb 导出 mux 输出探针 + 控制/数据衔接网；
     无 mux 页时返回空。"""

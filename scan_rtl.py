@@ -91,14 +91,18 @@ def find_verilog_files(dirs):
 def scan_files(paths):
     """多个 .v 文件 → 合并的 {模块名: {...}}（重名模块保留首个）。"""
     modules = {}
+    unreadable = 0
     for p in paths:
         try:
             with open(p, "r", encoding="utf-8", errors="replace") as f:
                 text = f.read()
         except OSError:
+            unreadable += 1
             continue
         for name, info in parse_modules(text).items():
             modules.setdefault(name, info)
+    if unreadable:
+        print("⚠ %d 个文件读不了（权限/坏链接），已跳过" % unreadable)
     return modules
 
 
@@ -119,6 +123,47 @@ def build_signal_map(modules, top, max_depth=4):
 
     walk(top, "", 0)
     return sigmap
+
+
+def resolve_top_module(top_module, modules, top_path):
+    """顶层模块名容错。
+
+    $dreg_top 是环境配置，RTL 实际声明才是真相，两者大小写/名字可能不一致
+    （Verilog 模块名大小写敏感；老项目惯例=文件名小写、模块名大写，新项目未必沿用）。
+    精确命中直接返回；否则按「大小写不同 → 顶层文件实际定义」两级自救，
+    都救不回来时给出能直接行动的诊断，而不是只让用户去查 --rtl-dirs。
+    """
+    if top_module in modules:
+        return top_module
+    # 自救①：RTL 里有大小写不同的同名模块
+    ci = {}
+    for name in modules:
+        ci.setdefault(name.lower(), name)
+    hit = ci.get(top_module.lower())
+    if hit:
+        print("⚠ 顶层模块 %r 不在 RTL 里，但找到大小写不同的 %r —— 按后者继续"
+              "（$dreg_top 的大小写与 RTL 实际声明不一致）" % (top_module, hit))
+        return hit
+    # 自救②：顶层文件本身定义了什么模块
+    if not top_path or not os.path.isfile(top_path):
+        sys.exit("⛔ 顶层模块 %r 不在已解析模块里，且顶层文件不存在: %s\n"
+                 "   （$dreg_dir/$dreg_file 可能没指向真实 RTL，先核对这两个环境变量）"
+                 % (top_module, top_path))
+    try:
+        with open(top_path, "r", encoding="utf-8", errors="replace") as f:
+            in_top = list(parse_modules(f.read()))
+    except OSError as ex:
+        sys.exit("⛔ 顶层模块 %r 不在已解析模块里，且顶层文件读不了: %s（%s）"
+                 % (top_module, top_path, ex))
+    if in_top:
+        print("⚠ 顶层模块 %r 不在 RTL 里；顶层文件 %s 实际定义的是: %s —— 按 %r 继续"
+              "（$dreg_top 与 RTL 不一致，建议反馈环境维护人）"
+              % (top_module, top_path, ", ".join(in_top), in_top[0]))
+        return in_top[0]
+    sys.exit("⛔ 顶层模块 %r 不在已解析模块里，顶层文件 %s 里也解析不出任何 module\n"
+             "   （可能是宏/转义名等本脚本识别不了的写法——"
+             "grep -n 'module' 该文件人工确认后，用 --top-module 指定真实模块名）"
+             % (top_module, top_path))
 
 
 # ───────────────────────────── 信号清单（nets.txt）读写 ─────────────────────────────
@@ -291,8 +336,7 @@ def main():
         if not parsed:
             sys.exit("⛔ 在 %s 里找不到 module 定义" % args.top)
         top_module = list(parsed)[0]
-    if top_module not in modules:
-        sys.exit("⛔ 顶层模块 %r 不在已解析模块里（检查 --rtl-dirs 是否含顶层文件）" % top_module)
+    top_module = resolve_top_module(top_module, modules, args.top)
     print("DUT 顶层模块: %s" % top_module)
 
     sigmap = build_signal_map(modules, top_module, max_depth=args.max_depth)
