@@ -123,6 +123,26 @@ def collect_mux_nets(wb):
     return nets
 
 
+def collect_dft_nets(wb):
+    """dft 页 → iddq 门网（2026-06-10 Hi1108：IDDQ 漏电态拍要 force 门网，此前不导出——
+    门若埋在子模块，scan_rtl 定不到层级 → force CUVUNF 且无提示）。
+
+    导出门基名（force 目标）+ _to_dft 衔接网（核对用，宁多勿漏，同 mux 网原则）。
+    无 dft 页 / 任何异常 → 返回空 dict，绝不波及 logic/mux 网导出。
+    """
+    nets = {}
+    try:
+        for ob, g in sorted((getattr(wb, "dft", None) or {}).items()):
+            gb, graw = g.get("gate_base"), g.get("gate_raw")
+            if gb and re.match(r"^[A-Za-z_]\w*$", gb):
+                nets.setdefault(gb, "dft 页 iddq 门（IDDQ 漏电态拍的 force 目标；门控输出 %s 等）" % ob)
+            if graw and graw != gb and re.match(r"^[A-Za-z_]\w*$", graw):
+                nets.setdefault(graw, "dft 页 iddq 门的 _to_dft 衔接网（核对 DFT mux 接线用）")
+    except Exception:  # noqa: BLE001
+        return {}
+    return nets
+
+
 def match_excel(wb, sigmap):
     """对照：Excel 需要的网 vs RTL 层级。返回 (prefixes, at_top, missing)，见 scan_rtl.match_nets。"""
     return match_nets(collect_excel_nets(wb), sigmap)

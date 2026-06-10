@@ -670,3 +670,43 @@ def test_mux_left_neg_indicator_reflects_user_neg(lpbt_win):
     r = _mux_idx(w, grp.out_base)
     w.ti_table.setCurrentCell(0, 0); w.on_ti_add_neg_selected()
     assert w.table.item(r, G.COL_NEG).checkState() == QtCore.Qt.Checked   # 左表已勾(有负向)
+
+
+# ───────────── 2026-06-10 Hi1108：受 dft 页 iddq 门控的信号，编辑器必须亮出门网 ─────────────
+def test_mux_dft_gate_visible_in_editor(gui_app, tmp_path):
+    """用户实地反馈：mixer2g_trim 受 iddq 门控，但编辑器真值表/输入表都看不到 iddq →
+    对照 for_test 误以为漏了源头控制。修=『输入信号』表加 DFT 门一行 + 头部明说
+    「.sv/报告自动追加 1 条 IDDQ 漏电态拍，不占下表列」。"""
+    import test_mux_wl as TM
+    from dreg_verify import gui as G
+    excel = tmp_path / "dftgate_gui.xlsx"
+    TM._build_mux_wb(
+        str(excel),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            TM._mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            TM._mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+        ],
+        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
+    )
+    w = G.MainWindow()
+    w.path_edit.setText(str(excel))
+    w.on_load()
+    try:
+        grp = _mux_grp(w, "d_g")
+        w._load_test_items(grp)
+        # 『输入信号』表多一行 DFT 门：信号列=门基名、角色列说明 .sv 自动+1 条漏电态拍
+        labels = [w.ti_inputs.item(r, 1).text() for r in range(w.ti_inputs.rowCount())]
+        roles = [w.ti_inputs.item(r, 2).text() for r in range(w.ti_inputs.rowCount())]
+        assert "d_iddq_mode" in labels, labels
+        assert any("DFT门" in x and "漏电态拍" in x for x in roles), roles
+        # 头部明说：受 iddq 门控、拍不占编辑器列（免得用户以为没生成）
+        assert "iddq 门控" in w.ti_header.text() and "漏电态拍" in w.ti_header.text(), \
+            w.ti_header.text()
+    finally:
+        w.close()

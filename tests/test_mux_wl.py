@@ -1909,6 +1909,39 @@ def test_wl_iddq_dft_skip_surfaced(tmp_path):
                for r in rep["verifiability"]["signals"]), rep["verifiability"]["signals"]
 
 
+def test_collect_dft_nets_exports_iddq_gate(tmp_path):
+    """2026-06-10 Hi1108：dft 页的 iddq 门网必须进 nets.txt 导出——它是 IDDQ 漏电态拍的
+    force 目标，漏导则门埋在子模块时 scan_rtl 定不到层级 → force CUVUNF 且无提示。"""
+    from dreg_verify import rtl_scan
+    wb = _build_mux_wb(
+        str(tmp_path / "dftnets.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+        ],
+        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
+    )
+    nets = rtl_scan.collect_dft_nets(wb)
+    assert "d_iddq_mode" in nets                       # 门基名（force 目标）
+    assert "d_iddq_mode_to_dft" in nets                # _to_dft 衔接网（核对用）
+    assert "force 目标" in nets["d_iddq_mode"]
+    # 无 dft 页 → 空 dict；坏对象 → 兜底空 dict（不波及 logic/mux 网导出）
+    class _NoDft:
+        dft = {}
+    assert rtl_scan.collect_dft_nets(_NoDft()) == {}
+    class _Bad:
+        @property
+        def dft(self):
+            raise RuntimeError("boom")
+    assert rtl_scan.collect_dft_nets(_Bad()) == {}
+
+
 # ───────────── 第二十三轮：规格冲突(同 case 不同源)单列 + owner 透出（P1 = 1+3）─────────────
 def test_spec_collision_distinct_surfacing(tmp_path):
     """designer 表里同一控制选择值却选不同数据源(如 lctune off 段 case 错写成 on 段) → 整组跳过，

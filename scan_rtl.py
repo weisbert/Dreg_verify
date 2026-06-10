@@ -244,6 +244,16 @@ def _load_excel_nets(excel_path):
     if mux_nets:
         print("✓ mux 页: 发现 %d 个相关网，新增导出 %d 个（输出探针 + 控制衔接网 + 数据网）"
               % (len(mux_nets), added))
+    # dft 页的 iddq 门网（2026-06-10）——IDDQ 漏电态拍的 force 目标，漏导则门埋子模块时 CUVUNF
+    dft_nets = rtl_scan.collect_dft_nets(wb)
+    added_dft = 0
+    for name, why in dft_nets.items():
+        if name not in nets:
+            nets[name] = why
+            added_dft += 1
+    if dft_nets:
+        print("✓ dft 页: 发现 %d 个 iddq 门网，新增导出 %d 个（IDDQ 漏电态拍 force 目标）"
+              % (len(dft_nets), added_dft))
     return nets
 
 

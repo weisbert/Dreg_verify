@@ -2043,6 +2043,14 @@ class MainWindow(QtWidgets.QMainWindow):
         snote = (meta or {}).get("shadowed_note")        # A2 死分支：靠后重复 case 已跳过，标注出来
         if snote:
             self.ti_header.setText(self.ti_header.text() + "　|　⚙ " + snote)
+        # 受 dft 页 iddq 门控：IDDQ 漏电态拍在生成 .sv/报告时自动追加，不在编辑器列里——
+        # 明说，免得对照 for_test 以为漏了 iddq 这个源头控制（2026-06-10 Hi1108 实地反馈）
+        g = (getattr(self.wb, "dft", None) or {}).get((grp.out_base or "").lower())
+        if g:
+            self.ti_header.setText(
+                self.ti_header.text()
+                + "　|　⚙ 受 dft 页 iddq 门控(%s)：生成 .sv/报告自动追加 1 条 IDDQ 漏电态拍"
+                  "(force 门=1 验输出压0)，不占下表列" % g["gate_base"])
 
     def _render_mux_exp_col(self, ci, n_inputs):
         """渲染 mux 表第 ci 列的 auto_out + 期望 两格（手填状态变化时单列重绘）。
@@ -2188,11 +2196,16 @@ class MainWindow(QtWidgets.QMainWindow):
         pos_rows = [rd for rd in self._ti_rows if rd.get("kind") != "neg"]
         n_filled = sum(1 for rd in pos_rows if rd.get("designer_expected") is not None)
         fill_tag = ("   期望已手填 %d/%d" % (n_filled, len(pos_rows))) if pos_rows else ""
+        # 受 dft 页 iddq 门控的 logic 输出：与 mux 侧同口径明说（拍在 .sv/报告，不占编辑器列）
+        _dftg = (getattr(self.wb, "dft", None) or {}).get(
+            (self._ti_sig.out_base or "").lower()) if self.wb else None
+        iddq_tag = ("   [⚙dft页iddq门控(%s)：.sv自动+1条漏电态拍]" % _dftg["gate_base"]
+                    if _dftg else "")
         # 表达式写成 "输出 = RHS" 等式；字母对照已下移到『输入信号』表，头部保持精简
         self.ti_header.setText(
-            "信号 %s     %s = %s     用例 %d 条%s%s%s"
+            "信号 %s     %s = %s     用例 %d 条%s%s%s%s"
             % (self._ti_sig.out_name, self._ti_sig.out_base or "out", self._ti_sig.expr,
-               len(self._ti_rows), fill_tag, tag, cone_tag))
+               len(self._ti_rows), fill_tag, tag, cone_tag, iddq_tag))
 
     def _ti_mark_customized(self):
         if not self._ti_sig:
@@ -2646,6 +2659,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 role = "数据寄存器(被该case选中)"
             rows.append({"letter": "case %s" % case_raw, "label": self._mux_label(b),
                          "role": role, "kind": kind, "drive": drive, "bold": False})
+        # ── DFT 门（dft 页）：受 iddq 门控的输出，把门网当输入亮出来（.sv 自动+1 条漏电态拍）──
+        dft_row = self._dft_gate_input_row(grp.out_base)
+        if dft_row:
+            rows.append(dft_row)
         tbl.setRowCount(len(rows))
         for i, rd in enumerate(rows):
             for c, v in enumerate([rd["letter"], rd["label"], rd["role"],
@@ -2665,6 +2682,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _mux_label(b):
         """绑定 → 『信号(位宽)』列文本。"""
         return b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
+
+    def _dft_gate_input_row(self, out_base):
+        """输出受 dft 页 iddq 门控 → 『输入信号』表追加一行门网；不受门控返回 None。
+
+        2026-06-10 Hi1108 实地反馈：iddq 门不在 cone/case 输入里（在 dft 页），编辑器真值表
+        从不显示它，用户对照 for_test 以为漏了这个源头控制。在输入表单独亮出（驱动列照常给
+        未解析/需探针前缀着色——它正是 IDDQ 漏电态拍的 force 目标）。"""
+        g = (getattr(self.wb, "dft", None) or {}).get((out_base or "").lower())
+        if not g or self._resolver is None:
+            return None
+        info = {"raw": g["gate_base"], "base": g["gate_base"],
+                "width": 1, "msb": None, "lsb": None}
+        b = self._resolver.resolve("dft_gate_" + g["gate_base"], info)
+        kind, drive = self._binding_meta(b)
+        return {"letter": "dft页", "label": g["gate_base"],
+                "role": "DFT门(iddq)·.sv自动+1条漏电态拍", "kind": kind,
+                "drive": drive, "bold": True}
 
     def _mux_ctrl_rows(self, drv, exp):
         """一个控制信号的驱动器 → 『输入信号』表的若干行（按三来源给角色文案）。"""
@@ -2760,7 +2794,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "ti_inputs"):
             return
         tbl = self.ti_inputs
-        tbl.setRowCount(len(self._ti_groups))
+        # DFT 门行（dft 页）：logic 输出也可能被 iddq 门控，与 mux 侧同口径亮出
+        dft_row = self._dft_gate_input_row(self._ti_sig.out_base if self._ti_sig else "")
+        tbl.setRowCount(len(self._ti_groups) + (1 if dft_row else 0))
         for i, g in enumerate(self._ti_groups):
             kind, drive = self._input_meta(g)
             role = "控制/选择位" if g["is_control"] else "数据位"
@@ -2773,6 +2809,18 @@ class MainWindow(QtWidgets.QMainWindow):
                     it.setForeground(QtGui.QColor("red"))
                 elif c == 4 and "需探针前缀" in v:
                     it.setForeground(QtGui.QColor("#d97706"))   # 琥珀：需前缀(非阻断但要配)
+                tbl.setItem(i, c, it)
+        if dft_row:
+            i = len(self._ti_groups)
+            for c, v in enumerate([dft_row["letter"], dft_row["label"], dft_row["role"],
+                                   dft_row["kind"], dft_row["drive"]]):
+                it = QtWidgets.QTableWidgetItem(v)
+                if c == 0:
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                if c == 4 and "未解析" in v:
+                    it.setForeground(QtGui.QColor("red"))
+                elif c == 4 and "需探针前缀" in v:
+                    it.setForeground(QtGui.QColor("#d97706"))
                 tbl.setItem(i, c, it)
         tbl.resizeColumnsToContents()
         self._fit_inputs_height()
