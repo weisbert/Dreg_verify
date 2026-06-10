@@ -340,10 +340,27 @@ class FlowLayout(QtWidgets.QLayout):
         return y + line_h - rect.y() + m.bottom()
 
 
+def _code_version():
+    """工具代码版本（git 短 HEAD，拿不到给空）——进窗口标题。
+
+    2026-06-10 实地教训：用户机器上可能同时存在旧拷贝/旧进程，「改了却看不到」排查
+    了一整轮才怀疑到版本——标题带 HEAD 后一眼可辨跑的是哪份代码。"""
+    try:
+        import subprocess
+        return subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+             "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Dreg_verify — wr_rf_tc.sv 生成器 + 测试项编辑")
+        _ver = _code_version()
+        self.setWindowTitle("Dreg_verify — wr_rf_tc.sv 生成器 + 测试项编辑"
+                            + ("　[代码版本 %s]" % _ver if _ver else ""))
         self.resize(1360, 800)
         self.wb = None
         self.signals = []
