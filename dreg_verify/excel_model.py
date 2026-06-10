@@ -685,7 +685,8 @@ def _normalize_type(v):
 
 # ───────────────────────────── 顶层装载 ─────────────────────────────
 class DregWorkbook:
-    def __init__(self, logic, regmap, tmm, sheet_names, mux=None, dft=None):
+    def __init__(self, logic, regmap, tmm, sheet_names, mux=None, dft=None,
+                 fortest_order=None):
         self.logic = logic              # list[LogicSignal]
         self.regmap = regmap            # dict
         self.tmm = tmm                  # dict
@@ -693,6 +694,8 @@ class DregWorkbook:
         self.mux = mux if mux is not None else []   # list[MuxGroup]（无 mux 页 = 空列表）
         # {输出基名low: 门控信息}（dft 页；无 dft 页=空）。DFT 观测模式用，见 read_dft。
         self.dft = dft if dft is not None else {}
+        # {输出基名low: [输入基名low顺序]}（for_test 页；无/空页=空）。真值表输入行排序对照用。
+        self.fortest_order = fortest_order if fortest_order is not None else {}
 
 
 def _dft_strip(name):
@@ -737,6 +740,33 @@ def read_dft(ws, header_row=2):
     return out
 
 
+def read_fortest_order(ws):
+    """读 for_test 页的【输入行顺序】：{输出基名low: [输入基名low(按 for_test 行序)]}。
+
+    2026-06-10 用户要求：我们真值表的输入行次序要与 designer for_test 一致。
+    真表排版(R21/R27 实证，我们的回填也同构)：每组 = 若干输入行(F 列=输入名)
+    + 输出行(D 列=输出名)；以"遇到 D 行"给当前组封口。
+    只做顺序对照：F/D 都剥位宽转小写；解析不出/无 for_test 页 → 空 dict(回退原序)。
+    表头等杂行会进无人查询的键，无害。
+    """
+    out = {}
+    if ws is None:
+        return out
+    cur = []
+    # 只读 A..F 列（for_test 动辄上万行、T 向量几十列——读全宽会拖慢装载）
+    for r in ws.iter_rows(min_row=1, max_col=6, values_only=True):
+        fval = _s(r[5]) if len(r) > 5 else ""      # F 列：输入信号名
+        dval = _s(r[3]) if len(r) > 3 else ""      # D 列：输出信号名(组封口)
+        if fval:
+            cur.append(_strip_width(fval)[0].lower())
+        if dval:
+            ob = _strip_width(dval)[0].lower()
+            if cur and ob:
+                out.setdefault(ob, list(cur))
+            cur = []
+    return out
+
+
 def _find_sheet(wb, *candidates):
     lowered = {s.lower(): s for s in wb.sheetnames}
     for c in candidates:
@@ -755,12 +785,15 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     ws_tmm = _find_sheet(wb, "total_memory_map", "total memory map", "memory_map")
     ws_mux = _find_sheet(wb, "mux")
     ws_dft = _find_sheet(wb, "dft")
+    ws_ft = _find_sheet(wb, "for_test")
 
     logic = read_logic(ws_logic, logic_header_row)
     regmap = read_regmap(ws_regmap, regmap_header_row) if ws_regmap is not None else {}
     tmm = read_tmm(ws_tmm) if ws_tmm is not None else {}
     mux = read_mux(ws_mux) if ws_mux is not None else []
     dft = read_dft(ws_dft) if ws_dft is not None else {}
+    fortest_order = read_fortest_order(ws_ft) if ws_ft is not None else {}
     names = list(wb.sheetnames)
     wb.close()
-    return DregWorkbook(logic, regmap, tmm, names, mux=mux, dft=dft)
+    return DregWorkbook(logic, regmap, tmm, names, mux=mux, dft=dft,
+                        fortest_order=fortest_order)

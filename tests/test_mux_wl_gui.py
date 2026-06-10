@@ -673,7 +673,7 @@ def test_mux_left_neg_indicator_reflects_user_neg(lpbt_win):
 
 
 # ───────────── 2026-06-10 Hi1108：iddq 门=真值表的【横向输入行】（用户三轮澄清定稿） ─────────────
-def _dft_wb(tmp_path, fname, iddq_typ=("Y", "RO")):
+def _dft_wb(tmp_path, fname, iddq_typ=("Y", "RO"), fortest_groups=None):
     import test_mux_wl as TM
     return TM._build_mux_wb(
         str(tmp_path / fname),
@@ -691,6 +691,7 @@ def _dft_wb(tmp_path, fname, iddq_typ=("Y", "RO")):
                      "L": "A", "M": "ls", "N": 1, "R": 1}],
         dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A"),
                   ("d_lg_to_dft[1:0]", "d_iddq_mode_to_dft", "d_lg[1:0]", "B?0:A")],
+        fortest_groups=fortest_groups,
     )
 
 
@@ -724,6 +725,33 @@ def test_mux_dft_gate_is_input_row(gui_app, tmp_path):
         labels = [w.ti_inputs.item(r, 1).text() for r in range(w.ti_inputs.rowCount())]
         assert "d_iddq_mode" in labels, labels
         assert "已列为输入行" in w.ti_header.text(), w.ti_header.text()
+    finally:
+        w.close()
+
+
+def test_mux_input_rows_follow_fortest_order(gui_app, tmp_path):
+    """2026-06-10 用户要求：真值表输入行次序与 designer for_test 同组行序一致——
+    门排中间也照排；编辑(手填期望)在新行号下照常工作。"""
+    from dreg_verify import gui as G
+    excel = tmp_path / "ftorder_gui.xlsx"
+    _dft_wb(tmp_path, "ftorder_gui.xlsx",
+            fortest_groups=[("d_g[1:0]", ["d_iddq_mode", "d_sel[1:0]",
+                                          "d_s1[1:0]", "d_s0[1:0]"])])
+    w = G.MainWindow()
+    w.path_edit.setText(str(excel))
+    w.on_load()
+    try:
+        grp = _mux_grp(w, "d_g")
+        w._load_test_items(grp)
+        vh = [w.ti_table.verticalHeaderItem(r).text()
+              for r in range(w.ti_table.rowCount())]
+        # 行序 = for_test：iddq(门) → sel(控制) → s1 → s0（数据），auto/期望殿后
+        assert vh[0].startswith("d_iddq_mode"), vh
+        assert "d_sel" in vh[1] and "d_s1" in vh[2] and "d_s0" in vh[3], vh
+        assert w.ti_table.item(0, 0).text() == "0"        # 门行=透传值
+        # 期望行在底部、手填仍工作
+        w.ti_table.item(w._ti_mux_exp_row, 0).setText("2'b01")
+        assert w._ti_mux_vecs[0].designer_expected == 1
     finally:
         w.close()
 

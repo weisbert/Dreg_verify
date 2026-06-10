@@ -755,7 +755,8 @@ def test_wl_negative_vectors(wl_wb):
 from fixtures import _set_row, _tmm_reg, _tmm_field  # noqa: E402
 
 
-def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=None, dft_rows=None):
+def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=None, dft_rows=None,
+                  fortest_groups=None):
     """造一个只有 logic(默认空)/tmm/regmap/mux 四页的最小工作簿，给级联/边界回归用。
 
     tmm_fields: [(reg_name, addr, field_name(可带[msb:lsb]), bit, dig, typ), ...]
@@ -764,6 +765,8 @@ def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=Non
     logic_rows: [{列字母: 值}, ...] 可选——往 logic 页加行（A..J=输入, K=输出, L=表达式,
                 M=suffix, N=top_output, R=序号），用于复现"mux 数据/控制输入是某 logic 输出"的形态。
     dft_rows: [(A=<out>_to_dft, B=<gate>_to_dft, D=<out>, E=门控表达式), ...] 可选——造 dft 页。
+    fortest_groups: [(输出名, [输入名顺序]), ...] 可选——造 for_test 页（F 列=输入行、
+                D 列=输出行封口，与真表排版同构），给输入行排序对照用。
     """
     import openpyxl
     wb = openpyxl.Workbook()
@@ -794,6 +797,15 @@ def _build_mux_wb(path, tmm_fields, mux_rows, regmap_fields=None, logic_rows=Non
         _set_row(ds, 2, {"A": "A", "B": "B", "C": "C", "D": "out put signal", "E": "logic expression"})
         for ri, (a, b, d, e) in enumerate(dft_rows, start=3):
             _set_row(ds, ri, {"A": a, "B": b, "D": d, "E": e})
+    if fortest_groups:
+        ft = wb.create_sheet("for_test")
+        ri = 3
+        for out_name, in_names in fortest_groups:
+            for inp in in_names:
+                _set_row(ft, ri, {"F": inp})
+                ri += 1
+            _set_row(ft, ri, {"D": out_name})
+            ri += 2
     wb.save(path)
     return excel_model.load_workbook(path)
 
@@ -1917,6 +1929,42 @@ def test_wl_iddq_dft_skip_surfaced(tmp_path):
     rep = generator.report(wb, generator.GenOptions(mux_mode="max"))
     assert any("未补 DFT 拍" in (r.get("detail") or "")          # 报告可验证性 detail 也透出（Fix E）
                for r in rep["verifiability"]["signals"]), rep["verifiability"]["signals"]
+
+
+def test_fortest_input_order(tmp_path):
+    """2026-06-10 用户要求：真值表输入行次序 = designer for_test 同组的行序。
+    for_test 指定 [iddq, sel, s1, s0] → 报告 inputs 按此排（门排中间也行）；
+    不在 for_test 的输出 → 原序 + 门殿后。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "ftorder.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+        ],
+        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
+        fortest_groups=[("d_g[1:0]", ["d_iddq_mode", "d_sel[1:0]",
+                                      "d_s1[1:0]", "d_s0[1:0]"])],
+    )
+    # excel_model 解析：剥位宽、小写、按行序
+    assert wb.fortest_order["d_g"] == ["d_iddq_mode", "d_sel", "d_s1", "d_s0"]
+    rep = generator.report(wb, generator.GenOptions(mux_mode="min"))
+    tbl = next(t for t in rep["tables"] if t["signal"].startswith("d_g"))
+    labels = [excel_model._strip_width(i["label"])[0] for i in tbl["inputs"]]
+    assert labels == ["d_iddq_mode", "d_sel", "d_s1", "d_s0"], labels
+    # values/raw 与 inputs 对齐：iddq 列(第 0 行)功能测试=0、DFT 拍=1
+    for t in tbl["tests"]:
+        assert len(t["values"]) == len(tbl["inputs"])
+    gate_vals = [t["values"][0] for t in tbl["tests"]]
+    assert "1" in gate_vals and gate_vals.count("0") == len(gate_vals) - 1, gate_vals
+    # 排序仅影响显示次序，不影响 .sv 内容本身
+    txt = generator.render(generator.build(wb, generator.GenOptions(mux_mode="min")))
+    assert "force `ENV_RF.d_iddq_mode=1'b0;" in txt
 
 
 def test_collect_dft_nets_exports_iddq_gate(tmp_path):

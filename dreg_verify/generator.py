@@ -425,6 +425,23 @@ def pin_dft_gate(out_base, vecs, wb, resolver):
     return (b, transp)
 
 
+def fortest_order_entries(entries, wb, out_base, name_fn):
+    """把输入条目按 designer for_test 同输出组的【输入行顺序】重排（2026-06-10 用户要求：
+    真值表/报告/回填的输入次序与 for_test 一致）。
+
+    entries 任意对象列表，name_fn(条目)→基名(小写、无位宽)。该输出不在 for_test
+    （无 for_test 页 / 空组）→ 原序返回；列进 for_test 的条目按其行序，没列进的
+    保持原相对顺序排在之后。稳定排序，不丢条目。
+    """
+    order = (getattr(wb, "fortest_order", None) or {}).get((out_base or "").lower())
+    if not order:
+        return list(entries)
+    pos = {n: i for i, n in enumerate(order)}
+    big = len(order)
+    return [e for _k, e in sorted(((pos.get(name_fn(e), big + i), e)
+                                   for i, e in enumerate(entries)), key=lambda t: t[0])]
+
+
 def probe_prefix_for(sig, opts):
     """该信号的探针层级前缀，没有则空串。
 
@@ -1168,6 +1185,12 @@ def report(wb, opts):
         # iddq 门=显式输入（与 build 同口径）；返回的绑定供报告 inputs 行 + for_test 回填
         _lpin = pin_dft_gate(sig.out_base.lower(), vecs, wb, resolver)
         groups = V.input_groups(node, bindings)
+        # 输入行显示顺序 = designer for_test 同组的行序（门也参与排序；无 for_test=原序+门殿后）
+        _lentries = [("g", g) for g in groups] + ([("gate", None)] if _lpin else [])
+        _lentries = fortest_order_entries(
+            _lentries, wb, sig.out_base,
+            lambda e: ((excel_model._strip_width(e[1].get("base") or e[1].get("label") or "")[0]
+                        .lower()) if e[0] == "g" else _lpin[0].base.lower()))
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
                  # is_logic：本表是 logic cone 真值表(回填 for_test 只处理它，mux 表结构不同跳过)
@@ -1177,14 +1200,13 @@ def report(wb, opts):
                  # letters = 该输入的 Excel 来源坐标(普通信号=A/B/C…；cone 展开叶子=
                  # "上游行名.字母"如 pll_n1.A)，让报告里的真值表能对回表达式/Excel
                  # 逐输入还带回填 for_test 用的驱动元数据(addr/RO/bit/wire)，见 _input_meta
-                 "inputs": [_input_meta(g, bindings) for g in groups], "tests": []}
-        if _lpin:
-            # iddq 门作为输入行（2026-06-10）：HTML 真值表 + for_test 回填都带上（与 designer
-            # for_test 输入清单同口径——RO 网、无地址、宽 1，回填走 B=网名/C=16'h0 路径）
-            table["inputs"].append({
-                "label": _lpin[0].base, "letters": "dft门", "base": _lpin[0].base,
-                "kind": "RO", "ro": True, "addr": None, "reg_lsb": None, "reg_msb": None,
-                "slice_lsb": None, "slice_msb": None, "wire": _lpin[0].wire, "width": 1})
+                 # iddq 门也是输入行（2026-06-10）：HTML 真值表 + for_test 回填都带上（RO 网、
+                 # 无地址、宽 1，回填走 B=网名/C=16'h0 路径）；次序已按 for_test 行序排好
+                 "inputs": [(_input_meta(e[1], bindings) if e[0] == "g" else {
+                     "label": _lpin[0].base, "letters": "dft门", "base": _lpin[0].base,
+                     "kind": "RO", "ro": True, "addr": None, "reg_lsb": None, "reg_msb": None,
+                     "slice_lsb": None, "slice_msb": None, "wire": _lpin[0].wire, "width": 1})
+                            for e in _lentries], "tests": []}
         unresolved_bases = set()
         for vec in vecs:
             forces, writes, unres = W.compute_drives(vec, bindings, used)
@@ -1199,15 +1221,16 @@ def report(wb, opts):
             write_str = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
             bv = V.vector_to_base_values(vec, groups)
             # iddq 门输入值：功能向量=透传值；DFT 拍=force 的常量支值（与 .sv 实际驱动一致）
-            _gvals = ([] if not _lpin else
-                      [(1 - _lpin[1]) if getattr(vec, "dft_pitch", False) else _lpin[1]])
+            _gv = (None if not _lpin else
+                   ((1 - _lpin[1]) if getattr(vec, "dft_pitch", False) else _lpin[1]))
+            _rawrow = [(bv.get(e[1]["key"], 0) if e[0] == "g" else _gv) for e in _lentries]
             table["tests"].append({
                 "name": W.test_label(vec),
                 "neg": vec.is_negative,
-                "values": ([_fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups]
-                           + [_fmt_cell(v, 1) for v in _gvals]),
+                "values": [_fmt_cell(_rawrow[i], e[1]["width"] if e[0] == "g" else 1)
+                           for i, e in enumerate(_lentries)],
                 # raw = 逐输入原始整数值(回填 for_test 的 T 向量列/G/H 计算要用；values 是格式化串)
-                "raw": [bv.get(g["key"], 0) for g in groups] + _gvals,
+                "raw": _rawrow,
                 # auto_out = 表达式计算值；expected = 进 .sv 的对比值(designer 手填 > auto_out 兜底 > 负向错值)
                 "auto_out": _fmt_cell(vec.exp_value, vec.exp_width),
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
@@ -1364,30 +1387,38 @@ def report(wb, opts):
         if skip_reason:
             continue
 
-        # ── case 选择表（tables 段，kind='mux'）：行=控制+各数据寄存器，列=测试 T ──
+        # ── case 选择表（tables 段，kind='mux'）：行=控制+各数据寄存器(+DFT门)，列=测试 T ──
         used = exp["used_vars"]
+        # 输入行显示顺序 = designer for_test 同组的行序（门也参与排序；无 for_test=原序+门殿后）
+        _mentries = [("key", k) for k in used] + ([("gate", None)] if _mpin else [])
+        _mentries = fortest_order_entries(
+            _mentries, wb, grp.out_base,
+            lambda e: ((exp["bindings"][e[1]].base or "").lower() if e[0] == "key"
+                       else _mpin[0].base.lower()))
         inp_rows = []
-        for key in used:
+        for ent in _mentries:
+            if ent[0] == "gate":
+                # iddq 门作为输入行（2026-06-10，与 logic 表同口径）：HTML 真值表带上
+                inp_rows.append({"label": _mpin[0].base, "letters": "dft门(force)"})
+                continue
+            key = ent[1]
             b = exp["bindings"][key]
             label = b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
             # 角色判断统一走 mux_gen.key_role（多控制 c1:/c2:、上游配方 m<N>.* 都认）
             tag = {"ctrl": "ctrl", "data": "data", "upstream": "上游mux"}[mux_gen.key_role(key)]
             inp_rows.append({"label": label, "letters": "%s(%s)" % (key, tag)})
-        if _mpin:
-            # iddq 门作为输入行（2026-06-10，与 logic 表同口径）：HTML 真值表带上
-            inp_rows.append({"label": _mpin[0].base, "letters": "dft门(force)"})
         table = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
                  "type": "mux", "expr": expr_text, "kind": "mux",
                  "inputs": inp_rows, "tests": []}
         for vec in vecs:
             forces, writes, _unres = W.compute_drives(vec, exp["bindings"], used)
-            _gvals = ([] if not _mpin else
-                      [(1 - _mpin[1]) if getattr(vec, "dft_pitch", False) else _mpin[1]])
+            _gv = (None if not _mpin else
+                   ((1 - _mpin[1]) if getattr(vec, "dft_pitch", False) else _mpin[1]))
             table["tests"].append({
                 "name": W.test_label(vec),
                 "neg": vec.is_negative,
-                "values": ([_fmt_cell(vec.assignments.get(k, 0), exp["bindings"][k].width)
-                            for k in used] + [_fmt_cell(v, 1) for v in _gvals]),
+                "values": [(_fmt_cell(vec.assignments.get(e[1], 0), exp["bindings"][e[1]].width)
+                            if e[0] == "key" else _fmt_cell(_gv, 1)) for e in _mentries],
                 "auto_out": _fmt_cell(vec.exp_value, vec.exp_width),
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
                 "designer_filled": vec.designer_filled,
