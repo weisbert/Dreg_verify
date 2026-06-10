@@ -249,6 +249,7 @@ DSGN_BG = QtGui.QColor("#e2f2e2")       # 已手填且 == auto_out（绿：desig
 DIFF_BG = QtGui.QColor("#ffd9d9")       # 已手填但 != auto_out（红：表达式可能与 designer 意图不符）
 FB_FG = QtGui.QColor("#999999")         # 未手填（灰字显示兜底的 auto_out 值）
 USER_BG = QtGui.QColor("#eef3fb")       # mux 用户手编/复制列（第二十八轮）的整列淡底色，与自动生成列区分
+DFT_BG = QtGui.QColor("#f3eafa")        # IDDQ拍 显示列（淡紫）：工具自动追加的 DFT 漏电态拍，只读
 
 # 「级联 ?」内置帮助的兜底内容：仓库根目录的 级联模式说明.md 缺失时显示(正常显示完整 .md)
 CASCADE_DOC_FALLBACK = """\
@@ -1915,6 +1916,7 @@ class MainWindow(QtWidgets.QMainWindow):
         old_widths = [self.ti_table.columnWidth(c) for c in range(self.ti_table.columnCount())]
         self._clear_test_items("")
         self._ti_mux_sig = grp
+        self._ti_mux_dft_vec = None        # 早退路径(清空/撞值/无向量)不得沿用上个信号的拍
         self._set_sig_cov_combo(grp)          # 单点覆盖下拉置到本信号档（不触发重算）
         self._set_ti_buttons_for_mux(True)    # mux 信号：置灰列结构/CSV 按钮(无 mux 分支)，给准确 tooltip
         exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
@@ -1970,6 +1972,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_mux_user_start = gen_n
         self._ti_mux_vecs = vecs
         self._ti_mux_exp_row = len(used) + 1
+        # IDDQ 拍显示列（2026-06-10 用户实地要求：要在真值表里直接看到 iddq 源头控制，
+        # 像 for_test 一样）：与 build 同口径算出该拍，渲染成【只读显示列】+底部【DFT门】行。
+        # 不进 _ti_mux_vecs——列操作/负向/期望/数据编辑/CSV/持久化全不碰它
+        # （各处理器本就有 0<=c<len(vecs) 边界检查，显示列号=len(vecs) 落在界外）。
+        self._ti_mux_dft_vec = None
+        self._ti_mux_dft_gate = (getattr(self.wb, "dft", None) or {}).get(
+            (grp.out_base or "").lower())
+        if self._ti_mux_dft_gate and self._resolver is not None:
+            _tmp = list(vecs)
+            _skip = generator._append_dft_vectors(grp.out_base.lower(), _tmp,
+                                                  self.wb, self._resolver)
+            if not _skip and len(_tmp) > len(vecs):
+                self._ti_mux_dft_vec = _tmp[-1]
         self._update_mux_header(grp, vecs, mux_mode, meta)
         if meta.get("override_collision"):     # B2：手填值撞值（非阻断，用户负责）
             self.ti_header.setText(self.ti_header.text()
@@ -1977,10 +1992,12 @@ class MainWindow(QtWidgets.QMainWindow):
                                      "(假绿)，请核对手填值")
         self._ti_loading = True
         try:
+            dftv = self._ti_mux_dft_vec
             self.ti_table.clear()
-            self.ti_table.setColumnCount(len(vecs))
-            self.ti_table.setHorizontalHeaderLabels([W.test_label(v) for v in vecs])
-            self.ti_table.setRowCount(len(used) + 2)
+            self.ti_table.setColumnCount(len(vecs) + (1 if dftv else 0))
+            self.ti_table.setHorizontalHeaderLabels(
+                [W.test_label(v) for v in vecs] + (["IDDQ拍"] if dftv else []))
+            self.ti_table.setRowCount(len(used) + 2 + (1 if dftv else 0))
             vlabels = []
             data_key_set = set(exp.get("data_keys", []))   # 真·数据输入（d:*）；控制/上游配方键不在内
             self._ti_mux_data_rows = {}                     # 可手填数据行 row -> (物理基名小写, 位宽, 绑定键)
@@ -2018,6 +2035,14 @@ class MainWindow(QtWidgets.QMainWindow):
                         if is_user:
                             it.setBackground(USER_BG)               # 用户列整列着色(含只读的控制行)
                     self.ti_table.setItem(ri, ci, it)
+                if dftv is not None:                        # IDDQ拍 显示列的输入格（只读）
+                    dit = QtWidgets.QTableWidgetItem(
+                        self._cell_text(dftv.assignments.get(key, 0), b.width))
+                    dit.setFlags(QtCore.Qt.ItemIsEnabled)
+                    dit.setBackground(DFT_BG)
+                    dit.setToolTip("IDDQ 漏电态拍（工具按 dft 页自动追加，只读）：\n"
+                                   "输入沿用一条功能用例，再 force DFT 门=1，验输出被压到常量支。")
+                    self.ti_table.setItem(ri, len(vecs), dit)
                 if is_data and base_low:
                     self._ti_mux_data_rows[ri] = (base_low, b.width, key)
             # auto_out 行(只读) + 期望 行(可手填)——与 logic 编辑器同语义/同配色
@@ -2025,6 +2050,9 @@ class MainWindow(QtWidgets.QMainWindow):
             vlabels.append("期望(进.sv)")
             for ci in range(len(vecs)):
                 self._render_mux_exp_col(ci, len(used))
+            if dftv is not None:
+                self._render_dft_display(dftv, self._ti_mux_dft_gate, len(vecs),
+                                         len(used), vlabels)
             self.ti_table.setVerticalHeaderLabels(vlabels)
             self._ti_fit_columns(old_widths)
         finally:
@@ -2060,14 +2088,49 @@ class MainWindow(QtWidgets.QMainWindow):
         snote = (meta or {}).get("shadowed_note")        # A2 死分支：靠后重复 case 已跳过，标注出来
         if snote:
             self.ti_header.setText(self.ti_header.text() + "　|　⚙ " + snote)
-        # 受 dft 页 iddq 门控：IDDQ 漏电态拍在生成 .sv/报告时自动追加，不在编辑器列里——
-        # 明说，免得对照 for_test 以为漏了 iddq 这个源头控制（2026-06-10 Hi1108 实地反馈）
+        # 受 dft 页 iddq 门控：IDDQ 漏电态拍自动追加进 .sv/报告，并在真值表里显示为
+        # 只读「IDDQ拍」列 + 底部 DFT门 行（2026-06-10 Hi1108 实地反馈，两轮迭代）
         g = (getattr(self.wb, "dft", None) or {}).get((grp.out_base or "").lower())
         if g:
+            shown = getattr(self, "_ti_mux_dft_vec", None) is not None
             self.ti_header.setText(
                 self.ti_header.text()
-                + "　|　⚙ 受 dft 页 iddq 门控(%s)：生成 .sv/报告自动追加 1 条 IDDQ 漏电态拍"
-                  "(force 门=1 验输出压0)，不占下表列" % g["gate_base"])
+                + "　|　⚙ 受 dft 页 iddq 门控(%s)：自动追加 1 条 IDDQ 漏电态拍(force 门=1 验输出压0)%s"
+                % (g["gate_base"],
+                   "，见最后一列「IDDQ拍」与底部 DFT门 行(只读)" if shown
+                   else "；本信号该拍补不上(门不可 force 或无功能模板)，原因见生成/报告"))
+
+    def _render_dft_display(self, dftv, gate, dcol, n_inputs, vlabels):
+        """渲染 IDDQ拍 显示列的 auto_out/期望 两格 + 底部「DFT门」行（全部只读）。
+
+        2026-06-10 用户实地要求：iddq 源头控制要像 for_test 一样在真值表里直接可见。
+        DFT门 行：功能列=透传值(RTL 默认，不驱动)，IDDQ拍 列=force 到常量支值。"""
+        transp = int(gate["transparent"])
+        gate_val = 1 - transp
+        # auto_out / 期望 格：门=force 值 → 输出被压到常量支(0)
+        for rr in (n_inputs, n_inputs + 1):
+            it = QtWidgets.QTableWidgetItem(W.fmt_bin(dftv.exp_value, dftv.exp_width))
+            it.setFlags(QtCore.Qt.ItemIsEnabled)
+            it.setBackground(DFT_BG)
+            it.setToolTip("IDDQ 漏电态：门=%d 把输出压到常量支(%d)。期望由 dft 页公式决定，"
+                          "不可手填。" % (gate_val, dftv.exp_value))
+            self.ti_table.setItem(rr, dcol, it)
+        # 底部「DFT门」行：门网名直接做行表头（真值表里能看到 iddq 信号本尊）
+        grow = n_inputs + 2
+        vlabels.append("%s (DFT门)" % gate["gate_base"])
+        for ci in range(dcol):
+            it = QtWidgets.QTableWidgetItem("%d(默认)" % transp)
+            it.setFlags(QtCore.Qt.ItemIsEnabled)
+            it.setForeground(QtGui.QColor("#888888"))
+            it.setToolTip("功能测试不驱动 DFT 门：RTL 默认 %d=透传，输出走功能值。" % transp)
+            self.ti_table.setItem(grow, ci, it)
+        it = QtWidgets.QTableWidgetItem("%d(force)" % gate_val)
+        it.setFlags(QtCore.Qt.ItemIsEnabled)
+        it.setBackground(DFT_BG)
+        f = it.font(); f.setBold(True); it.setFont(f)
+        it.setToolTip("IDDQ 拍：.sv 里 force 门=%d → 断言输出=常量支(%d) → 该拍后恢复门态。"
+                      % (gate_val, dftv.exp_value))
+        self.ti_table.setItem(grow, dcol, it)
 
     def _render_mux_exp_col(self, ci, n_inputs):
         """渲染 mux 表第 ci 列的 auto_out + 期望 两格（手填状态变化时单列重绘）。
@@ -2216,7 +2279,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 受 dft 页 iddq 门控的 logic 输出：与 mux 侧同口径明说（拍在 .sv/报告，不占编辑器列）
         _dftg = (getattr(self.wb, "dft", None) or {}).get(
             (self._ti_sig.out_base or "").lower()) if self.wb else None
-        iddq_tag = ("   [⚙dft页iddq门控(%s)：.sv自动+1条漏电态拍]" % _dftg["gate_base"]
+        iddq_tag = ("   [⚙dft页iddq门控(%s)：自动+1条漏电态拍，见「IDDQ拍」列]" % _dftg["gate_base"]
                     if _dftg else "")
         # 表达式写成 "输出 = RHS" 等式；字母对照已下移到『输入信号』表，头部保持精简
         self.ti_header.setText(
@@ -2851,6 +2914,76 @@ class MainWindow(QtWidgets.QMainWindow):
         shown = min(max(n, 1), 7)
         t.setFixedHeight((shown + 1) * row_h + 6)       # +1 行给表头
 
+    def _logic_dft_display(self):
+        """logic 信号的 IDDQ拍 显示信息（与 build 同口径）；不显示返回 None。
+
+        与 build 一致的条件：被 dft 页门控 + 门可 force(RO) + 有 auto_out!=0 的正向模板 +
+        信号未被用户自定义(_edited → build 走 override 路径不注入拍，显示列必须跟着消失，
+        否则编辑器骗人)。"""
+        sig = self._ti_sig
+        if sig is None or not self.wb or self._resolver is None:
+            return None
+        if (self._ti_name_low or "") in self._edited:
+            return None
+        g = (getattr(self.wb, "dft", None) or {}).get((sig.out_base or "").lower())
+        if not g:
+            return None
+        info = {"raw": g["gate_base"], "base": g["gate_base"],
+                "width": 1, "msb": None, "lsb": None}
+        b = self._resolver.resolve("dft_gate_" + g["gate_base"], info)
+        if not (b.resolved and b.kind == "RO"):
+            return None
+        tmpl = next((rd for rd in self._ti_rows
+                     if rd.get("kind") != "neg" and (rd.get("correct") or 0) != 0), None)
+        if tmpl is None:
+            return None
+        return {"gate": g, "tmpl": tmpl}
+
+    def _ti_render_dft_col(self):
+        """渲染 logic 真值表的 IDDQ拍 显示列 + 底部 DFT门 行（全部只读，与 mux 侧同语义）。"""
+        disp = self._ti_dft_disp
+        g, tmpl = disp["gate"], disp["tmpl"]
+        dcol = len(self._ti_rows)
+        grow = self.R_EXP + 1
+        transp = int(g["transparent"])
+        gate_val = 1 - transp
+        out_w = self._ti_sig.out_width or 1
+        self._ti_loading = True
+        try:
+            for i, gr in enumerate(self._ti_groups):
+                val = tmpl["base_values"].get(gr["key"], 0)
+                it = QtWidgets.QTableWidgetItem(self._cell_text(val, gr["width"]))
+                it.setFlags(QtCore.Qt.ItemIsEnabled)
+                it.setBackground(DFT_BG)
+                it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                it.setToolTip("IDDQ 漏电态拍（工具按 dft 页自动追加，只读）：\n"
+                              "输入沿用一条功能用例，再 force DFT 门=1，验输出被压到常量支。")
+                self.ti_table.setItem(i, dcol, it)
+            for rr in (self.R_AUTO, self.R_EXP):
+                it = QtWidgets.QTableWidgetItem(self._cell_text(0, out_w))
+                it.setFlags(QtCore.Qt.ItemIsEnabled)
+                it.setBackground(DFT_BG)
+                it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                it.setToolTip("IDDQ 漏电态：门=%d 把输出压到常量支(0)。期望由 dft 页公式决定，"
+                              "不可手填。" % gate_val)
+                self.ti_table.setItem(rr, dcol, it)
+            # 底部 DFT门 行：功能列=透传默认值，IDDQ拍 列=force 值
+            for c in range(dcol):
+                it = QtWidgets.QTableWidgetItem("%d(默认)" % transp)
+                it.setFlags(QtCore.Qt.ItemIsEnabled)
+                it.setForeground(QtGui.QColor("#888888"))
+                it.setToolTip("功能测试不驱动 DFT 门：RTL 默认 %d=透传，输出走功能值。" % transp)
+                self.ti_table.setItem(grow, c, it)
+            it = QtWidgets.QTableWidgetItem("%d(force)" % gate_val)
+            it.setFlags(QtCore.Qt.ItemIsEnabled)
+            it.setBackground(DFT_BG)
+            f = it.font(); f.setBold(True); it.setFont(f)
+            it.setToolTip("IDDQ 拍：.sv 里 force 门=%d → 断言输出=常量支(0) → 该拍后恢复门态。"
+                          % gate_val)
+            self.ti_table.setItem(grow, dcol, it)
+        finally:
+            self._ti_loading = False
+
     def _ti_populate(self):
         self._ti_hl_col = -1          # 列集变了，旧高亮作废(下次选中再亮)
         # 重建前记下现有列宽：用户手动拖过的宽度在重建后恢复（修"列宽拖了又弹回去"）
@@ -2858,16 +2991,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_loading = True
         try:
             self.ti_table.clear()
-            nrows = self._ti_dims()
+            # IDDQ拍 显示列 + DFT门 行（2026-06-10：logic 输出也可能被 dft 页门控，与 mux 同口径）
+            disp = self._logic_dft_display()
+            self._ti_dft_disp = disp
+            nrows = self._ti_dims() + (1 if disp else 0)
             ntests = len(self._ti_rows)
             self.ti_table.setRowCount(nrows)
-            self.ti_table.setColumnCount(ntests)
+            self.ti_table.setColumnCount(ntests + (1 if disp else 0))
             out_w = self._ti_sig.out_width if self._ti_sig else 1
             wsuf = "[%d:0]" % (out_w - 1) if out_w and out_w > 1 else ""
             auto_label = "auto_out%s" % wsuf
             exp_label = "期望(进.sv)%s" % wsuf
             # 行表头=信号名(带位宽，控制位带标记+加粗)；字母↔信号对照在 tooltip 与上方『输入信号』表
             vlabels = [self._vheader_short(g) for g in self._ti_groups] + [auto_label, exp_label]
+            if disp:
+                vlabels.append("%s (DFT门)" % disp["gate"]["gate_base"])
             self.ti_table.setVerticalHeaderLabels(vlabels)
             for i, g in enumerate(self._ti_groups):
                 hi = self.ti_table.verticalHeaderItem(i)
@@ -2894,11 +3032,14 @@ class MainWindow(QtWidgets.QMainWindow):
                                 "· 已填但 != auto_out → 红色(表达式可能与你的意图不符——仿真 FAIL 正是要抓的)\n"
                                 "· 负向列 → 故意填错值(琥珀色)，与 designer 期望是两回事" % out_name)
                 fe = hexp.font(); fe.setBold(True); hexp.setFont(fe)
-            self.ti_table.setHorizontalHeaderLabels(["T%d" % i for i in range(ntests)])
+            self.ti_table.setHorizontalHeaderLabels(["T%d" % i for i in range(ntests)]
+                                                    + (["IDDQ拍"] if disp else []))
         finally:
             self._ti_loading = False
         for c in range(len(self._ti_rows)):
             self._ti_render_col(c)
+        if self._ti_dft_disp:
+            self._ti_render_dft_col()
         self._ti_fit_columns(old_widths)
         self._update_cov_hint()
 
