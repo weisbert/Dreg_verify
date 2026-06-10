@@ -1877,11 +1877,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # 多一行门网、每条测试取透传值（generator.pin_dft_gate 在 build/report 实际驱动）。
         # 输入行次序按 designer for_test 同组行序排（门也参与；无 for_test=原序+门殿后）。
         self._ti_dft_pin = self._dft_pin_display(sig.out_base)
-        _entries = [("g", g) for g in groups] + ([("gate", None)] if self._ti_dft_pin else [])
+        _pin = self._ti_dft_pin
+
+        def _lgbind(e):
+            return bindings.get(e[1].get("rep")) if e[0] == "g" else None
+        _entries = [("g", g) for g in groups] + ([("gate", None)] if _pin else [])
         _entries = generator.fortest_order_entries(
             _entries, self.wb, sig.out_base,
             lambda e: ((excel_model._strip_width(e[1].get("base") or e[1].get("label") or "")[0]
-                        .lower()) if e[0] == "g" else self._ti_dft_pin[0].lower()))
+                        .lower()) if e[0] == "g" else _pin[0].lower()),
+            key_fn=lambda e: ((_pin[2], _pin[3]) if e[0] == "gate"
+                              else ((_lgbind(e).address, _lgbind(e).reg_lsb)
+                                    if _lgbind(e) is not None else (None, None))))
         groups = [e[1] for e in _entries if e[0] == "g"]
         self._ti_gate_row = next((i for i, e in enumerate(_entries) if e[0] == "gate"), None)
         self._set_ti_buttons_for_mux(False)   # logic 信号：列编辑按钮全可用
@@ -1988,11 +1995,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # 输入行次序按 designer for_test 同组行序排（门也参与；无 for_test=原序+门殿后）；
         # auto_out/期望 行号统一经 _ti_mux_exp_row 透出给各处理器。
         self._ti_mux_dft_pin = self._dft_pin_display(grp.out_base)
-        disp = [("key", k) for k in used] + ([("gate", None)] if self._ti_mux_dft_pin else [])
+        pin = self._ti_mux_dft_pin
+        disp = [("key", k) for k in used] + ([("gate", None)] if pin else [])
         self._ti_mux_disp = generator.fortest_order_entries(
             disp, self.wb, grp.out_base,
             lambda e: ((exp["bindings"][e[1]].base or "").lower() if e[0] == "key"
-                       else self._ti_mux_dft_pin[0].lower()))
+                       else pin[0].lower()),
+            key_fn=lambda e: ((exp["bindings"][e[1]].address, exp["bindings"][e[1]].reg_lsb)
+                              if e[0] == "key" else (pin[2], pin[3])))
         n_in = len(self._ti_mux_disp)
         self._ti_mux_exp_row = n_in + 1
         self._update_mux_header(grp, vecs, mux_mode, meta)
@@ -2792,7 +2802,8 @@ class MainWindow(QtWidgets.QMainWindow):
         b = self._resolver.resolve("dft_gate_" + g["gate_base"], info)
         if not (b.resolved and b.kind == "RO"):
             return None
-        return (g["gate_base"], int(g["transparent"]))
+        # (门基名, 透传值, 寄存器地址, bit位)——后两项给"地址+bit"默认排序用
+        return (g["gate_base"], int(g["transparent"]), b.address, b.reg_lsb)
 
     def _mux_ctrl_rows(self, drv, exp):
         """一个控制信号的驱动器 → 『输入信号』表的若干行（按三来源给角色文案）。"""

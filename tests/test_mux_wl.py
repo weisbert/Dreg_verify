@@ -1889,10 +1889,12 @@ def test_wl_iddq_dft(tmp_path):
     dg = [d for d in rep["detail"] if d["signal"].startswith("d_g")]
     assert dg, "报告里应有 d_g 的明细行"
     assert any("DFT门" in d["exp_src"] for d in dg), dg
-    # 报告真值表：iddq 门=输入行（label=门基名），每条测试有取值（功能=0 透传，DFT 拍=1）
+    # 报告真值表：iddq 门=输入行（label=门基名），每条测试有取值（功能=0 透传，DFT 拍=1）。
+    # 行序=寄存器地址：sel(h10)→iddq(h11)→s0(h20)→s1(h21) → 门在第 2 行（for_test 生成规则）
     tbl = next(t for t in rep["tables"] if t["signal"].startswith("d_g"))
-    assert tbl["inputs"][-1]["label"] == "d_iddq_mode", tbl["inputs"]
-    gate_vals = [t["values"][-1] for t in tbl["tests"]]
+    gi = next(i for i, x in enumerate(tbl["inputs"]) if x["label"] == "d_iddq_mode")
+    assert gi == 1, tbl["inputs"]
+    gate_vals = [t["values"][gi] for t in tbl["tests"]]
     assert "1" in gate_vals and gate_vals.count("0") == len(gate_vals) - 1, gate_vals
     for t in tbl["tests"]:                       # values 与 inputs 行数恒等（HTML/回填对齐）
         assert len(t["values"]) == len(tbl["inputs"]), (len(t["values"]), len(tbl["inputs"]))

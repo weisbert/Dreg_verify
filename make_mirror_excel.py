@@ -46,7 +46,8 @@ ADDR_TSENSOR = 160       # linectrl_tsensor RO（mode=0 line 路）
 ADDR_M2G = 388           # mixer2g_trim t0..t7（2bit 打包进一个寄存器）
 ADDR_M5G_A = 389         # mixer5g_trim t0..t3（3bit，4位对齐）
 ADDR_M5G_B = 390         # mixer5g_trim t4..t7
-ADDR_IDDQ = 500          # dft iddq_mode RO（门控）
+ADDR_IDDQ = 0x47         # dft iddq_mode RO（门控）——真表 WL_DFT_IDDQ=h47（2026-06-10 探查实证；
+                         # 地址影响输入行排序：真表上 iddq 在 temp_code(0x3C) 与 tsensor(0xA0) 之间）
 ADDR_FREQSEL = 70        # freq_sel_mode RW（band_2g_sel 上游 mode 选择）
 ADDR_BAND2G = 71         # band_2g_sel_local[3:0] RW（mode=1 主载体）
 ADDR_PFB_TRIM = 72       # pfb b0..b3_trim 4×4bit 打包（band_trim 的数据源）

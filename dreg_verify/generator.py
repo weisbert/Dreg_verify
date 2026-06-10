@@ -425,21 +425,30 @@ def pin_dft_gate(out_base, vecs, wb, resolver):
     return (b, transp)
 
 
-def fortest_order_entries(entries, wb, out_base, name_fn):
-    """把输入条目按 designer for_test 同输出组的【输入行顺序】重排（2026-06-10 用户要求：
-    真值表/报告/回填的输入次序与 for_test 一致）。
+def fortest_order_entries(entries, wb, out_base, name_fn, key_fn=None):
+    """把输入条目排成 for_test 的次序（2026-06-10 用户两轮澄清定稿）。
 
-    entries 任意对象列表，name_fn(条目)→基名(小写、无位宽)。该输出不在 for_test
-    （无 for_test 页 / 空组）→ 原序返回；列进 for_test 的条目按其行序，没列进的
-    保持原相对顺序排在之后。稳定排序，不丢条目。
+    优先级：① 该输出在 for_test 页里有现成组（罕见——for_test 平时是空的，偶有样例）
+    → 按其输入行序；② 否则按【寄存器地址 + bit 位】排（key_fn 给 (addr, reg_lsb)）——
+    这是 designer for_test 生成工具的规则（实证：mixer2g_trim 样例 = mode/local(0x3C
+    bit0/4) → iddq(h47) → tsensor(0xA0) → 数据 t0..t7(0x184 bit0..14) 严格地址递增）；
+    ③ 没给 key_fn → 原序。无地址的条目（纯 wire）排在有地址的之后、保持原相对顺序。
+    稳定排序，不丢条目。entries 任意对象列表，name_fn(条目)→基名(小写、无位宽)。
     """
+    entries = list(entries)
     order = (getattr(wb, "fortest_order", None) or {}).get((out_base or "").lower())
-    if not order:
-        return list(entries)
-    pos = {n: i for i, n in enumerate(order)}
-    big = len(order)
-    return [e for _k, e in sorted(((pos.get(name_fn(e), big + i), e)
-                                   for i, e in enumerate(entries)), key=lambda t: t[0])]
+    if order:
+        pos = {n: i for i, n in enumerate(order)}
+        big = len(order)
+        return [e for _k, e in sorted(((pos.get(name_fn(e), big + i), e)
+                                       for i, e in enumerate(entries)), key=lambda t: t[0])]
+    if key_fn is None:
+        return entries
+    def _canon(i, e):
+        addr, lsb = key_fn(e)
+        return (0, addr, lsb or 0, i) if addr is not None else (1, 0, 0, i)
+    return [e for _k, e in sorted(((_canon(i, e), e) for i, e in enumerate(entries)),
+                                  key=lambda t: t[0])]
 
 
 def probe_prefix_for(sig, opts):
@@ -1185,12 +1194,16 @@ def report(wb, opts):
         # iddq 门=显式输入（与 build 同口径）；返回的绑定供报告 inputs 行 + for_test 回填
         _lpin = pin_dft_gate(sig.out_base.lower(), vecs, wb, resolver)
         groups = V.input_groups(node, bindings)
-        # 输入行显示顺序 = designer for_test 同组的行序（门也参与排序；无 for_test=原序+门殿后）
+        # 输入行显示顺序 = for_test 行序（有样例组时）/ 寄存器地址+bit 位（默认，同 for_test 生成规则）
+        def _lbind(e):
+            return bindings.get(e[1].get("rep")) if e[0] == "g" else _lpin[0]
         _lentries = [("g", g) for g in groups] + ([("gate", None)] if _lpin else [])
         _lentries = fortest_order_entries(
             _lentries, wb, sig.out_base,
             lambda e: ((excel_model._strip_width(e[1].get("base") or e[1].get("label") or "")[0]
-                        .lower()) if e[0] == "g" else _lpin[0].base.lower()))
+                        .lower()) if e[0] == "g" else _lpin[0].base.lower()),
+            key_fn=lambda e: ((_lbind(e).address, _lbind(e).reg_lsb)
+                              if _lbind(e) is not None else (None, None)))
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
                  # is_logic：本表是 logic cone 真值表(回填 for_test 只处理它，mux 表结构不同跳过)
@@ -1389,12 +1402,14 @@ def report(wb, opts):
 
         # ── case 选择表（tables 段，kind='mux'）：行=控制+各数据寄存器(+DFT门)，列=测试 T ──
         used = exp["used_vars"]
-        # 输入行显示顺序 = designer for_test 同组的行序（门也参与排序；无 for_test=原序+门殿后）
+        # 输入行显示顺序 = for_test 行序（有样例组时）/ 寄存器地址+bit 位（默认，同 for_test 生成规则）
         _mentries = [("key", k) for k in used] + ([("gate", None)] if _mpin else [])
         _mentries = fortest_order_entries(
             _mentries, wb, grp.out_base,
             lambda e: ((exp["bindings"][e[1]].base or "").lower() if e[0] == "key"
-                       else _mpin[0].base.lower()))
+                       else _mpin[0].base.lower()),
+            key_fn=lambda e: ((exp["bindings"][e[1]].address, exp["bindings"][e[1]].reg_lsb)
+                              if e[0] == "key" else (_mpin[0].address, _mpin[0].reg_lsb)))
         inp_rows = []
         for ent in _mentries:
             if ent[0] == "gate":

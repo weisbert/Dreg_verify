@@ -388,18 +388,19 @@ def test_b2_mux_data_cell_editable_persist_reload(gui_app, tmp_path, monkeypatch
                  if r not in w._ti_mux_data_rows and r < w._ti_mux_exp_row - 1]
     if ctrl_rows:
         assert not (w.ti_table.item(ctrl_rows[0], 0).flags() & QtCore.Qt.ItemIsEditable)
-    # 手填数据值 = 2（setText 触发 itemChanged → _on_mux_data_changed → 重渲+落盘）
-    w.ti_table.item(drow, 0).setText(w._cell_text(2, width))
-    assert w._mux_data.get(name_low, {}).get(base_low) == 2
+    # 手填数据值（取与当前显示不同的值——setText 同值不触发 itemChanged）
+    nv = 2 if w.ti_table.item(drow, 0).text() != w._cell_text(2, width) else 1
+    w.ti_table.item(drow, 0).setText(w._cell_text(nv, width))
+    assert w._mux_data.get(name_low, {}).get(base_low) == nv
     # 落盘（edits.json 里有 mux_data 段）
     import json
     saved = json.load(open(str(tmp_path / "edits.json"), encoding="utf-8"))
-    assert any((b.get("mux_data") or {}).get(name_low, {}).get(base_low) == 2
+    assert any((b.get("mux_data") or {}).get(name_low, {}).get(base_low) == nv
                for b in saved.values()), saved
     w.close()
     # 重开 → _mux_data 恢复
     w2 = G.MainWindow(); w2.path_edit.setText(str(excel)); w2.on_load()
-    assert w2._mux_data.get(name_low, {}).get(base_low) == 2
+    assert w2._mux_data.get(name_low, {}).get(base_low) == nv
     w2.close()
 
 
@@ -708,13 +709,17 @@ def test_mux_dft_gate_is_input_row(gui_app, tmp_path):
         grp = _mux_grp(w, "d_g")
         w._load_test_items(grp)
         used_n = len(w._ti_mux_exp["used_vars"])
-        # 行数 = 输入 + DFT门行 + auto_out + 期望；DFT门行在输入区末尾（行号=used_n）
+        # 行数 = 输入 + DFT门行 + auto_out + 期望；行序=寄存器地址（for_test 生成规则）：
+        # sel(h10)→iddq(h11)→s0(h20)→s1(h21) → DFT门行在第 2 行（不再固定殿后）
         assert w.ti_table.rowCount() == used_n + 3
-        assert "d_iddq_mode" in w.ti_table.verticalHeaderItem(used_n).text()
-        assert "DFT门" in w.ti_table.verticalHeaderItem(used_n).text()
+        grow = next(r for r in range(w.ti_table.rowCount())
+                    if "DFT门" in (w.ti_table.verticalHeaderItem(r).text() or ""))
+        assert grow == 1, [w.ti_table.verticalHeaderItem(r).text()
+                           for r in range(w.ti_table.rowCount())]
+        assert "d_iddq_mode" in w.ti_table.verticalHeaderItem(grow).text()
         for c in range(w.ti_table.columnCount()):     # 每条测试都取透传值 0（只读）
             from PySide6 import QtCore
-            it = w.ti_table.item(used_n, c)
+            it = w.ti_table.item(grow, c)
             assert it.text() == "0", (c, it.text())
             assert not (it.flags() & QtCore.Qt.ItemIsEditable)
         # 期望行下移一行后仍工作：_ti_mux_exp_row 指向最后一行，手填期望照常
@@ -771,9 +776,14 @@ def test_logic_dft_gate_is_input_row(gui_app, tmp_path):
         w._load_test_items(sig)
         gn = len(w._ti_groups)
         assert w.ti_table.rowCount() == gn + 3              # 输入 + DFT门 + auto + 期望
-        assert "d_iddq_mode" in w.ti_table.verticalHeaderItem(gn).text()
+        # 行序=寄存器地址：iddq(h11) < d_s0(h20) → DFT门行在第 1 行（行0）
+        grow = next(r for r in range(w.ti_table.rowCount())
+                    if "DFT门" in (w.ti_table.verticalHeaderItem(r).text() or ""))
+        assert grow == 0, [w.ti_table.verticalHeaderItem(r).text()
+                           for r in range(w.ti_table.rowCount())]
+        assert "d_iddq_mode" in w.ti_table.verticalHeaderItem(grow).text()
         assert w.R_AUTO == gn + 1 and w.R_EXP == gn + 2     # auto/期望整体下移一行
-        assert w.ti_table.item(gn, 0).text() == "0"         # 每条测试取透传值
+        assert w.ti_table.item(grow, 0).text() == "0"       # 每条测试取透传值
         # 期望行手填仍工作（行号经 R_EXP 透出，处理器不感知偏移）
         w.ti_table.item(w.R_EXP, 0).setText("2'b10")
         assert w._ti_rows[0].get("designer_expected") == 2

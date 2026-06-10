@@ -1006,10 +1006,12 @@ def test_gui_truthtable_short_headers_and_inputs_table(qapp, wb, tmp_path_factor
 
 
 def test_report_table_inputs_carry_letters(wb):
-    """report() 的真值表 inputs 每项带 letters（A/B/C…），供 HTML/CSV 对照表达式。"""
+    """report() 的真值表 inputs 每项带 letters（A/B/C…），供 HTML/CSV 对照表达式。
+    2026-06-10 起行序=寄存器地址+bit 位（for_test 生成规则），不再是表达式字母序。"""
     rep = generator.report(wb, generator.GenOptions(top_output_only=False))
     t = next(x for x in rep["tables"] if x["signal"] == "d_logic_bt_lp_reserve")
-    assert [i["letters"] for i in t["inputs"]] == ["A", "C", "B", "J"]
+    assert sorted(i["letters"] for i in t["inputs"]) == ["A", "B", "C", "J"]   # 不丢输入
+    assert [i["letters"] for i in t["inputs"]] == ["B", "A", "C", "J"]          # 地址序
     assert all("label" in i for i in t["inputs"])   # 原 label 不破坏
 
 
