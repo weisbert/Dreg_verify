@@ -1967,6 +1967,33 @@ def test_fortest_input_order(tmp_path):
     assert "force `ENV_RF.d_iddq_mode=1'b0;" in txt
 
 
+def test_fortest_order_strips_wire_suffixes(tmp_path):
+    """for_test 的 D/F 名可能写衔接网名(带 _to_dft/_to_logic/_to_mux 后缀——designer 观测点
+    在 DFT mux 之后)：归一后照样对上基名，排序生效。"""
+    wb = _build_mux_wb(
+        str(tmp_path / "ftsuffix.xlsx"),
+        tmm_fields=[
+            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
+            ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),
+            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
+            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
+        ],
+        mux_rows=[
+            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
+            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
+        ],
+        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
+        # D 用 _to_dft 衔接网名、F 混用 _to_dft/_to_mux 后缀——都应归一到基名
+        fortest_groups=[("d_g_to_dft[1:0]", ["d_iddq_mode_to_dft", "d_sel_to_mux[1:0]",
+                                             "d_s1_to_mux[1:0]", "d_s0_to_mux[1:0]"])],
+    )
+    assert wb.fortest_order["d_g"] == ["d_iddq_mode", "d_sel", "d_s1", "d_s0"]
+    rep = generator.report(wb, generator.GenOptions(mux_mode="min"))
+    tbl = next(t for t in rep["tables"] if t["signal"].startswith("d_g"))
+    labels = [excel_model._strip_width(i["label"])[0] for i in tbl["inputs"]]
+    assert labels == ["d_iddq_mode", "d_sel", "d_s1", "d_s0"], labels
+
+
 def test_collect_dft_nets_exports_iddq_gate(tmp_path):
     """2026-06-10 Hi1108：dft 页的 iddq 门网必须进 nets.txt 导出——它是 IDDQ 漏电态拍的
     force 目标，漏导则门埋在子模块时 scan_rtl 定不到层级 → force CUVUNF 且无提示。"""

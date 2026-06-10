@@ -124,6 +124,32 @@ def main():
                 if n_hits <= 120:
                     dump_row(s, ri, row, args.cols, L)
     L.append("  共 %d 行命中%s" % (n_hits, "（只显示前 120 行）" if n_hits > 120 else ""))
+
+    # ── ⑤ for_test 顺序探查：--sig 命中组的 D/F 原始格（输入行序对照真值表排序用）──
+    L.append("\n══ ⑤ for_test 页：内容含 %r 的格子所在【组】的 D/F 列原样（行序=排序依据）══"
+             % args.sig)
+    ftn = next((s for s in wb.sheetnames if s.lower() == "for_test"), None)
+    if ftn is None:
+        L.append("  ⛔ 没有 for_test 页 —— 排序无来源，回退原序(门殿后)")
+    else:
+        ws = wb[ftn]
+        rows_df = []        # [(行号, D, F)]
+        hit_rows = []
+        for ri, row in enumerate(ws.iter_rows(min_row=1, max_col=6, values_only=True),
+                                 start=1):
+            d = "" if len(row) < 4 or row[3] is None else str(row[3])
+            fv = "" if len(row) < 6 or row[5] is None else str(row[5])
+            rows_df.append((ri, d, fv))
+            if args.sig.lower() in (d + " " + fv).lower():
+                hit_rows.append(ri)
+        if not hit_rows:
+            L.append("  ⛔ for_test 里没有含 %r 的 D/F 格 —— 该输出不在 for_test，回退原序" % args.sig)
+        else:
+            lo = max(0, min(hit_rows) - 16)
+            hi = min(len(rows_df), max(hit_rows) + 4)
+            for (ri, d, fv) in rows_df[lo:hi]:
+                if d or fv:
+                    L.append("  for_test!行%-5d D=%-50s F=%s" % (ri, d, fv))
     wb.close()
 
     # ── ④ 产品代码实际装载：wb.dft 解析结果 + 对照输出名 ──
@@ -144,6 +170,12 @@ def main():
         for sig in m.logic:
             if args.sig.lower() in (sig.out_base or "").lower():
                 L.append("  logic: out_name=%s out_base=%s" % (sig.out_name, sig.out_base))
+        # for_test 顺序解析结果（排序生效与否就看这里有没有该输出的键）
+        L.append("fortest_order 解析到 %d 个输出组；键含 %r 的："
+                 % (len(getattr(m, "fortest_order", {}) or {}), args.sig))
+        for k, order in sorted((getattr(m, "fortest_order", {}) or {}).items()):
+            if args.sig.lower() in k:
+                L.append("  %s -> %s" % (k, order))
     except Exception as ex:  # noqa: BLE001
         L.append("  ⛔ 装载失败: %s" % ex)
 

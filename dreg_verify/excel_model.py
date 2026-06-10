@@ -740,14 +740,29 @@ def read_dft(ws, header_row=2):
     return out
 
 
+_FT_WIRE_SUFFIXES = ("_to_dft", "_to_logic", "_to_mux")
+
+
+def _ft_norm(name):
+    """for_test 顺序对照用的名字归一：剥位宽 + 小写 + 剥接线后缀(_to_dft/_to_logic/_to_mux)。
+
+    designer 的 for_test 观测点在 DFT mux 之后，输出/输入名可能写衔接网名（带后缀）；
+    我们这边对照用的是基名——归一后两边才能对上（_ls 是真网名的一部分，不剥）。"""
+    s = _strip_width(name)[0].lower()
+    for suf in _FT_WIRE_SUFFIXES:
+        if s.endswith(suf):
+            return s[:-len(suf)]
+    return s
+
+
 def read_fortest_order(ws):
     """读 for_test 页的【输入行顺序】：{输出基名low: [输入基名low(按 for_test 行序)]}。
 
     2026-06-10 用户要求：我们真值表的输入行次序要与 designer for_test 一致。
     真表排版(R21/R27 实证，我们的回填也同构)：每组 = 若干输入行(F 列=输入名)
     + 输出行(D 列=输出名)；以"遇到 D 行"给当前组封口。
-    只做顺序对照：F/D 都剥位宽转小写；解析不出/无 for_test 页 → 空 dict(回退原序)。
-    表头等杂行会进无人查询的键，无害。
+    只做顺序对照：F/D 都走 _ft_norm 归一（剥位宽/接线后缀）；解析不出/无 for_test 页
+    → 空 dict(回退原序)。表头等杂行会进无人查询的键，无害。
     """
     out = {}
     if ws is None:
@@ -758,9 +773,9 @@ def read_fortest_order(ws):
         fval = _s(r[5]) if len(r) > 5 else ""      # F 列：输入信号名
         dval = _s(r[3]) if len(r) > 3 else ""      # D 列：输出信号名(组封口)
         if fval:
-            cur.append(_strip_width(fval)[0].lower())
+            cur.append(_ft_norm(fval))
         if dval:
-            ob = _strip_width(dval)[0].lower()
+            ob = _ft_norm(dval)
             if cur and ob:
                 out.setdefault(ob, list(cur))
             cur = []
