@@ -861,7 +861,9 @@ def test_gui_mux_export_csv_includes_negative(qapp, tmp_path_factory, tmp_path, 
     gui, w, grp = _mux_window(tmp_path_factory, "demux_csv_neg")
     w._mux_neg.add(grp.out_name.lower())              # 模拟勾了左表「负向」
     w._load_test_items(grp)
-    n_pos = len(w._ti_mux_vecs)
+    # 2026-06-10：勾「负向」后编辑器真值表本身已含 1 条负向列；CSV 忠于编辑器(内部去重防双计)
+    n_cols = len(w._ti_mux_vecs)
+    assert sum(1 for v in w._ti_mux_vecs if v.is_negative) == 1
     out = str(tmp_path / "mux_tests_neg.csv")
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: (out, "CSV (*.csv)")))
@@ -871,7 +873,7 @@ def test_gui_mux_export_csv_includes_negative(qapp, tmp_path_factory, tmp_path, 
     with open(out, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.reader(f))
     header = rows[0]
-    assert len(header) == n_pos + 1 + 1               # 表头 + n 正向 + 1 负向(which=first)
+    assert len(header) == n_cols + 1                  # 表头 + 全部列(正向 + 1 负向，无双计)
     assert any(l.endswith("_NEG") for l in header[1:])
     neg_row = next(r for r in rows if r[0] == "负向?")
     assert neg_row.count("是") == 1

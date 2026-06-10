@@ -832,3 +832,116 @@ def test_logic_dft_gate_is_input_row(gui_app, tmp_path):
         assert w._ti_rows[0].get("designer_expected") == 2
     finally:
         w.close()
+
+
+# ───────── 2026-06-10 bug：左表勾「负向」→ mux 真值表也要显示出负向列（用户报） ─────────
+def _mux_table_row(w, sig):
+    return next(r for r in range(w.table.rowCount())
+               if w.signals[w._idx_of_row(r)] is sig)
+
+
+def test_mux_left_neg_shows_in_editor(lpbt_win):
+    """⭐bug 回归(2026-06-10)：在左表给 mux 勾「负向」，编辑器真值表此前看不到负向列
+    （只在生成/导出/报告时追加），用户以为没生效。修复：_load_mux_test_items 据 _mux_neg
+    用 add_negatives(which=first) 追加全局负向列，列头 _NEG。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    n0 = len(w._ti_mux_vecs)
+    assert sum(1 for v in w._ti_mux_vecs if v.is_negative) == 0    # 勾之前无负向列
+    # 模拟用户在左表勾「负向」（触发 on_signal_table_item_changed → 正看该信号会重渲编辑器）
+    row = _mux_table_row(w, grp)
+    w.table.item(row, G.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    assert grp.out_name.lower() in w._mux_neg
+    negs = [v for v in w._ti_mux_vecs if v.is_negative]
+    assert len(negs) == 1, "勾负向后编辑器真值表应出现 1 条负向列"
+    assert len(w._ti_mux_vecs) == n0 + 1
+    assert G.W.test_label(w._ti_mux_vecs[-1]).endswith("_NEG")     # 负向列在末尾、列头带 _NEG
+
+
+def test_mux_left_neg_editor_matches_build(lpbt_win):
+    """编辑器显示的负向列数 == build 真实产出的 n_negative（所见即所得）。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    row = _mux_table_row(w, grp)
+    w.table.item(row, G.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    n_editor_neg = sum(1 for v in w._ti_mux_vecs if v.is_negative)
+    res = generator.build(w.wb, w._opts([grp.out_name]))
+    n_build_neg = sum(st["n_negative"] for _l, st in res["blocks"]
+                      if st.get("out_name") == grp.out_name)
+    assert n_editor_neg == n_build_neg == 1
+
+
+def test_mux_left_neg_column_readonly(lpbt_win):
+    """全局负向列=只读参考列：输入格/期望格都不可编辑（要自定义错值走「加负向(选中)」）。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    row = _mux_table_row(w, grp)
+    w.table.item(row, G.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    nc = len(w._ti_mux_vecs) - 1                       # 末列=全局负向
+    assert w._ti_mux_vecs[nc].is_negative
+    for r in range(w.ti_table.rowCount()):             # 整列每一格都只读
+        it = w.ti_table.item(r, nc)
+        assert it is not None and not (it.flags() & QtCore.Qt.ItemIsEditable), r
+
+
+def test_mux_left_neg_uncheck_removes_column(lpbt_win):
+    """取消勾选「负向」→ 正看该信号时编辑器负向列即时消失（无残留）。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    row = _mux_table_row(w, grp)
+    w.table.item(row, G.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    assert any(v.is_negative for v in w._ti_mux_vecs)
+    w.table.item(row, G.COL_NEG).setCheckState(QtCore.Qt.Unchecked)
+    assert grp.out_name.lower() not in w._mux_neg
+    assert not any(v.is_negative for v in w._ti_mux_vecs), "取消勾选后负向列应消失"
+
+
+def test_mux_left_neg_dedup_with_user_neg(lpbt_win):
+    """左表「负向」(全局 which=first) 与用户逐 case 负向重叠 → 编辑器只显 1 条（与 build 去重一致）。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    # 先对首列加一条用户负向（= 全局 which=first 会撞的那条）
+    w.ti_table.setCurrentCell(0, 0)
+    w.on_ti_add_neg_selected()
+    n_user_neg = sum(1 for v in w._ti_mux_vecs if v.is_negative)
+    assert n_user_neg == 1
+    # 再勾左表「负向」→ 全局负向与用户负向同源同错值 → 去重后仍只 1 条
+    row = _mux_table_row(w, grp)
+    w.table.item(row, G.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    assert sum(1 for v in w._ti_mux_vecs if v.is_negative) == 1, "重叠负向应去重"
+    # build 同口径：负向也只 1 条
+    res = generator.build(w.wb, w._opts([grp.out_name]))
+    n_build_neg = sum(st["n_negative"] for _l, st in res["blocks"]
+                      if st.get("out_name") == grp.out_name)
+    assert n_build_neg == 1
+
+
+def test_mux_left_neg_user_columns_still_editable(lpbt_win):
+    """加了用户正向列 + 勾全局负向：用户列仍可编辑、全局负向只读（边界 user_start/user_end 正确）。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    w = lpbt_win
+    grp = _load_buildable_mux(w)
+    w.ti_table.setCurrentCell(0, 0)
+    w.on_ti_add()                                      # 加一条用户正向列
+    ustart = w._ti_mux_user_start
+    row = _mux_table_row(w, grp)
+    w.table.item(row, G.COL_NEG).setCheckState(QtCore.Qt.Checked)
+    # 用户列边界正确：[user_start,user_end) 是用户列，末尾是全局负向
+    assert w._ti_mux_user_start == ustart
+    assert w._ti_mux_user_end == len(w._ti_mux_vecs) - 1
+    assert w._ti_mux_vecs[-1].is_negative
+    # 用户正向列的数据格仍可编辑
+    drow = next(iter(w._ti_mux_data_rows))
+    uit = w.ti_table.item(drow, ustart)
+    assert uit.flags() & QtCore.Qt.ItemIsEditable, "用户列数据格应仍可编辑"
