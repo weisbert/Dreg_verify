@@ -1832,9 +1832,11 @@ def test_dft_observe_forces_iddq_gate(tmp_path):
 
 
 def test_wl_iddq_dft(tmp_path):
-    """⭐ item③ iddq DFT 态拍（第二十二轮）：被 dft 页门控(B?0:A)的输出，全面/穷举补一条 DFT 拍
-    (force 门=1 → 断言输出=常量支0 → 该拍后 release)；精简不补。期望取门常量支(0)，非"透传取反"；
-    release 保证不钉死后续拍(S4)。"""
+    """⭐ item③ iddq DFT 态拍（第二十二轮）：被 dft 页门控(B?0:A)的输出，补一条 DFT 拍
+    (force 门=1 → 断言输出=常量支0 → 该拍后 release)。期望取门常量支(0)，非"透传取反"；
+    release 保证不钉死后续拍(S4)。
+    2026-06-10 Hi1108 实地反馈改为【所有档都补】：精简档跳过曾让 mixer2g_trim 整个漏掉 iddq
+    源头控制且零标注——精简裁数据/case 组合，不裁输入源（for_test 最小集也带 iddq）。"""
     def _wb():
         return _build_mux_wb(
             str(tmp_path / "iddq.xlsx"),
@@ -1850,9 +1852,10 @@ def test_wl_iddq_dft(tmp_path):
             ],
             dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
         )
-    # 精简：不补 DFT 拍（保三档区别）—— iddq 门完全不出现
+    # 精简：同样补 DFT 拍（Hi1108 实地反馈——少一个源头控制不可接受，且只多 1 条向量）
     txt_min = generator.render(generator.build(_wb(), generator.GenOptions(mux_mode="min")))
-    assert "d_iddq_mode" not in txt_min
+    assert "force `ENV_RF.d_iddq_mode=1'b1;" in txt_min
+    assert "release `ENV_RF.d_iddq_mode;" in txt_min
     # 全面：补一条 DFT 拍
     res = generator.build(_wb(), generator.GenOptions(mux_mode="max"))
     txt = generator.render(res)

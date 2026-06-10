@@ -353,19 +353,19 @@ def dft_force_preamble(wb, resolver, gen_bases, opts):
     return lines, warns
 
 
-def _append_dft_vectors(out_base, vecs, wb, resolver, side_mode, dft_observe=False):
+def _append_dft_vectors(out_base, vecs, wb, resolver, dft_observe=False):
     """item③ iddq DFT 态拍（第二十二轮）：被 dft 页门控的输出，在功能向量外追加一条 DFT 态拍——
     force 门(iddq)到选中【常量支】的值、断言输出=该常量(0)，该拍后还原门态（S4：否则 force 的
     iddq=1 会钉死后续所有拍/块的门）。
 
-    side_mode ∈ {min,max,exhaustive}：精简(min)不补，保三档区别（精简对'iddq 门坏死'是假绿，由
-    报告/GUI 据 meta['iddq_skipped'] 标注，见 §3.5）。原地追加进 vecs（T 编号由调用方统一重排）。
+    所有覆盖档都补（2026-06-10 Hi1108 实地反馈：精简档原本跳过且无任何标注，用户对照 for_test
+    发现 mixer2g_trim 整个少了 iddq 这个源头控制——精简裁的是数据/case 组合数量，不该漏掉一个
+    输入源；designer 的 for_test 最小集也带 iddq，且每个被门控输出只多 1 条向量）。
+    原地追加进 vecs（T 编号由调用方统一重排）。
     dft_observe：开时全局前导已 force 门=透传，本拍不能 release(会连带抹掉前导→污染后续被门控块=评审
     blocker)，须 force 回透传值恢复前导态；关时无前导，release 让门回 RTL 默认(透传)即可。
     返回 None（正常补 / 该输出无 dft 门 → 无需补）或 str（被门控但补不了的原因，供 meta['iddq_skipped']）。
     """
-    if side_mode == "min":
-        return None                                   # 精简档不补 iddq 拍（保三档区别）
     g = wb.dft.get(out_base) if getattr(wb, "dft", None) else None
     if not g:
         return None                                   # 该输出不被 dft 门控 → 无需 DFT 拍
@@ -676,11 +676,10 @@ def build(wb, opts):
                 for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
                     v.index = i
 
-        # item③ iddq DFT 态拍（第二十二轮）：被 dft 门控的 logic 输出补一条 DFT 拍（全面/穷举；精简不补）。
+        # item③ iddq DFT 态拍（第二十二轮）：被 dft 门控的 logic 输出补一条 DFT 拍（所有档）。
         # 仅自动向量路径补（override=用户全定制，不注入工具拍）；放在负向之后 → DFT 拍不被自动负向翻倍。
         if override is None:
             _dft_skip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
-                                            mux_gen.coverage_mode(*opts.logic_vec_params(sig.out_name)),
                                             opts.dft_observe)
             if _dft_skip:
                 meta["iddq_skipped"] = _dft_skip
@@ -796,9 +795,9 @@ def build(wb, opts):
             for i, v in enumerate(vecs):
                 v.index = i
 
-        # item③ iddq DFT 态拍（mux 被门控输出，如 mixer2g_en）：全面/穷举补、精简不补；放负向之后。
+        # item③ iddq DFT 态拍（mux 被门控输出，如 mixer2g_trim）：所有档都补；放负向之后。
         _dft_skip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
-                                        opts.mux_cov_mode(grp.out_name), opts.dft_observe)
+                                        opts.dft_observe)
         if _dft_skip:
             meta["iddq_skipped"] = _dft_skip
         vecs = _dedup_negatives(vecs)        # 全局负向 vs 用户逐 case 负向去重（无用户负向时恒等）
@@ -1129,7 +1128,6 @@ def report(wb, opts):
                                        fixed_value=opts.neg_value)
             # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 logic 挂点；override 路径不注入）
             _lskip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
-                                         mux_gen.coverage_mode(*opts.logic_vec_params(sig.out_name)),
                                          opts.dft_observe)
             if _lskip:
                 meta["iddq_skipped"] = _lskip   # 缺口可见(M2)：报告 error 列透出（.sv 已有 // ⚠）
@@ -1261,7 +1259,7 @@ def report(wb, opts):
                             v.index = i
                     # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 mux 挂点）；skip 原因进 meta 供透出
                     _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
-                                                 opts.mux_cov_mode(grp.out_name), opts.dft_observe)
+                                                 opts.dft_observe)
                     if _rskip:
                         meta["iddq_skipped"] = _rskip
                     vecs = _dedup_negatives(vecs)          # 与 build 同口径：全局/逐 case 负向去重

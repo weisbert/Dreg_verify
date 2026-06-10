@@ -563,8 +563,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "  精简 = 每 case 1 条(x位取0)\n"
             "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据(抓数据通路位坏死)\n"
             "  穷举 = 同全面(没有另一条物理控制路径可扫)\n"
-            "⚠ 精简档不补 iddq 门控拍、级联只走 mode=1 主载体（不验 mode=0 RO 线控分支）；\n"
-            "  升【全面/穷举】才补这两类覆盖（缺口在报告/产物注释里也会标注）")
+            "·被 dft 页 iddq 门控的输出：各档都补 1 条 IDDQ 漏电态拍（force 门=1 验输出压 0）\n"
+            "⚠ 精简档级联只走 mode=1 主载体（不验 mode=0 RO 线控分支）；\n"
+            "  升【全面/穷举】才补该覆盖（缺口在报告/产物注释里也会标注）")
         # 恢复上次档位（连接信号【前】设值，避免初始化期间误触 on_coverage_changed）；
         # 迁移：旧文件只有单 coverage 键时同步赋两侧，缺键则默认精简（index 0）。
         # ⚠ pytest 下【不】从真实 settings 恢复（与 _save_settings 的 pytest no-op 对称）：否则用户
