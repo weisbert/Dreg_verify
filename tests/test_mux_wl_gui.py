@@ -705,60 +705,8 @@ def test_mux_dft_gate_visible_in_editor(gui_app, tmp_path):
         roles = [w.ti_inputs.item(r, 2).text() for r in range(w.ti_inputs.rowCount())]
         assert "d_iddq_mode" in labels, labels
         assert any("DFT门" in x and "漏电态拍" in x for x in roles), roles
-        # 头部明说：受 iddq 门控 + 指向真值表里的 IDDQ拍 列
+        # 头部明说：受 iddq 门控、拍不占编辑器列（免得用户以为没生成）
         assert "iddq 门控" in w.ti_header.text() and "漏电态拍" in w.ti_header.text(), \
             w.ti_header.text()
-        # 真值表本尊（第二次实地反馈：用户在真值表里找 iddq）——最后一列=只读 IDDQ拍，
-        # 底部一行=DFT 门网名（功能列 0(默认)，IDDQ拍 列 1(force)）
-        ncol = w.ti_table.columnCount()
-        assert ncol == len(w._ti_mux_vecs) + 1, (ncol, len(w._ti_mux_vecs))
-        assert w.ti_table.horizontalHeaderItem(ncol - 1).text() == "IDDQ拍"
-        grow = w.ti_table.rowCount() - 1
-        assert "d_iddq_mode" in w.ti_table.verticalHeaderItem(grow).text()
-        assert w.ti_table.item(grow, 0).text() == "0(默认)"
-        assert w.ti_table.item(grow, ncol - 1).text() == "1(force)"
-        # IDDQ拍 列全只读（不可编辑→列操作/期望/数据处理器永远收不到它的编辑事件）
-        from PySide6 import QtCore
-        for r in range(w.ti_table.rowCount()):
-            it = w.ti_table.item(r, ncol - 1)
-            assert it is not None and not (it.flags() & QtCore.Qt.ItemIsEditable), r
-        # 选中 IDDQ拍 列做列操作不得崩溃/不得误删（处理器边界检查兜住显示列）
-        w.ti_table.setCurrentCell(0, ncol - 1)
-        w.on_ti_add_neg_selected()                       # 加负向：列号越界→忽略
-        assert w.ti_table.columnCount() == ncol, "对显示列加负向不应新增列"
-    finally:
-        w.close()
-
-
-def test_logic_dft_gate_visible_in_editor(gui_app, tmp_path):
-    """logic 输出被 dft 页门控：真值表同样显示 IDDQ拍 列 + DFT门 行（与 mux 同口径）。"""
-    import test_mux_wl as TM
-    from dreg_verify import gui as G
-    excel = tmp_path / "dftgate_logic_gui.xlsx"
-    TM._build_mux_wb(
-        str(excel),
-        tmm_fields=[
-            ("EN", "h10", "d_en_x", "0", "N", "RW"),
-            ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),
-        ],
-        mux_rows=[],
-        logic_rows=[{"A": "d_en_x_to_logic", "K": "d_lg[1:0]",
-                     "L": "A?2'b11:2'b01", "M": "ls", "N": 1, "R": 1}],
-        dft_rows=[("d_lg_to_dft[1:0]", "d_iddq_mode_to_dft", "d_lg[1:0]", "B?0:A")],
-    )
-    w = G.MainWindow()
-    w.path_edit.setText(str(excel))
-    w.on_load()
-    try:
-        sig = next(s for s in w.signals
-                   if not isinstance(s, excel_model.MuxGroup) and s.out_base == "d_lg")
-        w._load_test_items(sig)
-        ncol = w.ti_table.columnCount()
-        assert ncol == len(w._ti_rows) + 1, (ncol, len(w._ti_rows))
-        assert w.ti_table.horizontalHeaderItem(ncol - 1).text() == "IDDQ拍"
-        grow = w.ti_table.rowCount() - 1
-        assert "d_iddq_mode" in w.ti_table.verticalHeaderItem(grow).text()
-        assert w.ti_table.item(grow, ncol - 1).text() == "1(force)"
-        assert "IDDQ拍" in w.ti_header.text()
     finally:
         w.close()
