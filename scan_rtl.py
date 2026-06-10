@@ -106,13 +106,26 @@ def scan_files(paths):
     return modules
 
 
-def build_signal_map(modules, top, max_depth=4):
-    """从顶层模块递归展开实例，返回 {信号名: [层级路径...]}；"" = 顶层。"""
+def build_signal_map(modules, top, max_depth=16, report=None):
+    """从顶层模块递归展开实例，返回 {信号名: [层级路径...]}；"" = 顶层。
+
+    report（可选 dict）填入诊断，回答「为什么有些网找不到」——这是定位 missing 的关键：
+      report["unresolved"] = {被实例化但没解析到定义的模块名: 出现次数}
+                             多半是该模块 .v 不在 --rtl-dirs 范围 → 整棵子树的网全丢。
+      report["depth_cut"]  = 因超过 max_depth 而没继续展开的实例数（层级太深被截断）。
+    不传 report 时行为与旧版一致（只返回 sigmap）。默认深度 16（旧版 4 对芯片级 dreg 太浅）。
+    """
     sigmap = {}
+    unresolved = {}
+    depth_cut = [0]
 
     def walk(mod_name, path, depth):
         info = modules.get(mod_name)
-        if info is None or depth > max_depth:
+        if info is None:
+            unresolved[mod_name] = unresolved.get(mod_name, 0) + 1   # 子树整片丢——多半范围漏了
+            return
+        if depth > max_depth:
+            depth_cut[0] += 1                                        # 层级太深被截断
             return
         for s in info["signals"]:
             paths = sigmap.setdefault(s, [])
@@ -122,6 +135,9 @@ def build_signal_map(modules, top, max_depth=4):
             walk(child, path + ("." if path else "") + inst, depth + 1)
 
     walk(top, "", 0)
+    if report is not None:
+        report["unresolved"] = unresolved
+        report["depth_cut"] = depth_cut[0]
     return sigmap
 
 
@@ -275,8 +291,19 @@ def _infer_from_dreg_env(args):
         args.top_module = dreg_top
         print("✓ 自动推断顶层模块 ($dreg_top): %s" % dreg_top)
     if not args.rtl_dirs and dreg_dir:
-        args.rtl_dirs = os.path.normpath(os.path.join(dreg_dir, "..", ".."))
-        print("✓ 自动推断 RTL 扫描范围 ($dreg_dir/../..): %s" % args.rtl_dirs)
+        # 目标=整个 digital/（dreg 模块常分散在 sub_dreg / 各子块目录，子块 RTL 可能在 sub_dreg 之外）。
+        # 旧逻辑固定 $dreg_dir/../.. 只对 digital/pll/TOP 这种两级布局正好=digital；
+        # digital/sub_dreg/TOP/src 这种更深布局只会到 sub_dreg → 漏扫同级子块(整片 missing)。
+        # 改为：路径里有名为 digital 的祖先就用它（最靠叶子的那个）；没有才退回 ../..。
+        norm = os.path.normpath(dreg_dir)
+        parts = norm.split(os.sep)
+        if "digital" in parts:
+            idx = len(parts) - 1 - parts[::-1].index("digital")     # 最靠近叶子的 digital 祖先
+            args.rtl_dirs = os.sep.join(parts[:idx + 1]) or os.sep
+            print("✓ 自动推断 RTL 扫描范围 (digital/ 祖先): %s" % args.rtl_dirs)
+        else:
+            args.rtl_dirs = os.path.normpath(os.path.join(dreg_dir, "..", ".."))
+            print("✓ 自动推断 RTL 扫描范围 ($dreg_dir/../..): %s" % args.rtl_dirs)
     if not args.nets and not args.excel and os.path.isfile("nets.txt"):
         args.nets = "nets.txt"
         print("✓ 使用当前目录的 nets.txt")
@@ -299,7 +326,8 @@ def main():
     ap.add_argument("--rtl-dirs", help="RTL 目录（逗号分隔；默认: $dreg_dir 上两级 = 整个 digital/）")
     ap.add_argument("--out", default="probe_prefixes.txt",
                     help="输出映射文件 (默认 probe_prefixes.txt)")
-    ap.add_argument("--max-depth", type=int, default=4, help="层级展开深度 (默认 4)")
+    ap.add_argument("--max-depth", type=int, default=16,
+                    help="层级展开深度 (默认 16；芯片级 dreg 层级很深，调小会漏扫深层网)")
     args = ap.parse_args()
 
     # ── 模式①：仅导出信号清单（Windows，有 Excel）──
@@ -349,8 +377,22 @@ def main():
     top_module = resolve_top_module(top_module, modules, args.top)
     print("DUT 顶层模块: %s" % top_module)
 
-    sigmap = build_signal_map(modules, top_module, max_depth=args.max_depth)
+    report = {}
+    sigmap = build_signal_map(modules, top_module, max_depth=args.max_depth, report=report)
     print("RTL 信号总数: %d" % len(sigmap))
+    # 诊断「为什么有些网 missing」：①被实例化但没定义的模块=范围漏了 ②深度截断=层级太深
+    unresolved = report.get("unresolved") or {}
+    if unresolved:
+        print("⚠ %d 个被实例化的模块【找不到定义】——它们整棵子树的网都无法定位"
+              "（多半 .v 不在 --rtl-dirs 内，按出现次数排序，前 20）:" % len(unresolved))
+        for m, c in sorted(unresolved.items(), key=lambda kv: (-kv[1], kv[0]))[:20]:
+            print("    %s（被实例化 %d 次）" % (m, c))
+        if len(unresolved) > 20:
+            print("    …… 还有 %d 个未列出" % (len(unresolved) - 20))
+        print("  → 若你要的网就埋在这些模块里：把它们的 RTL 目录加进 --rtl-dirs 重扫。")
+    if report.get("depth_cut"):
+        print("⚠ %d 处实例因超过 --max-depth=%d 未继续展开（层级太深被截断）"
+              "——missing 偏多时先把 --max-depth 调大重扫。" % (report["depth_cut"], args.max_depth))
 
     prefixes, at_top, missing = match_nets(nets, sigmap)
     with open(args.out, "w", encoding="utf-8") as f:

@@ -100,6 +100,50 @@ def test_signal_map_depth_limit(modules):
     assert sigmap["pll_n"] == ["U_BT_LP_PLL_DIG"]                   # 但不含更深的 U_BT_LP_DREG
 
 
+def test_signal_map_report_unresolved_and_depth():
+    """⭐诊断 missing 根因(2026-06-10 Hi1108)：①子模块定义缺失=范围漏→report['unresolved']
+    ②层级超 max_depth 被截断→report['depth_cut']。这两项直接区分『范围漏』vs『深度浅』。"""
+    mods = {
+        "TOP": {"signals": {"a"}, "instances": [("U_MID", "MID")]},
+        "MID": {"signals": {"b"}, "instances": [("U_LEAF", "LEAF"), ("U_X", "MISSING_MOD")]},
+        "LEAF": {"signals": {"c"}, "instances": []},
+    }
+    # 全深度：MISSING_MOD 无定义 → unresolved；无截断；LEAF 的网照常定位
+    rep = {}
+    sigmap = rtl_scan.build_signal_map(mods, "TOP", report=rep)
+    assert rep["unresolved"] == {"MISSING_MOD": 1}
+    assert rep["depth_cut"] == 0
+    assert sigmap["c"] == ["U_MID.U_LEAF"]
+    # 限深 1：LEAF(深度2) 被截断 → depth_cut≥1，其网消失
+    rep2 = {}
+    sigmap2 = rtl_scan.build_signal_map(mods, "TOP", max_depth=1, report=rep2)
+    assert rep2["depth_cut"] >= 1
+    assert "c" not in sigmap2
+    # 不传 report → 行为与旧版一致(只返回 sigmap，不报错)
+    assert "a" in rtl_scan.build_signal_map(mods, "TOP")
+
+
+def test_infer_scope_climbs_to_digital(monkeypatch):
+    """⭐扫描范围自动推断(2026-06-10 Hi1108)：深布局 digital/sub_dreg/TOP/src 应爬到 digital，
+    而非旧 ../.. 停在 sub_dreg（停在 sub_dreg 会漏扫同级子块=半数网 missing）。"""
+    import argparse
+    import scan_rtl
+    deep = os.sep + os.sep.join(["data", "chip", "digital", "sub_dreg",
+                                 "WL_RF_DREG_TOP_C0C1", "src"])
+    monkeypatch.setenv("dreg_dir", deep)
+    monkeypatch.setenv("dreg_file", "wl_rf_dreg_top_c0c1")
+    monkeypatch.setenv("dreg_top", "WL_RF_DREG_TOP_C0C1")
+    args = argparse.Namespace(top=None, top_module=None, rtl_dirs=None, nets="x", excel=None)
+    scan_rtl._infer_from_dreg_env(args)
+    assert args.rtl_dirs.split(os.sep)[-1] == "digital"            # 爬到 digital
+    # LPBT 两级布局不回归：digital/pll/TOP 仍解析到 digital
+    monkeypatch.setenv("dreg_dir", os.sep + os.sep.join(["data", "chip", "digital",
+                                                         "pll", "LPBT_DIG_TOP"]))
+    args2 = argparse.Namespace(top=None, top_module=None, rtl_dirs=None, nets="x", excel=None)
+    scan_rtl._infer_from_dreg_env(args2)
+    assert args2.rtl_dirs.split(os.sep)[-1] == "digital"
+
+
 # ───────────── Excel 对照 ─────────────
 @pytest.fixture(scope="module")
 def wb(tmp_path_factory):
