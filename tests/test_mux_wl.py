@@ -1856,6 +1856,9 @@ def test_wl_iddq_dft(tmp_path):
     txt_min = generator.render(generator.build(_wb(), generator.GenOptions(mux_mode="min")))
     assert "force `ENV_RF.d_iddq_mode=1'b1;" in txt_min
     assert "release `ENV_RF.d_iddq_mode;" in txt_min
+    # iddq 门=显式输入（2026-06-10 用户定稿）：每条功能向量都 force 门到透传值 0
+    # （与 for_test 输入清单同口径，不靠 RTL 默认）——min 档 2 条功能向量 + 1 条 DFT 拍
+    assert txt_min.count("force `ENV_RF.d_iddq_mode=1'b0;") >= 2, txt_min
     # 全面：补一条 DFT 拍
     res = generator.build(_wb(), generator.GenOptions(mux_mode="max"))
     txt = generator.render(res)
@@ -1874,6 +1877,13 @@ def test_wl_iddq_dft(tmp_path):
     dg = [d for d in rep["detail"] if d["signal"].startswith("d_g")]
     assert dg, "报告里应有 d_g 的明细行"
     assert any("DFT门" in d["exp_src"] for d in dg), dg
+    # 报告真值表：iddq 门=输入行（label=门基名），每条测试有取值（功能=0 透传，DFT 拍=1）
+    tbl = next(t for t in rep["tables"] if t["signal"].startswith("d_g"))
+    assert tbl["inputs"][-1]["label"] == "d_iddq_mode", tbl["inputs"]
+    gate_vals = [t["values"][-1] for t in tbl["tests"]]
+    assert "1" in gate_vals and gate_vals.count("0") == len(gate_vals) - 1, gate_vals
+    for t in tbl["tests"]:                       # values 与 inputs 行数恒等（HTML/回填对齐）
+        assert len(t["values"]) == len(tbl["inputs"]), (len(t["values"]), len(tbl["inputs"]))
     # Fix C（评审 major）：报告 force 列须含 iddq 门 force（extra_forces），否则报告与 .sv 不符
     assert any("d_iddq_mode=1'b1" in (d.get("force") or "") for d in dg), [d.get("force") for d in dg]
     # Fix A（评审 blocker）：dft_observe 开时 DFT 拍后必须 force 回透传(恢复全局前导)，不能 bare release

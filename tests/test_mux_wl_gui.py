@@ -672,19 +672,14 @@ def test_mux_left_neg_indicator_reflects_user_neg(lpbt_win):
     assert w.table.item(r, G.COL_NEG).checkState() == QtCore.Qt.Checked   # 左表已勾(有负向)
 
 
-# ───────────── 2026-06-10 Hi1108：受 dft 页 iddq 门控的信号，编辑器必须亮出门网 ─────────────
-def test_mux_dft_gate_visible_in_editor(gui_app, tmp_path):
-    """用户实地反馈：mixer2g_trim 受 iddq 门控，但编辑器真值表/输入表都看不到 iddq →
-    对照 for_test 误以为漏了源头控制。修=『输入信号』表加 DFT 门一行 + 头部明说
-    「.sv/报告自动追加 1 条 IDDQ 漏电态拍，不占下表列」。"""
+# ───────────── 2026-06-10 Hi1108：iddq 门=真值表的【横向输入行】（用户三轮澄清定稿） ─────────────
+def _dft_wb(tmp_path, fname, iddq_typ=("Y", "RO")):
     import test_mux_wl as TM
-    from dreg_verify import gui as G
-    excel = tmp_path / "dftgate_gui.xlsx"
-    TM._build_mux_wb(
-        str(excel),
+    return TM._build_mux_wb(
+        str(tmp_path / fname),
         tmm_fields=[
             ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
-            ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),
+            ("IDDQ", "h11", "d_iddq_mode", "0", iddq_typ[0], iddq_typ[1]),
             ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
             ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
         ],
@@ -692,21 +687,67 @@ def test_mux_dft_gate_visible_in_editor(gui_app, tmp_path):
             TM._mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
             TM._mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
         ],
-        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
+        logic_rows=[{"A": "d_s0_to_logic[1:0]", "K": "d_lg[1:0]",
+                     "L": "A", "M": "ls", "N": 1, "R": 1}],
+        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A"),
+                  ("d_lg_to_dft[1:0]", "d_iddq_mode_to_dft", "d_lg[1:0]", "B?0:A")],
     )
+
+
+def test_mux_dft_gate_is_input_row(gui_app, tmp_path):
+    """mux：iddq 门=真值表输入区末行（每条测试取透传值 0），期望行随之下移一行仍可手填；
+    『输入信号』表照旧有 DFT 门行；头部说明改为「已列为输入行」。"""
+    from dreg_verify import gui as G
+    excel = tmp_path / "dftrow_gui.xlsx"
+    _dft_wb(tmp_path, "dftrow_gui.xlsx")
     w = G.MainWindow()
     w.path_edit.setText(str(excel))
     w.on_load()
     try:
         grp = _mux_grp(w, "d_g")
         w._load_test_items(grp)
-        # 『输入信号』表多一行 DFT 门：信号列=门基名、角色列说明 .sv 自动+1 条漏电态拍
+        used_n = len(w._ti_mux_exp["used_vars"])
+        # 行数 = 输入 + DFT门行 + auto_out + 期望；DFT门行在输入区末尾（行号=used_n）
+        assert w.ti_table.rowCount() == used_n + 3
+        assert "d_iddq_mode" in w.ti_table.verticalHeaderItem(used_n).text()
+        assert "DFT门" in w.ti_table.verticalHeaderItem(used_n).text()
+        for c in range(w.ti_table.columnCount()):     # 每条测试都取透传值 0（只读）
+            from PySide6 import QtCore
+            it = w.ti_table.item(used_n, c)
+            assert it.text() == "0", (c, it.text())
+            assert not (it.flags() & QtCore.Qt.ItemIsEditable)
+        # 期望行下移一行后仍工作：_ti_mux_exp_row 指向最后一行，手填期望照常
+        assert w._ti_mux_exp_row == used_n + 2
+        w.ti_table.item(w._ti_mux_exp_row, 0).setText("2'b11")
+        assert w._ti_mux_vecs[0].designer_expected == 3
+        # 『输入信号』表照旧有 DFT 门行；头部说明=已列为输入行
         labels = [w.ti_inputs.item(r, 1).text() for r in range(w.ti_inputs.rowCount())]
-        roles = [w.ti_inputs.item(r, 2).text() for r in range(w.ti_inputs.rowCount())]
         assert "d_iddq_mode" in labels, labels
-        assert any("DFT门" in x and "漏电态拍" in x for x in roles), roles
-        # 头部明说：受 iddq 门控、拍不占编辑器列（免得用户以为没生成）
-        assert "iddq 门控" in w.ti_header.text() and "漏电态拍" in w.ti_header.text(), \
-            w.ti_header.text()
+        assert "已列为输入行" in w.ti_header.text(), w.ti_header.text()
+    finally:
+        w.close()
+
+
+def test_logic_dft_gate_is_input_row(gui_app, tmp_path):
+    """logic：受 dft 页门控的输出，真值表同样多一行 DFT 门输入（R_AUTO/R_EXP 整体下移，
+    期望手填/负向编辑不受影响）。"""
+    from dreg_verify import gui as G
+    excel = tmp_path / "dftrow_lg_gui.xlsx"
+    _dft_wb(tmp_path, "dftrow_lg_gui.xlsx")
+    w = G.MainWindow()
+    w.path_edit.setText(str(excel))
+    w.on_load()
+    try:
+        sig = next(s for s in w.signals
+                   if not isinstance(s, excel_model.MuxGroup) and s.out_base == "d_lg")
+        w._load_test_items(sig)
+        gn = len(w._ti_groups)
+        assert w.ti_table.rowCount() == gn + 3              # 输入 + DFT门 + auto + 期望
+        assert "d_iddq_mode" in w.ti_table.verticalHeaderItem(gn).text()
+        assert w.R_AUTO == gn + 1 and w.R_EXP == gn + 2     # auto/期望整体下移一行
+        assert w.ti_table.item(gn, 0).text() == "0"         # 每条测试取透传值
+        # 期望行手填仍工作（行号经 R_EXP 透出，处理器不感知偏移）
+        w.ti_table.item(w.R_EXP, 0).setText("2'b10")
+        assert w._ti_rows[0].get("designer_expected") == 2
     finally:
         w.close()

@@ -395,6 +395,36 @@ def _append_dft_vectors(out_base, vecs, wb, resolver, dft_observe=False):
     return None
 
 
+def pin_dft_gate(out_base, vecs, wb, resolver):
+    """被 dft 页门控的输出：把门(iddq)当作每条测试的【显式输入】，force 到透传值。
+
+    2026-06-10 用户三轮澄清后定稿：designer 的 for_test 输入信号清单里有 iddq
+    （功能测试=0 透传），我们生成的测试输入集必须同口径——门是该输出的真实源头控制，
+    每条向量都显式驱动它，不靠 RTL 默认值（防上一块 force 残留 + 输入完整、可对照）。
+    DFT 拍除外（它本身 force 门=1 验常量支）。门解析不了/非 RO 时不钉（输入表红色
+    未解析 + iddq_skipped 已有提示），返回 None。
+
+    幂等（同一门只加一次 extra_forces），GUI/build/report 可重复调用。
+    返回 (门绑定, 透传值) 或 None——调用方拿去做显示（GUI 输入行 / 报告 inputs 行）。
+    """
+    g = wb.dft.get(out_base) if getattr(wb, "dft", None) else None
+    if not g:
+        return None
+    info = {"raw": g["gate_base"], "base": g["gate_base"], "width": 1, "msb": None, "lsb": None}
+    b = resolver.resolve("dft_gate_" + g["gate_base"], info)
+    if not (b.resolved and b.kind == "RO"):
+        return None
+    transp = int(g["transparent"])
+    for v in vecs:
+        if getattr(v, "dft_pitch", False):
+            continue
+        ef = list(getattr(v, "extra_forces", None) or [])
+        if any(wl == b.wire_lhs for (wl, _x, _w) in ef):
+            continue
+        v.extra_forces = ef + [(b.wire_lhs, transp, 1)]
+    return (b, transp)
+
+
 def probe_prefix_for(sig, opts):
     """该信号的探针层级前缀，没有则空串。
 
@@ -685,6 +715,9 @@ def build(wb, opts):
                 meta["iddq_skipped"] = _dft_skip
             for i, v in enumerate(vecs):
                 v.index = i
+        # iddq 门=显式输入（2026-06-10）：被门控输出的每条向量 force 门到透传值（override
+        # 路径也钉——门是环境驱动，与用户定制的内容正交；for_test 输入集同口径）
+        pin_dft_gate(sig.out_base.lower(), vecs, wb, resolver)
 
         # 真·仅负向：只保留负向向量(编号不重排，与"全部"导出的 T 编号一致便于对照)；
         # 没有负向的信号整个不出现在产物里
@@ -800,6 +833,7 @@ def build(wb, opts):
                                         opts.dft_observe)
         if _dft_skip:
             meta["iddq_skipped"] = _dft_skip
+        pin_dft_gate(grp.out_base.lower(), vecs, wb, resolver)   # iddq 门=显式输入(每条向量驱透传)
         vecs = _dedup_negatives(vecs)        # 全局负向 vs 用户逐 case 负向去重（无用户负向时恒等）
         for i, v in enumerate(vecs):
             v.index = i
@@ -1131,6 +1165,8 @@ def report(wb, opts):
                                          opts.dft_observe)
             if _lskip:
                 meta["iddq_skipped"] = _lskip   # 缺口可见(M2)：报告 error 列透出（.sv 已有 // ⚠）
+        # iddq 门=显式输入（与 build 同口径）；返回的绑定供报告 inputs 行 + for_test 回填
+        _lpin = pin_dft_gate(sig.out_base.lower(), vecs, wb, resolver)
         groups = V.input_groups(node, bindings)
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
@@ -1142,6 +1178,13 @@ def report(wb, opts):
                  # "上游行名.字母"如 pll_n1.A)，让报告里的真值表能对回表达式/Excel
                  # 逐输入还带回填 for_test 用的驱动元数据(addr/RO/bit/wire)，见 _input_meta
                  "inputs": [_input_meta(g, bindings) for g in groups], "tests": []}
+        if _lpin:
+            # iddq 门作为输入行（2026-06-10）：HTML 真值表 + for_test 回填都带上（与 designer
+            # for_test 输入清单同口径——RO 网、无地址、宽 1，回填走 B=网名/C=16'h0 路径）
+            table["inputs"].append({
+                "label": _lpin[0].base, "letters": "dft门", "base": _lpin[0].base,
+                "kind": "RO", "ro": True, "addr": None, "reg_lsb": None, "reg_msb": None,
+                "slice_lsb": None, "slice_msb": None, "wire": _lpin[0].wire, "width": 1})
         unresolved_bases = set()
         for vec in vecs:
             forces, writes, unres = W.compute_drives(vec, bindings, used)
@@ -1155,12 +1198,16 @@ def report(wb, opts):
             force_str = "; ".join(_fparts)
             write_str = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
             bv = V.vector_to_base_values(vec, groups)
+            # iddq 门输入值：功能向量=透传值；DFT 拍=force 的常量支值（与 .sv 实际驱动一致）
+            _gvals = ([] if not _lpin else
+                      [(1 - _lpin[1]) if getattr(vec, "dft_pitch", False) else _lpin[1]])
             table["tests"].append({
                 "name": W.test_label(vec),
                 "neg": vec.is_negative,
-                "values": [_fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups],
+                "values": ([_fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups]
+                           + [_fmt_cell(v, 1) for v in _gvals]),
                 # raw = 逐输入原始整数值(回填 for_test 的 T 向量列/G/H 计算要用；values 是格式化串)
-                "raw": [bv.get(g["key"], 0) for g in groups],
+                "raw": [bv.get(g["key"], 0) for g in groups] + _gvals,
                 # auto_out = 表达式计算值；expected = 进 .sv 的对比值(designer 手填 > auto_out 兜底 > 负向错值)
                 "auto_out": _fmt_cell(vec.exp_value, vec.exp_width),
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
@@ -1265,6 +1312,8 @@ def report(wb, opts):
                     vecs = _dedup_negatives(vecs)          # 与 build 同口径：全局/逐 case 负向去重
                     for i, v in enumerate(vecs):
                         v.index = i
+        # iddq 门=显式输入（与 build 同口径，skip 路径 vecs 为空时无害）
+        _mpin = pin_dft_gate(grp.out_base.lower(), vecs, wb, resolver)
 
         # 警告只在【真生成】时显示（被跳过的组用 error 列说明，警告无意义）
         row_warn = out_warn if not skip_reason else ""
@@ -1324,16 +1373,21 @@ def report(wb, opts):
             # 角色判断统一走 mux_gen.key_role（多控制 c1:/c2:、上游配方 m<N>.* 都认）
             tag = {"ctrl": "ctrl", "data": "data", "upstream": "上游mux"}[mux_gen.key_role(key)]
             inp_rows.append({"label": label, "letters": "%s(%s)" % (key, tag)})
+        if _mpin:
+            # iddq 门作为输入行（2026-06-10，与 logic 表同口径）：HTML 真值表带上
+            inp_rows.append({"label": _mpin[0].base, "letters": "dft门(force)"})
         table = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
                  "type": "mux", "expr": expr_text, "kind": "mux",
                  "inputs": inp_rows, "tests": []}
         for vec in vecs:
             forces, writes, _unres = W.compute_drives(vec, exp["bindings"], used)
+            _gvals = ([] if not _mpin else
+                      [(1 - _mpin[1]) if getattr(vec, "dft_pitch", False) else _mpin[1]])
             table["tests"].append({
                 "name": W.test_label(vec),
                 "neg": vec.is_negative,
-                "values": [_fmt_cell(vec.assignments.get(k, 0), exp["bindings"][k].width)
-                           for k in used],
+                "values": ([_fmt_cell(vec.assignments.get(k, 0), exp["bindings"][k].width)
+                            for k in used] + [_fmt_cell(v, 1) for v in _gvals]),
                 "auto_out": _fmt_cell(vec.exp_value, vec.exp_width),
                 "expected": _fmt_cell(vec.asserted_value, vec.exp_width),
                 "designer_filled": vec.designer_filled,

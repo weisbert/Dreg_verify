@@ -580,7 +580,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "  精简 = 每 case 1 条(x位取0)\n"
             "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据(抓数据通路位坏死)\n"
             "  穷举 = 同全面(没有另一条物理控制路径可扫)\n"
-            "·被 dft 页 iddq 门控的输出：各档都补 1 条 IDDQ 漏电态拍（force 门=1 验输出压 0）\n"
+            "·被 dft 页 iddq 门控的输出：门列为输入行（每条测试 force 到透传值）\n"
+            "  + 各档都补 1 条 IDDQ 漏电态拍（force 门=1 验输出压 0）\n"
             "⚠ 精简档级联只走 mode=1 主载体（不验 mode=0 RO 线控分支）；\n"
             "  升【全面/穷举】才补该覆盖（缺口在报告/产物注释里也会标注）")
         # 恢复上次档位（连接信号【前】设值，避免初始化期间误触 on_coverage_changed）；
@@ -1839,6 +1840,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_mux_vecs = []; self._ti_mux_exp_row = -1   # mux 期望编辑状态一并清(防陈旧引用)
         self._ti_mux_user_start = 1 << 30                   # 用户列起始(无信号=无用户列)
         self._ti_mux_exp = None                             # mux 展开缓存(导出CSV/用户向量复用)
+        self._ti_dft_pin = None; self._ti_mux_dft_pin = None   # DFT 门输入行状态(防跨信号陈旧)
         self._set_ti_buttons_for_mux(False)                 # 无信号：列编辑按钮恢复可用(原行为)
         self._set_sig_cov_combo(None)                       # 无信号：单点覆盖下拉禁用并复位
         self.ti_header.setText(header_text)
@@ -1870,6 +1872,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._clear_test_items("信号: %s — %s（无法生成测试项）" % (sig.out_name, err))
             return
         self._ti_sig = sig; self._ti_node = node
+        # iddq 门=横向输入行（2026-06-10，与 mux 侧同口径）：受门控的 logic 输出真值表
+        # 输入区末行显示门网、每条测试取透传值（generator.pin_dft_gate 在 build/report 实际驱动）
+        self._ti_dft_pin = self._dft_pin_display(sig.out_base)
         self._set_ti_buttons_for_mux(False)   # logic 信号：列编辑按钮全可用
         self._set_sig_cov_combo(sig)          # 单点覆盖下拉置到本信号档（不触发重算）
         self._ti_bindings = bindings; self._ti_groups = groups
@@ -1969,7 +1974,12 @@ class MainWindow(QtWidgets.QMainWindow):
             vecs.append(uv)
         self._ti_mux_user_start = gen_n
         self._ti_mux_vecs = vecs
-        self._ti_mux_exp_row = len(used) + 1
+        # iddq 门=横向输入行（2026-06-10 用户定稿）：受门控的输出，真值表输入区多一行
+        # 门网，每条测试取透传值（.sv 每条向量显式 force，generator.pin_dft_gate 同口径）。
+        # 行插在输入区末尾 → auto_out/期望 行号 +1，统一经 _ti_mux_exp_row 透出给各处理器。
+        self._ti_mux_dft_pin = self._dft_pin_display(grp.out_base)
+        n_in = len(used) + (1 if self._ti_mux_dft_pin else 0)
+        self._ti_mux_exp_row = n_in + 1
         self._update_mux_header(grp, vecs, mux_mode, meta)
         if meta.get("override_collision"):     # B2：手填值撞值（非阻断，用户负责）
             self.ti_header.setText(self.ti_header.text()
@@ -1980,7 +1990,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_table.clear()
             self.ti_table.setColumnCount(len(vecs))
             self.ti_table.setHorizontalHeaderLabels([W.test_label(v) for v in vecs])
-            self.ti_table.setRowCount(len(used) + 2)
+            self.ti_table.setRowCount(n_in + 2)
             vlabels = []
             data_key_set = set(exp.get("data_keys", []))   # 真·数据输入（d:*）；控制/上游配方键不在内
             self._ti_mux_data_rows = {}                     # 可手填数据行 row -> (物理基名小写, 位宽, 绑定键)
@@ -2020,11 +2030,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ti_table.setItem(ri, ci, it)
                 if is_data and base_low:
                     self._ti_mux_data_rows[ri] = (base_low, b.width, key)
+            # DFT 门输入行（输入区末尾）：每条测试都显式驱到透传值（只读——值由 dft 页公式决定）
+            pin = self._ti_mux_dft_pin
+            if pin:
+                vlabels.append("%s (DFT门)" % pin[0])
+                for ci in range(len(vecs)):
+                    it = QtWidgets.QTableWidgetItem(self._cell_text(pin[1], 1))
+                    it.setFlags(QtCore.Qt.ItemIsEnabled)
+                    if ci >= ustart:
+                        it.setBackground(USER_BG)          # 用户列整列着色，与其它输入行一致
+                    it.setToolTip(
+                        "DFT 门（dft 页）：本输出的源头控制之一。每条测试都显式 force 到"
+                        "透传值 %d（输出走功能值），与 for_test 的输入清单同口径。\n"
+                        ".sv 末尾另自动追加 1 条门=%d 的 IDDQ 漏电态拍（验门控本身）。"
+                        % (pin[1], 1 - pin[1]))
+                    self.ti_table.setItem(len(used), ci, it)
             # auto_out 行(只读) + 期望 行(可手填)——与 logic 编辑器同语义/同配色
             vlabels.append("auto_out")
             vlabels.append("期望(进.sv)")
             for ci in range(len(vecs)):
-                self._render_mux_exp_col(ci, len(used))
+                self._render_mux_exp_col(ci, n_in)
             self.ti_table.setVerticalHeaderLabels(vlabels)
             self._ti_fit_columns(old_widths)
         finally:
@@ -2060,14 +2085,17 @@ class MainWindow(QtWidgets.QMainWindow):
         snote = (meta or {}).get("shadowed_note")        # A2 死分支：靠后重复 case 已跳过，标注出来
         if snote:
             self.ti_header.setText(self.ti_header.text() + "　|　⚙ " + snote)
-        # 受 dft 页 iddq 门控：IDDQ 漏电态拍在生成 .sv/报告时自动追加，不在编辑器列里——
-        # 明说，免得对照 for_test 以为漏了 iddq 这个源头控制（2026-06-10 Hi1108 实地反馈）
+        # 受 dft 页 iddq 门控（2026-06-10 用户定稿）：门=横向输入行，每条测试驱透传值；
+        # 门不可 force 时退化为提示（输入表红色未解析 + 报告 iddq_skipped 兜底）
         g = (getattr(self.wb, "dft", None) or {}).get((grp.out_base or "").lower())
         if g:
-            self.ti_header.setText(
-                self.ti_header.text()
-                + "　|　⚙ 受 dft 页 iddq 门控(%s)：生成 .sv/报告自动追加 1 条 IDDQ 漏电态拍"
-                  "(force 门=1 验输出压0)，不占下表列" % g["gate_base"])
+            if getattr(self, "_ti_mux_dft_pin", None):
+                note = ("受 dft 页 iddq 门控(%s)：已列为输入行，每条测试 force 到透传值；"
+                        ".sv 另自动追加 1 条门=1 的 IDDQ 漏电态拍" % g["gate_base"])
+            else:
+                note = ("受 dft 页 iddq 门控(%s)：门网解析不到可 force 的 RO 网，"
+                        "未能当输入驱动（见上方输入表/报告）" % g["gate_base"])
+            self.ti_header.setText(self.ti_header.text() + "　|　⚙ " + note)
 
     def _render_mux_exp_col(self, ci, n_inputs):
         """渲染 mux 表第 ci 列的 auto_out + 期望 两格（手填状态变化时单列重绘）。
@@ -2213,11 +2241,11 @@ class MainWindow(QtWidgets.QMainWindow):
         pos_rows = [rd for rd in self._ti_rows if rd.get("kind") != "neg"]
         n_filled = sum(1 for rd in pos_rows if rd.get("designer_expected") is not None)
         fill_tag = ("   期望已手填 %d/%d" % (n_filled, len(pos_rows))) if pos_rows else ""
-        # 受 dft 页 iddq 门控的 logic 输出：与 mux 侧同口径明说（拍在 .sv/报告，不占编辑器列）
+        # 受 dft 页 iddq 门控的 logic 输出：门=输入行，每条测试驱透传值（与 mux 侧同口径）
         _dftg = (getattr(self.wb, "dft", None) or {}).get(
             (self._ti_sig.out_base or "").lower()) if self.wb else None
-        iddq_tag = ("   [⚙dft页iddq门控(%s)：.sv自动+1条漏电态拍]" % _dftg["gate_base"]
-                    if _dftg else "")
+        iddq_tag = ("   [⚙dft页iddq门控(%s)：已列为输入行，每条测试驱透传值；.sv另自动+1条漏电态拍]"
+                    % _dftg["gate_base"] if _dftg else "")
         # 表达式写成 "输出 = RHS" 等式；字母对照已下移到『输入信号』表，头部保持精简
         self.ti_header.setText(
             "信号 %s     %s = %s     用例 %d 条%s%s%s%s"
@@ -2561,9 +2589,12 @@ class MainWindow(QtWidgets.QMainWindow):
     #   列: 每列一条测试用例(正向 或 负向；负向列标红、列头带 _NEG)。
     def _ti_dims(self):
         self._ti_G = len(self._ti_groups)
-        self.R_AUTO = self._ti_G          # auto_out 行：程序按表达式算出的值(参考，只读)
-        self.R_EXP = self._ti_G + 1       # 期望 行：designer 手填；未填→生成 .sv 时用 auto_out 兜底
-        return self._ti_G + 2     # 总行数 = 输入数 + 2(auto_out + 期望)
+        # DFT 门输入行（受 dft 页门控的输出，2026-06-10）插在输入区末尾 → auto/期望行整体 +1。
+        # 行号统一经 R_AUTO/R_EXP 属性透出，所有消费方(渲染/编辑处理器)不感知偏移。
+        _extra = 1 if getattr(self, "_ti_dft_pin", None) else 0
+        self.R_AUTO = self._ti_G + _extra   # auto_out 行：程序按表达式算出的值(参考，只读)
+        self.R_EXP = self.R_AUTO + 1        # 期望 行：designer 手填；未填→生成 .sv 时 auto_out 兜底
+        return self.R_EXP + 1      # 总行数 = 输入数 (+DFT门行) + 2(auto_out + 期望)
 
     @staticmethod
     def _fmt_val(val, width):
@@ -2714,8 +2745,24 @@ class MainWindow(QtWidgets.QMainWindow):
         b = self._resolver.resolve("dft_gate_" + g["gate_base"], info)
         kind, drive = self._binding_meta(b)
         return {"letter": "dft页", "label": g["gate_base"],
-                "role": "DFT门(iddq)·.sv自动+1条漏电态拍", "kind": kind,
+                "role": "DFT门(iddq)·每条测试驱透传值", "kind": kind,
                 "drive": drive, "bold": True}
+
+    def _dft_pin_display(self, out_base):
+        """真值表「DFT门」输入行的显示信息 (门基名, 透传值)；不被门控/门不可 force → None。
+
+        2026-06-10 用户三轮澄清后定稿：iddq 是被门控输出的【横向输入参数】——必须像
+        for_test 一样作为输入行出现在真值表里、每条测试有取值。判定与
+        generator.pin_dft_gate 同口径（编辑器显示的=每条向量 .sv 实际 force 的）。"""
+        g = (getattr(self.wb, "dft", None) or {}).get((out_base or "").lower())
+        if not g or self._resolver is None:
+            return None
+        info = {"raw": g["gate_base"], "base": g["gate_base"],
+                "width": 1, "msb": None, "lsb": None}
+        b = self._resolver.resolve("dft_gate_" + g["gate_base"], info)
+        if not (b.resolved and b.kind == "RO"):
+            return None
+        return (g["gate_base"], int(g["transparent"]))
 
     def _mux_ctrl_rows(self, drv, exp):
         """一个控制信号的驱动器 → 『输入信号』表的若干行（按三来源给角色文案）。"""
@@ -2867,7 +2914,10 @@ class MainWindow(QtWidgets.QMainWindow):
             auto_label = "auto_out%s" % wsuf
             exp_label = "期望(进.sv)%s" % wsuf
             # 行表头=信号名(带位宽，控制位带标记+加粗)；字母↔信号对照在 tooltip 与上方『输入信号』表
-            vlabels = [self._vheader_short(g) for g in self._ti_groups] + [auto_label, exp_label]
+            vlabels = [self._vheader_short(g) for g in self._ti_groups]
+            if getattr(self, "_ti_dft_pin", None):
+                vlabels.append("%s (DFT门)" % self._ti_dft_pin[0])
+            vlabels += [auto_label, exp_label]
             self.ti_table.setVerticalHeaderLabels(vlabels)
             for i, g in enumerate(self._ti_groups):
                 hi = self.ti_table.verticalHeaderItem(i)
@@ -2946,6 +2996,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 it = self._mk_item(self._cell_text(val, g["width"]), True)
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)   # 右对齐→低位对齐，列间差异一眼看出
                 self.ti_table.setItem(i, c, it)
+            # DFT 门输入行（受门控输出）：每条测试都驱到透传值（只读，值由 dft 页公式决定）
+            pin = getattr(self, "_ti_dft_pin", None)
+            if pin:
+                git = self._mk_item(self._cell_text(pin[1], 1), False)
+                git.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                git.setToolTip(
+                    "DFT 门（dft 页）：本输出的源头控制之一。每条测试都显式 force 到透传值 %d"
+                    "（输出走功能值），与 for_test 的输入清单同口径。\n"
+                    ".sv 末尾另自动追加 1 条门=%d 的 IDDQ 漏电态拍（验门控本身）。"
+                    % (pin[1], 1 - pin[1]))
+                self.ti_table.setItem(self._ti_G, c, git)
             drv_tip = ("\nforce: %s" % fs if fs else "") + ("\nRF_WRITE: %s" % ws if ws else "")
             # ── auto_out 行（只读）：程序按表达式算出的值 ──
             autoit = self._mk_item(self._cell_text(rd["correct"] & E.mask(w), w), False)
@@ -3813,6 +3874,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     bk = g["key"]
                     wr.writerow([self._vheader_label(g)] + [self._fmt_val(rd["base_values"].get(bk, 0), g["width"])
                                                             for rd in rows])
+                if getattr(self, "_ti_dft_pin", None):   # DFT 门输入行：每条测试驱透传值
+                    wr.writerow(["%s (DFT门)" % self._ti_dft_pin[0]]
+                                + [str(self._ti_dft_pin[1])] * len(rows))
                 out_w = self._ti_sig.out_width or 1
                 wsuf = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
                 # auto_out(表达式计算) 与 期望(进 .sv 的对比值) 分两行——与编辑器/HTML 报告一致
@@ -3888,6 +3952,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     role = "数据" if key in data_key_set else "控制"
                     label = "%s (%s)" % ((b.base if b is not None else key), role)
                     wr.writerow([label] + [self._fmt_val(v.assignments.get(key, 0), width) for v in vecs])
+                pin = getattr(self, "_ti_mux_dft_pin", None)
+                if pin:    # DFT 门输入行：每条测试驱透传值（与编辑器/报告/.sv 同口径）
+                    wr.writerow(["%s (DFT门)" % pin[0]] + [str(pin[1])] * len(vecs))
                 wr.writerow(["auto_out%s" % wsuf] + [self._fmt_val(v.exp_value & E.mask(out_w), out_w)
                                                      for v in vecs])
                 wr.writerow(["期望(进.sv)%s" % wsuf] + [self._fmt_val(v.asserted_value & E.mask(out_w), out_w)
