@@ -1553,6 +1553,13 @@ def analyze_mux_group(resolver, wb, grp, mode="min", probe_prefix="", opts=None)
         grp.out_base.lower(): probe_prefix} if probe_prefix else {})
     blockers = mux_prefix_risks(grp, exp, eff_opts)
     if blockers:
+        if eff_opts.include_risky:
+            # 强制生成模式（2026-06-10 Hi1108：用户要实测"这设计到底要不要前缀"）：照常生成
+            # 裸名 force，状态仍 needs-prefix(橙) 但不阻断——文案如实说"已强制生成，待仿真验证"
+            return {"status": "needs-prefix", "inputs": rows, "out_net": out_net,
+                    "error": "已强制生成(缺前缀，裸名 force——仿真过=此设计不需前缀；"
+                             "CUVUNF 则跑 scan_rtl 配前缀)：" + "; ".join(r[2] for r in blockers),
+                    "blocking": False, "cone": False}
         return {"status": "needs-prefix", "inputs": rows, "out_net": out_net,
                 "error": "; ".join(r[2] for r in blockers), "blocking": True, "cone": False}
     out_warn = mux_output_warning(grp, eff_opts)

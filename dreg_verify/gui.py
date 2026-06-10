@@ -195,7 +195,9 @@ def _skipped_detail_text(skipped):
                             for letter, base, note in risky)
         parts.append("%s\n%s" % (name, reasons))
     return ("跳过原因：以下输入在 ENV_RF 层探不到（force 会 elaboration 失败）。\n"
-            "如需强制生成请用 CLI --include-risky。\n\n" + "\n\n".join(parts))
+            "如需强制生成：勾选工具栏「缺前缀强制生成」（或 CLI --include-risky）——\n"
+            "裸名 force 交给仿真验证；仿真过=此设计不需前缀，CUVUNF 则跑 scan_rtl 配前缀。\n\n"
+            + "\n\n".join(parts))
 
 
 (COL_SEL, COL_NEG, COL_R, COL_K, COL_OWNER, COL_TYPE, COL_TOP, COL_STATUS,
@@ -634,11 +636,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if _load_settings().get("dft_observe"):
             self.dft_observe_chk.setChecked(True)
         self.dft_observe_chk.stateChanged.connect(self.on_dft_observe_changed)
+        # 缺前缀强制生成（2026-06-10 Hi1108）：默认"force 子模块内部网缺前缀=跳过"是 LPBT/Hi1107C
+        # 的实证结论——新设计层级可能不同，根本不需要前缀。开了就照常生成裸名 force 交给仿真验证。
+        self.include_risky_chk = QtWidgets.QCheckBox("缺前缀强制生成")
+        self.include_risky_chk.setToolTip(
+            "默认行为：要 force 的输入网被判定在子模块内部(级联衔接网/wire 兜底)、又没配探针前缀时，\n"
+            "该信号跳过生成（防 elaboration CUVUNF——这是 LPBT/Hi1107C 上的实证结论）。\n\n"
+            "勾上 = 这类信号照常生成（force 用裸名 `ENV_RF.<网名>），用仿真验证本设计是否真需要前缀：\n"
+            "  · elaboration 全过 = 此设计这些网顶层直达，不需要前缀，保持勾选即可\n"
+            "  · 报 CUVUNF = 网确实埋在子模块，跑 scan_rtl 配前缀后重新生成\n"
+            "（与 CLI --include-risky 同义；左表状态列会显示「已强制生成」。）")
+        # pytest 下不从真实 settings 恢复（与 coverage 恢复同理：避免开发机配置污染 GUI 测试）
+        if "pytest" not in sys.modules and _load_settings().get("include_risky"):
+            self.include_risky_chk.setChecked(True)
+        self.include_risky_chk.stateChanged.connect(self.on_include_risky_changed)
         for w in (QtWidgets.QLabel("logic覆盖:"), self.coverage,
                   QtWidgets.QLabel("mux覆盖:"), self.coverage_mux, self.cov_hint,
                   QtWidgets.QLabel("   上限"), self.max_tests,
                   QtWidgets.QLabel("   级联:"), self.cascade_combo, cascade_help,
-                  self.dft_observe_chk):
+                  self.dft_observe_chk, self.include_risky_chk):
             opt.addWidget(w)
         opt.addStretch(1)
         root.addLayout(opt)
@@ -932,6 +948,19 @@ class MainWindow(QtWidgets.QMainWindow):
         _save_settings(st)
         self._refresh_preview()
 
+    def _include_risky_on(self):
+        return (self.include_risky_chk.isChecked()
+                if hasattr(self, "include_risky_chk") else False)
+
+    def on_include_risky_changed(self, *args):
+        """缺前缀强制生成切换：持久化 + 重分析（左表状态/阻断判定变）+ 刷新预览。"""
+        st = _load_settings()
+        st["include_risky"] = self.include_risky_chk.isChecked()
+        _save_settings(st)
+        if self.wb is not None:
+            self._reanalyze_all()
+        self._refresh_preview()
+
     def _open_cascade_doc(self):
         """级联 ? → 程序内置帮助窗(直接渲染『级联模式说明.md』)，不调外部编辑器。"""
         if getattr(self, "_cascade_doc_dlg", None) is None:
@@ -1140,7 +1169,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._set_text(r, COL_TYPE, sig.suffix)
                 self._set_text(r, COL_TOP, str(sig.top_output))
                 st = self._analysis.get(r, {}).get("status", "?")
-                it = QtWidgets.QTableWidgetItem(STATUS_LABEL.get(st, st))
+                _lab = STATUS_LABEL.get(st, st)
+                if st == "needs-prefix" and self._include_risky_on():
+                    _lab = "⚠缺前缀·已强制生成"   # 开「缺前缀强制生成」后如实反映：进 .sv，待仿真验证
+                it = QtWidgets.QTableWidgetItem(_lab)
                 if st != "clean":
                     # 橙=needs-prefix(要前缀否则跳过)；蓝=bare-probe(裸名已生成,信息)；其余故障红
                     it.setForeground(STATUS_FG.get(st, QtGui.QColor("red")))
@@ -1581,7 +1613,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # mux_prefix_risks 才能正确区分"还缺前缀"和"已配好可生成"
             # 带上手填数据值(B2)——否则左表状态用自动值算，与右侧编辑器/生成结果不一致(审查 #9)
             opts = generator.GenOptions(probe_prefixes=self._probe_prefixes,
-                                        mux_data={k: dict(v) for k, v in self._mux_data.items()})
+                                        mux_data={k: dict(v) for k, v in self._mux_data.items()},
+                                        include_risky=self._include_risky_on())
             return generator.analyze_mux_group(
                 self._resolver, self.wb, sig,
                 mode=self._sig_cov_collapsed(sig),     # 单点优先，与右侧编辑器/生成同口径
@@ -4122,7 +4155,10 @@ class MainWindow(QtWidgets.QMainWindow):
             mux_user_vecs={k: list(v) for k, v in self._mux_user_vecs.items() if v},
             # DFT 观测模式（续②）：产物开头 force iddq 门到透传值，使 _to_dft 输出反映功能值
             dft_observe=(self.dft_observe_chk.isChecked()
-                         if hasattr(self, "dft_observe_chk") else False))
+                         if hasattr(self, "dft_observe_chk") else False),
+            # 缺前缀强制生成（2026-06-10）：force 子模块内部网缺前缀的信号也照常生成裸名 force，
+            # 交给仿真验证此设计是否真需要前缀（=CLI --include-risky）
+            include_risky=self._include_risky_on())
 
     # ───────────── 收集 / 选项 ─────────────
     def _collect(self):

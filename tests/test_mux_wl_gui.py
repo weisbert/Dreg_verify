@@ -761,6 +761,49 @@ def test_mux_input_rows_follow_fortest_order(gui_app, tmp_path):
         w.close()
 
 
+def test_gui_include_risky_toggle(gui_app, tmp_path, monkeypatch):
+    """「缺前缀强制生成」开关（2026-06-10 Hi1108：前缀需求是 LPBT 实证，新设计可能根本不用，
+    用户要强制生成交给仿真验证）：默认 force 子模块内部网缺前缀=跳过(阻断)；勾上=照常生成
+    裸名 force、左表状态改「已强制生成」、build 不再跳过。"""
+    import test_mux_wl as TM
+    from dreg_verify import gui as G, generator
+    monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
+    excel = tmp_path / "risky_gui.xlsx"
+    TM._build_mux_wb(
+        str(excel),
+        tmm_fields=[("SEL", "h10", "d_sel", "0", "N", "RW"),
+                    ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW")],
+        mux_rows=[   # case1 数据 d_unknown 表里查无 → force 兜底 → 默认硬阻断
+            TM._mrow("d_s0_to_mux[1:0]", "d_sel_to_mux", "1'b0", "d_g[1:0]", 1),
+            TM._mrow("d_unknown_to_mux[1:0]", "d_sel_to_mux", "1'b1", "d_g[1:0]", 1),
+        ])
+    w = G.MainWindow()
+    w.path_edit.setText(str(excel))
+    w.on_load()
+    try:
+        i = _mux_idx(w, "d_g")
+        # 默认：needs-prefix + 阻断 + build 跳过
+        assert not w.include_risky_chk.isChecked()
+        assert w._analysis[i]["status"] == "needs-prefix"
+        assert w._analysis[i].get("blocking") is True
+        res0 = generator.build(w.wb, w._opts(["d_g[1:0]"]))
+        assert res0["summary"]["n_mux_generated"] == 0
+        assert res0["skipped"], "默认应跳过并给原因"
+        # 勾上：重分析为非阻断、状态文案如实、build 生成
+        w.include_risky_chk.setChecked(True)
+        assert w._analysis[i]["status"] == "needs-prefix"
+        assert w._analysis[i].get("blocking") is False
+        assert "已强制生成" in w._analysis[i]["error"]
+        row = next(r for r in range(w.table.rowCount()) if w._idx_of_row(r) == i)
+        assert w.table.item(row, G.COL_STATUS).text() == "⚠缺前缀·已强制生成"
+        res1 = generator.build(w.wb, w._opts(["d_g[1:0]"]))
+        assert res1["summary"]["n_mux_generated"] == 1, res1["skipped"]
+        txt = generator.render(res1)
+        assert "d_g" in txt
+    finally:
+        w.close()
+
+
 def test_logic_dft_gate_is_input_row(gui_app, tmp_path):
     """logic：受 dft 页门控的输出，真值表同样多一行 DFT 门输入（R_AUTO/R_EXP 整体下移，
     期望手填/负向编辑不受影响）。"""
