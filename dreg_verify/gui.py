@@ -1041,14 +1041,24 @@ class MainWindow(QtWidgets.QMainWindow):
         return (self.append_to_logic_chk.isChecked()
                 if hasattr(self, "append_to_logic_chk") else True)
 
+    def _reload_open_editor(self):
+        """重析后把当前打开的 per-signal 编辑器也刷新——否则探针网名改了、左表变了，但编辑器/「预览
+        本信号.sv」看着没动（用户会觉得"点了没生效"）。与 on_cascade_mode_changed 同口径。"""
+        if (self._ti_sig is not None and self._ti_name_low is not None
+                and self._ti_name_low not in self._customized):
+            self._load_test_items(self._ti_sig)
+        elif getattr(self, "_ti_mux_sig", None) is not None:
+            self._load_mux_test_items(self._ti_mux_sig)
+
     def on_append_to_logic_changed(self, *args):
         """logic 输出引用尾缀开关切换：持久化 + 重建 Resolver 重析全表（影响所有 top_out=0 被引用
-        logic 输出的探针网名 → 左表 out_net / 状态 / 预览全变）。"""
+        logic 输出的探针网名 → 左表 out_net / 状态 / 预览全变）+ 刷新当前编辑器。"""
         st = _load_settings()
         st["append_to_logic"] = self.append_to_logic_chk.isChecked()
         _save_settings(st)
         if self.wb is not None:
             self._reanalyze_all()
+            self._reload_open_editor()
         self._refresh_preview()
 
     def _append_to_mux_on(self):
@@ -1057,12 +1067,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_append_to_mux_changed(self, *args):
         """mux 输出引用尾缀开关切换：持久化 + 重建 Resolver 重析全表（影响所有被引用 mux 输出的
-        探针网名）。与 logic 开关独立。"""
+        探针网名）+ 刷新当前编辑器。与 logic 开关独立。"""
         st = _load_settings()
         st["append_to_mux"] = self.append_to_mux_chk.isChecked()
         _save_settings(st)
         if self.wb is not None:
             self._reanalyze_all()
+            self._reload_open_editor()
         self._refresh_preview()
 
     def _include_risky_on(self):
