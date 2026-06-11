@@ -97,6 +97,16 @@ def test_wl_cli_suffix_signals_optin(wl_excel, tmp_path):
     assert "`ENV_RF.d_wl_rf_bwctrl[1:0]==" in sv or "d_wl_rf_bwctrl" in sv
 
 
+def test_wl_cli_mux_ref_suffix_global(wl_excel, tmp_path):
+    """--mux-ref-suffix：整设计给被引用的 mux 输出统一补去向尾缀（默认不带=裸名）。"""
+    from dreg_verify import cli
+    out_sv = tmp_path / "wl.sv"
+    cli.main(["--excel", str(wl_excel), "--out", str(out_sv), "--mux-ref-suffix",
+              "--probe-prefix", "d_wl_rf_lna_gain_to_logic=%s" % WL_PREFIX])
+    sv = out_sv.read_text(encoding="utf-8")
+    assert "`ENV_RF.%s.d_wl_rf_lna_gain_to_logic[2:0]==" % WL_PREFIX in sv
+
+
 # ───────────── ③ 配前缀文件 → 全流程生成 ─────────────
 def test_wl_cli_probe_prefix_file_generates_all(wl_excel, tmp_path):
     """--probe-prefix-file 导入前缀后，CLI 全流程产出 5 个组的 .sv：

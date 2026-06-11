@@ -26,7 +26,7 @@ class GenOptions:
                  cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None,
                  append_to_logic=True, logic_mode=None, mux_mode=None, sig_cov=None,
                  mux_dropped=None, mux_cleared=None, mux_user_vecs=None,
-                 suffix_override=None):
+                 suffix_override=None, append_to_mux=False):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -86,11 +86,14 @@ class GenOptions:
         # 输出【引用尾缀】开关（2026-06-11 Hi1108）：top_output=0 的输出被下游引用时，探针网名补尾缀，
         # 尾缀随 Excel（logic 行引用→_to_logic、mux 页引用→_to_mux，见 excel_model.ref_suffix）。某些
         # 设计里 <名>_to_logic/_to_mux 恰是另一个真实输入网，补了就探错对象——关掉则直接探基名网。
-        # logic 输出引用尾缀全局开关：默认 True=被下游引用的 logic 输出探尾缀网(=RTL 真名，LPBT 实证)；
-        # _ls 与顶层输出不受影响。【只管 logic 类型默认】，mux 输出默认探裸名(端口尾缀设计相关，见下)。
+        # 两个【独立】全局尾缀开关(用户拍板 logic/mux 分开)：
+        #   append_to_logic 默认 True=被引用的 logic 输出探尾缀网(=RTL 真名，LPBT 实证)；
+        #   append_to_mux  默认 False=mux 输出探裸名(端口尾缀设计相关 Excel 推不出，WL 裸名；整设计要补就开)。
+        # _ls 与顶层输出不受影响。
         self.append_to_logic = bool(append_to_logic)
-        # 单点尾缀覆盖 {信号名/基名(小写): True=探尾缀网 / False=探裸名} —— 压过类型默认(Resolver 据此回填)：
-        #   logic 撞名信号(如 lo2g5g)置 False 单独探裸名；mux 输出(默认裸名)置 True 单独探尾缀网(如 rxiq)。
+        self.append_to_mux = bool(append_to_mux)
+        # 单点尾缀覆盖 {信号名/基名(小写): True=探尾缀网 / False=探裸名} —— 压过两个全局类型默认(Resolver 回填)：
+        #   logic 撞名信号(如 lo2g5g)置 False 单独探裸名；个别 mux 输出置 True/False 单独定。
         #   空=只跟类型默认(老调用方逐字节不变)。
         self.suffix_override = {str(k).strip().lower(): bool(v)
                                 for k, v in (suffix_override or {}).items()}
@@ -651,6 +654,7 @@ def build(wb, opts):
                           wire_prefixes=opts.probe_prefixes,
                           cascade_mode=opts.cascade_mode,
                           append_to_logic=opts.append_to_logic,
+                          append_to_mux=opts.append_to_mux,
                           suffix_override=opts.suffix_override)
     selected = select_signals(wb, opts)
     filtered_internal = filtered_internal_signals(wb, opts)   # 默认静默滤掉的内部节点(可见性用)
@@ -1156,6 +1160,7 @@ def report(wb, opts):
                           wire_prefixes=opts.probe_prefixes,
                           cascade_mode=opts.cascade_mode,
                           append_to_logic=opts.append_to_logic,
+                          append_to_mux=opts.append_to_mux,
                           suffix_override=opts.suffix_override)
     sigs = select_signals(wb, opts)
     summary, detail, tables = [], [], []
@@ -1590,6 +1595,7 @@ def diagnose(wb, opts=None):
                           wire_prefixes=opts.probe_prefixes,
                           cascade_mode=opts.cascade_mode,
                           append_to_logic=opts.append_to_logic,
+                          append_to_mux=opts.append_to_mux,
                           suffix_override=opts.suffix_override)
     sigs = select_signals(wb, opts)
 

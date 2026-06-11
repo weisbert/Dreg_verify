@@ -128,6 +128,10 @@ def build_argparser():
                          "Excel：logic 行引用→_to_logic、mux 页引用→_to_mux)；本旗标让它直接探基名网——"
                          "用于 <名>_to_logic/_to_mux 恰好撞了某个真实输入网的设计(如 Hi1108)。"
                          "_ls 与顶层输出不受影响。(--no-to-logic-suffix 为兼容别名)")
+    g4.add_argument("--mux-ref-suffix", dest="append_to_mux", action="store_true",
+                    help="【整设计】给 mux 输出也补去向尾缀(_to_mux/_to_logic)。mux 输出默认探裸名(端口尾缀"
+                         "设计相关、Excel 推不出，WL 实证裸名)；本旗标对所有被引用的 mux 输出统一补——用于"
+                         "端口真名带尾缀的设计(如 Hi1108 rxiq)。个别例外用 --no-suffix-signals 单独拉回裸名。")
     g4.add_argument("--no-suffix-signals",
                     help="单点【探裸名】：这些信号(基名/全名，逗号分隔)单独不补尾缀、直接探基名网——用于"
                          "logic 撞名信号(其 <名>_to_logic 恰是另一根真实输入网，如 lo2g5g)。压过全局开关。")
@@ -1054,6 +1058,7 @@ def main(argv=None):
         sv_summary=args.sv_summary,
         cascade_mode=args.cascade_mode,
         append_to_logic=args.append_to_logic,
+        append_to_mux=args.append_to_mux,
         suffix_override=dict({n: False for n in (_split(args.no_suffix_signals) or [])},
                              **{n: True for n in (_split(args.suffix_signals) or [])}),
     )

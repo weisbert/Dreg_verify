@@ -93,7 +93,8 @@ class InputBinding:
 class Resolver:
     def __init__(self, wb, force_overrides=None, rfwrite_overrides=None,
                  default_kind=None, wire_fallback=True, wire_prefixes=None,
-                 cascade_mode="cone", append_to_logic=True, suffix_override=None):
+                 cascade_mode="cone", append_to_logic=True, append_to_mux=False,
+                 suffix_override=None):
         """
         wb: DregWorkbook
         force_overrides / rfwrite_overrides: 基名集合(小写比较)，强制 RO / RW。
@@ -120,12 +121,17 @@ class Resolver:
         # top_output=0 被下游引用的输出探针网名补不补其 Excel 引用尾缀(_to_logic/_to_mux，见
         # excel_model.ref_suffix)。【必须在建 _logic_outputs 缓存(读 s.rtl_base)之前做】，使缓存与探针
         # 网名一致。默认 True=随 Excel 补(保持 LPBT 行为)；只影响输出、不动输入级联网/_ls。
+        # 两个【独立】全局尾缀开关(2026-06-11 用户拍板 logic/mux 分开)：把开关回填到每个信号，
+        # rtl_base 据此决定补不补其 Excel 引用尾缀(_to_logic/_to_mux)。【必须在建 _logic_outputs/
+        # _mux_outputs 缓存(读 rtl_base)之前做】，使缓存与探针网名一致。只影响输出、不动输入级联网/_ls。
+        #   · append_to_logic 默认 True：logic 输出被下游以 <名>_to_logic 引用时 RTL 真名就带尾缀(LPBT
+        #     实证可靠)，故默认补；撞名信号(如 lo2g5g，<名>_to_logic 撞了别的真实输入网)单点置裸名。
+        #   · append_to_mux 默认 False：mux 输出端口带不带尾缀【设计相关、Excel 推不出】——WL 的 mux 输出
+        #     是裸名(另有 _to_logic 衔接网)、Hi1108 rxiq 的端口本身叫 _to_logic。故默认探裸名，整设计要补
+        #     就开这个全局开关(一次全开)，个别例外再单点。
         self.append_to_logic = bool(append_to_logic)
-        # 单点尾缀覆盖(2026-06-11) {信号名/基名(小写): True=探尾缀网 / False=探裸名}——压过【类型默认】：
-        #   · logic 输出：被下游以 <名>_to_logic 引用时 RTL 真名就带尾缀(LPBT 实证可靠) → 默认随全局
-        #     append_to_logic(默认开)；撞名信号(如 lo2g5g，<名>_to_logic 撞了别的真实输入网)单点置 False。
-        #   · mux 输出：端口名带不带尾缀【设计相关、Excel 推不出】——WL 的 mux 输出是裸名+另有 _to_logic
-        #     衔接网；Hi1108 rxiq 的 mux 输出端口本身就叫 _to_logic。故 mux【默认探裸名】，由用户单点置 True。
+        self.append_to_mux = bool(append_to_mux)
+        # 单点尾缀覆盖 {信号名/基名(小写): True=探尾缀网 / False=探裸名}——压过上面两个全局类型默认。
         # 空覆盖 → 只看类型默认(老调用方逐字节不变)。匹配按 out_name 再 out_base。
         ov = {str(k).strip().lower(): bool(v) for k, v in (suffix_override or {}).items()}
         self.suffix_override = ov
@@ -138,7 +144,7 @@ class Resolver:
         for s in wb.logic:
             s._append_to_logic = _atl(s.out_name, s.out_base, self.append_to_logic)
         for g in (getattr(wb, "mux", None) or []):
-            g._append_to_logic = _atl(g.out_name, g.out_base, False)   # mux 默认探裸名
+            g._append_to_logic = _atl(g.out_name, g.out_base, self.append_to_mux)
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}

@@ -667,11 +667,29 @@ def test_mux_output_suffix_default_bare_and_optin(wl_wb):
         probe_prefixes={"d_wl_rf_lna_gain_to_logic": "U_DREG.U_MUX"},
         suffix_override={"d_wl_rf_lna_gain": True})))
     assert "`ENV_RF.U_DREG.U_MUX.d_wl_rf_lna_gain_to_logic[2:0]==" in on
-    # 反向：logic 撞名信号单点 opt-out（探裸名），下面的 logic 用例在 test_cone 覆盖；此处验 mux 不受
-    # 全局 append_to_logic 影响（mux 默认裸名，与全局开关无关）
-    on_global = generator.render(generator.build(wl_wb, generator.GenOptions(
+    # logic 全局开关【不】影响 mux：append_to_logic=True 时 mux 输出仍探裸名（mux 归 append_to_mux 管）
+    on_logic = generator.render(generator.build(wl_wb, generator.GenOptions(
         append_to_logic=True, probe_prefixes={"d_wl_rf_lna_gain": "U_DREG.U_MUX"})))
-    assert "`ENV_RF.U_DREG.U_MUX.d_wl_rf_lna_gain[2:0]==" in on_global   # 全局开尾缀≠mux 补尾缀
+    assert "`ENV_RF.U_DREG.U_MUX.d_wl_rf_lna_gain[2:0]==" in on_logic    # logic 开关≠mux 补尾缀
+
+
+def test_append_to_mux_global_toggle(wl_wb):
+    """全局「mux加尾缀」开关(2026-06-11 用户拍板 logic/mux 分开)：默认关=mux 输出探裸名(WL 不变)；
+    开=所有被引用的 mux 输出统一补去向尾缀(Hi1108 整设计一次全开)；单点 suffix_override 仍压过。"""
+    # 默认关：WL 5 个 mux 输出全裸名
+    off = generator.render(generator.build(wl_wb, generator.GenOptions(probe_prefixes=WL_PREFIXES)))
+    assert "`ENV_RF.%s.d_wl_rf_lna_gain[2:0]==" % WL_PREFIX in off
+    assert "d_wl_rf_lna_gain_to_logic[2:0]==" not in off
+    # 全局开：被引用的 mux 输出补尾缀（lna_gain→_to_logic，前缀按全名命中）
+    on = generator.render(generator.build(wl_wb, generator.GenOptions(
+        append_to_mux=True, probe_prefixes=WL_PREFIXES)))
+    assert "`ENV_RF.%s.d_wl_rf_lna_gain_to_logic[2:0]==" % WL_PREFIX in on
+    # 全局开 + 单点拉回裸名：suffix_override=False 压过全局
+    on_ovr = generator.render(generator.build(wl_wb, generator.GenOptions(
+        append_to_mux=True, probe_prefixes=WL_PREFIXES,
+        suffix_override={"d_wl_rf_lna_gain": False})))
+    assert "`ENV_RF.%s.d_wl_rf_lna_gain[2:0]==" % WL_PREFIX in on_ovr
+    assert "d_wl_rf_lna_gain_to_logic[2:0]==" not in on_ovr
 
 
 def test_wl_report_sync_with_build(wl_wb):

@@ -262,6 +262,42 @@ def test_per_signal_suffix_override_gui(wl_win):
     assert key not in w._suffix_override
 
 
+def test_append_to_mux_global_drives_default(wl_win):
+    """全局「mux加尾缀」开关(2026-06-11 用户拍板 logic/mux 分开)：默认不勾→mux 输出探裸名；勾上→所有
+    被引用的 mux 输出探尾缀网(单点默认跟随)；与 logic 开关独立。"""
+    w = wl_win
+    grp = _mux_grp(w, "d_wl_rf_lna_gain")
+    w._load_test_items(grp)
+    assert w.append_to_mux_chk.isChecked() is False     # mux 全局默认不勾
+    assert w.suffix_chk.isChecked() is False            # 单点跟随=不勾(探裸名)
+    assert grp.rtl_name == "d_wl_rf_lna_gain[2:0]"
+    w.append_to_mux_chk.setChecked(True)                # 开全局 mux 尾缀 → 重析
+    assert grp.rtl_name == "d_wl_rf_lna_gain_to_logic[2:0]"
+    w._load_test_items(grp)                             # 重载刷新单点勾选
+    assert w.suffix_chk.isChecked() is True             # 单点跟随全局=勾
+    # logic 开关独立：关 logic 尾缀不影响 mux
+    w.append_to_logic_chk.setChecked(False)
+    assert grp.rtl_name == "d_wl_rf_lna_gain_to_logic[2:0]"   # mux 仍带尾缀
+
+
+def test_suffix_setting_does_not_freeze_coverage(wl_win):
+    """回应用户顾虑：设「探尾缀网」【不】把信号变成自定义属性、不冻结覆盖度——设完后信号既不进
+    _customized 也不进 _sig_cov，全局覆盖度切换照常对它生效。"""
+    w = wl_win
+    grp = _mux_grp(w, "d_wl_rf_lna_gain")
+    w._load_test_items(grp)
+    w.suffix_chk.setChecked(True)                       # 给它设尾缀
+    key = grp.out_name.lower()
+    assert key in w._suffix_override                    # 尾缀记下了(独立属性)
+    assert key not in w._customized                     # 但【没】变成自定义测试项
+    assert key not in w._sig_cov                        # 也【没】钉死单点覆盖档
+    # 全局 mux 覆盖度仍对它生效（实际生效档跟着全局走，没被尾缀冻结）
+    w.coverage_mux.setCurrentText("精简")
+    assert w._sig_cov_collapsed(grp) == "min"
+    w.coverage_mux.setCurrentText("穷举")
+    assert w._sig_cov_collapsed(grp) == "exhaustive"
+
+
 def test_wl_gui_lna_gain_truth_table(wl_win):
     """组1 真值表也渲染（寄存器直出控制 + RO 线控/RW 数据）。"""
     w = wl_win
