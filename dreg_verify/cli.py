@@ -122,10 +122,12 @@ def build_argparser():
                     help="复刻 for_test 覆盖面: = --include-internal + --include-risky, 不跳过任何信号"
                          "(含 top_output=0 内部信号、含 close_ready_flag 等不可驱动 wire 的信号)。"
                          "用于和 for_test 逐信号对照；产物可能 CUVUNF 跑不起来(预期内)。")
-    g4.add_argument("--no-to-logic-suffix", dest="append_to_logic", action="store_false",
-                    help="关闭输出 _to_logic 尾缀：top_output=0 且被下游以 <名>_to_logic 引用的输出，"
-                         "默认补 _to_logic 当探针网名(LPBT 实证)；本旗标让它直接探基名网——"
-                         "用于 <名>_to_logic 恰好撞了某个真实输入网的设计(如 Hi1108)。_ls 尾缀不受影响。")
+    g4.add_argument("--no-ref-suffix", "--no-to-logic-suffix", dest="append_to_logic",
+                    action="store_false",
+                    help="关闭输出【引用尾缀】：top_output=0 的输出被下游引用时，探针网名默认补尾缀(随 "
+                         "Excel：logic 行引用→_to_logic、mux 页引用→_to_mux)；本旗标让它直接探基名网——"
+                         "用于 <名>_to_logic/_to_mux 恰好撞了某个真实输入网的设计(如 Hi1108)。"
+                         "_ls 与顶层输出不受影响。(--no-to-logic-suffix 为兼容别名)")
     g4.add_argument("--cascade-mode", choices=["cone", "force"], default="cone",
                     help="级联(输入引用上游 logic 计算网)的驱动模式，详见 级联模式说明.md："
                          "cone(默认)=展开上游表达式、驱动其源头寄存器(纯 Excel，不需要探针前缀)；"

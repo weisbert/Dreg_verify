@@ -82,9 +82,10 @@ class GenOptions:
         # （与 by_base/点名法同口径——覆盖度切换/case 重排都稳）。
         self.mux_data = {str(k).lower(): {str(bk).lower(): int(bv) for bk, bv in v.items()}
                          for k, v in (mux_data or {}).items() if v}
-        # 输出 _to_logic 尾缀开关（2026-06-11 Hi1108）：top_output=0 且被下游以 <名>_to_logic 引用的
-        # 输出，默认补 _to_logic 当探针网名（LPBT 实证）。某些设计里 <名>_to_logic 恰是另一个真实
-        # 输入网，补了就探错对象——关掉则直接探基名网。默认 True=保持 LPBT 行为；_ls 尾缀不受影响。
+        # 输出【引用尾缀】开关（2026-06-11 Hi1108）：top_output=0 的输出被下游引用时，探针网名补尾缀，
+        # 尾缀随 Excel（logic 行引用→_to_logic、mux 页引用→_to_mux，见 excel_model.ref_suffix）。某些
+        # 设计里 <名>_to_logic/_to_mux 恰是另一个真实输入网，补了就探错对象——关掉则直接探基名网。
+        # 默认 True=随 Excel 补（保持 LPBT 行为）；_ls 与顶层输出不受影响。
         self.append_to_logic = bool(append_to_logic)
         # 覆盖档位 logic/mux 解耦（第二十二轮，用户拍板互不绑定）：logic_mode/mux_mode ∈
         # {min,max,exhaustive}。未显式传(=None)则该侧回退到 (mode, exhaustive) 合成的档位——

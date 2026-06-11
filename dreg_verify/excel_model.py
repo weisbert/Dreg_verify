@@ -39,11 +39,14 @@ class LogicSignal:
         self.assert_id = assert_id       # R 列序号
         # inputs: dict 字母 -> {'raw','base','width','msb','lsb'}
         self.inputs = inputs
-        # 是否被下游 logic 行以 <名>_to_logic 引用（read_logic 装载后回填；决定 RTL 网名后缀）
-        self.to_logic_ref = False
-        # _to_logic 尾缀开关（2026-06-11，Resolver 据 GenOptions.append_to_logic 回填）：False=即便
-        # to_logic_ref 也不补 _to_logic，直接探基名网（某些设计 <名>_to_logic 撞了真实输入网时用）。
-        # to_logic_ref 保持不变(=客观事实)，只由本开关 AND 决定是否真正追加。默认 True=旧行为。
+        # 该内部信号在 Excel 下游被怎样引用 → 决定 RTL 探针网名【尾缀】（尾缀随 Excel、不写死）：
+        #   被下游 logic 行以 <名>_to_logic 引用 → "_to_logic"（read_logic 回填）
+        #   被 mux 页(数据/控制)以 <名>_to_mux 引用 → "_to_mux"（load_workbook 回填）
+        #   未被引用(顶层输出/reserve) → ""（用基名）
+        self.ref_suffix = ""
+        # 尾缀总开关（2026-06-11，Resolver 据 GenOptions.append_to_logic 回填）：False=即便有
+        # ref_suffix 也不补、直接探基名网（某些设计 <名>_to_xxx 撞了真实输入网时用）。ref_suffix 保持
+        # 不变(=客观事实)，只由本开关 AND 决定是否真正追加。默认 True=随 Excel 补尾缀（旧行为）。
         self._append_to_logic = True
 
     @property
@@ -52,12 +55,16 @@ class LogicSignal:
         return str(self.top_output).strip() in ("1", "1.0", "True", "true")
 
     @property
+    def to_logic_ref(self):
+        """兼容旧名：是否被下游以 _to_logic 引用（= ref_suffix == "_to_logic"）。"""
+        return self.ref_suffix == "_to_logic"
+
+    @property
     def rtl_base(self):
-        """RTL 真实网名(去位宽)。ls 行带 _ls 后缀；被下游引用的内部信号带 _to_logic 后缀
-        （_append_to_logic 关时不补 _to_logic，直接探基名；_ls 不受此开关影响）。"""
-        tlr = self.to_logic_ref and getattr(self, "_append_to_logic", True)
-        return rtl_net_name(self.out_base, self.suffix,
-                            is_top=self.is_top, to_logic_ref=tlr)
+        """RTL 真实网名(去位宽)。ls 行带 _ls 后缀；被下游引用的内部信号带其 Excel 引用尾缀
+        (_to_logic / _to_mux)。_append_to_logic 关时不补尾缀、直接探基名；_ls 不受此开关影响。"""
+        rs = self.ref_suffix if getattr(self, "_append_to_logic", True) else ""
+        return rtl_net_name(self.out_base, self.suffix, is_top=self.is_top, ref_suffix=rs)
 
     @property
     def rtl_name(self):
@@ -276,23 +283,26 @@ def strip_to_mux(name):
     return name
 
 
-def rtl_net_name(base, suffix, is_top=True, to_logic_ref=False):
+def rtl_net_name(base, suffix, is_top=True, to_logic_ref=False, ref_suffix=None):
     """K 列名 → RTL 真实网名。
 
     实证（2026-06-02 公司 lpbt_dig_top.v / BT_LP_DREG_sig_logic.v）：
       - M=ls 行：RTL 端口 = K 列名 + "_ls"（d_en_refbuf → d_en_refbuf_ls）
-      - 内部信号(top_output=0)且被下游 logic 行以 <名>_to_logic 引用：
-        RTL wire = K 列名 + "_to_logic"（pll_n1 → pll_n1_to_logic，
-        在 BT_LP_DREG_sig_logic 模块内部，配合探针前缀即可验证）
-      - 其余（to_logic/to_mux 顶层输出、未被引用的内部信号如 reserve）：K 列已是全名，原样用
+      - 内部信号(top_output=0)且被下游引用：RTL wire = K 列名 + 【引用尾缀 ref_suffix】，
+        尾缀由 Excel 下游引用决定——被 logic 行以 <名>_to_logic 引用→"_to_logic"
+        (pll_n1 → pll_n1_to_logic)；被 mux 页以 <名>_to_mux 引用→"_to_mux"。
+        （在子模块内部，配合探针前缀即可验证）
+      - 其余（顶层输出、未被引用的内部信号如 reserve）：K 列已是全名，原样用
     直接用 K 列名探针会 elaboration CUVUNF。
+    ref_suffix=None 时退回旧入参 to_logic_ref（True→"_to_logic"），保证老调用方不变。
     """
     sfx = _s(suffix).lower()
     low = base.lower()
     if sfx == "ls" and not low.endswith("_ls"):
         return base + "_ls"
-    if not is_top and to_logic_ref and not low.endswith("_to_logic"):
-        return base + "_to_logic"
+    rs = _s(ref_suffix if ref_suffix is not None else ("_to_logic" if to_logic_ref else ""))
+    if not is_top and rs and not low.endswith(rs.lower()):
+        return base + rs
     return base
 
 
@@ -373,17 +383,22 @@ def read_logic(ws, header_row=2):
             inputs=inputs,
         ))
 
-    # ── 标注"被下游以 <名>_to_logic 引用"的信号 ──
-    # 实证(2026-06-02 BT_LP_DREG_sig_logic.v)：这类内部信号的 RTL wire 名 = K列名 + "_to_logic"
-    # (pll_n1 → pll_n1_to_logic)。reserve 这类没被下游引用的内部信号 RTL 名 = K 原文。
-    referenced = set()
+    # ── 标注"被下游引用"的内部信号 + 其引用尾缀（决定 RTL 探针网名，尾缀随 Excel 不写死）──
+    # 实证(2026-06-02 BT_LP_DREG_sig_logic.v)：被下游 logic 行以 <名>_to_logic 引用的内部信号 RTL
+    # wire 名 = K列名 + "_to_logic"(pll_n1 → pll_n1_to_logic)；被 mux 页以 <名>_to_mux 引用的则带
+    # "_to_mux"(由 load_workbook 跨页回填)。reserve 这类没被引用的内部信号 RTL 名 = K 原文。
+    # 这里先扫 logic 输入列（_to_logic 优先；个别 logic 行也可能引用 _to_mux 衔接网）。
+    ref_logic, ref_mux = set(), set()
     for sig in signals:
         for info in sig.inputs.values():
-            raw_base = _strip_width(info["raw"])[0]
-            if raw_base.lower().endswith("_to_logic"):
-                referenced.add(info["base"].lower())
+            rb = _strip_width(info["raw"])[0].lower()
+            if rb.endswith("_to_logic"):
+                ref_logic.add(rb[: -len("_to_logic")])
+            elif rb.endswith("_to_mux"):
+                ref_mux.add(rb[: -len("_to_mux")])
     for sig in signals:
-        sig.to_logic_ref = sig.out_base.lower() in referenced
+        b = sig.out_base.lower()
+        sig.ref_suffix = "_to_logic" if b in ref_logic else ("_to_mux" if b in ref_mux else "")
     return signals
 
 
@@ -797,6 +812,26 @@ def _find_sheet(wb, *candidates):
     return None
 
 
+def _apply_mux_ref_suffix(logic, mux):
+    """跨页回填：mux 页(数据 A 列 / 控制 B-E 列)以 <名>_to_mux 引用某个 logic 输出时，该 logic 输出的
+    RTL wire 就叫 <名>_to_mux —— 给同名 logic 输出的 ref_suffix 置 "_to_mux"（探针网名随之带尾缀）。
+
+    只认 raw 真带 _to_mux 的引用（input_base/ctrl.base 已剥 _to_mux，故查 raw 后缀确认）；已被 logic
+    以 _to_logic 引用的不覆盖（_to_logic 优先，保持 LPBT 行为）。被引用基名若是寄存器(非 logic 行)则
+    不在 logic 列表里、自然不匹配。尾缀是 Excel 决定的，工具忠实照搬、不写死成 _to_logic。"""
+    mux_refs = set()
+    for g in (mux or []):
+        for c in g.cases:
+            if _strip_width(c.input_raw)[0].lower().endswith("_to_mux"):
+                mux_refs.add(c.input_base.lower())
+        for ct in g.ctrls:
+            if _strip_width(ct.raw)[0].lower().endswith("_to_mux"):
+                mux_refs.add(ct.base.lower())
+    for sig in logic:
+        if not sig.ref_suffix and sig.out_base.lower() in mux_refs:
+            sig.ref_suffix = "_to_mux"
+
+
 def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     ws_logic = _find_sheet(wb, "logic")
@@ -813,6 +848,7 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     regmap = read_regmap(ws_regmap, regmap_header_row) if ws_regmap is not None else {}
     tmm = read_tmm(ws_tmm) if ws_tmm is not None else {}
     mux = read_mux(ws_mux) if ws_mux is not None else []
+    _apply_mux_ref_suffix(logic, mux)        # 跨页：mux 以 _to_mux 引用的 logic 输出 → 回填 _to_mux 尾缀
     dft = read_dft(ws_dft) if ws_dft is not None else {}
     fortest_order = read_fortest_order(ws_ft) if ws_ft is not None else {}
     names = list(wb.sheetnames)

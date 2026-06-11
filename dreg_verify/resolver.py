@@ -116,9 +116,10 @@ class Resolver:
         self.wire_fallback = wire_fallback
         self.wire_prefixes = {k.lower(): v for k, v in (wire_prefixes or {}).items()}
         self.cascade_mode = cascade_mode if cascade_mode in ("cone", "force") else "cone"
-        # _to_logic 输出尾缀开关（2026-06-11 Hi1108）：把开关回填到每个 logic 信号，rtl_base 据此决定
-        # top_output=0 被下游引用的输出探针网名补不补 _to_logic。【必须在建 _logic_outputs 缓存(读
-        # s.rtl_base)之前做】，使缓存与探针网名一致。默认 True=保持 LPBT 行为；只影响输出、不动输入级联网/_ls。
+        # 输出【引用尾缀】开关（2026-06-11 Hi1108）：把开关回填到每个 logic 信号，rtl_base 据此决定
+        # top_output=0 被下游引用的输出探针网名补不补其 Excel 引用尾缀(_to_logic/_to_mux，见
+        # excel_model.ref_suffix)。【必须在建 _logic_outputs 缓存(读 s.rtl_base)之前做】，使缓存与探针
+        # 网名一致。默认 True=随 Excel 补(保持 LPBT 行为)；只影响输出、不动输入级联网/_ls。
         self.append_to_logic = bool(append_to_logic)
         for s in wb.logic:
             s._append_to_logic = self.append_to_logic

@@ -628,16 +628,18 @@ class MainWindow(QtWidgets.QMainWindow):
         cascade_help.setFixedWidth(24)
         cascade_help.setToolTip("级联模式帮助：两种模式的图解与选择建议(程序内置窗口)")
         cascade_help.clicked.connect(self._open_cascade_doc)
-        # 输出 _to_logic 尾缀开关（2026-06-11 Hi1108）：top_output=0 且被下游以 <名>_to_logic 引用的
-        # 输出，默认补 _to_logic 当探针网名；关掉=直接探基名网。默认勾选=保持 LPBT 行为。
-        self.append_to_logic_chk = QtWidgets.QCheckBox("输出加_to_logic尾缀")
+        # 输出尾缀开关（2026-06-11 Hi1108）：top_output=0 的输出若被下游引用，探针网名补【引用尾缀】，
+        # 尾缀随 Excel：被 logic 行以 <名>_to_logic 引用→_to_logic；被 mux 页以 <名>_to_mux 引用→_to_mux。
+        # 关掉=直接探基名网。默认勾选=随 Excel 补（保持 LPBT 行为）。
+        self.append_to_logic_chk = QtWidgets.QCheckBox("输出加下游引用尾缀")
         self.append_to_logic_chk.setChecked(True)
         self.append_to_logic_chk.setToolTip(
-            "默认勾选（LPBT 实证）：top_output=0 的输出若被下游 logic 以 <名>_to_logic 引用，\n"
-            "断言探针网名补 _to_logic（如 pll_n → pll_n_to_logic）。\n\n"
-            "取消勾选 = 直接探基名网（如 pll_n）。用于某些设计里 <名>_to_logic 恰好是另一个真实\n"
-            "输入网、补了尾缀就探错对象的情况（如 Hi1108 d_wl_rf_..._en 的 _to_logic 撞输入网）。\n"
-            "（只影响输出探针；输入级联网与 _ls 尾缀不受此开关影响。= CLI --no-to-logic-suffix）")
+            "默认勾选（LPBT 实证）：top_output=0 的输出若被下游引用，断言探针网名补【引用尾缀】——\n"
+            "尾缀由 Excel 决定：被下游 logic 行以 <名>_to_logic 引用→补 _to_logic（pll_n→pll_n_to_logic）；\n"
+            "被 mux 页以 <名>_to_mux 引用→补 _to_mux。（顶层输出、_ls 尾缀不受此开关影响。）\n\n"
+            "取消勾选 = 直接探基名网（如 pll_n）。用于某些设计里 <名>_to_logic/_to_mux 恰好是另一个\n"
+            "真实输入网、补了尾缀就探错对象的情况（如 Hi1108 d_wl_rf_..._en 的 _to_logic 撞输入网）。\n"
+            "（= CLI --no-ref-suffix）")
         if "pytest" not in sys.modules:
             self.append_to_logic_chk.setChecked(bool(_load_settings().get("append_to_logic", True)))
         self.append_to_logic_chk.stateChanged.connect(self.on_append_to_logic_changed)
@@ -951,7 +953,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if hasattr(self, "append_to_logic_chk") else True)
 
     def on_append_to_logic_changed(self, *args):
-        """输出 _to_logic 尾缀开关切换：持久化 + 重建 Resolver 重析全表（影响所有 top_out=0 被引用
+        """输出引用尾缀开关切换：持久化 + 重建 Resolver 重析全表（影响所有 top_out=0 被引用
         输出的探针网名 → 左表 out_net / 状态 / 预览全变）。"""
         st = _load_settings()
         st["append_to_logic"] = self.append_to_logic_chk.isChecked()
@@ -2559,7 +2561,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _apply_global_settings(self, g):
-        """导入：套用全局工具栏设置(覆盖度/上限/级联/_to_logic 尾缀)。blockSignals 设值，避免逐项触发
+        """导入：套用全局工具栏设置(覆盖度/上限/级联/输出引用尾缀)。blockSignals 设值，避免逐项触发
         联动(resolver 重建/编辑器重载由调用方统一做一次)；并写入 settings 持久化。"""
         if not isinstance(g, dict):
             return
@@ -4216,7 +4218,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mux_cleared=sorted(self._mux_cleared),
             # mux 用户手编/复制/负向列（第二十八轮）：注入 build/report(make_mux_vectors 之后)，与 logic 平级
             mux_user_vecs={k: list(v) for k, v in self._mux_user_vecs.items() if v},
-            # 输出 _to_logic 尾缀开关（2026-06-11 Hi1108）：默认补 _to_logic 当探针网名；关=探基名网
+            # 输出引用尾缀开关（2026-06-11 Hi1108）：默认随 Excel 补 _to_logic/_to_mux 当探针网名；关=探基名网
             append_to_logic=self._append_to_logic_on(),
             # 缺前缀强制生成（2026-06-10）：force 子模块内部网缺前缀的信号也照常生成裸名 force，
             # 交给仿真验证此设计是否真需要前缀（=CLI --include-risky）

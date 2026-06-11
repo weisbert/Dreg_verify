@@ -459,6 +459,26 @@ def test_cli_no_to_logic_suffix(tmp_path):
     assert "pll_n1_to_logic" not in off
 
 
+def test_ref_suffix_to_mux_from_mux_page():
+    """尾缀随 Excel：被 mux 页以 <名>_to_mux 引用的 logic 输出 → RTL 探针网名带 _to_mux（不是 _to_logic）。
+    _apply_mux_ref_suffix 跨页回填；开关关时回到基名。"""
+    sig = excel_model.LogicSignal(row=1, out_name="d_foo[2:0]", out_width=3, expr="A",
+                                  suffix="", top_output="0", notes="", owner="", assert_id="1",
+                                  inputs={})
+    assert sig.ref_suffix == "" and sig.rtl_name == "d_foo[2:0]"        # 未引用 → 裸名
+    case = excel_model.MuxCase(row=3, case_raw="1'b0", input_raw="d_foo_to_mux[2:0]",
+                               input_base="d_foo", input_width=3, input_msb=2, input_lsb=0)
+    grp = excel_model.MuxGroup(group_no=1, out_name="d_bar[2:0]", out_width=3,
+                               ctrl_raw="d_sel_to_mux", ctrl_base="d_sel", ctrl_width=1,
+                               owner="", top_output="0", cases=[case])
+    excel_model._apply_mux_ref_suffix([sig], [grp])
+    assert sig.ref_suffix == "_to_mux"                                  # 尾缀来自 Excel 的 mux 引用
+    assert sig.rtl_name == "d_foo_to_mux[2:0]"                          # 探针网名带 _to_mux
+    assert sig.to_logic_ref is False                                   # 兼容旧名：不是 _to_logic
+    sig._append_to_logic = False                                       # 开关关 → 回基名
+    assert sig.rtl_name == "d_foo[2:0]"
+
+
 def test_probe_prefix_cli_parse():
     from dreg_verify.cli import _parse_probe_prefixes
     assert _parse_probe_prefixes(["pll_n=U_BT_LP_PLL_DIG", "x=A.B"]) == {
