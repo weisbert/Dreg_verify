@@ -630,21 +630,21 @@ class MainWindow(QtWidgets.QMainWindow):
         cascade_help.clicked.connect(self._open_cascade_doc)
         # 输出尾缀开关（2026-06-11 Hi1108）：top_output=0 的输出若被下游引用，探针网名补【引用尾缀】，
         # 尾缀随 Excel：被 logic 行以 <名>_to_logic 引用→_to_logic；被 mux 页以 <名>_to_mux 引用→_to_mux。
-        # 关掉=直接探基名网。默认勾选=随 Excel 补（保持 LPBT 行为）。
+        # 关掉=直接探基名网。**默认不勾**（2026-06-11 用户拍板：尾缀按需开，不默认改网名；撞名风险更小）。
         self.append_to_logic_chk = QtWidgets.QCheckBox("输出加下游引用尾缀")
-        self.append_to_logic_chk.setChecked(True)
+        self.append_to_logic_chk.setChecked("pytest" in sys.modules)   # 生产默认不勾；pytest 保持勾(基线=随Excel补尾缀)
         self.append_to_logic_chk.setToolTip(
-            "默认勾选（LPBT 实证）：top_output=0 的输出若被下游引用，断言探针网名补【引用尾缀】——\n"
+            "勾上：top_output=0 的输出若被下游引用，断言探针网名补【引用尾缀】——\n"
             "尾缀由 Excel 决定：被下游 logic 行以 <名>_to_logic 引用→补 _to_logic（pll_n→pll_n_to_logic）；\n"
             "被 mux 页以 <名>_to_mux 引用→补 _to_mux。（顶层输出、_ls 尾缀不受此开关影响。）\n\n"
-            "取消勾选 = 直接探基名网（如 pll_n）。用于某些设计里 <名>_to_logic/_to_mux 恰好是另一个\n"
-            "真实输入网、补了尾缀就探错对象的情况（如 Hi1108 d_wl_rf_..._en 的 _to_logic 撞输入网）。\n"
-            "（= CLI --no-ref-suffix）")
+            "默认不勾 = 直接探基名网（如 pll_n）。避免某些设计里 <名>_to_logic/_to_mux 恰好是另一个\n"
+            "真实输入网、补了尾缀就探错对象（如 Hi1108 d_wl_rf_..._en 的 _to_logic 撞输入网）。\n"
+            "若仿真报输出网 CUVUNF（说明该内部网确在子模块、RTL 名带尾缀）→勾上即可。（= CLI --no-ref-suffix 的反向）")
         if "pytest" not in sys.modules:
-            self.append_to_logic_chk.setChecked(bool(_load_settings().get("append_to_logic", True)))
+            self.append_to_logic_chk.setChecked(bool(_load_settings().get("append_to_logic", False)))
         self.append_to_logic_chk.stateChanged.connect(self.on_append_to_logic_changed)
-        # 缺前缀强制生成（2026-06-10 Hi1108）：默认"force 子模块内部网缺前缀=跳过"是 LPBT/Hi1107C
-        # 的实证结论——新设计层级可能不同，根本不需要前缀。开了就照常生成裸名 force 交给仿真验证。
+        # 缺前缀强制生成（2026-06-10 Hi1108）：**默认勾选**（2026-06-11 用户拍板）——新设计层级可能与
+        # LPBT/Hi1107C 不同、根本不需要前缀，先照常生成裸名 force 交给仿真验证(过=不需前缀；CUVUNF 再配)。
         self.include_risky_chk = QtWidgets.QCheckBox("缺前缀强制生成")
         self.include_risky_chk.setToolTip(
             "默认行为：要 force 的输入网被判定在子模块内部(级联衔接网/wire 兜底)、又没配探针前缀时，\n"
@@ -653,9 +653,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "  · elaboration 全过 = 此设计这些网顶层直达，不需要前缀，保持勾选即可\n"
             "  · 报 CUVUNF = 网确实埋在子模块，跑 scan_rtl 配前缀后重新生成\n"
             "（与 CLI --include-risky 同义；左表状态列会显示「已强制生成」。）")
-        # pytest 下不从真实 settings 恢复（与 coverage 恢复同理：避免开发机配置污染 GUI 测试）
-        if "pytest" not in sys.modules and _load_settings().get("include_risky"):
-            self.include_risky_chk.setChecked(True)
+        # pytest 下保持不勾(基线=按 LPBT 跳过 risky，测试不变)；生产默认勾(缺键=True)，settings 可改
+        if "pytest" not in sys.modules:
+            self.include_risky_chk.setChecked(bool(_load_settings().get("include_risky", True)))
         self.include_risky_chk.stateChanged.connect(self.on_include_risky_changed)
         for w in (QtWidgets.QLabel("logic覆盖:"), self.coverage,
                   QtWidgets.QLabel("mux覆盖:"), self.coverage_mux, self.cov_hint,
@@ -967,12 +967,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 if hasattr(self, "include_risky_chk") else False)
 
     def on_include_risky_changed(self, *args):
-        """缺前缀强制生成切换：持久化 + 重分析（左表状态/阻断判定变）+ 刷新预览。"""
+        """缺前缀强制生成切换：持久化 + 刷新左表状态/预览。
+        include_risky【不改输入解析(Resolver)、也不改 logic 分析】——只影响 mux 风险分析与 skip/状态显示。
+        故复用现有 Resolver，只重算 mux 组分析（吃 include_risky），logic 状态在重绘时按 include_risky 出
+        『已强制生成』即可。省掉昂贵的 Resolver 重建 + 全 logic 重析（消除大表点击卡顿）。"""
         st = _load_settings()
         st["include_risky"] = self.include_risky_chk.isChecked()
         _save_settings(st)
         if self.wb is not None:
-            self._reanalyze_all()
+            for i, s in enumerate(self.signals):
+                if isinstance(s, excel_model.MuxGroup):
+                    try:
+                        self._analysis[i] = self._analyze_one(s)
+                    except Exception as ex:  # noqa: BLE001
+                        self._analysis[i] = {"status": "解析异常", "inputs": [], "out_net": "",
+                                             "error": repr(ex)}
+            self._populate_table()
         self._refresh_preview()
 
     def _open_cascade_doc(self):
@@ -2578,9 +2588,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cascade_combo.setCurrentIndex(1 if cm == "force" else 0)
             self.cascade_combo.blockSignals(False)
         atl = g.get("append_to_logic")
-        # 缺键(旧配置/含已删的 dft_observe)→ 复位到默认 True，使「导入这份工作状态」确定性=LPBT 行为，
+        # 缺键(旧配置/含已删的 dft_observe)→ 复位到默认 False(=生产默认不勾)，使「导入这份工作状态」确定性，
         # 不残留本会话先前的手动切换。
-        atl = atl if isinstance(atl, bool) else True
+        atl = atl if isinstance(atl, bool) else False
         self.append_to_logic_chk.blockSignals(True); self.append_to_logic_chk.setChecked(atl)
         self.append_to_logic_chk.blockSignals(False)
         self._persist_coverage()                 # coverage_logic/mux + max_tests

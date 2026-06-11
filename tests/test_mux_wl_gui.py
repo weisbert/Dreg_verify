@@ -64,7 +64,7 @@ def test_append_to_logic_toggle_gui(gui_app, tmp_path):
     fixtures.build_workbook(str(excel), with_pll_chain=True, with_mux=True)
     w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
     try:
-        assert w.append_to_logic_chk.isChecked()           # 默认勾选=保持 LPBT 行为
+        assert w.append_to_logic_chk.isChecked()           # pytest 基线=勾(生产默认不勾，见 __init__ 的 pytest 守卫)
         assert w._opts(["pll_n1"]).append_to_logic is True
         assert w._resolver.append_to_logic is True
         sig = next(s for s in w.signals if getattr(s, "out_base", "") == "pll_n1")
@@ -112,9 +112,9 @@ def test_append_to_logic_config_roundtrip(gui_app, tmp_path, monkeypatch):
         assert w._resolver.append_to_logic is False
         assert w._opts(["pll_n1"]).append_to_logic is False
         assert sig.rtl_name == "pll_n1[31:0]"
-        # 确定性：套用缺 append_to_logic 键的全局设置（如旧配置）→ 复位 True
+        # 确定性：套用缺 append_to_logic 键的全局设置（如旧配置）→ 复位生产默认 False（不残留本会话切换）
         w._apply_global_settings({"coverage_logic": "精简"})
-        assert w.append_to_logic_chk.isChecked() is True
+        assert w.append_to_logic_chk.isChecked() is False
     finally:
         w.close()
 
@@ -853,7 +853,9 @@ def test_gui_include_risky_toggle(gui_app, tmp_path, monkeypatch):
         assert res0["summary"]["n_mux_generated"] == 0
         assert res0["skipped"], "默认应跳过并给原因"
         # 勾上：重分析为非阻断、状态文案如实、build 生成
+        resolver_before = w._resolver            # 缺前缀强制生成不改输入解析 → 不该重建 Resolver(防大表卡顿)
         w.include_risky_chk.setChecked(True)
+        assert w._resolver is resolver_before, "include_risky 切换不应重建 Resolver(消除点击卡顿)"
         assert w._analysis[i]["status"] == "needs-prefix"
         assert w._analysis[i].get("blocking") is False
         assert "已强制生成" in w._analysis[i]["error"]
