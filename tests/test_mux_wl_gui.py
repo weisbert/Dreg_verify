@@ -64,7 +64,7 @@ def test_append_to_logic_toggle_gui(gui_app, tmp_path):
     fixtures.build_workbook(str(excel), with_pll_chain=True, with_mux=True)
     w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
     try:
-        assert w.append_to_logic_chk.isChecked()           # pytest 基线=勾(生产默认不勾，见 __init__ 的 pytest 守卫)
+        assert w.append_to_logic_chk.isChecked()           # 默认勾(2026-06-11 翻回=RTL 真名)
         assert w._opts(["pll_n1"]).append_to_logic is True
         assert w._resolver.append_to_logic is True
         sig = next(s for s in w.signals if getattr(s, "out_base", "") == "pll_n1")
@@ -112,9 +112,10 @@ def test_append_to_logic_config_roundtrip(gui_app, tmp_path, monkeypatch):
         assert w._resolver.append_to_logic is False
         assert w._opts(["pll_n1"]).append_to_logic is False
         assert sig.rtl_name == "pll_n1[31:0]"
-        # 确定性：套用缺 append_to_logic 键的全局设置（如旧配置）→ 复位生产默认 False（不残留本会话切换）
+        # 确定性：套用缺 append_to_logic 键的全局设置（如旧配置）→ 复位生产默认 True（2026-06-11 翻回，
+        # =RTL 真名；不残留本会话切换）
         w._apply_global_settings({"coverage_logic": "精简"})
-        assert w.append_to_logic_chk.isChecked() is False
+        assert w.append_to_logic_chk.isChecked() is True
     finally:
         w.close()
 
@@ -238,6 +239,27 @@ def test_wl_gui_cascade_truth_table_rendered(wl_win):
     assert w.ti_table.rowCount() > 0
     assert "无法生成测试" not in w.ti_header.text()
     assert "互异值分配失败" not in w.ti_header.text()
+
+
+def test_per_signal_suffix_override_gui(wl_win):
+    """单点「本信号探尾缀网」(2026-06-11 Hi1108 rxiq)：mux 输出默认【不勾】(探裸名)；勾/取消即时改
+    rtl_name + 重析；override 映射只存偏离项(回默认即删)。mux 默认裸名是关键回归(端口尾缀设计相关)。"""
+    w = wl_win
+    grp = _mux_grp(w, "d_wl_rf_lna_gain")     # top_out=0 mux 输出、被 logic 以 _to_logic 引用
+    w._load_test_items(grp)
+    assert w.suffix_chk.isEnabled()           # 被下游引用 → 有尾缀可补，本框可用
+    assert w.suffix_chk.isChecked() is False  # mux 默认探裸名（不随 logic 全局开关）
+    assert grp.rtl_name == "d_wl_rf_lna_gain[2:0]"
+    # 勾上 → 探尾缀网 + 重析（rtl_base 随之变）。override 按 out_name 记忆(与 _sig_cov 同口径)
+    key = grp.out_name.lower()
+    w.suffix_chk.setChecked(True)
+    assert grp.rtl_name == "d_wl_rf_lna_gain_to_logic[2:0]"
+    assert w._suffix_override.get(key) is True
+    assert w._opts(["d_wl_rf_lna_gain"]).suffix_override.get(key) is True
+    # 取消 → 回默认（映射不留偏离项）
+    w.suffix_chk.setChecked(False)
+    assert grp.rtl_name == "d_wl_rf_lna_gain[2:0]"
+    assert key not in w._suffix_override
 
 
 def test_wl_gui_lna_gain_truth_table(wl_win):

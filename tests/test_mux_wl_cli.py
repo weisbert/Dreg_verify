@@ -82,6 +82,21 @@ def test_wl_cli_generates_with_warning_no_prefix(wl_excel, tmp_path, capsys):
     assert "`ENV_RF.d_wl_rf_lna_gain[2:0]==" in sv
 
 
+# ───────────── ②.5 --suffix-signals：mux 输出单点探尾缀网 ─────────────
+def test_wl_cli_suffix_signals_optin(wl_excel, tmp_path):
+    """--suffix-signals：mux 输出默认探裸名，指定后单点探带去向尾缀(_to_logic)的网（rxiq 形态）。
+    前缀按全名 key 命中（不静默失配）。--no-suffix-signals 同理可把 logic 撞名信号拉回裸名。"""
+    from dreg_verify import cli
+    out_sv = tmp_path / "wl.sv"
+    cli.main(["--excel", str(wl_excel), "--out", str(out_sv),
+              "--suffix-signals", "d_wl_rf_lna_gain",
+              "--probe-prefix", "d_wl_rf_lna_gain_to_logic=%s" % WL_PREFIX])
+    sv = out_sv.read_text(encoding="utf-8")
+    assert "`ENV_RF.%s.d_wl_rf_lna_gain_to_logic[2:0]==" % WL_PREFIX in sv   # 探尾缀网 + 前缀命中
+    # 没点名的 mux 输出仍探裸名（默认）
+    assert "`ENV_RF.d_wl_rf_bwctrl[1:0]==" in sv or "d_wl_rf_bwctrl" in sv
+
+
 # ───────────── ③ 配前缀文件 → 全流程生成 ─────────────
 def test_wl_cli_probe_prefix_file_generates_all(wl_excel, tmp_path):
     """--probe-prefix-file 导入前缀后，CLI 全流程产出 5 个组的 .sv：

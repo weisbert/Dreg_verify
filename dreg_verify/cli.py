@@ -128,6 +128,13 @@ def build_argparser():
                          "Excel：logic 行引用→_to_logic、mux 页引用→_to_mux)；本旗标让它直接探基名网——"
                          "用于 <名>_to_logic/_to_mux 恰好撞了某个真实输入网的设计(如 Hi1108)。"
                          "_ls 与顶层输出不受影响。(--no-to-logic-suffix 为兼容别名)")
+    g4.add_argument("--no-suffix-signals",
+                    help="单点【探裸名】：这些信号(基名/全名，逗号分隔)单独不补尾缀、直接探基名网——用于"
+                         "logic 撞名信号(其 <名>_to_logic 恰是另一根真实输入网，如 lo2g5g)。压过全局开关。")
+    g4.add_argument("--suffix-signals",
+                    help="单点【探尾缀网】：这些信号(逗号分隔)单独探带去向尾缀(_to_logic/_to_mux)的网——"
+                         "主要用于 mux 输出(默认探裸名，因端口尾缀设计相关)：其端口本身就叫 <名>_to_logic 时"
+                         "(如 Hi1108 rxiq=2:1 mux 喂 sig_logic)单独开。压过类型默认。")
     g4.add_argument("--cascade-mode", choices=["cone", "force"], default="cone",
                     help="级联(输入引用上游 logic 计算网)的驱动模式，详见 级联模式说明.md："
                          "cone(默认)=展开上游表达式、驱动其源头寄存器(纯 Excel，不需要探针前缀)；"
@@ -1047,6 +1054,8 @@ def main(argv=None):
         sv_summary=args.sv_summary,
         cascade_mode=args.cascade_mode,
         append_to_logic=args.append_to_logic,
+        suffix_override=dict({n: False for n in (_split(args.no_suffix_signals) or [])},
+                             **{n: True for n in (_split(args.suffix_signals) or [])}),
     )
 
     if args.out_file:

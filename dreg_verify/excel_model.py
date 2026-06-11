@@ -197,8 +197,16 @@ class MuxGroup:
         # 嵌套 mux 自动归一化提示（read_mux 把"一个块塞两级"折叠成多控制拼接时填，非空=已自动合并，
         # 给 designer 复核用；空=没动过）。详见 _normalize_nested_mux。
         self.normalized_note = ""
-        # 与 LogicSignal 对齐的占位字段（mux 无 logic 后缀语义；expr 是只读属性=case 描述文本）
+        # 与 LogicSignal 对齐的占位字段（expr 是只读属性=case 描述文本）
         self.suffix = "mux"
+        # mux 输出被下游引用的去向尾缀（load_workbook 跨页回填，仅记录【客观事实】=被怎么引用）：
+        #   被 logic 行以 <名>_to_logic 引用 → "_to_logic"；被别的 mux 以 <名>_to_mux 引用 → "_to_mux"。
+        #   未被引用/顶层输出 = ""。注意：mux 输出端口名带不带这尾缀是【设计相关】(WL 的 mux 输出是裸名
+        #   +另有 _to_logic 衔接网；Hi1108 rxiq 的 mux 输出端口本身叫 _to_logic)，Excel 推不出——故仅记录。
+        self.ref_suffix = ""
+        # 是否真把 ref_suffix 补到探针网名上。mux【默认 False=探裸名】(与 logic 默认 True 相反，因端口尾缀
+        # 设计相关、不默认套)；Resolver 据 GenOptions.suffix_override 单点回填(rxiq 这类单点置 True)。
+        self._append_to_logic = False
 
     @property
     def ctrl_total_width(self):
@@ -232,19 +240,37 @@ class MuxGroup:
 
     @property
     def rtl_base(self):
-        """mux 输出 RTL 网名 = G 列基名原样（2026-06-03 真表 scan_rtl 实证：7 个输出全在 DUT 顶层）。
-        不走 logic 的 rtl_net_name 后缀变换（_ls/_to_logic）——套了反而 CUVUNF。"""
-        return self.out_base
+        """mux 输出 RTL 网名。默认 = G 列基名【裸名】(顶层输出、以及绝大多数 mux 输出)。仅当本组被单点
+        置「探尾缀网」(_append_to_logic=True，如 Hi1108 rxiq=2:1 mux 喂 sig_logic、端口真名带 _to_logic)
+        才补其 Excel 去向尾缀(_to_logic/_to_mux)。mux 默认裸名——端口尾缀设计相关，Excel 推不出(WL 的 mux
+        输出就是裸名)。不走 _ls(mux 无 ls 语义)。"""
+        rs = self.ref_suffix if getattr(self, "_append_to_logic", False) else ""
+        return rtl_net_name(self.out_base, self.suffix, is_top=self.is_top, ref_suffix=rs)
+
+    @property
+    def rtl_base_full(self):
+        """rtl_base 但【无视 _append_to_logic 开关】，总按 ref_suffix 补尾缀——仅供探针前缀 key 匹配
+        (与 LogicSignal.rtl_base_full 同口径：scan_rtl/用户配的前缀 key 常是带尾缀的全名)。"""
+        return rtl_net_name(self.out_base, self.suffix, is_top=self.is_top,
+                            ref_suffix=self.ref_suffix)
+
+    def _with_slice(self, base):
+        """按解析出的 msb/lsb 重建位宽切片——不要用字符串索引拼接（G 列名含内部空格时会拼出非法 SV）。"""
+        if self.out_msb is None or self.out_lsb is None:
+            return base
+        if self.out_msb == self.out_lsb:
+            return "%s[%d]" % (base, self.out_msb)
+        return "%s[%d:%d]" % (base, self.out_msb, self.out_lsb)
 
     @property
     def rtl_name(self):
-        """含位宽切片的探针 LHS（assert 用）。
-        用解析出的 msb/lsb 重建——不要用字符串索引拼接（G 列名含内部空格时会拼出非法 SV）。"""
-        if self.out_msb is None or self.out_lsb is None:
-            return self.rtl_base
-        if self.out_msb == self.out_lsb:
-            return "%s[%d]" % (self.rtl_base, self.out_msb)
-        return "%s[%d:%d]" % (self.rtl_base, self.out_msb, self.out_lsb)
+        """含位宽切片的探针 LHS（assert 用）。"""
+        return self._with_slice(self.rtl_base)
+
+    @property
+    def rtl_name_full(self):
+        """rtl_name 的全名版(无视开关补尾缀)——仅供探针前缀 key 匹配，不进断言。"""
+        return self._with_slice(self.rtl_base_full)
 
     def __repr__(self):
         return "MuxGroup(mux%s, %s, ctrl=%s, %d cases)" % (
@@ -846,6 +872,42 @@ def _apply_mux_ref_suffix(logic, mux):
             sig.ref_suffix = "_to_mux"
 
 
+def _apply_mux_output_ref_suffix(logic, mux):
+    """跨页回填【mux 输出】的引用尾缀（2026-06-11 Hi1108 rxiq_phase_ctrl 实证）：
+
+    top_output=0 的 mux 输出若被下游引用，RTL wire 名 = G列基名 + 去向尾缀，和 logic 输出同一套
+    net flows-to 命名约定——被 logic 行以 <名>_to_logic 引用 → "_to_logic"(rxiq_phase_ctrl 是 2:1
+    mux 输出、喂 sig_logic，RTL: WL_TRX_C0C1_DREG_sig_mux.v 里 d_wl_rf_rxiq_phase_ctrl_to_logic)；
+    被别的 mux 以 <名>_to_mux 引用 → "_to_mux"(mux→mux 级联)。顶层输出(top_output=1，原 7 个 WL
+    mux)不带尾缀——只动 top_output=0 且被引用的 mux 输出。_to_logic 优先。
+
+    与 read_logic / _apply_mux_ref_suffix 同源：扫 logic 输入列的 _to_logic/_to_mux 引用 + mux 页
+    数据/控制列的 _to_mux 引用。被引用基名若不是 mux 输出(是寄存器/logic 行)自然不匹配。"""
+    ref_logic, ref_mux = set(), set()
+    for sig in logic:
+        for info in sig.inputs.values():
+            rb = _strip_width(info["raw"])[0].lower()
+            if rb.endswith("_to_logic"):
+                ref_logic.add(rb[: -len("_to_logic")])
+            elif rb.endswith("_to_mux"):
+                ref_mux.add(rb[: -len("_to_mux")])
+    for g in (mux or []):
+        for c in g.cases:
+            if _strip_width(c.input_raw)[0].lower().endswith("_to_mux"):
+                ref_mux.add(c.input_base.lower())
+        for ct in g.ctrls:
+            if _strip_width(ct.raw)[0].lower().endswith("_to_mux"):
+                ref_mux.add(ct.base.lower())
+    for g in (mux or []):
+        if g.is_top or g.ref_suffix:
+            continue
+        b = g.out_base.lower()
+        if b in ref_logic:
+            g.ref_suffix = "_to_logic"
+        elif b in ref_mux:
+            g.ref_suffix = "_to_mux"
+
+
 def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     ws_logic = _find_sheet(wb, "logic")
@@ -863,6 +925,7 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     tmm = read_tmm(ws_tmm) if ws_tmm is not None else {}
     mux = read_mux(ws_mux) if ws_mux is not None else []
     _apply_mux_ref_suffix(logic, mux)        # 跨页：mux 以 _to_mux 引用的 logic 输出 → 回填 _to_mux 尾缀
+    _apply_mux_output_ref_suffix(logic, mux) # 跨页：被 logic/mux 引用的 top_out=0 mux 输出 → 回填去向尾缀
     dft = read_dft(ws_dft) if ws_dft is not None else {}
     fortest_order = read_fortest_order(ws_ft) if ws_ft is not None else {}
     names = list(wb.sheetnames)

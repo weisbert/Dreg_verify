@@ -649,6 +649,31 @@ def test_wl_build_include_risky_generates_without_prefix(wl_wb):
     assert res["summary"]["n_mux_generated"] == 5
 
 
+def test_mux_output_suffix_default_bare_and_optin(wl_wb):
+    """mux 输出尾缀【默认裸名 + 单点 opt-in】(2026-06-11 Hi1108 rxiq 实证 + WL 回归)：
+
+    WL 的 d_wl_rf_lna_gain 是 top_out=0 mux 输出、被 logic 行 lna_gain_dly 以 <名>_to_logic 引用——
+    但 mux 输出端口在 WL 是【裸名】(另有独立 _to_logic 衔接网)。故 mux 默认探裸名(不像 logic 那样
+    自动补尾缀，端口尾缀设计相关、Excel 推不出)。rxiq 形态(端口本身叫 _to_logic)则单点 opt-in。"""
+    # ref_suffix 被跨页回填(客观事实=被 _to_logic 引用)，但默认【不补】→ 探裸名（WL 行为不变）
+    grp = _grp(wl_wb, "d_wl_rf_lna_gain")
+    assert grp.ref_suffix == "_to_logic"               # 记录了被引用的去向
+    base = generator.render(generator.build(wl_wb, generator.GenOptions(
+        probe_prefixes={"d_wl_rf_lna_gain": "U_DREG.U_MUX"})))
+    assert "`ENV_RF.U_DREG.U_MUX.d_wl_rf_lna_gain[2:0]==" in base   # 裸名 + 前缀
+    assert "d_wl_rf_lna_gain_to_logic[2:0]==" not in base           # 默认不补尾缀
+    # 单点 opt-in（rxiq 形态：端口真名带 _to_logic）→ 探尾缀网；前缀按【全名】key 命中（不静默失配）
+    on = generator.render(generator.build(wl_wb, generator.GenOptions(
+        probe_prefixes={"d_wl_rf_lna_gain_to_logic": "U_DREG.U_MUX"},
+        suffix_override={"d_wl_rf_lna_gain": True})))
+    assert "`ENV_RF.U_DREG.U_MUX.d_wl_rf_lna_gain_to_logic[2:0]==" in on
+    # 反向：logic 撞名信号单点 opt-out（探裸名），下面的 logic 用例在 test_cone 覆盖；此处验 mux 不受
+    # 全局 append_to_logic 影响（mux 默认裸名，与全局开关无关）
+    on_global = generator.render(generator.build(wl_wb, generator.GenOptions(
+        append_to_logic=True, probe_prefixes={"d_wl_rf_lna_gain": "U_DREG.U_MUX"})))
+    assert "`ENV_RF.U_DREG.U_MUX.d_wl_rf_lna_gain[2:0]==" in on_global   # 全局开尾缀≠mux 补尾缀
+
+
 def test_wl_report_sync_with_build(wl_wb):
     """report 与 build 双轨同步：同口径生成；多控制键正确分类。"""
     # 无前缀：top_out=0 组照常生成（error 列空），警告进 warning 列

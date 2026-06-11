@@ -379,6 +379,11 @@ class MainWindow(QtWidgets.QMainWindow):
                                  # 暗中盖过全局下拉，让"刚打开 GUI 改全局却对某些信号无效"(用户实测的 bug)。
                                  # 开 GUI 即一张白纸，全局下拉对所有信号生效；要个别不同当场调，关掉即忘。
         self._sig_cov_loading = False  # 程序化设单点覆盖下拉时屏蔽其 changed 信号，防加载信号时误触重算
+        self._suffix_override = {}  # 单点尾缀覆盖 {信号名小写: True=探尾缀网/False=探裸名}——压过类型默认
+                                 # (logic 默认随全局开、mux 默认裸名)。用于 logic 撞名信号(lo2g5g→False)与
+                                 # mux 端口带尾缀信号(rxiq→True)。稳定的设计事实，故【存盘+随配置导入导出】
+                                 # (区别于会话内临时的 _sig_cov)；按 Excel 路径记忆，启动恢复。
+        self._suffix_loading = False  # 程序化设「本信号探尾缀网」勾选时屏蔽其 changed 信号
         self._ti_sig = None      # 当前在编辑器里的信号
         self._ti_node = None
         self._ti_bindings = {}
@@ -630,18 +635,19 @@ class MainWindow(QtWidgets.QMainWindow):
         cascade_help.clicked.connect(self._open_cascade_doc)
         # 输出尾缀开关（2026-06-11 Hi1108）：top_output=0 的输出若被下游引用，探针网名补【引用尾缀】，
         # 尾缀随 Excel：被 logic 行以 <名>_to_logic 引用→_to_logic；被 mux 页以 <名>_to_mux 引用→_to_mux。
-        # 关掉=直接探基名网。**默认不勾**（2026-06-11 用户拍板：尾缀按需开，不默认改网名；撞名风险更小）。
+        # 关掉=直接探基名网。**默认勾**（2026-06-11 用户拍板：Hi1108 rxiq 实证 top_out=0 内部网 RTL 真名
+        # 就带尾缀=补尾缀才是常态；撞名信号是少数，用左表「本信号探裸名」单独关）。logic 与 mux 输出同口径。
         self.append_to_logic_chk = QtWidgets.QCheckBox("输出加下游引用尾缀")
-        self.append_to_logic_chk.setChecked("pytest" in sys.modules)   # 生产默认不勾；pytest 保持勾(基线=随Excel补尾缀)
+        self.append_to_logic_chk.setChecked(True)   # 生产默认勾；pytest 也勾(基线=随Excel补尾缀)
         self.append_to_logic_chk.setToolTip(
-            "勾上：top_output=0 的输出若被下游引用，断言探针网名补【引用尾缀】——\n"
+            "勾上（默认）：top_output=0 的输出若被下游引用，断言探针网名补【引用尾缀】——\n"
             "尾缀由 Excel 决定：被下游 logic 行以 <名>_to_logic 引用→补 _to_logic（pll_n→pll_n_to_logic）；\n"
-            "被 mux 页以 <名>_to_mux 引用→补 _to_mux。（顶层输出、_ls 尾缀不受此开关影响。）\n\n"
-            "默认不勾 = 直接探基名网（如 pll_n）。避免某些设计里 <名>_to_logic/_to_mux 恰好是另一个\n"
-            "真实输入网、补了尾缀就探错对象（如 Hi1108 d_wl_rf_..._en 的 _to_logic 撞输入网）。\n"
-            "若仿真报输出网 CUVUNF（说明该内部网确在子模块、RTL 名带尾缀）→勾上即可。（= CLI --no-ref-suffix 的反向）")
+            "被 mux 页以 <名>_to_mux 引用→补 _to_mux（mux 输出同样适用）。（顶层输出、_ls 不受此开关影响。）\n\n"
+            "尾缀名就是这些内部网的 RTL 真名（Hi1108 rxiq 实证：bare 名在 RTL 里根本不存在）。\n"
+            "个别设计里 <名>_to_logic/_to_mux 恰好撞了另一个真实输入网（如 lo2g5g），补了就探错对象——\n"
+            "那种【单个信号】在左表里勾「本信号探裸名」单独关，不必关全局。（全局取消勾选 = CLI --no-ref-suffix）")
         if "pytest" not in sys.modules:
-            self.append_to_logic_chk.setChecked(bool(_load_settings().get("append_to_logic", False)))
+            self.append_to_logic_chk.setChecked(bool(_load_settings().get("append_to_logic", True)))
         self.append_to_logic_chk.stateChanged.connect(self.on_append_to_logic_changed)
         # 缺前缀强制生成（2026-06-10 Hi1108）：**默认勾选**（2026-06-11 用户拍板）——新设计层级可能与
         # LPBT/Hi1107C 不同、根本不需要前缀，先照常生成裸名 force 交给仿真验证(过=不需前缀；CUVUNF 再配)。
@@ -717,6 +723,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sig_cov_tag = QtWidgets.QLabel("")     # 生效来源提示（单点/跟随全局），随信号刷新
         self.sig_cov_tag.setStyleSheet("color:#667;")
         sigcov.addWidget(self.sig_cov_tag)
+        sigcov.addSpacing(16)
+        # 本信号探尾缀网（2026-06-11）：单点强制【当前信号】探带去向尾缀(_to_logic/_to_mux)的网，压过
+        # 类型默认。logic 输出被引用时默认就探尾缀网(勾)、mux 输出默认探裸名(不勾)。用于个别例外信号：
+        # mux 端口本身带尾缀(rxiq→勾)、logic 撞名信号(lo2g5g→取消勾)。按信号名记忆、存盘 + 随配置导入导出。
+        self.suffix_chk = QtWidgets.QCheckBox("本信号探尾缀网")
+        self.suffix_chk.setEnabled(False)        # 未选信号 / 该信号未被下游引用(无尾缀可补) 时不可用
+        self.suffix_chk.setToolTip(
+            "勾上：【当前这一个信号】的断言探针探带【去向尾缀】的网(<名>_to_logic / <名>_to_mux)；\n"
+            "取消：探基名裸网(<名>)。压过类型默认。\n\n"
+            "类型默认：logic 输出被下游以 <名>_to_logic 引用时，RTL 真名就带尾缀→默认勾(=RTL 真名)；\n"
+            "mux 输出端口带不带尾缀是【设计相关】(WL=裸名+另有衔接网；Hi1108 rxiq=端口本身叫 _to_logic)，\n"
+            "工具推不出→默认【不勾】(探裸名)。\n\n"
+            "什么时候动它：① mux 输出仿真报 CUVUNF、scan_rtl 查到真名带 _to_logic/_to_mux→勾上(如 rxiq)；\n"
+            "② logic 输出的 <名>_to_logic 恰好撞了另一根真实输入网(如 lo2g5g)→取消勾、探裸名。\n"
+            "(未被下游引用的信号无尾缀可补，本框禁用；= CLI --suffix-signals / --no-suffix-signals。)")
+        self.suffix_chk.stateChanged.connect(self.on_suffix_changed)
+        sigcov.addWidget(self.suffix_chk)
         sigcov.addStretch(1)
         lay.addWidget(sigcov_box)
 
@@ -915,6 +938,60 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_sig_cov_combo(sig)       # 兜底刷新提示
         self._update_cov_hint()
 
+    def _suffix_type_default(self, sig):
+        """该信号尾缀的【类型默认】(无单点覆盖时的状态)：logic 输出跟全局开关、mux 输出默认探裸名。"""
+        if isinstance(sig, excel_model.MuxGroup):
+            return False
+        return self._append_to_logic_on()
+
+    def _set_suffix_chk(self, sig):
+        """加载信号时把「本信号探尾缀网」勾选置到该信号实际生效状态（单点覆盖优先，否则类型默认），
+        不触发重析。无信号 / 该信号未被下游引用(无尾缀可补) → 禁用。"""
+        if not hasattr(self, "suffix_chk"):
+            return
+        name_low = sig.out_name.lower() if sig is not None else None
+        has_suffix = bool(sig is not None and getattr(sig, "ref_suffix", ""))
+        ov = self._suffix_override.get(name_low) if name_low else None
+        effective = ov if ov is not None else (self._suffix_type_default(sig) if sig else False)
+        self._suffix_loading = True
+        try:
+            self.suffix_chk.setEnabled(has_suffix)
+            self.suffix_chk.setChecked(bool(has_suffix and effective))
+        finally:
+            self._suffix_loading = False
+
+    def on_suffix_changed(self, *args):
+        """「本信号探尾缀网」勾选变化：记进 _suffix_override(=类型默认则删除该条，保持映射=偏离项)，
+        存盘 + 重析全表(rtl_base 随之变，必须重建 Resolver)。加载时由 _suffix_loading 守卫避免误触。"""
+        if (self._suffix_loading or self._sig_loading
+                or getattr(self, "_ti_loading", False)):
+            return
+        sig = self._ti_sig if self._ti_sig is not None else getattr(self, "_ti_mux_sig", None)
+        if sig is None:
+            return
+        name_low = sig.out_name.lower()
+        checked = self.suffix_chk.isChecked()
+        if checked == self._suffix_type_default(sig):
+            self._suffix_override.pop(name_low, None)   # 回到类型默认 → 不留偏离项
+        else:
+            self._suffix_override[name_low] = checked
+        self._save_suffix_override()
+        self._reanalyze_all()       # rtl_base 变了 → 重建 Resolver 重析（前缀命中/状态随之刷新）
+
+    def _save_suffix_override(self):
+        """单点尾缀覆盖按 Excel 路径写入 settings（pytest 下 no-op，与 probe_prefixes 同策略）。"""
+        if "pytest" in sys.modules:
+            return
+        st = _load_settings()
+        all_maps = st.get("suffix_override", {})
+        path = self.path_edit.text().strip()
+        if self._suffix_override:
+            all_maps[path] = dict(self._suffix_override)
+        else:
+            all_maps.pop(path, None)
+        st["suffix_override"] = all_maps
+        _save_settings(st)
+
     def _persist_coverage(self):
         """持久化两侧覆盖档（第二十二轮解耦）+ 用例上限（第二十六轮），下次启动恢复。pytest 下 no-op。"""
         st = _load_settings()
@@ -1108,11 +1185,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # 探针前缀按 Excel 路径持久化：换表自动恢复上次配置（须在建 Resolver 前加载——wire 前缀要传进去）
         self._probe_prefixes = dict(_load_settings().get("probe_prefixes", {}).get(path, {}))
         self._force_signals = set(_load_settings().get("force_signals", {}).get(path, []))
+        self._suffix_override = {str(k).strip().lower(): bool(v) for k, v in
+                                 _load_settings().get("suffix_override", {}).get(path, {}).items()
+                                 if str(k).strip()}
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     force_overrides=self._force_signals,
                                     cascade_mode=self._cascade_mode(),
-                                    append_to_logic=self._append_to_logic_on())
+                                    append_to_logic=self._append_to_logic_on(),
+                                    suffix_override=dict(self._suffix_override))
         self._analysis = {}
         # 切换工作簿，清空旧的测试项编辑状态
         self._edited = {}
@@ -1663,7 +1744,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     force_overrides=self._force_signals,
                                     cascade_mode=self._cascade_mode(),
-                                    append_to_logic=self._append_to_logic_on())
+                                    append_to_logic=self._append_to_logic_on(),
+                                    suffix_override=dict(self._suffix_override))
         for i, s in enumerate(self.signals):
             try:
                 self._analysis[i] = self._analyze_one(s)
@@ -1915,6 +1997,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_mux_disp = []; self._ti_gate_row = None       # 输入行显示次序(for_test 对齐)
         self._set_ti_buttons_for_mux(False)                 # 无信号：列编辑按钮恢复可用(原行为)
         self._set_sig_cov_combo(None)                       # 无信号：单点覆盖下拉禁用并复位
+        self._set_suffix_chk(None)                          # 无信号：探尾缀网勾选禁用
         self.ti_header.setText(header_text)
         self._ti_loading = True
         try:
@@ -1964,6 +2047,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_gate_row = next((i for i, e in enumerate(_entries) if e[0] == "gate"), None)
         self._set_ti_buttons_for_mux(False)   # logic 信号：列编辑按钮全可用
         self._set_sig_cov_combo(sig)          # 单点覆盖下拉置到本信号档（不触发重算）
+        self._set_suffix_chk(sig)             # 探尾缀网勾选置到本信号实际状态
         self._ti_bindings = bindings; self._ti_groups = groups
         self._ti_cone = bool(chain)       # 头部/输入表据此标注"已展开上游"
         self._ti_chain = chain            # 展开链(本行+逐层代入的上游行)，cone 信号显示
@@ -2008,6 +2092,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._clear_test_items("")
         self._ti_mux_sig = grp
         self._set_sig_cov_combo(grp)          # 单点覆盖下拉置到本信号档（不触发重算）
+        self._set_suffix_chk(grp)             # 探尾缀网勾选置到本信号实际状态
         self._set_ti_buttons_for_mux(True)    # mux 信号：置灰列结构/CSV 按钮(无 mux 分支)，给准确 tooltip
         exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
         self._ti_mux_exp = exp                # 缓存：导出CSV/用户向量编辑复用(避免重复展开)
@@ -2564,6 +2649,7 @@ class MainWindow(QtWidgets.QMainWindow):
             },
             "probe_prefixes": dict(self._probe_prefixes),
             "force_signals": sorted(self._force_signals),
+            "suffix_override": dict(self._suffix_override),
             "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
             "neg_only": dict(self._neg_only),
             "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
@@ -2593,9 +2679,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cascade_combo.setCurrentIndex(1 if cm == "force" else 0)
             self.cascade_combo.blockSignals(False)
         atl = g.get("append_to_logic")
-        # 缺键(旧配置/含已删的 dft_observe)→ 复位到默认 False(=生产默认不勾)，使「导入这份工作状态」确定性，
-        # 不残留本会话先前的手动切换。
-        atl = atl if isinstance(atl, bool) else False
+        # 缺键(旧配置/含已删的 dft_observe)→ 复位到默认 True(=生产默认勾，2026-06-11 翻回)，使「导入这份
+        # 工作状态」确定性，不残留本会话先前的手动切换。
+        atl = atl if isinstance(atl, bool) else True
         self.append_to_logic_chk.blockSignals(True); self.append_to_logic_chk.setChecked(atl)
         self.append_to_logic_chk.blockSignals(False)
         self._persist_coverage()                 # coverage_logic/mux + max_tests
@@ -2611,7 +2697,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mux_expected = {}; self._mux_neg = set(); self._mux_data = {}
         self._mux_dropped = {}; self._mux_cleared = set(); self._mux_user_vecs = {}
         self._sig_cov = {}
-        self._probe_prefixes = {}; self._force_signals = set()
+        self._probe_prefixes = {}; self._force_signals = set(); self._suffix_override = {}
 
     def on_export_edits(self):
         """导出【完整配置】为 .json（给同事/版本库/跨机器）：信号勾选 + 全局设置 + 探针前缀 +
@@ -2686,10 +2772,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if isinstance(fs, list):
                 self._force_signals = {str(x).strip().lower() for x in fs if str(x).strip()}
                 self._save_force_signals()
+            so = payload.get("suffix_override")
+            if isinstance(so, dict):
+                self._suffix_override = {str(k).strip().lower(): bool(v)
+                                         for k, v in so.items() if str(k).strip()}
+                self._save_suffix_override()
             self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                         force_overrides=self._force_signals,
                                         cascade_mode=self._cascade_mode(),
-                                        append_to_logic=self._append_to_logic_on())
+                                        append_to_logic=self._append_to_logic_on(),
+                                        suffix_override=dict(self._suffix_override))
         n_restored, missing = self._apply_edits_bucket(payload)
         self._sync_neg_checks_from_edits()
         if is_full:
@@ -4235,6 +4327,8 @@ class MainWindow(QtWidgets.QMainWindow):
             mux_user_vecs={k: list(v) for k, v in self._mux_user_vecs.items() if v},
             # 输出引用尾缀开关（2026-06-11 Hi1108）：默认随 Excel 补 _to_logic/_to_mux 当探针网名；关=探基名网
             append_to_logic=self._append_to_logic_on(),
+            # 单点探裸名豁免：撞名信号(如 lo2g5g)即便全局开尾缀也单独不补（压过 append_to_logic）
+            suffix_override=dict(self._suffix_override),
             # 缺前缀强制生成（2026-06-10）：force 子模块内部网缺前缀的信号也照常生成裸名 force，
             # 交给仿真验证此设计是否真需要前缀（=CLI --include-risky）
             include_risky=self._include_risky_on())
