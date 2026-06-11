@@ -180,7 +180,9 @@ def test_render_prefix_file_round_trip(wb, modules):
     text = rtl_scan.render_prefix_file(prefixes, at_top, missing, top_module="LPBT_DIG_TOP")
     parsed = generator.parse_probe_prefix_lines(text)
     assert parsed == prefixes                       # 注释行全部被忽略，映射 1:1 还原
-    assert "pll_n=U_BT_LP_PLL_DIG" in text
+    assert "U_BT_LP_PLL_DIG:" in text               # 合并格式：路径作组头单独一行
+    assert "    pll_n" in text                       # 信号名列在组头之下（缩进）
+    assert "pll_n=" not in text                      # 不再是逐行『名=路径』扁平格式
     assert "# d_en_refbuf_ls" in text               # 顶层信号以注释列出
     assert "d_logic_bt_lp_lna_agc" in text          # 缺失信号也在注释里
 

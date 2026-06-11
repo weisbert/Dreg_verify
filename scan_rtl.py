@@ -225,18 +225,30 @@ def match_nets(nets, sigmap):
 
 
 def render_prefix_file(prefixes, at_top, missing, top_module=""):
-    """输出 probe_prefixes.txt 内容：可直接被 GUI『导入…』/ CLI --probe-prefix-file 使用。"""
+    """输出 probe_prefixes.txt 内容：可直接被 GUI『导入…』/ CLI --probe-prefix-file 使用。
+
+    用【合并格式】——按层级路径分组（『路径:』一行，其下每行一个信号名）。
+    芯片级 dreg 上千个网常挤在同一路径下，分组后路径只写一次，远比逐行『名=路径』短、好读、好填。
+    解析端（generator.parse_probe_prefix_lines）两种格式都认，旧扁平文件继续可用。"""
     lines = ["# 由 scan_rtl.py 自动生成 (DUT top: %s)" % top_module,
-             "# 每行: 信号名=ENV_RF 之下的层级路径", ""]
-    for name, path in sorted(prefixes.items()):
-        lines.append("%s=%s" % (name, path))
+             "# 合并格式：『层级路径:』单独一行，其下每行一个信号名（均在该路径下）。",
+             "# 也兼容旧格式『信号名=路径』。GUI『导入…』/ CLI --probe-prefix-file 都能读。", ""]
+    groups = {}
+    for name, path in prefixes.items():
+        groups.setdefault(path, []).append(name)
+    for path in sorted(groups):
+        lines.append("%s:" % path)
+        lines += ["    %s" % n for n in sorted(groups[path])]
+        lines.append("")
     if at_top:
-        lines += ["", "# ── 以下信号在 DUT 顶层就能探到，无需前缀 ──"]
+        lines += ["# ── 以下信号在 DUT 顶层就能探到，无需前缀 ──"]
         lines += ["# %s" % n for n in at_top]
+        lines.append("")
     if missing:
-        lines += ["", "# ── ⚠ 以下信号在 RTL 中找不到（不可验证，建议反馈 Dreg 团队核对）──"]
+        lines += ["# ── ⚠ 以下信号在 RTL 中找不到（不可验证，建议反馈 Dreg 团队核对）──"]
         lines += ["# %s    (%s)" % (n, why) for n, why in missing]
-    return "\n".join(lines) + "\n"
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 # ───────────────────────────── CLI ─────────────────────────────

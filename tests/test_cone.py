@@ -442,6 +442,52 @@ spaced  =  U_X.Y.
     assert generator.parse_probe_prefix_lines(None) == {}
 
 
+def test_parse_probe_prefix_merged_format():
+    """合并格式：『路径:』组头 + 其下缩进的信号名（scan_rtl 信号多时省去重复路径）。"""
+    text = """
+# 合并格式
+U_TOP1:
+    SIG1
+    SIG2
+    SIG3
+U_TOP1.TOP2:
+    SIG4
+    SIG5
+"""
+    assert generator.parse_probe_prefix_lines(text) == {
+        "sig1": "U_TOP1", "sig2": "U_TOP1", "sig3": "U_TOP1",
+        "sig4": "U_TOP1.TOP2", "sig5": "U_TOP1.TOP2"}
+
+
+def test_parse_probe_prefix_mixed_and_edges():
+    """两种格式可混用；组头之前的裸行仍跳过；空路径组头=顶层无前缀（跳过其下信号）。"""
+    text = """
+loose_no_group
+flat_sig=U_FLAT.SUB.
+U_GRP:
+    grouped_sig
+    annotated_sig   bus[3:0]
+:
+    at_top_sig
+"""
+    assert generator.parse_probe_prefix_lines(text) == {
+        "flat_sig": "U_FLAT.SUB",      # 扁平条目去尾点，不影响后续组头
+        "grouped_sig": "U_GRP",
+        "annotated_sig": "U_GRP"}      # 行尾注解被忽略，取首 token
+    # loose_no_group（组头前裸行）、at_top_sig（空路径组下）均不产生映射
+
+
+def test_render_probe_prefix_grouped_round_trip():
+    """render_probe_prefix_grouped 输出可被 parse 无损还原；空映射 → 空串。"""
+    mapping = {"pll_n": "U_BT_LP_PLL_DIG", "mon_active": "U_BT_LP_PLL_DIG",
+               "xxx": "U_BT_LP_PLL_DIG.DIG_1"}
+    text = generator.render_probe_prefix_grouped(mapping)
+    assert "U_BT_LP_PLL_DIG:" in text and "    pll_n" in text and "    mon_active" in text
+    assert "U_BT_LP_PLL_DIG.DIG_1:" in text and "    xxx" in text
+    assert generator.parse_probe_prefix_lines(text) == mapping     # 往返无损
+    assert generator.render_probe_prefix_grouped({}) == ""
+
+
 def test_probe_prefix_file_cli(tmp_path):
     """CLI --probe-prefix-file 读 GUI 导出的映射文件；命令行 --probe-prefix 同名覆盖文件。"""
     from dreg_verify.cli import _parse_probe_prefixes

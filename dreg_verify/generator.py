@@ -540,22 +540,56 @@ def mux_output_warning(grp, opts):
 
 
 def parse_probe_prefix_lines(text):
-    """探针前缀映射文本 → dict。GUI 编辑器与映射文件共用同一格式：
+    """探针前缀映射文本 → dict。GUI 编辑器与映射文件共用，**两种格式都认**：
 
-        # 注释行
-        pll_n=U_BT_LP_PLL_DIG
-        mon_active=U_BT_LP_PLL_DIG.DIG_1
+      ① 扁平格式（每行一条）：
+            pll_n=U_BT_LP_PLL_DIG
+            mon_active=U_BT_LP_PLL_DIG.DIG_1
 
-    每行 信号名=ENV_RF 下的层级路径。空行/#注释/无等号/空路径 → 跳过。"""
+      ② 合并格式（路径分组，scan_rtl 信号多时省去重复路径，方便填写）：
+            U_BT_LP_PLL_DIG:            ← 『路径:』单独一行
+                pll_n                  ← 其下每行一个信号名，都在该路径下
+                mon_active
+            U_BT_LP_PLL_DIG.DIG_1:
+                xxx
+
+    两种可在同一文件混用。空行/#注释跳过；含『=』按①；以『:』结尾按②的组头；
+    其余裸行=当前组头之下的信号名（无组头在前则跳过）。信号名小写、路径去首尾点。"""
     out = {}
+    cur = None                                     # 合并格式当前组头路径（None=还没遇到组头）
     for ln in (text or "").splitlines():
         ln = ln.strip()
-        if not ln or ln.startswith("#") or "=" not in ln:
+        if not ln or ln.startswith("#"):
             continue
-        name, prefix = ln.split("=", 1)
-        if name.strip() and prefix.strip():
-            out[name.strip().lower()] = prefix.strip().strip(".")
+        if "=" in ln:                              # ① 扁平 信号名=路径（不影响当前组头）
+            name, prefix = ln.split("=", 1)
+            if name.strip() and prefix.strip():
+                out[name.strip().lower()] = prefix.strip().strip(".")
+            continue
+        if ln.endswith(":"):                       # ② 组头『路径:』（空路径=顶层无需前缀）
+            cur = ln[:-1].strip().strip(".")
+            continue
+        if cur:                                    # ② 组头之下的信号名
+            name = ln.split()[0].strip().lower()   # 容忍行尾注解，取首个 token
+            if name:
+                out[name] = cur
     return out
+
+
+def render_probe_prefix_grouped(mapping):
+    """{信号名: 路径} → 合并格式文本（按路径分组，路径只写一次）。
+
+    parse_probe_prefix_lines 可无损还原。空映射 → 空串。GUI 前缀编辑器显示/导出、
+    与 scan_rtl 的 render_prefix_file 同一排版，便于「信号太多」时阅读和手工填写。"""
+    groups = {}
+    for name, path in mapping.items():
+        groups.setdefault(path, []).append(name)
+    lines = []
+    for path in sorted(groups):
+        lines.append("%s:" % path)
+        lines += ["    %s" % n for n in sorted(groups[path])]
+        lines.append("")
+    return "\n".join(lines).rstrip() + ("\n" if mapping else "")
 
 
 def expand_signal(wb, resolver, sig, chain_out=None, fallback_notes=None):

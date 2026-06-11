@@ -1491,15 +1491,18 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.setWindowTitle("探针前缀映射")
         lay = QtWidgets.QVBoxLayout(dlg)
         hint = QtWidgets.QLabel(
-            "每行一条映射：信号名=ENV_RF 之下的层级路径。例如：\n"
-            "    信号实际在  `ENV_RF.U_BT_LP_PLL_DIG.pll_n        →  pll_n=U_BT_LP_PLL_DIG\n"
-            "    信号实际在  `ENV_RF.U_BT_LP_PLL_DIG.DIG_1.xxx    →  xxx=U_BT_LP_PLL_DIG.DIG_1\n"
+            "支持两种写法（可混用）。信号多时推荐【合并格式】——路径只写一次：\n"
+            "    U_BT_LP_PLL_DIG:                  ← 『层级路径:』单独一行\n"
+            "        pll_n                         ← 其下每行一个信号名，都在该路径下\n"
+            "        mon_active\n"
+            "    U_BT_LP_PLL_DIG.DIG_1:\n"
+            "        xxx\n"
+            "扁平写法仍可用：pll_n=U_BT_LP_PLL_DIG（每行一条 信号名=路径）。\n"
             "被验证输出 → assert 探针带层级；force 输入 wire → force 路径带层级。\n"
             "删除行 = 清除映射；# 开头 = 注释。")
         lay.addWidget(hint)
         edit = QtWidgets.QPlainTextEdit()
-        edit.setPlainText("\n".join("%s=%s" % (k, v)
-                                    for k, v in sorted(self._probe_prefixes.items())))
+        edit.setPlainText(generator.render_probe_prefix_grouped(self._probe_prefixes))
         self._mono(edit)
         lay.addWidget(edit)
 
@@ -1528,7 +1531,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             merged = generator.parse_probe_prefix_lines(edit.toPlainText())
             merged.update(generator.parse_probe_prefix_lines(text))
-            edit.setPlainText("\n".join("%s=%s" % (k, v) for k, v in sorted(merged.items())))
+            edit.setPlainText(generator.render_probe_prefix_grouped(merged))
 
         def do_export():
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
