@@ -227,18 +227,18 @@ def match_nets(nets, sigmap):
 def render_prefix_file(prefixes, at_top, missing, top_module=""):
     """输出 probe_prefixes.txt 内容：可直接被 GUI『导入…』/ CLI --probe-prefix-file 使用。
 
-    用【合并格式】——按层级路径分组（『路径:』一行，其下每行一个信号名）。
+    用【合并格式】——按层级路径分组（『路径:』一行，其下信号名逗号分隔挤在一行）。
     芯片级 dreg 上千个网常挤在同一路径下，分组后路径只写一次，远比逐行『名=路径』短、好读、好填。
-    解析端（generator.parse_probe_prefix_lines）两种格式都认，旧扁平文件继续可用。"""
+    解析端（generator.parse_probe_prefix_lines）逗号/空格/每行一个都认，旧扁平文件继续可用。"""
     lines = ["# 由 scan_rtl.py 自动生成 (DUT top: %s)" % top_module,
-             "# 合并格式：『层级路径:』单独一行，其下每行一个信号名（均在该路径下）。",
-             "# 也兼容旧格式『信号名=路径』。GUI『导入…』/ CLI --probe-prefix-file 都能读。", ""]
+             "# 合并格式：『层级路径:』单独一行，其下信号名逗号分隔挤在一行（均在该路径下）。",
+             "# 每行一个、或空格分隔也认；也兼容旧格式『信号名=路径』。GUI『导入…』/ CLI 都能读。", ""]
     groups = {}
     for name, path in prefixes.items():
         groups.setdefault(path, []).append(name)
     for path in sorted(groups):
         lines.append("%s:" % path)
-        lines += ["    %s" % n for n in sorted(groups[path])]
+        lines.append("    " + ", ".join(sorted(groups[path])))
         lines.append("")
     if at_top:
         lines += ["# ── 以下信号在 DUT 顶层就能探到，无需前缀 ──"]

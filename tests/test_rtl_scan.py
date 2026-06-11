@@ -181,7 +181,8 @@ def test_render_prefix_file_round_trip(wb, modules):
     parsed = generator.parse_probe_prefix_lines(text)
     assert parsed == prefixes                       # 注释行全部被忽略，映射 1:1 还原
     assert "U_BT_LP_PLL_DIG:" in text               # 合并格式：路径作组头单独一行
-    assert "    pll_n" in text                       # 信号名列在组头之下（缩进）
+    assert "pll_n" in text and "mon_active" in text  # 信号名列在组头之下
+    assert any(", " in ln for ln in text.splitlines())   # 内联：同路径信号逗号分隔挤一行
     assert "pll_n=" not in text                      # 不再是逐行『名=路径』扁平格式
     assert "# d_en_refbuf_ls" in text               # 顶层信号以注释列出
     assert "d_logic_bt_lp_lna_agc" in text          # 缺失信号也在注释里

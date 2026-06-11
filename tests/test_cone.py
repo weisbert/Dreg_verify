@@ -413,6 +413,52 @@ def test_internal_signal_verifiable_with_prefix(wb):
     assert "`RF_WRITE(10'h2," in text and "`RF_WRITE(10'h3," in text
 
 
+def test_to_logic_suffix_toggle(tmp_path):
+    """append_to_logic 开关（2026-06-11 Hi1108）：默认补 _to_logic 探针网名；关时直接探基名网；
+    _ls 尾缀不受此开关影响（只压 _to_logic 那一支）。
+
+    用【独立 wb】（不复用模块级 fixture）：本测试会把 append_to_logic=False 经 Resolver 写到
+    wb.logic 信号上（持久态，GUI 懒读需要），复用模块 wb 会污染后续直接读 rtl_name 的测试。"""
+    path = tmp_path / "to_logic_toggle.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    wb = excel_model.load_workbook(str(path))
+    # 默认（开）：pll_n1(top_out=0, 被 pll_n2 引用) 探针 = pll_n1_to_logic
+    on = generator.render(generator.build(wb, generator.GenOptions(
+        signals=["pll_n1"], top_output_only=False,
+        probe_prefixes={"pll_n1_to_logic": "U_X"})))
+    assert "`ENV_RF.U_X.pll_n1_to_logic[31:0]==" in on
+    # 关：pll_n1 探针 = 基名 pll_n1（不补 _to_logic），前缀按基名 key 命中
+    off = generator.render(generator.build(wb, generator.GenOptions(
+        signals=["pll_n1"], top_output_only=False, append_to_logic=False,
+        probe_prefixes={"pll_n1": "U_X"})))
+    assert "`ENV_RF.U_X.pll_n1[31:0]==" in off
+    assert "pll_n1_to_logic" not in off                    # 尾缀确实没补
+    # _ls 不受开关影响：d_pfd_en_lnmode(M=ls) 关开关后仍探 d_pfd_en_lnmode_ls
+    off_ls = generator.render(generator.build(wb, generator.GenOptions(
+        signals=["d_pfd_en_lnmode"], append_to_logic=False,
+        probe_prefixes={"d_pfd_en_lnmode_ls": "U_BT_LP_PLL_DIG",
+                        "mon_active": "U_BT_LP_PLL_DIG"})))
+    assert "d_pfd_en_lnmode_ls==" in off_ls
+
+
+def test_cli_no_to_logic_suffix(tmp_path):
+    """CLI --no-to-logic-suffix 端到端：pll_n1 探针落到基名网（不补 _to_logic）；默认仍带 _to_logic。"""
+    from dreg_verify import cli
+    path = tmp_path / "atl_cli.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    out_on = tmp_path / "on.sv"
+    cli.main(["--excel", str(path), "--signals", "pll_n1", "--include-internal",
+              "--probe-prefix", "pll_n1_to_logic=U_X", "--out", str(out_on)])
+    on = out_on.read_text(encoding="utf-8")
+    assert "`ENV_RF.U_X.pll_n1_to_logic[31:0]==" in on
+    out_off = tmp_path / "off.sv"
+    cli.main(["--excel", str(path), "--signals", "pll_n1", "--include-internal",
+              "--no-to-logic-suffix", "--probe-prefix", "pll_n1=U_X", "--out", str(out_off)])
+    off = out_off.read_text(encoding="utf-8")
+    assert "`ENV_RF.U_X.pll_n1[31:0]==" in off
+    assert "pll_n1_to_logic" not in off
+
+
 def test_probe_prefix_cli_parse():
     from dreg_verify.cli import _parse_probe_prefixes
     assert _parse_probe_prefixes(["pll_n=U_BT_LP_PLL_DIG", "x=A.B"]) == {
@@ -443,7 +489,7 @@ spaced  =  U_X.Y.
 
 
 def test_parse_probe_prefix_merged_format():
-    """合并格式：『路径:』组头 + 其下缩进的信号名（scan_rtl 信号多时省去重复路径）。"""
+    """合并格式：『路径:』组头 + 其下信号名（每行一个）。"""
     text = """
 # 合并格式
 U_TOP1:
@@ -459,30 +505,50 @@ U_TOP1.TOP2:
         "sig4": "U_TOP1.TOP2", "sig5": "U_TOP1.TOP2"}
 
 
+def test_parse_probe_prefix_inline_format():
+    """合并格式·一行多个：组头之下信号名逗号/空格分隔（scan_rtl 默认导出）。"""
+    text = """
+U_TOP1:
+    SIG1, SIG2, SIG3
+U_TOP1.TOP2:
+    SIG3, SIG4
+"""
+    # SIG3 在两个路径下出现 → 后者覆盖前者（dict 语义，与每行一个一致）
+    assert generator.parse_probe_prefix_lines(text) == {
+        "sig1": "U_TOP1", "sig2": "U_TOP1",
+        "sig3": "U_TOP1.TOP2", "sig4": "U_TOP1.TOP2"}
+    # 边界：尾逗号、多空格、逗号+空格混排、位宽切片整体作一个名（不被内部冒号当组头/拆分）、
+    # 行尾 # 注释被忽略（不变成假信号名）
+    edge = "U_X:\n    A, B,\n    C   D\n    E,F  G\n    dout[7:0]\n    H, I  # 这是注释\n"
+    assert generator.parse_probe_prefix_lines(edge) == {
+        "a": "U_X", "b": "U_X", "c": "U_X", "d": "U_X",
+        "e": "U_X", "f": "U_X", "g": "U_X", "dout[7:0]": "U_X",
+        "h": "U_X", "i": "U_X"}
+
+
 def test_parse_probe_prefix_mixed_and_edges():
-    """两种格式可混用；组头之前的裸行仍跳过；空路径组头=顶层无前缀（跳过其下信号）。"""
+    """三种格式可混用；组头之前的裸行仍跳过；空路径组头=顶层无前缀（跳过其下信号）。"""
     text = """
 loose_no_group
 flat_sig=U_FLAT.SUB.
 U_GRP:
-    grouped_sig
-    annotated_sig   bus[3:0]
+    grouped_sig, second_sig
 :
     at_top_sig
 """
     assert generator.parse_probe_prefix_lines(text) == {
         "flat_sig": "U_FLAT.SUB",      # 扁平条目去尾点，不影响后续组头
         "grouped_sig": "U_GRP",
-        "annotated_sig": "U_GRP"}      # 行尾注解被忽略，取首 token
+        "second_sig": "U_GRP"}         # 同一行逗号分隔的多个名
     # loose_no_group（组头前裸行）、at_top_sig（空路径组下）均不产生映射
 
 
 def test_render_probe_prefix_grouped_round_trip():
-    """render_probe_prefix_grouped 输出可被 parse 无损还原；空映射 → 空串。"""
+    """render_probe_prefix_grouped 输出（内联）可被 parse 无损还原；空映射 → 空串。"""
     mapping = {"pll_n": "U_BT_LP_PLL_DIG", "mon_active": "U_BT_LP_PLL_DIG",
                "xxx": "U_BT_LP_PLL_DIG.DIG_1"}
     text = generator.render_probe_prefix_grouped(mapping)
-    assert "U_BT_LP_PLL_DIG:" in text and "    pll_n" in text and "    mon_active" in text
+    assert "U_BT_LP_PLL_DIG:" in text and "    mon_active, pll_n" in text   # 内联、排序后逗号分隔
     assert "U_BT_LP_PLL_DIG.DIG_1:" in text and "    xxx" in text
     assert generator.parse_probe_prefix_lines(text) == mapping     # 往返无损
     assert generator.render_probe_prefix_grouped({}) == ""

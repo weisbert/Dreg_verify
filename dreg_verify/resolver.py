@@ -93,7 +93,7 @@ class InputBinding:
 class Resolver:
     def __init__(self, wb, force_overrides=None, rfwrite_overrides=None,
                  default_kind=None, wire_fallback=True, wire_prefixes=None,
-                 cascade_mode="cone"):
+                 cascade_mode="cone", append_to_logic=True):
         """
         wb: DregWorkbook
         force_overrides / rfwrite_overrides: 基名集合(小写比较)，强制 RO / RW。
@@ -116,6 +116,12 @@ class Resolver:
         self.wire_fallback = wire_fallback
         self.wire_prefixes = {k.lower(): v for k, v in (wire_prefixes or {}).items()}
         self.cascade_mode = cascade_mode if cascade_mode in ("cone", "force") else "cone"
+        # _to_logic 输出尾缀开关（2026-06-11 Hi1108）：把开关回填到每个 logic 信号，rtl_base 据此决定
+        # top_output=0 被下游引用的输出探针网名补不补 _to_logic。【必须在建 _logic_outputs 缓存(读
+        # s.rtl_base)之前做】，使缓存与探针网名一致。默认 True=保持 LPBT 行为；只影响输出、不动输入级联网/_ls。
+        self.append_to_logic = bool(append_to_logic)
+        for s in wb.logic:
+            s._append_to_logic = self.append_to_logic
         # 预建小写索引，便于不区分大小写匹配
         self._tmm_lower = {k.lower(): v for k, v in wb.tmm.items()}
         self._regmap_lower = {k.lower(): v for k, v in wb.regmap.items()}

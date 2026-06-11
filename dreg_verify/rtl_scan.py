@@ -40,6 +40,9 @@ def collect_excel_nets(wb):
 
     nets = {}
     for sig in wb.logic:
+        # 探针网名用默认尾缀(LPBT 约定的真实网名)，显式设定使其不受同进程内先前 Resolver 的
+        # append_to_logic 开关残留影响（scan 找的是 RTL 真实网名；--no-to-logic-suffix 不经此路）。
+        sig._append_to_logic = True
         kind = "" if sig.is_top else "（内部信号）"
         nets.setdefault(sig.rtl_base, "输出 %s 的 assert 探针%s" % (sig.out_name, kind))
     # 两种级联模式各跑一遍解析，导出网取并集

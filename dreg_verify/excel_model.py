@@ -41,6 +41,10 @@ class LogicSignal:
         self.inputs = inputs
         # 是否被下游 logic 行以 <名>_to_logic 引用（read_logic 装载后回填；决定 RTL 网名后缀）
         self.to_logic_ref = False
+        # _to_logic 尾缀开关（2026-06-11，Resolver 据 GenOptions.append_to_logic 回填）：False=即便
+        # to_logic_ref 也不补 _to_logic，直接探基名网（某些设计 <名>_to_logic 撞了真实输入网时用）。
+        # to_logic_ref 保持不变(=客观事实)，只由本开关 AND 决定是否真正追加。默认 True=旧行为。
+        self._append_to_logic = True
 
     @property
     def is_top(self):
@@ -49,9 +53,11 @@ class LogicSignal:
 
     @property
     def rtl_base(self):
-        """RTL 真实网名(去位宽)。ls 行带 _ls 后缀；被下游引用的内部信号带 _to_logic 后缀。"""
+        """RTL 真实网名(去位宽)。ls 行带 _ls 后缀；被下游引用的内部信号带 _to_logic 后缀
+        （_append_to_logic 关时不补 _to_logic，直接探基名；_ls 不受此开关影响）。"""
+        tlr = self.to_logic_ref and getattr(self, "_append_to_logic", True)
         return rtl_net_name(self.out_base, self.suffix,
-                            is_top=self.is_top, to_logic_ref=self.to_logic_ref)
+                            is_top=self.is_top, to_logic_ref=tlr)
 
     @property
     def rtl_name(self):
@@ -692,7 +698,7 @@ class DregWorkbook:
         self.tmm = tmm                  # dict
         self.sheet_names = sheet_names
         self.mux = mux if mux is not None else []   # list[MuxGroup]（无 mux 页 = 空列表）
-        # {输出基名low: 门控信息}（dft 页；无 dft 页=空）。DFT 观测模式用，见 read_dft。
+        # {输出基名low: 门控信息}（dft 页；无 dft 页=空）。iddq DFT 拍 / pin_dft_gate 用，见 read_dft。
         self.dft = dft if dft is not None else {}
         # {输出基名low: [输入基名low顺序]}（for_test 页；无/空页=空）。真值表输入行排序对照用。
         self.fortest_order = fortest_order if fortest_order is not None else {}
@@ -717,7 +723,8 @@ def read_dft(ws, header_row=2):
     `B?0:A` 含义：门 B=0 → 输出取功能值 A(透传)；B=1 → 输出强制 0(IDDQ 漏电测试)。
     返回 {输出基名low: {"gate_base": 门基名low, "gate_raw": 门原文, "transparent": 0/1}}。
     只收能识别成"单条件门 cond?0:x / cond?x:0"的行（其余跳过，不乱猜）。
-    用途：DFT 观测模式把门 force 到 transparent 值，使被门控输出反映功能值（= for_test 的 iddq=0 做法）。
+    用途：iddq DFT 拍把门 force 到非透传支(=1，输出压常量 0)、pin_dft_gate 把门当显式输入 force 到
+    透传值，对照 designer 的 for_test（iddq=0 做法）。
     """
     out = {}
     if ws is None:

@@ -628,15 +628,19 @@ class MainWindow(QtWidgets.QMainWindow):
         cascade_help.setFixedWidth(24)
         cascade_help.setToolTip("级联模式帮助：两种模式的图解与选择建议(程序内置窗口)")
         cascade_help.clicked.connect(self._open_cascade_doc)
-        # DFT 观测模式：被验证输出走 _to_dft 且被 iddq 门控时，产物开头 force 门到透传值(iddq=0)
-        self.dft_observe_chk = QtWidgets.QCheckBox("DFT观测")
-        self.dft_observe_chk.setToolTip(
-            "被验证输出走 _to_dft、被 iddq 门控时：在产物开头 force iddq 门到透传值(=0)，\n"
-            "使我们断言的基名网反映功能值——与 for_test 一致。\n"
-            "（iddq_mode 多为 RO、默认 0，不开多半也对；开了更确定、且匹配 for_test。默认关=直探内部网。）")
-        if _load_settings().get("dft_observe"):
-            self.dft_observe_chk.setChecked(True)
-        self.dft_observe_chk.stateChanged.connect(self.on_dft_observe_changed)
+        # 输出 _to_logic 尾缀开关（2026-06-11 Hi1108）：top_output=0 且被下游以 <名>_to_logic 引用的
+        # 输出，默认补 _to_logic 当探针网名；关掉=直接探基名网。默认勾选=保持 LPBT 行为。
+        self.append_to_logic_chk = QtWidgets.QCheckBox("输出加_to_logic尾缀")
+        self.append_to_logic_chk.setChecked(True)
+        self.append_to_logic_chk.setToolTip(
+            "默认勾选（LPBT 实证）：top_output=0 的输出若被下游 logic 以 <名>_to_logic 引用，\n"
+            "断言探针网名补 _to_logic（如 pll_n → pll_n_to_logic）。\n\n"
+            "取消勾选 = 直接探基名网（如 pll_n）。用于某些设计里 <名>_to_logic 恰好是另一个真实\n"
+            "输入网、补了尾缀就探错对象的情况（如 Hi1108 d_wl_rf_..._en 的 _to_logic 撞输入网）。\n"
+            "（只影响输出探针；输入级联网与 _ls 尾缀不受此开关影响。= CLI --no-to-logic-suffix）")
+        if "pytest" not in sys.modules:
+            self.append_to_logic_chk.setChecked(bool(_load_settings().get("append_to_logic", True)))
+        self.append_to_logic_chk.stateChanged.connect(self.on_append_to_logic_changed)
         # 缺前缀强制生成（2026-06-10 Hi1108）：默认"force 子模块内部网缺前缀=跳过"是 LPBT/Hi1107C
         # 的实证结论——新设计层级可能不同，根本不需要前缀。开了就照常生成裸名 force 交给仿真验证。
         self.include_risky_chk = QtWidgets.QCheckBox("缺前缀强制生成")
@@ -655,7 +659,7 @@ class MainWindow(QtWidgets.QMainWindow):
                   QtWidgets.QLabel("mux覆盖:"), self.coverage_mux, self.cov_hint,
                   QtWidgets.QLabel("   上限"), self.max_tests,
                   QtWidgets.QLabel("   级联:"), self.cascade_combo, cascade_help,
-                  self.dft_observe_chk, self.include_risky_chk):
+                  self.append_to_logic_chk, self.include_risky_chk):
             opt.addWidget(w)
         opt.addStretch(1)
         root.addLayout(opt)
@@ -942,11 +946,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("级联模式已切换为『%s』——含级联输入的信号已按新模式重新解析"
                                 % self.cascade_combo.currentText())
 
-    def on_dft_observe_changed(self, *args):
-        """DFT 观测模式切换：持久化 + 刷新预览（只影响产物前导 force，不改各信号真值表/解析）。"""
+    def _append_to_logic_on(self):
+        return (self.append_to_logic_chk.isChecked()
+                if hasattr(self, "append_to_logic_chk") else True)
+
+    def on_append_to_logic_changed(self, *args):
+        """输出 _to_logic 尾缀开关切换：持久化 + 重建 Resolver 重析全表（影响所有 top_out=0 被引用
+        输出的探针网名 → 左表 out_net / 状态 / 预览全变）。"""
         st = _load_settings()
-        st["dft_observe"] = self.dft_observe_chk.isChecked()
+        st["append_to_logic"] = self.append_to_logic_chk.isChecked()
         _save_settings(st)
+        if self.wb is not None:
+            self._reanalyze_all()
         self._refresh_preview()
 
     def _include_risky_on(self):
@@ -1088,7 +1099,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     force_overrides=self._force_signals,
-                                    cascade_mode=self._cascade_mode())
+                                    cascade_mode=self._cascade_mode(),
+                                    append_to_logic=self._append_to_logic_on())
         self._analysis = {}
         # 切换工作簿，清空旧的测试项编辑状态
         self._edited = {}
@@ -1491,10 +1503,9 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.setWindowTitle("探针前缀映射")
         lay = QtWidgets.QVBoxLayout(dlg)
         hint = QtWidgets.QLabel(
-            "支持两种写法（可混用）。信号多时推荐【合并格式】——路径只写一次：\n"
+            "支持多种写法（可混用）。信号多时推荐【合并格式】——路径只写一次：\n"
             "    U_BT_LP_PLL_DIG:                  ← 『层级路径:』单独一行\n"
-            "        pll_n                         ← 其下每行一个信号名，都在该路径下\n"
-            "        mon_active\n"
+            "        pll_n, mon_active             ← 其下信号名逗号/空格分隔（每行一个也可以）\n"
             "    U_BT_LP_PLL_DIG.DIG_1:\n"
             "        xxx\n"
             "扁平写法仍可用：pll_n=U_BT_LP_PLL_DIG（每行一条 信号名=路径）。\n"
@@ -1634,7 +1645,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """探针前缀/级联模式变更后重建 Resolver（两者都影响所有信号的输入解析）并刷新全表。"""
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     force_overrides=self._force_signals,
-                                    cascade_mode=self._cascade_mode())
+                                    cascade_mode=self._cascade_mode(),
+                                    append_to_logic=self._append_to_logic_on())
         for i, s in enumerate(self.signals):
             try:
                 self._analysis[i] = self._analyze_one(s)
@@ -2531,7 +2543,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "coverage_mux": self.coverage_mux.currentText(),
                 "max_tests": self.max_tests.value(),
                 "cascade_mode": self._cascade_mode(),
-                "dft_observe": bool(self.dft_observe_chk.isChecked()),
+                "append_to_logic": bool(self.append_to_logic_chk.isChecked()),
             },
             "probe_prefixes": dict(self._probe_prefixes),
             "force_signals": sorted(self._force_signals),
@@ -2547,8 +2559,8 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _apply_global_settings(self, g):
-        """导入：套用全局工具栏设置(覆盖度/上限/级联/DFT)。blockSignals 设值，避免逐项触发联动
-        (resolver 重建/编辑器重载由调用方统一做一次)；并写入 settings 持久化。"""
+        """导入：套用全局工具栏设置(覆盖度/上限/级联/_to_logic 尾缀)。blockSignals 设值，避免逐项触发
+        联动(resolver 重建/编辑器重载由调用方统一做一次)；并写入 settings 持久化。"""
         if not isinstance(g, dict):
             return
         for combo, key in ((self.coverage, "coverage_logic"), (self.coverage_mux, "coverage_mux")):
@@ -2563,14 +2575,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cascade_combo.blockSignals(True)
             self.cascade_combo.setCurrentIndex(1 if cm == "force" else 0)
             self.cascade_combo.blockSignals(False)
-        dft = g.get("dft_observe")
-        if isinstance(dft, bool):
-            self.dft_observe_chk.blockSignals(True); self.dft_observe_chk.setChecked(dft)
-            self.dft_observe_chk.blockSignals(False)
+        atl = g.get("append_to_logic")
+        # 缺键(旧配置/含已删的 dft_observe)→ 复位到默认 True，使「导入这份工作状态」确定性=LPBT 行为，
+        # 不残留本会话先前的手动切换。
+        atl = atl if isinstance(atl, bool) else True
+        self.append_to_logic_chk.blockSignals(True); self.append_to_logic_chk.setChecked(atl)
+        self.append_to_logic_chk.blockSignals(False)
         self._persist_coverage()                 # coverage_logic/mux + max_tests
         st = _load_settings()
         st["cascade_mode"] = self._cascade_mode()
-        st["dft_observe"] = bool(self.dft_observe_chk.isChecked())
+        st["append_to_logic"] = bool(self.append_to_logic_chk.isChecked())
         _save_settings(st)
 
     def _reset_all_config_state(self):
@@ -2657,7 +2671,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._save_force_signals()
             self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                         force_overrides=self._force_signals,
-                                        cascade_mode=self._cascade_mode())
+                                        cascade_mode=self._cascade_mode(),
+                                        append_to_logic=self._append_to_logic_on())
         n_restored, missing = self._apply_edits_bucket(payload)
         self._sync_neg_checks_from_edits()
         if is_full:
@@ -4201,9 +4216,8 @@ class MainWindow(QtWidgets.QMainWindow):
             mux_cleared=sorted(self._mux_cleared),
             # mux 用户手编/复制/负向列（第二十八轮）：注入 build/report(make_mux_vectors 之后)，与 logic 平级
             mux_user_vecs={k: list(v) for k, v in self._mux_user_vecs.items() if v},
-            # DFT 观测模式（续②）：产物开头 force iddq 门到透传值，使 _to_dft 输出反映功能值
-            dft_observe=(self.dft_observe_chk.isChecked()
-                         if hasattr(self, "dft_observe_chk") else False),
+            # 输出 _to_logic 尾缀开关（2026-06-11 Hi1108）：默认补 _to_logic 当探针网名；关=探基名网
+            append_to_logic=self._append_to_logic_on(),
             # 缺前缀强制生成（2026-06-10）：force 子模块内部网缺前缀的信号也照常生成裸名 force，
             # 交给仿真验证此设计是否真需要前缀（=CLI --include-risky）
             include_risky=self._include_risky_on())

@@ -44,9 +44,6 @@ class TestVector:
         self.extra_forces = []
         # 本拍后须 release 的网名（force 门=1 后必须释放，否则后续拍门钉死=S4）：[wire_lhs]。
         self.release_nets = []
-        # 本拍后须【重新 force 回某值】的网（dft_observe 开时：DFT 拍不能 release 门——会连带抹掉全局
-        # 前导 force iddq=透传，污染后续被门控块——而要 force 回透传值恢复前导态）：[(wire_lhs,val,width)]。
-        self.restore_forces = []
 
     @property
     def asserted_value(self):
@@ -321,7 +318,6 @@ def clone_vector(v):
     nv.dft_pitch = v.dft_pitch
     nv.extra_forces = list(v.extra_forces)
     nv.release_nets = list(v.release_nets)
-    nv.restore_forces = list(v.restore_forces)
     return nv
 
 

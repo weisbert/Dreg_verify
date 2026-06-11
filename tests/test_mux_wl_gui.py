@@ -56,6 +56,69 @@ def lpbt_win(gui_app, tmp_path):
     w.close()
 
 
+def test_append_to_logic_toggle_gui(gui_app, tmp_path):
+    """GUI『输出加_to_logic尾缀』开关（2026-06-11 Hi1108）：默认开→pll_n1(top_out=0,被引用)探针带
+    _to_logic；关→直接探基名；resolver/_opts 同步、重析无碍、可来回切。"""
+    from dreg_verify import gui as G
+    excel = tmp_path / "atl.xlsx"
+    fixtures.build_workbook(str(excel), with_pll_chain=True, with_mux=True)
+    w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
+    try:
+        assert w.append_to_logic_chk.isChecked()           # 默认勾选=保持 LPBT 行为
+        assert w._opts(["pll_n1"]).append_to_logic is True
+        assert w._resolver.append_to_logic is True
+        sig = next(s for s in w.signals if getattr(s, "out_base", "") == "pll_n1")
+        assert sig.rtl_name == "pll_n1_to_logic[31:0]"     # 开：探针网名补 _to_logic
+        # 取消勾选 → on_append_to_logic_changed 触发重析(重建 Resolver，回填 _append_to_logic=False)
+        w.append_to_logic_chk.setChecked(False)
+        assert w._resolver.append_to_logic is False
+        assert w._opts(["pll_n1"]).append_to_logic is False
+        assert sig.rtl_name == "pll_n1[31:0]"              # 关：直接探基名网
+        # 勾回 → 复原
+        w.append_to_logic_chk.setChecked(True)
+        assert w._resolver.append_to_logic is True
+        assert sig.rtl_name == "pll_n1_to_logic[31:0]"
+    finally:
+        w.close()
+
+
+def test_append_to_logic_config_roundtrip(gui_app, tmp_path, monkeypatch):
+    """配置导入导出含 append_to_logic：导出 OFF→导入还原 OFF（checkbox/resolver/_opts/.sv 全 OFF）；
+    套用缺该键的全局设置→确定性复位 True（不残留本会话切换）。"""
+    import json
+    from PySide6 import QtWidgets
+    from dreg_verify import gui as G
+    excel = tmp_path / "atl_cfg.xlsx"
+    fixtures.build_workbook(str(excel), with_pll_chain=True, with_mux=True)
+    w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
+    try:
+        sig = next(s for s in w.signals if getattr(s, "out_base", "") == "pll_n1")
+        # 关开关 → 导出配置（global 含 append_to_logic=False）
+        w.append_to_logic_chk.setChecked(False)
+        cfg = w._collect_config()
+        assert cfg["global"]["append_to_logic"] is False
+        cfg_path = tmp_path / "cfg.json"
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        # 模拟新会话：开关复位 True
+        w.append_to_logic_chk.setChecked(True)
+        assert sig.rtl_name == "pll_n1_to_logic[31:0]"
+        # 导入该配置 → 还原 OFF（含 resolver 重建）。monkeypatch 文件对话框 + 完成提示框
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                            staticmethod(lambda *a, **k: (str(cfg_path), "")))
+        monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                            staticmethod(lambda *a, **k: None))
+        w.on_import_edits()
+        assert w.append_to_logic_chk.isChecked() is False
+        assert w._resolver.append_to_logic is False
+        assert w._opts(["pll_n1"]).append_to_logic is False
+        assert sig.rtl_name == "pll_n1[31:0]"
+        # 确定性：套用缺 append_to_logic 键的全局设置（如旧配置）→ 复位 True
+        w._apply_global_settings({"coverage_logic": "精简"})
+        assert w.append_to_logic_chk.isChecked() is True
+    finally:
+        w.close()
+
+
 def _mux_idx(w, out_base):
     """按 out_base 找到该 mux 组在 signals 里的行号。"""
     for i, s in enumerate(w.signals):

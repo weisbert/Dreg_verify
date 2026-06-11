@@ -24,7 +24,7 @@ class GenOptions:
                  vector_overrides=None, probe_prefixes=None,
                  owner_in_msg=False, sv_summary=False, negative_vectors_only=False,
                  cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None,
-                 dft_observe=False, logic_mode=None, mux_mode=None, sig_cov=None,
+                 append_to_logic=True, logic_mode=None, mux_mode=None, sig_cov=None,
                  mux_dropped=None, mux_cleared=None, mux_user_vecs=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
@@ -82,9 +82,10 @@ class GenOptions:
         # （与 by_base/点名法同口径——覆盖度切换/case 重排都稳）。
         self.mux_data = {str(k).lower(): {str(bk).lower(): int(bv) for bk, bv in v.items()}
                          for k, v in (mux_data or {}).items() if v}
-        # DFT 观测模式（第二十轮续②）：被验证输出走 _to_dft 且被 iddq 门控时，在产物开头 force 门到
-        # 透传值(iddq=0)，使我们断言的基名网反映功能值——= for_test 的做法。默认关（直探内部网为主）。
-        self.dft_observe = bool(dft_observe)
+        # 输出 _to_logic 尾缀开关（2026-06-11 Hi1108）：top_output=0 且被下游以 <名>_to_logic 引用的
+        # 输出，默认补 _to_logic 当探针网名（LPBT 实证）。某些设计里 <名>_to_logic 恰是另一个真实
+        # 输入网，补了就探错对象——关掉则直接探基名网。默认 True=保持 LPBT 行为；_ls 尾缀不受影响。
+        self.append_to_logic = bool(append_to_logic)
         # 覆盖档位 logic/mux 解耦（第二十二轮，用户拍板互不绑定）：logic_mode/mux_mode ∈
         # {min,max,exhaustive}。未显式传(=None)则该侧回退到 (mode, exhaustive) 合成的档位——
         # 所有旧调用方(CLI/GUI/436 测试)不传新参时产物逐字节不变。读取统一走
@@ -319,41 +320,7 @@ def mux_data_for(opts, grp):
             or opts.mux_data.get(grp.out_base.lower()) or None)
 
 
-def dft_force_preamble(wb, resolver, gen_bases, opts):
-    """DFT 观测模式产物前导：被生成的输出里凡在 dft 页被门控的，把其门(iddq)force 到透传值。
-
-    门通常全表统一(iddq_mode)，按门去重只 force 一次。透传后我们断言的基名网=功能值（= for_test）。
-    门是 RO 线 → force；RW → 提示 RF_WRITE；无法解析 → 留 ⚠ 注释（用户手动设）。返回 (lines, warnings)。
-    """
-    if not opts.dft_observe or not getattr(wb, "dft", None):
-        return [], []
-    gates = {}      # gate_base_low -> (gate_raw, transparent)
-    for ob in gen_bases:
-        g = wb.dft.get(ob)
-        if g:
-            gates.setdefault(g["gate_base"], (g["gate_raw"], g["transparent"]))
-    if not gates:
-        return [], []
-    lines = ["// ⚙ DFT 观测模式：force DFT 门到透传值，"
-             "使被门控的 _to_dft 输出反映功能值（= for_test 的 iddq=0）"]
-    warns = []
-    for gb, (graw, transp) in sorted(gates.items()):
-        info = {"raw": gb, "base": gb, "width": 1, "msb": None, "lsb": None}
-        b = resolver.resolve("dft_gate_" + gb, info)
-        if b.resolved and b.kind == "RO":
-            lines.append("force `%s.%s = 1'b%d;" % (W.ENV, b.wire_lhs, transp))
-        elif b.resolved and b.kind == "RW" and b.address is not None:
-            lines.append("// ⚠ DFT 门 %s 是 RW(addr 0x%X)，请用 RF_WRITE 设字段=%d"
-                         % (gb, b.address, transp))
-            warns.append((gb, "DFT 门是 RW，需 RF_WRITE 设=%d" % transp))
-        else:
-            lines.append("// ⚠ DFT 门 %s 无法解析为可 force 的网，请手动设 =%d（%s）"
-                         % (gb, transp, b.note or ""))
-            warns.append((gb, "DFT 门无法解析，需手动设 =%d" % transp))
-    return lines, warns
-
-
-def _append_dft_vectors(out_base, vecs, wb, resolver, dft_observe=False):
+def _append_dft_vectors(out_base, vecs, wb, resolver):
     """item③ iddq DFT 态拍（第二十二轮）：被 dft 页门控的输出，在功能向量外追加一条 DFT 态拍——
     force 门(iddq)到选中【常量支】的值、断言输出=该常量(0)，该拍后还原门态（S4：否则 force 的
     iddq=1 会钉死后续所有拍/块的门）。
@@ -361,15 +328,14 @@ def _append_dft_vectors(out_base, vecs, wb, resolver, dft_observe=False):
     所有覆盖档都补（2026-06-10 Hi1108 实地反馈：精简档原本跳过且无任何标注，用户对照 for_test
     发现 mixer2g_trim 整个少了 iddq 这个源头控制——精简裁的是数据/case 组合数量，不该漏掉一个
     输入源；designer 的 for_test 最小集也带 iddq，且每个被门控输出只多 1 条向量）。
-    原地追加进 vecs（T 编号由调用方统一重排）。
-    dft_observe：开时全局前导已 force 门=透传，本拍不能 release(会连带抹掉前导→污染后续被门控块=评审
-    blocker)，须 force 回透传值恢复前导态；关时无前导，release 让门回 RTL 默认(透传)即可。
+    原地追加进 vecs（T 编号由调用方统一重排）。本拍后 release 门，让门回 RTL 默认(透传)（S4：否则
+    force 的 iddq=1 会钉死后续所有拍/块的门）。
     返回 None（正常补 / 该输出无 dft 门 → 无需补）或 str（被门控但补不了的原因，供 meta['iddq_skipped']）。
     """
     g = wb.dft.get(out_base) if getattr(wb, "dft", None) else None
     if not g:
         return None                                   # 该输出不被 dft 门控 → 无需 DFT 拍
-    # 门网解析（与 dft_force_preamble 同口径）：必须是可 force 的 RO 网
+    # 门网解析（与 pin_dft_gate 同口径）：必须是可 force 的 RO 网
     info = {"raw": g["gate_base"], "base": g["gate_base"], "width": 1, "msb": None, "lsb": None}
     b = resolver.resolve("dft_gate_" + g["gate_base"], info)
     if not (b.resolved and b.kind == "RO"):
@@ -387,10 +353,7 @@ def _append_dft_vectors(out_base, vecs, wb, resolver, dft_observe=False):
                       note="IDDQ 漏电态：门=1 应把输出压到常量支(0)（dft 页 %s）" % g["gate_raw"])
     dv.dft_pitch = True
     dv.extra_forces = [(b.wire_lhs, gate_val, 1)]     # 额外 force iddq 门=常量支值
-    if dft_observe:
-        dv.restore_forces = [(b.wire_lhs, transp, 1)]  # 还原全局前导态（透传），不 release（评审 blocker）
-    else:
-        dv.release_nets = [b.wire_lhs]                # 无前导：release 让门回 RTL 默认(透传)（S4）
+    dv.release_nets = [b.wire_lhs]                    # 本拍后 release，让门回 RTL 默认(透传)（S4）
     vecs.append(dv)
     return None
 
@@ -546,15 +509,16 @@ def parse_probe_prefix_lines(text):
             pll_n=U_BT_LP_PLL_DIG
             mon_active=U_BT_LP_PLL_DIG.DIG_1
 
-      ② 合并格式（路径分组，scan_rtl 信号多时省去重复路径，方便填写）：
-            U_BT_LP_PLL_DIG:            ← 『路径:』单独一行
-                pll_n                  ← 其下每行一个信号名，都在该路径下
-                mon_active
+      ② 合并格式（路径分组，scan_rtl 信号多时省去重复路径，方便填写）。
+         『路径:』单独一行，其下的信号名可【每行一个】，也可【一行多个、逗号或空格分隔】：
+            U_BT_LP_PLL_DIG:
+                pll_n, mon_active      ← 一行多个：逗号 / 空格都能分隔
             U_BT_LP_PLL_DIG.DIG_1:
-                xxx
+                xxx                    ← 每行一个也可以
 
-    两种可在同一文件混用。空行/#注释跳过；含『=』按①；以『:』结尾按②的组头；
-    其余裸行=当前组头之下的信号名（无组头在前则跳过）。信号名小写、路径去首尾点。"""
+    三种可在同一文件混用。空行/#注释跳过；含『=』按①；以『:』结尾按②的组头；
+    其余裸行=当前组头之下的信号名（按逗号+空格拆成多个，无组头在前则跳过）。
+    信号名小写、路径去首尾点。（注：位宽切片 sig[3:0] 不含逗号/空格、不以『:』结尾，整体作一个名。）"""
     out = {}
     cur = None                                     # 合并格式当前组头路径（None=还没遇到组头）
     for ln in (text or "").splitlines():
@@ -569,10 +533,9 @@ def parse_probe_prefix_lines(text):
         if ln.endswith(":"):                       # ② 组头『路径:』（空路径=顶层无需前缀）
             cur = ln[:-1].strip().strip(".")
             continue
-        if cur:                                    # ② 组头之下的信号名
-            name = ln.split()[0].strip().lower()   # 容忍行尾注解，取首个 token
-            if name:
-                out[name] = cur
+        if cur:                                    # ② 组头之下的信号名（一行可多个，逗号/空格分隔）
+            for tok in ln.split("#", 1)[0].replace(",", " ").split():   # 去行尾 # 注释再拆
+                out[tok.lower()] = cur
     return out
 
 
@@ -580,14 +543,15 @@ def render_probe_prefix_grouped(mapping):
     """{信号名: 路径} → 合并格式文本（按路径分组，路径只写一次）。
 
     parse_probe_prefix_lines 可无损还原。空映射 → 空串。GUI 前缀编辑器显示/导出、
-    与 scan_rtl 的 render_prefix_file 同一排版，便于「信号太多」时阅读和手工填写。"""
+    与 scan_rtl 的 render_prefix_file 同一排版（信号名逗号分隔挤在一行），便于「信号太多」时
+    阅读和手工填写。parse 端逗号/空格都能拆，故往返无损。"""
     groups = {}
     for name, path in mapping.items():
         groups.setdefault(path, []).append(name)
     lines = []
     for path in sorted(groups):
         lines.append("%s:" % path)
-        lines += ["    %s" % n for n in sorted(groups[path])]
+        lines.append("    " + ", ".join(sorted(groups[path])))
         lines.append("")
     return "\n".join(lines).rstrip() + ("\n" if mapping else "")
 
@@ -671,7 +635,8 @@ def build(wb, opts):
                           default_kind=opts.default_kind,
                           wire_fallback=opts.wire_fallback,
                           wire_prefixes=opts.probe_prefixes,
-                          cascade_mode=opts.cascade_mode)
+                          cascade_mode=opts.cascade_mode,
+                          append_to_logic=opts.append_to_logic)
     selected = select_signals(wb, opts)
     filtered_internal = filtered_internal_signals(wb, opts)   # 默认静默滤掉的内部节点(可见性用)
     blocks = []
@@ -769,8 +734,7 @@ def build(wb, opts):
         # item③ iddq DFT 态拍（第二十二轮）：被 dft 门控的 logic 输出补一条 DFT 拍（所有档）。
         # 仅自动向量路径补（override=用户全定制，不注入工具拍）；放在负向之后 → DFT 拍不被自动负向翻倍。
         if override is None:
-            _dft_skip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
-                                            opts.dft_observe)
+            _dft_skip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver)
             if _dft_skip:
                 meta["iddq_skipped"] = _dft_skip
             for i, v in enumerate(vecs):
@@ -889,8 +853,7 @@ def build(wb, opts):
                 v.index = i
 
         # item③ iddq DFT 态拍（mux 被门控输出，如 mixer2g_trim）：所有档都补；放负向之后。
-        _dft_skip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
-                                        opts.dft_observe)
+        _dft_skip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver)
         if _dft_skip:
             meta["iddq_skipped"] = _dft_skip
         pin_dft_gate(grp.out_base.lower(), vecs, wb, resolver)   # iddq 门=显式输入(每条向量驱透传)
@@ -1002,17 +965,11 @@ def build(wb, opts):
         # 默认静默过滤掉的 logic 内部节点（top_output=0）——拎出来给可见性
         "n_filtered_internal": len(filtered_internal),
     }
-    # DFT 观测模式（第二十轮续②，默认关）：被生成的输出里凡在 dft 页被 iddq 门控的，
-    # 在产物前导 force 门到透传值，使断言的基名网反映功能值（= for_test 的 iddq=0 做法）。
-    gen_bases = {str(st.get("out_name", "")).split("[")[0].lower() for _l, st in blocks}
-    dft_preamble, dft_warnings = dft_force_preamble(wb, resolver, gen_bases, opts)
-    summary["n_dft_forced"] = sum(1 for x in dft_preamble if x.startswith("force"))
     return {"blocks": blocks, "selected": selected, "errors": errors,
             "skipped": skipped, "spec_conflicts": spec_conflicts,
             "mux_warnings": mux_warnings,
             "cone_fallbacks": cone_fallbacks,
             "filtered_internal": filtered_internal,
-            "dft_preamble": dft_preamble, "dft_warnings": dft_warnings,
             "dup_labels": dup_labels, "summary": summary,
             # 计数器++已按 opts.sv_summary 写进 blocks，render 必须配套包裹声明/汇总，
             # 否则产物里是未声明变量 → 把标志带在结果里保证两者一致。
@@ -1079,8 +1036,7 @@ def render(result, header_info=None, comments=False, block_suffix=""):
     两份贴进同一作用域时块名不重名(同名兄弟命名块 = elaboration 错误)。"""
     return W.render_file(result["blocks"], header_info=header_info, comments=comments,
                          summary=result.get("sv_summary", False),
-                         block_suffix=block_suffix,
-                         preamble=result.get("dft_preamble") or None)
+                         block_suffix=block_suffix)
 
 
 def analyze_signal(resolver, sig, wb=None, probe_prefix=""):
@@ -1183,7 +1139,8 @@ def report(wb, opts):
                           default_kind=opts.default_kind,
                           wire_fallback=opts.wire_fallback,
                           wire_prefixes=opts.probe_prefixes,
-                          cascade_mode=opts.cascade_mode)
+                          cascade_mode=opts.cascade_mode,
+                          append_to_logic=opts.append_to_logic)
     sigs = select_signals(wb, opts)
     summary, detail, tables = [], [], []
     for sig in sigs:
@@ -1221,8 +1178,7 @@ def report(wb, opts):
                 vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
                                        fixed_value=opts.neg_value)
             # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 logic 挂点；override 路径不注入）
-            _lskip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
-                                         opts.dft_observe)
+            _lskip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver)
             if _lskip:
                 meta["iddq_skipped"] = _lskip   # 缺口可见(M2)：报告 error 列透出（.sv 已有 // ⚠）
         # iddq 门=显式输入（与 build 同口径）；返回的绑定供报告 inputs 行 + for_test 回填
@@ -1375,8 +1331,7 @@ def report(wb, opts):
                         for i, v in enumerate(vecs):
                             v.index = i
                     # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 mux 挂点）；skip 原因进 meta 供透出
-                    _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
-                                                 opts.dft_observe)
+                    _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver)
                     if _rskip:
                         meta["iddq_skipped"] = _rskip
                     vecs = _dedup_negatives(vecs)          # 与 build 同口径：全局/逐 case 负向去重
@@ -1617,7 +1572,8 @@ def diagnose(wb, opts=None):
                           default_kind=opts.default_kind,
                           wire_fallback=opts.wire_fallback,
                           wire_prefixes=opts.probe_prefixes,
-                          cascade_mode=opts.cascade_mode)
+                          cascade_mode=opts.cascade_mode,
+                          append_to_logic=opts.append_to_logic)
     sigs = select_signals(wb, opts)
 
     # 1) 类型列原文分布（tmm H / regmap F）

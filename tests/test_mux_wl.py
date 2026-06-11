@@ -1810,39 +1810,6 @@ def test_used_vars_collapses_data_by_register(tmp_path):
     assert len(exp["data_keys"]) == 4                                  # data_keys 仍 4 个(逐 case)
 
 
-# ───────── 第二十轮 续②：DFT 路观测模式（force iddq 门到透传值）─────────
-def test_dft_observe_forces_iddq_gate(tmp_path):
-    """[续②] 输出在 dft 页被 iddq 门控(B?0:A)时：dft_observe=True 在产物前导 force 门到透传值(0)，
-    使我们断言的基名网反映功能值（= for_test 的 iddq=0）；关时无前导。"""
-    wb = _build_mux_wb(
-        str(tmp_path / "dft.xlsx"),
-        tmm_fields=[
-            ("SEL", "h10", "d_sel[1:0]", "1:0", "N", "RW"),
-            ("IDDQ", "h11", "d_iddq_mode", "0", "Y", "RO"),    # DFT 门=RO 线
-            ("S0", "h20", "d_s0[1:0]", "1:0", "N", "RW"),
-            ("S1", "h21", "d_s1[1:0]", "1:0", "N", "RW"),
-        ],
-        mux_rows=[
-            _mrow("d_s0_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b00", "d_g[1:0]", 1),
-            _mrow("d_s1_to_mux[1:0]", "d_sel_to_mux[1:0]", "2'b01", "d_g[1:0]", 1),
-        ],
-        dft_rows=[("d_g_to_dft[1:0]", "d_iddq_mode_to_dft", "d_g[1:0]", "B?0:A")],
-    )
-    # dft 页解析：d_g 被 d_iddq_mode 门控、透传值 0
-    assert wb.dft.get("d_g") == {"gate_base": "d_iddq_mode",
-                                 "gate_raw": "d_iddq_mode_to_dft", "transparent": 0}
-    # 关：无前导 force
-    res0 = generator.build(wb, generator.GenOptions(dft_observe=False))
-    assert not res0.get("dft_preamble")
-    # 开：前导 force iddq 门到 1'b0
-    res1 = generator.build(wb, generator.GenOptions(dft_observe=True))
-    pre = "\n".join(res1.get("dft_preamble") or [])
-    assert "force" in pre and "d_iddq_mode" in pre and "1'b0" in pre, pre
-    # render 把前导写进产物最前
-    txt = generator.render(res1)
-    assert "d_iddq_mode" in txt and "1'b0" in txt
-
-
 def test_wl_iddq_dft(tmp_path):
     """⭐ item③ iddq DFT 态拍（第二十二轮）：被 dft 页门控(B?0:A)的输出，补一条 DFT 拍
     (force 门=1 → 断言输出=常量支0 → 该拍后 release)。期望取门常量支(0)，非"透传取反"；
@@ -1900,12 +1867,10 @@ def test_wl_iddq_dft(tmp_path):
         assert len(t["values"]) == len(tbl["inputs"]), (len(t["values"]), len(tbl["inputs"]))
     # Fix C（评审 major）：报告 force 列须含 iddq 门 force（extra_forces），否则报告与 .sv 不符
     assert any("d_iddq_mode=1'b1" in (d.get("force") or "") for d in dg), [d.get("force") for d in dg]
-    # Fix A（评审 blocker）：dft_observe 开时 DFT 拍后必须 force 回透传(恢复全局前导)，不能 bare release
-    txt_obs = generator.render(generator.build(
-        _wb(), generator.GenOptions(mux_mode="max", dft_observe=True)))
-    assert "release `ENV_RF.d_iddq_mode" not in txt_obs       # 开 dft_observe：不 release（会抹前导）
-    assert "force `ENV_RF.d_iddq_mode=1'b1;" in txt_obs        # DFT 拍 force 门=1
-    assert "force `ENV_RF.d_iddq_mode=1'b0;" in txt_obs        # 拍后 force 回透传 0（restore 前导）
+    # DFT 拍后 release 门（S4：否则 force 的 iddq=1 钉死后续所有拍/块的门）
+    txt = generator.render(generator.build(_wb(), generator.GenOptions(mux_mode="max")))
+    assert "force `ENV_RF.d_iddq_mode=1'b1;" in txt            # DFT 拍 force 门=1
+    assert "release `ENV_RF.d_iddq_mode" in txt                # 拍后 release，门回 RTL 默认透传
 
 
 def test_wl_iddq_dft_skip_surfaced(tmp_path):
