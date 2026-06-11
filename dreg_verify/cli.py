@@ -140,9 +140,15 @@ def build_argparser():
                          "主要用于 mux 输出(默认探裸名，因端口尾缀设计相关)：其端口本身就叫 <名>_to_logic 时"
                          "(如 Hi1108 rxiq=2:1 mux 喂 sig_logic)单独开。压过类型默认。")
     g4.add_argument("--cascade-mode", choices=["cone", "force"], default="cone",
-                    help="级联(输入引用上游 logic 计算网)的驱动模式，详见 级联模式说明.md："
+                    help="级联(输入/mux控制引用上游算出来的网)的【全局】驱动模式，详见 级联模式说明.md："
                          "cone(默认)=展开上游表达式、驱动其源头寄存器(纯 Excel，不需要探针前缀)；"
-                         "force=直接 force 字面 _to_logic 网(每行 logic 隔离验证；需要 scan_rtl 前缀)")
+                         "force=直接 force 字面 _to_logic/_to_mux 网(隔离验证；需要 scan_rtl 前缀)。"
+                         "logic/mux 可用下面两参单独覆盖。")
+    g4.add_argument("--logic-cascade", choices=["cone", "force"], default=None,
+                    help="【logic 信号】级联模式，覆盖 --cascade-mode（缺省=跟随 --cascade-mode）。")
+    g4.add_argument("--mux-cascade", choices=["cone", "force"], default=None,
+                    help="【mux 信号】级联模式，覆盖 --cascade-mode（缺省=跟随 --cascade-mode）。"
+                         "mux 控制是深级联(另一 mux 的输出)时常用 force 直接 force 控制衔接网更稳。")
     g4.add_argument("--probe-prefix", action="append", default=[], metavar="信号=层级路径",
                     help="信号网在 ENV_RF 子模块里时的探针前缀，可多次。"
                          "如 --probe-prefix pll_n=U_BT_LP_PLL_DIG → 断言写 "
@@ -1057,6 +1063,7 @@ def main(argv=None):
         owner_in_msg=args.owner_in_msg,
         sv_summary=args.sv_summary,
         cascade_mode=args.cascade_mode,
+        logic_cascade=args.logic_cascade, mux_cascade=args.mux_cascade,
         append_to_logic=args.append_to_logic,
         append_to_mux=args.append_to_mux,
         suffix_override=dict({n: False for n in (_split(args.no_suffix_signals) or [])},

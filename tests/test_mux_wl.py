@@ -478,6 +478,32 @@ def test_coverage_decouple_genoptions():
     assert d3.mux_cov_mode() == "min"
 
 
+def test_cascade_decouple_genoptions():
+    """⭐ 级联模式 logic/mux 解耦 + 单点(2026-06-11)：cascade_for 优先级 单点 > 类型全局 > 全局 cascade_mode。"""
+    G = generator
+    # 未解耦：两侧都回退全局 cascade_mode
+    o = G.GenOptions(cascade_mode="cone")
+    assert o.cascade_for("x", is_mux=False) == "cone"
+    assert o.cascade_for("x", is_mux=True) == "cone"
+    # 解耦：logic 走全局 cone、mux 走 mux_cascade=force（用户实际诉求：logic 不需前缀、mux 控制深级联要 force）
+    d = G.GenOptions(cascade_mode="cone", mux_cascade="force")
+    assert d.cascade_for("d_foo", is_mux=False) == "cone"
+    assert d.cascade_for("d_foo", is_mux=True) == "force"
+    # logic_cascade 单独覆盖、不影响 mux
+    d2 = G.GenOptions(cascade_mode="cone", logic_cascade="force")
+    assert d2.cascade_for("x", is_mux=False) == "force"
+    assert d2.cascade_for("x", is_mux=True) == "cone"
+    # 单点压过类型全局
+    d3 = G.GenOptions(cascade_mode="cone", mux_cascade="cone",
+                      sig_cascade={"d_rxiq_phase_ctrl": "force"})
+    assert d3.cascade_for("d_rxiq_phase_ctrl", is_mux=True) == "force"   # 单点 force
+    assert d3.cascade_for("d_other", is_mux=True) == "cone"              # 其余跟全局
+    # 非法值忽略
+    d4 = G.GenOptions(cascade_mode="force", logic_cascade="bogus", mux_cascade="")
+    assert d4.cascade_for("x", is_mux=False) == "force"                  # 回退全局
+    assert d4.cascade_for("x", is_mux=True) == "force"
+
+
 def test_coverage_decouple_build_independent(lpbt_wb):
     """⭐ build() 端到端：logic 侧与 mux 侧覆盖档互不串档（改一侧另一侧用例数不动）。"""
     G = generator

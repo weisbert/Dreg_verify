@@ -482,6 +482,29 @@ def test_b1_cascade_toggle_rerenders_mux(wl_win):
     assert calls and calls[-1] is mux              # mux 真值表确实被重渲了
 
 
+def test_cascade_decouple_gui(wl_win):
+    """级联 logic/mux 解耦 + 单点(2026-06-11 用户拍板)：两个全局下拉 + 本信号级联，各自独立生效。"""
+    w = wl_win
+    assert w._logic_cascade() == "cone" and w._mux_cascade() == "cone"   # 默认两侧 cone
+    # mux 全局切 force，logic 保持 cone
+    w.cascade_mux_combo.setCurrentIndex(1)
+    assert w._mux_cascade() == "force" and w._logic_cascade() == "cone"
+    opts = w._opts(["x"])
+    assert opts.mux_cascade == "force" and opts.logic_cascade == "cone"
+    mux = next(s for s in w.signals if isinstance(s, excel_model.MuxGroup))
+    assert w._cascade_for(mux) == "force"            # mux 信号跟随 mux 全局
+    # 本信号级联单点：给该 mux 设 cone，压过全局 force
+    w._load_test_items(mux)
+    assert w.sig_cascade_combo.isEnabled()
+    w.sig_cascade_combo.setCurrentText("展开上游")
+    assert w._cascade_for(mux) == "cone"
+    assert w._opts(["x"]).sig_cascade.get(mux.out_name.lower()) == "cone"
+    # 回「跟随全局」→ 删单点，回到全局 force
+    w.sig_cascade_combo.setCurrentText("跟随全局")
+    assert w._cascade_for(mux) == "force"
+    assert mux.out_name.lower() not in w._sig_cascade
+
+
 # ───────────── ⑨ 第二十轮 B2：mux 数据值可手填 + 落盘 + 重开恢复 ─────────────
 def test_b2_mux_data_cell_editable_persist_reload(gui_app, tmp_path, monkeypatch):
     """[B2] mux 数据行可双击手填(控制行只读) → 存进 _mux_data + 落盘 + 整表重渲生效；重开恢复。"""

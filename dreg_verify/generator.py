@@ -26,7 +26,8 @@ class GenOptions:
                  cascade_mode="cone", gen_mux=True, mux_expected=None, mux_data=None,
                  append_to_logic=True, logic_mode=None, mux_mode=None, sig_cov=None,
                  mux_dropped=None, mux_cleared=None, mux_user_vecs=None,
-                 suffix_override=None, append_to_mux=False):
+                 suffix_override=None, append_to_mux=False,
+                 logic_cascade=None, mux_cascade=None, sig_cascade=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -70,6 +71,13 @@ class GenOptions:
         #   "cone"(默认) = 展开上游表达式驱动其源头寄存器（纯 Excel，不需要探针前缀）
         #   "force"      = 直接 force 字面 _to_logic 网（隔离验证每行；需要 scan_rtl 前缀）
         self.cascade_mode = cascade_mode if cascade_mode in ("cone", "force") else "cone"
+        # 级联模式 logic/mux 解耦 + 单点（2026-06-11 用户拍板，与覆盖度同款）：logic_cascade/mux_cascade ∈
+        # {cone,force}，未显式传(=None)则该侧回退全局 cascade_mode；sig_cascade={信号名(小写):模式} 压过
+        # 类型全局。读取统一走 cascade_for(name,is_mux)，build/report/GUI 同口径。未传新参=逐字节不变。
+        self.logic_cascade = logic_cascade if logic_cascade in ("cone", "force") else None
+        self.mux_cascade = mux_cascade if mux_cascade in ("cone", "force") else None
+        self.sig_cascade = {str(k).lower(): v for k, v in (sig_cascade or {}).items()
+                            if v in ("cone", "force")}
         # mux 页验证（2026-06-03 第九轮）：默认开（用户拍板"logic+mux 都生成"）。
         # Excel 没有 mux 页时自然为空，不影响纯 logic 表。
         self.gen_mux = bool(gen_mux)
@@ -147,6 +155,15 @@ class GenOptions:
         if self.mux_mode is None:
             return mux_gen.coverage_mode(self.mode, self.exhaustive)
         return self.mux_mode
+
+    def cascade_for(self, name=None, is_mux=False):
+        """该信号实际生效的级联模式 {cone,force}：单点 sig_cascade > 类型全局(logic/mux) > 全局
+        cascade_mode。build/report/GUI 解析每个信号前据此设 resolver.cascade_mode。"""
+        ov = self.sig_cascade.get(name.lower()) if name else None
+        if ov in ("cone", "force"):
+            return ov
+        tier = self.mux_cascade if is_mux else self.logic_cascade
+        return tier if tier in ("cone", "force") else self.cascade_mode
 
 
 def _decompose_cov(collapsed):
@@ -672,6 +689,7 @@ def build(wb, opts):
     dup_labels = []
 
     for sig in selected:
+        resolver.cascade_mode = opts.cascade_for(sig.out_name, is_mux=False)   # 级联模式 logic/单点
         try:
             node, bindings, expanded = expand_signal(wb, resolver, sig,
                                                      fallback_notes=cone_fallbacks)
@@ -806,6 +824,7 @@ def build(wb, opts):
             skipped.append((grp.out_name, grp.assert_id,
                             [("clear", _mux_ctrl_desc(grp), "用户已清空(零用例，本信号不产出测试)")]))
             continue
+        resolver.cascade_mode = opts.cascade_for(grp.out_name, is_mux=True)   # 级联模式 mux/单点
         exp = mux_gen.expand_mux_group(wb, resolver, grp)
         # 有解析问题 → 跳过并给原因（与 logic risky-skip 同理念：保证产物能 elaborate、跳过必有名字+原因）
         if exp["issues"] and not opts.include_risky:
@@ -1165,6 +1184,7 @@ def report(wb, opts):
     sigs = select_signals(wb, opts)
     summary, detail, tables = [], [], []
     for sig in sigs:
+        resolver.cascade_mode = opts.cascade_for(sig.out_name, is_mux=False)   # 级联模式 logic/单点
         chain = []        # cone 信号的展开链(本行+逐层代入的上游行)，HTML 真值表上方显示
         try:
             node, bindings, _expanded = expand_signal(wb, resolver, sig, chain_out=chain)
@@ -1303,6 +1323,7 @@ def report(wb, opts):
     mux_groups = select_mux_groups(wb, opts)
     mux_verif_rows = []
     for grp in mux_groups:
+        resolver.cascade_mode = opts.cascade_for(grp.out_name, is_mux=True)   # 级联模式 mux/单点
         exp = mux_gen.expand_mux_group(wb, resolver, grp)
         expr_text = _mux_expr_text(grp)
         base_row = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
@@ -1478,6 +1499,7 @@ def report(wb, opts):
     verif = {"counts": {"clean": 0, "wire-fallback": 0, "unresolved": 0, "parse-err": 0},
              "signals": []}
     for sig in sigs:
+        resolver.cascade_mode = opts.cascade_for(sig.out_name, is_mux=False)   # 级联模式 logic/单点
         a = analyze_signal(resolver, sig, wb=wb)
         st = a["status"]
         verif["counts"][st] = verif["counts"].get(st, 0) + 1
@@ -1620,6 +1642,7 @@ def diagnose(wb, opts=None):
     fallback_wires = []     # 表里查无、按 wire force 的（需你确认是否真是 wire）
     seen_inputs = set()
     for sig in sigs:
+        resolver.cascade_mode = opts.cascade_for(sig.out_name, is_mux=False)   # 级联模式 logic/单点
         bindings = resolver.resolve_signal_inputs(sig)
         try:
             used = E.collect_vars(E.parse(sig.expr))

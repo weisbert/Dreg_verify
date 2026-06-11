@@ -384,6 +384,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                  # mux 端口带尾缀信号(rxiq→True)。稳定的设计事实，故【存盘+随配置导入导出】
                                  # (区别于会话内临时的 _sig_cov)；按 Excel 路径记忆，启动恢复。
         self._suffix_loading = False  # 程序化设「本信号探尾缀网」勾选时屏蔽其 changed 信号
+        self._sig_cascade = {}   # 单点级联模式 {信号名小写: "cone"/"force"}——压过全局 logic/mux 下拉。
+                                 # 会话内临时档（与 _sig_cov 同款，不存盘/恢复，避免静默盖过全局）。
+        self._sig_cascade_loading = False  # 程序化设「本信号级联」下拉时屏蔽其 changed 信号
         self._ti_sig = None      # 当前在编辑器里的信号
         self._ti_node = None
         self._ti_bindings = {}
@@ -616,19 +619,30 @@ class MainWindow(QtWidgets.QMainWindow):
             if isinstance(_mt, int) and 1 <= _mt <= 100000:
                 self.max_tests.setValue(_mt)
         self.max_tests.valueChanged.connect(self.on_coverage_changed)
-        # 级联模式：输入引用"上游 logic 计算网"(如 d_ndiv_n 的 mode_sel_to_logic)时怎么驱动
-        self.cascade_combo = QtWidgets.QComboBox()
-        self.cascade_combo.addItems(["展开上游(推荐)", "force级联网"])
-        self.cascade_combo.setToolTip(
-            "输入引用『上游 logic 算出来的网』(级联)时怎么驱动，点旁边 ? 看图解：\n\n"
+        # 级联模式 logic/mux 解耦（2026-06-11 用户拍板）：输入/控制引用『上游算出来的网』时怎么驱动。
+        # 两个独立下拉——logic 多走「展开上游」(纯 Excel 不需前缀)、mux 控制常需「force级联网」直 force 衔接网。
+        _casc_tip = (
+            "输入/mux 控制引用『上游算出来的网』(级联)时怎么驱动，点旁边 ? 看图解：\n\n"
             "  展开上游(默认)：把上游表达式代入，改为驱动它的源头寄存器/管脚。\n"
             "      优点=纯 Excel、不需要探针前缀；代价=上游逻辑跟本行一起验，上游有 bug 会连带本行 fail\n\n"
-            "  force级联网：直接 force 那根 _to_logic 网。\n"
-            "      优点=每行 logic 隔离验证、fail 定位准；代价=该网在 sig_logic 模块内部，\n"
+            "  force级联网：直接 force 那根 _to_logic/_to_mux 衔接网。\n"
+            "      优点=隔离验证、fail 定位准（mux 控制是深级联时尤其稳）；代价=该网在子模块内部，\n"
             "      必须先跑 scan_rtl 拿到层级前缀，否则该信号会被跳过")
-        if _load_settings().get("cascade_mode") == "force":
-            self.cascade_combo.setCurrentIndex(1)
-        self.cascade_combo.currentIndexChanged.connect(self.on_cascade_mode_changed)
+        self.cascade_logic_combo = QtWidgets.QComboBox()
+        self.cascade_logic_combo.addItems(["展开上游(推荐)", "force级联网"])
+        self.cascade_logic_combo.setToolTip("【logic 信号】级联驱动模式。\n" + _casc_tip)
+        if _load_settings().get("cascade_logic", _load_settings().get("cascade_mode")) == "force":
+            self.cascade_logic_combo.setCurrentIndex(1)
+        self.cascade_logic_combo.currentIndexChanged.connect(self.on_cascade_mode_changed)
+        self.cascade_mux_combo = QtWidgets.QComboBox()
+        self.cascade_mux_combo.addItems(["展开上游(推荐)", "force级联网"])
+        self.cascade_mux_combo.setToolTip(
+            "【mux 信号】级联驱动模式。mux 控制信号若是另一个 mux 的输出(深级联)，"
+            "「展开上游」常驱不到确定值(控制 X→输出走 default)→ 改「force级联网」直接 force 控制衔接网更稳。\n\n"
+            + _casc_tip)
+        if _load_settings().get("cascade_mux", _load_settings().get("cascade_mode")) == "force":
+            self.cascade_mux_combo.setCurrentIndex(1)
+        self.cascade_mux_combo.currentIndexChanged.connect(self.on_cascade_mode_changed)
         cascade_help = QtWidgets.QPushButton("?")
         cascade_help.setFixedWidth(24)
         cascade_help.setToolTip("级联模式帮助：两种模式的图解与选择建议(程序内置窗口)")
@@ -678,7 +692,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (QtWidgets.QLabel("logic覆盖:"), self.coverage,
                   QtWidgets.QLabel("mux覆盖:"), self.coverage_mux, self.cov_hint,
                   QtWidgets.QLabel("   上限"), self.max_tests,
-                  QtWidgets.QLabel("   级联:"), self.cascade_combo, cascade_help,
+                  QtWidgets.QLabel("   logic级联:"), self.cascade_logic_combo,
+                  QtWidgets.QLabel("mux级联:"), self.cascade_mux_combo, cascade_help,
                   self.append_to_logic_chk, self.append_to_mux_chk, self.include_risky_chk):
             opt.addWidget(w)
         opt.addStretch(1)
@@ -752,6 +767,21 @@ class MainWindow(QtWidgets.QMainWindow):
             "(未被下游引用的信号无尾缀可补，本框禁用；= CLI --suffix-signals / --no-suffix-signals。)")
         self.suffix_chk.stateChanged.connect(self.on_suffix_changed)
         sigcov.addWidget(self.suffix_chk)
+        sigcov.addSpacing(16)
+        # 本信号级联（2026-06-11）：给【当前信号】单独设级联模式，压过全局 logic/mux 级联下拉。
+        # 会话内临时档（同单点覆盖度，不存盘）。用于个别深级联 mux（如 rxiq 控制走 force）。
+        sigcov.addWidget(QtWidgets.QLabel("本信号级联:"))
+        self.sig_cascade_combo = QtWidgets.QComboBox()
+        self.sig_cascade_combo.addItems(["跟随全局", "展开上游", "force级联网"])
+        self.sig_cascade_combo.setEnabled(False)
+        self.sig_cascade_combo.setToolTip(
+            "给【当前选中的这一个信号】单独设级联模式，压过上方全局 logic/mux 级联下拉：\n"
+            "  跟随全局 = 用对应类型的全局级联档（默认）\n"
+            "  展开上游 / force级联网 = 只有此信号用该模式\n"
+            "用于个别深级联信号(如 mux 控制是另一 mux 的输出、展开上游驱不到→单独切 force级联网)。\n"
+            "⚠ 只是本次开着 GUI 期间的临时档，不存盘——开 GUI 永远全局档当家。")
+        self.sig_cascade_combo.currentIndexChanged.connect(self.on_sig_cascade_changed)
+        sigcov.addWidget(self.sig_cascade_combo)
         sigcov.addStretch(1)
         lay.addWidget(sigcov_box)
 
@@ -1012,17 +1042,32 @@ class MainWindow(QtWidgets.QMainWindow):
         st["max_tests"] = self.max_tests.value()
         _save_settings(st)
 
-    # ───────────── 级联模式（展开上游 / force级联网） ─────────────
-    def _cascade_mode(self):
-        """级联模式下拉 → GenOptions/Resolver 的 cascade_mode 字符串。"""
-        if not hasattr(self, "cascade_combo"):
+    # ───────────── 级联模式（展开上游 / force级联网，logic/mux 解耦 + 单点） ─────────────
+    def _logic_cascade(self):
+        """logic 全局级联模式 → "cone"/"force"。"""
+        if not hasattr(self, "cascade_logic_combo"):
             return "cone"
-        return "force" if self.cascade_combo.currentIndex() == 1 else "cone"
+        return "force" if self.cascade_logic_combo.currentIndex() == 1 else "cone"
+
+    def _mux_cascade(self):
+        """mux 全局级联模式 → "cone"/"force"。"""
+        if not hasattr(self, "cascade_mux_combo"):
+            return "cone"
+        return "force" if self.cascade_mux_combo.currentIndex() == 1 else "cone"
+
+    def _cascade_for(self, sig):
+        """该信号实际生效的级联模式：单点 _sig_cascade > 类型全局(mux/logic 下拉)。"""
+        name = sig.out_name.lower() if sig is not None else None
+        ov = self._sig_cascade.get(name) if name else None
+        if ov in ("cone", "force"):
+            return ov
+        return self._mux_cascade() if isinstance(sig, excel_model.MuxGroup) else self._logic_cascade()
 
     def on_cascade_mode_changed(self, *args):
-        """级联模式切换 → 持久化 + 重建 Resolver 重析全表 + 重算当前编辑器信号(未自定义的)。"""
+        """级联模式切换(logic 或 mux 全局) → 持久化 + 重建 Resolver 重析全表 + 重算当前编辑器信号。"""
         st = _load_settings()
-        st["cascade_mode"] = self._cascade_mode()
+        st["cascade_logic"] = self._logic_cascade()
+        st["cascade_mux"] = self._mux_cascade()
         _save_settings(st)
         if not self.wb:
             return
@@ -1031,11 +1076,46 @@ class MainWindow(QtWidgets.QMainWindow):
                 and self._ti_name_low not in self._customized):
             self._load_test_items(self._ti_sig)
         elif getattr(self, "_ti_mux_sig", None) is not None:
-            # mux 真值表也按新级联模式重渲——否则切 cone↔force 看着"没反应"（同 on_coverage_changed）。
-            # 切到 force 后控制行会变成被 force 的 _to_mux/_to_logic 衔接网 + needs-prefix 标记。
+            # mux 真值表也按新级联模式重渲（同 on_coverage_changed）：切 force 后控制行变 force 衔接网。
             self._load_mux_test_items(self._ti_mux_sig)
-        self.status.showMessage("级联模式已切换为『%s』——含级联输入的信号已按新模式重新解析"
-                                % self.cascade_combo.currentText())
+        self.status.showMessage("级联模式已更新（logic=%s / mux=%s）——含级联的信号已按新模式重新解析"
+                                % (self.cascade_logic_combo.currentText(),
+                                   self.cascade_mux_combo.currentText()))
+
+    _CASC_LABEL2MODE = {"展开上游": "cone", "force级联网": "force"}
+    _CASC_MODE2LABEL = {"cone": "展开上游", "force": "force级联网"}
+
+    def _set_sig_cascade_combo(self, sig):
+        """加载信号时把「本信号级联」下拉置到该信号已存的单点档（无则"跟随全局"），不触发重析。无信号→禁用。"""
+        if not hasattr(self, "sig_cascade_combo"):
+            return
+        name = sig.out_name.lower() if sig is not None else None
+        ov = self._sig_cascade.get(name) if name else None
+        self._sig_cascade_loading = True
+        try:
+            self.sig_cascade_combo.setEnabled(sig is not None)
+            self.sig_cascade_combo.setCurrentText(self._CASC_MODE2LABEL.get(ov, "跟随全局"))
+        finally:
+            self._sig_cascade_loading = False
+
+    def on_sig_cascade_changed(self, *args):
+        """「本信号级联」下拉变化：记进 _sig_cascade（"跟随全局"=删该条），重析全表 + 重载当前编辑器。
+        会话内临时档、不存盘。加载信号时由 _sig_cascade_loading 守卫避免误触。"""
+        if (self._sig_cascade_loading or self._sig_loading
+                or getattr(self, "_ti_loading", False)):
+            return
+        sig = self._ti_sig if self._ti_sig is not None else getattr(self, "_ti_mux_sig", None)
+        if sig is None:
+            return
+        name = sig.out_name.lower()
+        mode = self._CASC_LABEL2MODE.get(self.sig_cascade_combo.currentText())
+        if mode is None:
+            self._sig_cascade.pop(name, None)      # 跟随全局
+        else:
+            self._sig_cascade[name] = mode
+        if self.wb is not None:
+            self._reanalyze_all()
+            self._reload_open_editor()
 
     def _append_to_logic_on(self):
         return (self.append_to_logic_chk.isChecked()
@@ -1228,7 +1308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     force_overrides=self._force_signals,
-                                    cascade_mode=self._cascade_mode(),
+                                    cascade_mode=self._logic_cascade(),
                                     append_to_logic=self._append_to_logic_on(),
                                     append_to_mux=self._append_to_mux_on(),
                                     suffix_override=dict(self._suffix_override))
@@ -1763,6 +1843,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _analyze_one(self, sig):
         """单信号解析画像：logic 走 analyze_signal，mux 组走 analyze_mux_group（2026-06-03 第九轮）。"""
+        self._resolver.cascade_mode = self._cascade_for(sig)   # 级联模式 logic/mux/单点（与 build/report 同口径）
         if isinstance(sig, excel_model.MuxGroup):
             # 传全部已配置探针前缀（不只本信号的）——级联衔接网的前缀也要能命中，
             # mux_prefix_risks 才能正确区分"还缺前缀"和"已配好可生成"
@@ -1781,7 +1862,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """探针前缀/级联模式变更后重建 Resolver（两者都影响所有信号的输入解析）并刷新全表。"""
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     force_overrides=self._force_signals,
-                                    cascade_mode=self._cascade_mode(),
+                                    cascade_mode=self._logic_cascade(),
                                     append_to_logic=self._append_to_logic_on(),
                                     append_to_mux=self._append_to_mux_on(),
                                     suffix_override=dict(self._suffix_override))
@@ -2037,6 +2118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_ti_buttons_for_mux(False)                 # 无信号：列编辑按钮恢复可用(原行为)
         self._set_sig_cov_combo(None)                       # 无信号：单点覆盖下拉禁用并复位
         self._set_suffix_chk(None)                          # 无信号：探尾缀网勾选禁用
+        self._set_sig_cascade_combo(None)                   # 无信号：本信号级联下拉禁用
         self.ti_header.setText(header_text)
         self._ti_loading = True
         try:
@@ -2087,6 +2169,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_ti_buttons_for_mux(False)   # logic 信号：列编辑按钮全可用
         self._set_sig_cov_combo(sig)          # 单点覆盖下拉置到本信号档（不触发重算）
         self._set_suffix_chk(sig)             # 探尾缀网勾选置到本信号实际状态
+        self._set_sig_cascade_combo(sig)      # 本信号级联下拉置到本信号档
         self._ti_bindings = bindings; self._ti_groups = groups
         self._ti_cone = bool(chain)       # 头部/输入表据此标注"已展开上游"
         self._ti_chain = chain            # 展开链(本行+逐层代入的上游行)，cone 信号显示
@@ -2132,6 +2215,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ti_mux_sig = grp
         self._set_sig_cov_combo(grp)          # 单点覆盖下拉置到本信号档（不触发重算）
         self._set_suffix_chk(grp)             # 探尾缀网勾选置到本信号实际状态
+        self._set_sig_cascade_combo(grp)      # 本信号级联下拉置到本信号档
         self._set_ti_buttons_for_mux(True)    # mux 信号：置灰列结构/CSV 按钮(无 mux 分支)，给准确 tooltip
         exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
         self._ti_mux_exp = exp                # 缓存：导出CSV/用户向量编辑复用(避免重复展开)
@@ -2683,7 +2767,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "coverage_logic": self.coverage.currentText(),
                 "coverage_mux": self.coverage_mux.currentText(),
                 "max_tests": self.max_tests.value(),
-                "cascade_mode": self._cascade_mode(),
+                "cascade_logic": self._logic_cascade(), "cascade_mux": self._mux_cascade(),
                 "append_to_logic": bool(self.append_to_logic_chk.isChecked()),
                 "append_to_mux": bool(self.append_to_mux_chk.isChecked()),
             },
@@ -2713,11 +2797,14 @@ class MainWindow(QtWidgets.QMainWindow):
         mt = g.get("max_tests")
         if isinstance(mt, int) and 1 <= mt <= 100000:
             self.max_tests.blockSignals(True); self.max_tests.setValue(mt); self.max_tests.blockSignals(False)
+        # 级联模式 logic/mux（缺新键时回退旧 cascade_mode；都缺=cone）
         cm = g.get("cascade_mode")
-        if cm in ("cone", "force"):
-            self.cascade_combo.blockSignals(True)
-            self.cascade_combo.setCurrentIndex(1 if cm == "force" else 0)
-            self.cascade_combo.blockSignals(False)
+        for combo, key in ((self.cascade_logic_combo, "cascade_logic"),
+                           (self.cascade_mux_combo, "cascade_mux")):
+            v = g.get(key, cm)
+            combo.blockSignals(True)
+            combo.setCurrentIndex(1 if v == "force" else 0)
+            combo.blockSignals(False)
         atl = g.get("append_to_logic")
         # 缺键(旧配置/含已删的 dft_observe)→ 复位到默认 True(=生产默认勾，2026-06-11 翻回)，使「导入这份
         # 工作状态」确定性，不残留本会话先前的手动切换。
@@ -2731,7 +2818,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_to_mux_chk.blockSignals(False)
         self._persist_coverage()                 # coverage_logic/mux + max_tests
         st = _load_settings()
-        st["cascade_mode"] = self._cascade_mode()
+        st["cascade_logic"] = self._logic_cascade(); st["cascade_mux"] = self._mux_cascade()
         st["append_to_logic"] = bool(self.append_to_logic_chk.isChecked())
         st["append_to_mux"] = bool(self.append_to_mux_chk.isChecked())
         _save_settings(st)
@@ -2742,7 +2829,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._edited = {}; self._customized = set(); self._neg_only = {}
         self._mux_expected = {}; self._mux_neg = set(); self._mux_data = {}
         self._mux_dropped = {}; self._mux_cleared = set(); self._mux_user_vecs = {}
-        self._sig_cov = {}
+        self._sig_cov = {}; self._sig_cascade = {}
         self._probe_prefixes = {}; self._force_signals = set(); self._suffix_override = {}
 
     def on_export_edits(self):
@@ -2825,7 +2912,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._save_suffix_override()
             self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                         force_overrides=self._force_signals,
-                                        cascade_mode=self._cascade_mode(),
+                                        cascade_mode=self._logic_cascade(),
                                         append_to_logic=self._append_to_logic_on(),
                                         append_to_mux=self._append_to_mux_on(),
                                         suffix_override=dict(self._suffix_override))
@@ -4359,7 +4446,8 @@ class MainWindow(QtWidgets.QMainWindow):
             force_overrides=set(self._force_signals),
             owner_in_msg=owner_in_msg,
             sv_summary=sv_summary,
-            cascade_mode=self._cascade_mode(),
+            logic_cascade=self._logic_cascade(), mux_cascade=self._mux_cascade(),
+            sig_cascade=dict(self._sig_cascade),
             vector_overrides=self._vector_overrides(positive_only=positive_only,
                                                     negative_only=negative_only),
             # mux 手填期望：所有导出范围都传——负向的错值防撞要看到它，
