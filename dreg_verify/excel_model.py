@@ -71,6 +71,20 @@ class LogicSignal:
         """RTL 真实网名(含位宽切片)。assert 探针 LHS 用它，不能直接用 K 列原文。"""
         return self.rtl_base + self.out_name[len(self.out_base):]
 
+    @property
+    def rtl_base_full(self):
+        """rtl_base 但【无视 _append_to_logic 开关】——总是按 Excel ref_suffix 补尾缀。
+        scan_rtl 导出/用户手配的探针前缀 key 往往是这个【全名】；开关关时 rtl_base 退成裸名，
+        前缀查找若只认 rtl_base 就和 _to_logic key 对不上、把用户配的前缀静默丢掉
+        (2026-06-11 Hi1108 rxiq_phase_ctrl CUVUNF 实证)。前缀查找两个名都试 → 不再失配。"""
+        return rtl_net_name(self.out_base, self.suffix, is_top=self.is_top,
+                            ref_suffix=self.ref_suffix)
+
+    @property
+    def rtl_name_full(self):
+        """rtl_name 的全名版(含位宽切片，无视开关补尾缀)——仅供探针前缀 key 匹配，不进断言。"""
+        return self.rtl_base_full + self.out_name[len(self.out_base):]
+
     def __repr__(self):
         return "LogicSignal(R=%s, %s, expr=%r)" % (self.assert_id, self.out_name, self.expr)
 

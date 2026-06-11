@@ -441,6 +441,24 @@ def test_to_logic_suffix_toggle(tmp_path):
     assert "d_pfd_en_lnmode_ls==" in off_ls
 
 
+def test_probe_prefix_no_silent_miss_when_suffix_off(tmp_path):
+    """探针前缀【不静默失配】(2026-06-11 Hi1108 rxiq_phase_ctrl CUVUNF 实证)：
+
+    尾缀开关关时断言探针退成裸名，但 scan_rtl 导出 / 用户手配的前缀 key 往往是带 _to_logic 的
+    【全名】。修复前：前缀查找只认裸名 rtl_base → 全名 key 对不上 → 前缀被静默丢掉 → 裸名直贴
+    `ENV_RF → elaboration CUVUNF。修复后：全名也参与匹配，用户配的前缀照常生效(贴在裸名上)。"""
+    path = tmp_path / "prefix_no_miss.xlsx"
+    fixtures.build_workbook(str(path), with_pll_chain=True)
+    wb = excel_model.load_workbook(str(path))
+    # 关尾缀 + 前缀按【带 _to_logic 的全名】配（scan_rtl 风格 / 复现用户实际配法）
+    off = generator.render(generator.build(wb, generator.GenOptions(
+        signals=["pll_n1"], top_output_only=False, append_to_logic=False,
+        probe_prefixes={"pll_n1_to_logic": "U_PLL_DIG"})))
+    assert "`ENV_RF.U_PLL_DIG.pll_n1[31:0]==" in off    # 前缀贴上了（不再裸名直贴 ENV_RF）
+    assert "pll_n1_to_logic" not in off                  # 断言探针仍是裸名（尾缀确实关着）
+    assert "`ENV_RF.pll_n1[31:0]==" not in off           # 没有「无前缀裸名」那条 → 不会 CUVUNF
+
+
 def test_cli_no_to_logic_suffix(tmp_path):
     """CLI --no-to-logic-suffix 端到端：pll_n1 探针落到基名网（不补 _to_logic）；默认仍带 _to_logic。"""
     from dreg_verify import cli

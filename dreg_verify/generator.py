@@ -424,8 +424,14 @@ def probe_prefix_for(sig, opts):
     p = opts.probe_prefixes or {}
     rtl_base = getattr(sig, "rtl_base", sig.out_base)
     rtl_name = getattr(sig, "rtl_name", sig.out_name)
+    # 全名(无视尾缀开关，总带 ref_suffix)：scan_rtl 导出/用户手配的前缀 key 常是带 _to_logic 的全名。
+    # 尾缀开关关时 rtl_base 退成裸名，只认 rtl_base 会让那条前缀静默失配 → 裸名直贴 ENV_RF → CUVUNF
+    # (2026-06-11 Hi1108 rxiq 实证)。两个名都试：用户按裸名或全名配的前缀都能命中。
+    rtl_base_full = getattr(sig, "rtl_base_full", rtl_base)
+    rtl_name_full = getattr(sig, "rtl_name_full", rtl_name)
     return (p.get(sig.out_name.lower()) or p.get(sig.out_base.lower())
-            or p.get(rtl_name.lower()) or p.get(rtl_base.lower()) or "")
+            or p.get(rtl_name.lower()) or p.get(rtl_base.lower())
+            or p.get(rtl_name_full.lower()) or p.get(rtl_base_full.lower()) or "")
 
 
 def _mux_ctrl_desc(grp):

@@ -1465,8 +1465,13 @@ class MainWindow(QtWidgets.QMainWindow):
         """该信号配置的探针前缀（无则空串）。
         映射 key 兼容 Excel K 列名与 RTL 网名(_ls 后缀)——scan_rtl.py 导出的是后者。"""
         p = self._probe_prefixes
+        # 全名(无视尾缀开关)也试一遍：尾缀开关关时 rtl_base 退裸名，scan_rtl/用户按 _to_logic 全名
+        # 配的前缀才不会静默失配(与 generator.probe_prefix_for 同口径，2026-06-11 Hi1108 rxiq 实证)。
+        rb_full = getattr(sig, "rtl_base_full", sig.rtl_base)
+        rn_full = getattr(sig, "rtl_name_full", sig.rtl_name)
         return (p.get(sig.out_name.lower()) or p.get(sig.out_base.lower())
-                or p.get(sig.rtl_name.lower()) or p.get(sig.rtl_base.lower()) or "")
+                or p.get(sig.rtl_name.lower()) or p.get(sig.rtl_base.lower())
+                or p.get(rn_full.lower()) or p.get(rb_full.lower()) or "")
 
     def _prefix_cell(self, sig, analysis):
         """探针前缀列：输出前缀 + 受前缀影响的输入(如 mon_active→U_BT_LP_PLL_DIG)。
