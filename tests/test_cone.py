@@ -477,6 +477,34 @@ def test_cli_no_to_logic_suffix(tmp_path):
     assert "pll_n1_to_logic" not in off
 
 
+def test_ref_suffix_excludes_self_reference(tmp_path):
+    """自引用不算下游引用(2026-06-11 Hi1108 d_wl_rf_dpd_s2d_bias_en 实证)：输出 X 读【自己的】
+    <X>_to_logic 当输入时，那是 X 的前级原始信号(regfile 透传)，不是下游消费 X 输出网的引用——
+    据此补尾缀会让 X 的输出探针网名 = 它自己的输入网名(撞名探错)。故自引用不补；别的信号引用才补。"""
+    import openpyxl
+    from openpyxl.utils import column_index_from_string
+    path = tmp_path / "selfref.xlsx"
+    wb_x = openpyxl.Workbook(); ws = wb_x.active; ws.title = "logic"
+
+    def setrow(r, d):
+        for col, v in d.items():
+            ws.cell(row=r, column=column_index_from_string(col), value=v)
+    setrow(2, {"A": "in_A", "K": "out", "L": "expr", "M": "suffix", "N": "top_output", "R": "no"})
+    # 自引用：d_self 读自己的 d_self_to_logic（前级信号）→ 不该补尾缀
+    setrow(3, {"A": "d_self_to_logic", "K": "d_self", "L": "A", "M": "to_logic", "N": 0, "R": 1})
+    # 真·下游引用：d_prod 被【别的】信号 d_cons 以 d_prod_to_logic 引用 → 该补尾缀
+    setrow(4, {"A": "regx_to_logic", "K": "d_prod", "L": "A", "M": "to_logic", "N": 0, "R": 2})
+    setrow(5, {"A": "d_prod_to_logic", "K": "d_cons", "L": "A", "M": "to_logic", "N": 0, "R": 3})
+    wb_x.save(str(path))
+
+    w = excel_model.load_workbook(str(path))
+    by = {s.out_base: s for s in w.logic}
+    assert by["d_self"].ref_suffix == ""              # 自引用 → 不补尾缀
+    assert by["d_self"].rtl_name == "d_self"          # 探裸名（≠ 自己的输入 d_self_to_logic，不撞名）
+    assert by["d_prod"].ref_suffix == "_to_logic"     # 被别的信号引用 → 真·下游引用 → 补尾缀
+    assert by["d_prod"].rtl_name == "d_prod_to_logic"
+
+
 def test_ref_suffix_to_mux_from_mux_page():
     """尾缀随 Excel：被 mux 页以 <名>_to_mux 引用的 logic 输出 → RTL 探针网名带 _to_mux（不是 _to_logic）。
     _apply_mux_ref_suffix 跨页回填；开关关时回到基名。"""

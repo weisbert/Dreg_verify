@@ -428,14 +428,25 @@ def read_logic(ws, header_row=2):
     # wire 名 = K列名 + "_to_logic"(pll_n1 → pll_n1_to_logic)；被 mux 页以 <名>_to_mux 引用的则带
     # "_to_mux"(由 load_workbook 跨页回填)。reserve 这类没被引用的内部信号 RTL 名 = K 原文。
     # 这里先扫 logic 输入列（_to_logic 优先；个别 logic 行也可能引用 _to_mux 衔接网）。
+    #
+    # ⭐ 排除【自引用】(2026-06-11 Hi1108 d_wl_rf_dpd_s2d_bias_en 实证)：输出 X 自己读 <X>_to_logic 当
+    #   输入时，那根 <X>_to_logic 是 X 的【前级原始信号】(RTL: 端口 X → regfile → X_to_logic)，不是下游
+    #   消费 X 输出网的引用。若据此给 X 补 _to_logic，X 的输出探针网名就 = 它自己的输入网名 → 撞名探错。
+    #   故：base==本行输出基名(自引用)时不计入。只有【别的】信号引用 <X>_to_logic 才算真·下游引用。
+    #   (正常级联如 pll_n1 不受影响：pll_n1 的 _to_logic 来自 pll_n2 的引用，非 pll_n1 自己的输入。)
     ref_logic, ref_mux = set(), set()
     for sig in signals:
+        ob = sig.out_base.lower()
         for info in sig.inputs.values():
             rb = _strip_width(info["raw"])[0].lower()
             if rb.endswith("_to_logic"):
-                ref_logic.add(rb[: -len("_to_logic")])
+                base = rb[: -len("_to_logic")]
+                if base != ob:                       # 排除自引用（前级信号，非下游引用）
+                    ref_logic.add(base)
             elif rb.endswith("_to_mux"):
-                ref_mux.add(rb[: -len("_to_mux")])
+                base = rb[: -len("_to_mux")]
+                if base != ob:
+                    ref_mux.add(base)
     for sig in signals:
         b = sig.out_base.lower()
         sig.ref_suffix = "_to_logic" if b in ref_logic else ("_to_mux" if b in ref_mux else "")
