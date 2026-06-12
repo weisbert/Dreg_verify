@@ -1053,6 +1053,17 @@ class MainWindow(QtWidgets.QMainWindow):
         st["suffix_override"] = all_maps
         _save_settings(st)
 
+    def _logic_signals(self):
+        """wb.logic 应用当前 RTL 补充后的 logic 信号列表（合成信号替换原行/纯新增追加，与 build/report 同口径）。
+        无补充 → 原 wb.logic（逐字节不变）。左表/编辑器用它，故补充加进来后真值表会同步刷新出新输入维度。"""
+        if not self.wb:
+            return []
+        if not self._logic_overrides:
+            return list(self.wb.logic)
+        opts = generator.GenOptions(
+            logic_overrides={k: dict(v) for k, v in self._logic_overrides.items()})
+        return list(generator._logic_with_overrides(self.wb, opts))
+
     def _save_logic_overrides(self):
         """RTL 补充逻辑按 Excel 路径写入 settings（pytest 下 no-op，同 suffix_override 策略）。"""
         if "pytest" in sys.modules:
@@ -1331,17 +1342,19 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "加载失败", str(ex))
             return
         # logic 信号 + mux 组同表混排（用户拍板；mux 组鸭子兼容信号表所需的全部属性）
-        self.signals = list(self.wb.logic) + list(self.wb.mux)
+        # RTL 补充逻辑按 Excel 路径持久化：换表自动恢复（同 suffix_override；spec 原样存）。
+        # ★须在建 self.signals 前加载——signals 要用「应用补充后」的合成 logic 信号，左表/编辑器才同步显示补充。
+        self._logic_overrides = {str(k).strip().lower(): dict(v) for k, v in
+                                 _load_settings().get("logic_overrides", {}).get(path, {}).items()
+                                 if str(k).strip() and isinstance(v, dict)}
+        # 左表/编辑器用【应用 RTL 补充后】的 logic 信号(合成信号替换原行/纯新增追加)，与 build/report 同口径。
+        self.signals = self._logic_signals() + list(self.wb.mux)
         # 探针前缀按 Excel 路径持久化：换表自动恢复上次配置（须在建 Resolver 前加载——wire 前缀要传进去）
         self._probe_prefixes = dict(_load_settings().get("probe_prefixes", {}).get(path, {}))
         self._force_signals = set(_load_settings().get("force_signals", {}).get(path, []))
         self._suffix_override = {str(k).strip().lower(): bool(v) for k, v in
                                  _load_settings().get("suffix_override", {}).get(path, {}).items()
                                  if str(k).strip()}
-        # RTL 补充逻辑按 Excel 路径持久化：换表自动恢复（同 suffix_override；spec 原样存）
-        self._logic_overrides = {str(k).strip().lower(): dict(v) for k, v in
-                                 _load_settings().get("logic_overrides", {}).get(path, {}).items()
-                                 if str(k).strip() and isinstance(v, dict)}
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     force_overrides=self._force_signals,
@@ -1452,7 +1465,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 it.setToolTip(tip)
                 self.table.setItem(r, COL_STATUS, it)
                 self.table.setItem(r, COL_PREFIX, self._prefix_cell(sig, self._analysis.get(r, {})))
-                self._set_text(r, COL_EXPR, sig.expr)
+                if getattr(sig, "_is_supplement", False):
+                    # RTL 补充信号：表达式列加 ⚠[RTL补充] 前缀 + 信号名/表达式格琥珀底，左表一眼可见
+                    self._set_text(r, COL_EXPR, "⚠[RTL补充] %s" % sig.expr)
+                    _amber = QtGui.QColor("#fff7ed")
+                    _snote = getattr(sig, "_supplement_note", "") or ""
+                    _stip = ("⚠ 本信号逻辑为【RTL 补充】(Excel 真表缺此级 ECO，手工补)。\n"
+                             "生成/预览/报告均按此补充式扫真值表，.sv 块顶带 // ⚠。"
+                             + (("\n理由: %s" % _snote) if _snote else ""))
+                    for _c in (COL_K, COL_EXPR):
+                        _cell = self.table.item(r, _c)
+                        if _cell is not None:
+                            _cell.setBackground(_amber)
+                            _cell.setToolTip(_stip)
+                else:
+                    self._set_text(r, COL_EXPR, sig.expr)
                 self.table.item(r, COL_R).setData(QtCore.Qt.UserRole, r)
             except Exception:  # noqa: BLE001  单行异常不连累整表
                 self._set_text(r, COL_R, str(getattr(sig, "assert_id", "?")))
@@ -2068,6 +2095,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not txt:
             self._logic_overrides = {}
             self._save_logic_overrides()
+            self._refresh_after_logic_overrides()
             self.status.showMessage("RTL 补充逻辑已清空")
             return
         try:
@@ -2087,6 +2115,7 @@ class MainWindow(QtWidgets.QMainWindow):
         unknown = [n for n in norm if n not in have]
         self._logic_overrides = norm
         self._save_logic_overrides()
+        self._refresh_after_logic_overrides()
         n_on = sum(1 for v in norm.values() if v.get("enabled", True) is not False)
         msg = "已保存 %d 条 RTL 补充逻辑（%d 条启用）。生成/预览/报告时按补充式扫真值表，块顶带 // ⚠。" \
               % (len(norm), n_on)
@@ -2095,6 +2124,22 @@ class MainWindow(QtWidgets.QMainWindow):
                    "\n".join("  %s" % n for n in unknown[:20])
         QtWidgets.QMessageBox.information(self, "已保存", msg)
         self.status.showMessage("RTL 补充逻辑已更新（共 %d 条）" % len(norm))
+
+    def _refresh_after_logic_overrides(self):
+        """RTL 补充变更后即时刷新：重建信号列表(合成替换原行/纯新增追加) → 重析 → 重建左表 →
+        刷新编辑器真值表/预览。这样『加进去补充后 GUI 真值表不刷新』就被治掉了。"""
+        if not self.wb:
+            return
+        cur_name = (self._ti_sig.out_name
+                    if getattr(self, "_ti_sig", None) is not None else None)
+        self.signals = self._logic_signals() + list(self.wb.mux)
+        # 编辑器原指向的对象可能已被合成对象替换 → 按名重新指向新对象，否则刷新后仍显示旧逻辑
+        if cur_name is not None:
+            self._ti_sig = next((s for s in self.signals if s.out_name == cur_name), None)
+        self._analysis = {}
+        self._reanalyze_all()          # 重建 resolver + 全表重析 + _populate_table + 重载 logic 编辑器 + 刷新预览
+        if getattr(self, "_ti_mux_sig", None) is not None:
+            self._load_mux_test_items(self._ti_mux_sig)
 
     def _analyze_one(self, sig):
         """单信号解析画像：logic 走 analyze_signal，mux 组走 analyze_mux_group（2026-06-03 第九轮）。"""
@@ -2374,6 +2419,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_sig_cov_combo(None)                       # 无信号：单点覆盖下拉禁用并复位
         self._set_suffix_chk(None)                          # 无信号：探尾缀网勾选禁用
         self._set_sig_cascade_combo(None)                   # 无信号：本信号级联下拉禁用
+        self.ti_header.setStyleSheet("color:#445;")         # 复位 RTL 补充琥珀横幅
         self.ti_header.setText(header_text)
         self._ti_loading = True
         try:
@@ -2837,11 +2883,23 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._ti_sig.out_base or "").lower()) if self.wb else None
         iddq_tag = ("   [⚙dft页iddq门控(%s)：已列为输入行，每条测试驱透传值；.sv另自动+1条漏电态拍]"
                     % _dftg["gate_base"] if _dftg else "")
+        # RTL 补充逻辑(Excel 缺级、手工补)：头部显眼琥珀横幅 + 标注，且真值表已按补充式扫出新输入维度
+        supp = getattr(self._ti_sig, "_is_supplement", False)
+        if supp:
+            _snote = getattr(self._ti_sig, "_supplement_note", "") or ""
+            supp_tag = ("　⚠【RTL补充·Excel缺此级ECO，已用此式扫真值表】"
+                        + (("理由:%s" % _snote) if _snote else ""))
+            self.ti_header.setStyleSheet(
+                "color:#a05a00;background:#fff7ed;border:1px solid #fdba74;"
+                "border-radius:5px;padding:4px 8px;font-weight:600;")
+        else:
+            supp_tag = ""
+            self.ti_header.setStyleSheet("color:#445;")
         # 表达式写成 "输出 = RHS" 等式；字母对照已下移到『输入信号』表，头部保持精简
         self.ti_header.setText(
-            "信号 %s     %s = %s     用例 %d 条%s%s%s%s"
+            "信号 %s     %s = %s     用例 %d 条%s%s%s%s%s"
             % (self._ti_sig.out_name, self._ti_sig.out_base or "out", self._ti_sig.expr,
-               len(self._ti_rows), fill_tag, tag, cone_tag, iddq_tag))
+               len(self._ti_rows), fill_tag, tag, cone_tag, iddq_tag, supp_tag))
 
     def _ti_mark_customized(self):
         if not self._ti_sig:

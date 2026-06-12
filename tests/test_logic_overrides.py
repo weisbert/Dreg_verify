@@ -128,6 +128,29 @@ def test_supplement_pure_new_signal(wbx):
     assert res["blocks"][0][0][0].startswith("// ⚠")
 
 
+def test_supplement_self_reference_input_resolves_as_register(wbx):
+    """d_en_vco_fc 真形：补充式的某输入(EN)基名 == 输出基名(自引用)，且该基名同时是寄存器。
+    必须解析成 RF_WRITE(寄存器)、不被错误 cone 展开成自身、不递归。"""
+    # 让 d_logic_bt_lp_reserve 同时也是 0x16 寄存器（镜像 d_en_vco_fc 既是 logic 输出又是寄存器）
+    wbx.regmap["d_logic_bt_lp_reserve"] = excel_model.RegmapEntry(
+        signal="d_logic_bt_lp_reserve", reg_name="RSV", reg_type="RW", default=0,
+        bit_lsb=1, bit_msb=1, owner="x", address=0x16)
+    ov = {"d_logic_bt_lp_reserve": {
+        "enabled": True, "note": "自引用输入(镜像 d_en_vco_fc EN=自身寄存器)",
+        "expr": "IDDQ2 ? 1'b0 : (SEL ? FASTON : EN)",
+        "inputs": [
+            {"var": "EN",     "raw": "d_logic_bt_lp_reserve_to_logic"},  # base==out_base 自引用
+            {"var": "SEL",    "raw": "d_bt_lp_bt_mode_sel"},
+            {"var": "FASTON", "raw": "d_bt_lp_bt_mode_sel_local"},
+            {"var": "IDDQ2",  "raw": "d_bt_lp_iddq"},
+        ]}}
+    res = G.build(wbx, G.GenOptions(signals=["d_logic_bt_lp_reserve"], logic_overrides=ov))
+    assert res["summary"]["n_supplement"] == 1
+    assert res["summary"]["n_generated"] == 1          # 没被当 risky 跳过、没递归报错
+    sv = "\n".join(res["blocks"][0][0])
+    assert "RF_WRITE(10'h16" in sv                      # 自引用 EN 解析成 0x16 寄存器写
+
+
 # ───────────── GUI：校验 / 配置导出导入 / _opts 透传 ─────────────
 @pytest.fixture(scope="module")
 def qapp():
@@ -172,3 +195,49 @@ def test_gui_logic_overrides_validate_config_and_opts(qapp, tmp_path_factory):
     assert "logic_overrides" in cfg and "d_logic_bt_lp_lna_agc" in cfg["logic_overrides"]
     w._reset_all_config_state()
     assert w._logic_overrides == {}
+
+
+def test_gui_supplement_syncs_truth_table_and_marks(qapp, tmp_path_factory):
+    """加补充后 GUI 真值表【同步刷新】+ 左表/编辑器【明显标注】(用户报的两个问题)。"""
+    from dreg_verify import gui
+    from PySide6 import QtCore
+    path = tmp_path_factory.mktemp("gsync") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    w = gui.MainWindow()
+    w.path_edit.setText(str(path))
+    w.on_load()
+    target = "d_logic_bt_lp_lna_agc"
+
+    # 加载时该信号是原始 3 输入
+    sig0 = next(s for s in w.signals if s.out_name.startswith(target))
+    assert not getattr(sig0, "_is_supplement", False)
+    w._load_test_items(sig0)
+    base_inputs = len(w._ti_groups)
+
+    # 加补充 → 触发刷新（模拟 on_logic_overrides 保存后那步）
+    w._logic_overrides = {k: dict(v) for k, v in SUPP.items()}
+    w._refresh_after_logic_overrides()
+
+    # ① self.signals 换成了合成信号（带补充 expr/_is_supplement）
+    sig1 = next(s for s in w.signals if s.out_name.startswith(target))
+    assert getattr(sig1, "_is_supplement", False)
+    assert "EXTRA" in sig1.expr
+
+    # ② 编辑器真值表同步刷新出新 ECO 输入维度（比原来多）
+    w._load_test_items(sig1)
+    assert len(w._ti_groups) > base_inputs
+    in_bases = {str(g.get("base", "")).lower() for g in w._ti_groups}
+    assert any("d_bt_lp_iddq" in b for b in in_bases)
+    assert getattr(w._ti_sig, "_is_supplement", False)
+
+    # ③ 左表明显标注：表达式列加 ⚠[RTL补充] 前缀
+    row = next(r for r in range(w.table.rowCount())
+               if w.table.item(r, gui.COL_K)
+               and w.table.item(r, gui.COL_K).text().startswith(target))
+    assert w.table.item(row, gui.COL_EXPR).text().startswith("⚠[RTL补充]")
+
+    # ④ 清空补充 → 信号还原、标注消失
+    w._logic_overrides = {}
+    w._refresh_after_logic_overrides()
+    sig2 = next(s for s in w.signals if s.out_name.startswith(target))
+    assert not getattr(sig2, "_is_supplement", False)
