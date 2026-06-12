@@ -533,8 +533,50 @@ def test_tmm_regmap_strip_width_in_field_names():
             rws.cell(row=r, column=ci(c), value=v)
     sr2(2, {"G": "Signal_Name", "F": "Reg Type", "H": "Address"})     # 表头 row2
     sr2(3, {"G": "int_n[8:0]", "F": "RW", "H": "d2"})                 # d2 = 十进制 2
-    reg = read_regmap(rws)
+    reg, _dups = read_regmap(rws)
     assert "int_n" in reg and reg["int_n"].address == 2 and reg["int_n"].reg_type == "RW"
+
+
+# ── regmap 同名重复定义：保留【首个】(与表 VLOOKUP/for_test 一致)，不是后者覆盖 ──
+#    真表 d_bt_lp_pmu_test_en 同名出现于 0x32/bit12(先) 与 0x36/bit1(后)；旧 last-wins 错绑 0x36/bit1
+#    → 仿真 T2 挂(写 0x2 不驱动)。设计师 for_test 用首个 0x32/bit12(写 0x1000)。2026-06-12 实证。
+def test_regmap_duplicate_field_keeps_first_and_warns():
+    from openpyxl.utils import column_index_from_string as ci
+    from dreg_verify.excel_model import read_regmap
+    rwb = openpyxl.Workbook()
+    rws = rwb.active
+
+    def sr(r, m):
+        for c, v in m.items():
+            rws.cell(row=r, column=ci(c), value=v)
+    sr(2, {"G": "Signal_Name", "F": "Reg Type", "H": "Address", "D": "Reg_Name"})  # 表头 row2
+    # 同名两次：首=0x32(=d50)/bit12(M列=bit12)，次=0x36(=d54)/bit1(X列=bit1)
+    sr(3, {"G": "d_bt_lp_pmu_test_en", "F": "RW", "H": "d50", "D": "bt_lp_misc", "M": "1"})
+    sr(4, {"G": "d_bt_lp_pmu_test_en", "F": "RW", "H": "d54", "D": "bt_lp_test", "X": "1"})
+    reg, dups = read_regmap(rws)
+
+    # 保留首个：0x32/bit12（不是后者 0x36/bit1）
+    e = reg["d_bt_lp_pmu_test_en"]
+    assert e.address == 50 and e.bit_lsb == 12 and e.bit_msb == 12
+    # 重复被捕获(两条都在，按出现序)，供告警
+    assert "d_bt_lp_pmu_test_en" in dups and len(dups["d_bt_lp_pmu_test_en"]) == 2
+    assert [x.address for x in dups["d_bt_lp_pmu_test_en"]] == [50, 54]
+
+    # 端到端：用该字段的 logic 信号 → 绑首个寄存器 + 块顶 ⚠ + 写值是 0x1000(bit12) 而非 0x2(bit1)
+    s = _logic("d_logic_pmu", 1, "A",
+               {"A": {"raw": "d_bt_lp_pmu_test_en", "base": "d_bt_lp_pmu_test_en",
+                      "width": 1, "msb": None, "lsb": None}}, "128")
+    wb = DregWorkbook(logic=[s], regmap=reg, tmm={}, sheet_names=[], regmap_dups=dups)
+    b = Resolver(wb).resolve_signal_inputs(s)["A"]
+    assert b.found_in == "regmap" and b.address == 50 and b.reg_lsb == 12
+
+    res = G.build(wb, G.GenOptions(top_output_only=False))
+    assert res["summary"]["n_generated"] == 1
+    assert res["summary"]["n_regmap_warnings"] == 1
+    text = "\n".join(res["blocks"][0][0])
+    assert "regmap 重名" in text                    # 块顶告警可见
+    assert "10'h32" in text and "16'h1000" in text  # 写首个寄存器/正确位(bit12)
+    assert "10'h36" not in text and "16'h2" not in text  # 不是被覆盖的错寄存器/位
 
 
 def test_real_pll_field_resolves_to_rfwrite():

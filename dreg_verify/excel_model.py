@@ -679,8 +679,18 @@ def read_mux(ws, header_row=2):
 
 # ───────────────────────────── 读取 regmap 页 ─────────────────────────────
 def read_regmap(ws, header_row=2):
-    """返回 dict: signal_name -> RegmapEntry。bit 位置由 J..Y(=bit15..bit0) 哪列非空推出。"""
+    """返回 (out, dups)。bit 位置由 J..Y(=bit15..bit0) 哪列非空推出。
+      out:  dict signal_name -> RegmapEntry。
+      dups: dict signal_low -> [RegmapEntry,…]，仅含同名出现 >1 次者(按出现序，含被采纳的首个)，供告警。
+
+    ⭐同名信号重复定义时【保留首个】(setdefault 语义)——与表自身 for_test 的 VLOOKUP(取首个匹配)
+      及 read_tmm(setdefault 保留首个) 一致。旧版 `out[signal]=…` 让【后者覆盖前者】是 bug：真表
+      d_bt_lp_pmu_test_en 同名出现于 0x32/bit12(先) 与 0x36/bit1(后)，后者覆盖→工具错绑 0x36/bit1
+      →仿真 T2 挂；而设计师 for_test 用的真值是首个 0x32/bit12(2026-06-12 实证)。重复不静默吞，
+      经 dups 透出告警(见 generator._regmap_dup_warning)。"""
     out = {}
+    seen_lower = set()      # 已采纳(首个)的小写名
+    dup_lower = {}          # 小写名 -> [所有同名条目]，用于检出重复并告警
     # J..Y 共 16 列，分别代表 bit15..bit0
     bit_cols = [openpyxl.utils.get_column_letter(c) for c in
                 range(column_index_from_string("J"), column_index_from_string("Y") + 1)]
@@ -699,7 +709,7 @@ def read_regmap(ws, header_row=2):
             bit_msb, bit_lsb = max(occupied), min(occupied)
         else:
             bit_msb = bit_lsb = None
-        out[signal] = RegmapEntry(
+        entry = RegmapEntry(
             signal=signal,
             reg_name=_s(_col(row, "D")),
             reg_type=_s(_col(row, "F")),
@@ -709,7 +719,13 @@ def read_regmap(ws, header_row=2):
             owner=_s(_col(row, "AE")),
             address=parse_hex_addr(_col(row, "H")),   # regmap H 列 = 地址（'d13'）
         )
-    return out
+        low = signal.lower()
+        dup_lower.setdefault(low, []).append(entry)
+        if low not in seen_lower:                      # 保留首个(与 VLOOKUP/read_tmm 一致)
+            out[signal] = entry
+            seen_lower.add(low)
+    dups = {low: lst for low, lst in dup_lower.items() if len(lst) > 1}
+    return out, dups
 
 
 # ───────────────────────────── 读取 total_memory_map 页 ─────────────────────────────
@@ -776,12 +792,15 @@ def _normalize_type(v):
 # ───────────────────────────── 顶层装载 ─────────────────────────────
 class DregWorkbook:
     def __init__(self, logic, regmap, tmm, sheet_names, mux=None, dft=None,
-                 fortest_order=None):
+                 fortest_order=None, regmap_dups=None):
         self.logic = logic              # list[LogicSignal]
         self.regmap = regmap            # dict
         self.tmm = tmm                  # dict
         self.sheet_names = sheet_names
         self.mux = mux if mux is not None else []   # list[MuxGroup]（无 mux 页 = 空列表）
+        # {signal_low: [RegmapEntry,…]} regmap 同名重复定义(已按首个采纳)，供 generator 告警。
+        # 空 = 无重复(绝大多数表)。来自 read_regmap；手构 wb 不传=空。
+        self.regmap_dups = regmap_dups if regmap_dups is not None else {}
         # {输出基名low: 门控信息}（dft 页；无 dft 页=空）。iddq DFT 拍 / pin_dft_gate 用，见 read_dft。
         self.dft = dft if dft is not None else {}
         # {输出基名low: [输入基名low顺序]}（for_test 页；无/空页=空）。真值表输入行排序对照用。
@@ -1001,7 +1020,8 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     ws_ft = _find_sheet(wb, "for_test")
 
     logic = read_logic(ws_logic, logic_header_row)
-    regmap = read_regmap(ws_regmap, regmap_header_row) if ws_regmap is not None else {}
+    regmap, regmap_dups = (read_regmap(ws_regmap, regmap_header_row)
+                           if ws_regmap is not None else ({}, {}))
     tmm = read_tmm(ws_tmm) if ws_tmm is not None else {}
     mux = read_mux(ws_mux) if ws_mux is not None else []
     _apply_mux_ref_suffix(logic, mux)        # 跨页：mux 以 _to_mux 引用的 logic 输出 → 回填 _to_mux 尾缀
@@ -1013,4 +1033,4 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     names = list(wb.sheetnames)
     wb.close()
     return DregWorkbook(logic, regmap, tmm, names, mux=mux, dft=dft,
-                        fortest_order=fortest_order)
+                        fortest_order=fortest_order, regmap_dups=regmap_dups)

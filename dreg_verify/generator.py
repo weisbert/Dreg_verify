@@ -664,6 +664,43 @@ def _cone_force_fallback(resolver, sig, node, bindings, internal_letters, notes=
     return fb
 
 
+def _regmap_dup_warning(used_letters, bindings, wb):
+    """信号若用到 regmap 同名重复定义的字段(已按【首个】采纳)→ 返回告警串，否则 None。
+    used_letters: 该信号实际用到的变量字母集合(logic 用 E.collect_vars(node)、mux 用 used_vars)。
+
+    背景(2026-06-12 d_bt_lp_pmu_test_en 实证)：表里同一字段名可能在 regmap 出现两次、落在不同
+    寄存器/位(如 0x32/bit12 与 0x36/bit1)。read_regmap 现按首个采纳(与表 VLOOKUP 一致)，但首个未必
+    一定是设计意图——故凡命中重复就显式告警(块顶 ⚠ + CLI/汇总)，不静默。仅对【实际从 regmap 取值】
+    (found_in=='regmap')的输入告警；tmm 命中时 regmap 重复不影响结果，不扰民。"""
+    dups = getattr(wb, "regmap_dups", None)
+    if not dups:
+        return None
+
+    def _fmt(e):
+        a = ("0x%X" % e.address) if e.address is not None else "?"
+        if e.bit_lsb is None:
+            bit = "bit?"
+        elif e.bit_msb == e.bit_lsb:
+            bit = "bit%d" % e.bit_lsb
+        else:
+            bit = "bit[%d:%d]" % (e.bit_msb, e.bit_lsb)
+        rn = (e.reg_name or "").strip()
+        return ("%s@%s %s" % (rn, a, bit)).strip() if rn else ("%s %s" % (a, bit))
+
+    msgs, seen = [], set()
+    for ltr in used_letters:
+        b = bindings.get(ltr)
+        if b is None or not getattr(b, "resolved", False) or b.found_in != "regmap":
+            continue
+        low = b.base.lower()
+        if low in dups and low not in seen:
+            seen.add(low)
+            ents = dups[low]
+            msgs.append("regmap 重名: %s 在 %d 处定义 [%s]，已按首个采纳 (%s)；如不符请核对 regmap 或由 SE 消重"
+                        % (b.base, len(ents), ", ".join(_fmt(e) for e in ents), _fmt(ents[0])))
+    return " | ".join(msgs) if msgs else None
+
+
 def build(wb, opts):
     """
     返回 dict:
@@ -687,6 +724,7 @@ def build(wb, opts):
     skipped = []        # 含不可驱动输入(wire兜底/未解析)的信号，默认跳过(与 VBA 一致)
     spec_conflicts = []  # mux 规格冲突跳过(同 case 不同源)——单列, 账目/报告/GUI 据此区别于普通跳过
     mux_warnings = []   # 照常生成但有提示的 mux 组（如 top_out=0 用裸名探针，可能要前缀）
+    regmap_warnings = [] # 用到 regmap 同名重复字段的信号（已按首个采纳，块顶 ⚠ + 这里汇总）
     cone_fallbacks = [] # cone 成环 → 回退 force 基名的信号（for_test 那招），可见性用
     n_total_vectors = 0
     n_total_neg = 0
@@ -814,6 +852,11 @@ def build(wb, opts):
         # 不进 mux_warnings（那是 mux 专用通道，CLI 文案会误标）；报告侧由 summary.warning 透出。
         if meta.get("iddq_skipped"):
             lines = ["// ⚠ %s" % meta["iddq_skipped"]] + lines
+        # regmap 同名重复(已按首个采纳)：块顶留 ⚠ + 汇总，别让"绑到哪个寄存器"的歧义无声无息
+        _rmdup = _regmap_dup_warning(E.collect_vars(node), bindings, wb)
+        if _rmdup:
+            lines = ["// ⚠ %s" % _rmdup] + lines
+            regmap_warnings.append((sig.out_name, sig.assert_id, _rmdup))
         stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
@@ -979,6 +1022,11 @@ def build(wb, opts):
                     "跑 scan_rtl 配 --probe-prefix %s=<层级> 后重生成即为正确路径" % (abare, abare))
             lines = ["// ⚠ %s" % amsg] + lines
             mux_warnings.append((grp.out_name, grp.assert_id, amsg))
+        # regmap 同名重复(已按首个采纳)：mux 控制/数据字段同样可能撞重名 → 块顶留 ⚠ + 汇总
+        _rmdup = _regmap_dup_warning(exp.get("used_vars", ()), exp["bindings"], wb)
+        if _rmdup:
+            lines = ["// ⚠ %s" % _rmdup] + lines
+            regmap_warnings.append((grp.out_name, grp.assert_id, _rmdup))
         stats["is_mux"] = True
         stats["scan_path"] = meta.get("scan_path")
         blocks.append((lines, stats))
@@ -1007,12 +1055,13 @@ def build(wb, opts):
         "n_mux_selected": len(mux_selected),
         "n_mux_generated": len(blocks) - n_logic_blocks,
         "n_mux_warnings": len(mux_warnings),
+        "n_regmap_warnings": len(regmap_warnings),
         # 默认静默过滤掉的 logic 内部节点（top_output=0）——拎出来给可见性
         "n_filtered_internal": len(filtered_internal),
     }
     return {"blocks": blocks, "selected": selected, "errors": errors,
             "skipped": skipped, "spec_conflicts": spec_conflicts,
-            "mux_warnings": mux_warnings,
+            "mux_warnings": mux_warnings, "regmap_warnings": regmap_warnings,
             "cone_fallbacks": cone_fallbacks,
             "filtered_internal": filtered_internal,
             "dup_labels": dup_labels, "summary": summary,

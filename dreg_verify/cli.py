@@ -1215,6 +1215,14 @@ def _report(res, out):
             print("    ...(共 %d 个)" % len(res["mux_warnings"]))
         print("    这些已经生成进 .sv；若仿真 elaboration 报 CUVUNF 说明它们埋在子模块，"
               "跑 scan_rtl 配 --probe-prefix-file 后重生成即可。")
+    if s.get("n_regmap_warnings"):
+        # regmap 同名重复定义：已按【首个】采纳(与表 VLOOKUP/for_test 一致)，但首个未必是设计意图
+        print("  ⚠ %d 个信号用到 regmap 同名重复字段（已按首个采纳；如不符请核对 regmap 或由 SE 消重）："
+              % s["n_regmap_warnings"])
+        for name, aid, why in res.get("regmap_warnings", [])[:30]:
+            print("    - [R=%s] %s ← %s" % (aid, name, why))
+        if len(res.get("regmap_warnings", [])) > 30:
+            print("    ...(共 %d 个)" % len(res["regmap_warnings"]))
     if s.get("n_filtered_internal"):
         # 唯一'默认静默减少'的一类——把名字也亮出来，别让它无声无息
         fi = res.get("filtered_internal", [])
