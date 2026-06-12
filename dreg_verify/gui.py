@@ -510,6 +510,11 @@ class MainWindow(QtWidgets.QMainWindow):
         b_prefix.setToolTip("输出网不在 ENV_RF 顶层、而在子模块里时（如 pll_n 在 U_BT_LP_PLL_DIG 内部），\n"
                             "给勾选/选中的信号设置层级前缀 → 断言写 `ENV_RF.<前缀>.<信号名>。留空清除。")
         b_prefix.clicked.connect(self.on_set_probe_prefix)
+        b_nets = QtWidgets.QPushButton("导出 nets.txt…")
+        b_nets.setToolTip("把当前表需要在 ENV_RF 层级定位的网清单导出为 nets.txt，传到仿真服务器跑\n"
+                          "scan_rtl.py 扫 RTL → 得到 probe_prefixes.txt → 回来用『设置探针前缀 → 导入…』套用。\n"
+                          "（等价于 CLI：python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt）")
+        b_nets.clicked.connect(self.on_export_nets)
         b_force = QtWidgets.QPushButton("强制 force 信号")
         b_force.setToolTip("列出要『直接 force 顶层基名网、跳过 cone 展开』的信号基名(每行一个)。\n"
                            "用于覆盖工具的自动判断：撞名 RO 寄存器的内部信号(如 d_wl_rf_linectrl_band_sel)\n"
@@ -536,6 +541,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (b_negall, b_negnone):
             bulk.addWidget(b)
         bulk.addWidget(b_prefix)
+        bulk.addWidget(b_nets)
         bulk.addWidget(b_force)
         bulk.addWidget(QtWidgets.QLabel(" 编辑:"))
         bulk.addWidget(b_exp_edits)
@@ -1789,6 +1795,57 @@ class MainWindow(QtWidgets.QMainWindow):
                               for x in self._analysis.get(i, {}).get("inputs", [])))
         self.status.showMessage("探针前缀映射已更新（共 %d 条），影响 %d 个信号"
                                 "（见蓝色『探针前缀』列；状态列应变 clean）" % (len(mapping), affected))
+
+    def on_export_nets(self):
+        """导出 nets.txt：当前表需要在 ENV_RF 层级定位的网清单，供仿真服务器跑 scan_rtl 扫 RTL。
+
+        这是跨机器两段式工作流（Excel 在 Windows、RTL 在 Linux）的第①步——以前要落到命令行
+        跑 `python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt`，现在直接在 GUI 出。
+        网清单取 logic 探针 + 两种级联模式的 force 输入 + mux 三类网 + dft iddq 门网的并集
+        （与 scan_rtl._load_excel_nets 同口径，一次扫覆盖 cone/force 两模式，宁多勿漏）。
+        """
+        if not self.wb:
+            QtWidgets.QMessageBox.information(self, "无表", "先加载一张 Excel 真表，再导出 nets.txt。")
+            return
+        from dreg_verify import rtl_scan
+        try:
+            nets = rtl_scan.collect_excel_nets(self.wb)
+            n_logic = len(nets)
+            mux_nets = rtl_scan.collect_mux_nets(self.wb)
+            for name, why in mux_nets.items():
+                nets.setdefault(name, why)
+            dft_nets = rtl_scan.collect_dft_nets(self.wb)
+            for name, why in dft_nets.items():
+                nets.setdefault(name, why)
+        except Exception as ex:  # noqa: BLE001
+            QtWidgets.QMessageBox.critical(self, "导出失败", "收集网清单出错：\n%s" % ex)
+            return
+        finally:
+            # collect_excel_nets 会把 logic 信号的 _append_to_logic 强设为 True(找 RTL 真名)，
+            # 内部又建临时 Resolver 重盖所有信号的尾缀标记——重建本 GUI 的 Resolver 还原成当前设置，
+            # 否则后续左表/预览会按被污染的尾缀标记显示。
+            self._reanalyze_all()
+
+        base = os.path.dirname(self.path_edit.text().strip()) or os.getcwd()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出 nets.txt（信号清单，传服务器跑 scan_rtl）",
+            os.path.join(base, "nets.txt"), "信号清单 (*.txt);;全部文件 (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(rtl_scan.render_nets_text(nets))
+        except OSError as ex:
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
+            return
+        QtWidgets.QMessageBox.information(
+            self, "已导出 nets.txt",
+            "共 %d 个网已写出（logic %d · mux %d · dft %d，去重并集）：\n%s\n\n"
+            "下一步（跨机器两段式）：\n"
+            "  ① 把 scan_rtl.py + 这个 nets.txt 一起传到仿真服务器\n"
+            "  ② source dreg 环境后跑：python3 scan_rtl.py\n"
+            "  ③ 把生成的 probe_prefixes.txt 拷回 → 『设置探针前缀 → 导入…』套用"
+            % (len(nets), n_logic, len(mux_nets), len(dft_nets), path))
 
     def _save_force_signals(self):
         """强制 force 基名按 Excel 路径写入 settings（pytest 下 no-op，与其它持久化策略一致）。"""

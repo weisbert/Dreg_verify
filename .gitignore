@@ -32,6 +32,8 @@ wr_rf_tc.sv
 *wr_rf_tc*.sv
 *.sv.out
 *.sv
+# AI 提效分享 PPT 工作稿（含真实信号名，绝不提交；整个 ppt/ 目录都忽略）
+ppt/
 
 # ---- 编辑器 / 系统 ----
 .vscode/

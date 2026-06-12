@@ -120,6 +120,39 @@ def test_append_to_logic_config_roundtrip(gui_app, tmp_path, monkeypatch):
         w.close()
 
 
+def test_export_nets_gui(gui_app, tmp_path, monkeypatch):
+    """GUI『导出 nets.txt』(2026-06-12)：把当前表需要在 ENV_RF 层级定位的网清单写出，
+    供仿真服务器跑 scan_rtl（原 CLI scan_rtl.py --export-nets 的 GUI 化）。验证：
+      ① 文件可被 scan_rtl.parse_nets_text 解析、非空、含 mux 输出探针网（logic+mux+dft 并集）
+      ② 导出过程不污染左表尾缀状态——collect_excel_nets 会临时把 _append_to_logic 强设 True，
+         导出后必须还原成当前开关（关尾缀时探基名应保持基名）。"""
+    from PySide6 import QtWidgets
+    from dreg_verify import gui as G
+    from scan_rtl import parse_nets_text
+    excel = tmp_path / "nets_gui.xlsx"
+    fixtures.build_workbook(str(excel), with_pll_chain=True, with_mux=True)
+    w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
+    try:
+        out = tmp_path / "nets.txt"
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                            staticmethod(lambda *a, **k: (str(out), "")))
+        monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                            staticmethod(lambda *a, **k: None))
+        # 关『logic 加尾缀』→ pll_n1 探基名；导出后应仍是基名（污染已被 _reanalyze_all 还原）
+        w.append_to_logic_chk.setChecked(False)
+        sig = next(s for s in w.signals if getattr(s, "out_base", "") == "pll_n1")
+        assert sig.rtl_name == "pll_n1[31:0]"
+        w.on_export_nets()
+        assert out.exists()
+        nets = parse_nets_text(out.read_text(encoding="utf-8"))
+        assert nets, "nets.txt 应非空"
+        mux_bases = {g.out_base for g in (w.wb.mux or [])}
+        assert mux_bases & set(nets), "应导出 mux 输出探针网（mux 三类网并入）"
+        assert sig.rtl_name == "pll_n1[31:0]"            # 尾缀状态未被导出污染
+    finally:
+        w.close()
+
+
 def _mux_idx(w, out_base):
     """按 out_base 找到该 mux 组在 signals 里的行号。"""
     for i, s in enumerate(w.signals):
