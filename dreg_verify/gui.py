@@ -357,6 +357,17 @@ def _code_version():
         return ""
 
 
+class _CheckableMenu(QtWidgets.QMenu):
+    """可勾选下拉菜单：点 checkable 项只切换勾选、不关闭菜单（owner 多选用）。
+    普通项（不可勾）仍按默认行为关闭，键盘导航不受影响。"""
+    def mouseReleaseEvent(self, e):
+        act = self.activeAction()
+        if act is not None and act.isEnabled() and act.isCheckable():
+            act.trigger()          # 切换勾选 + 发 toggled，但不调用 super → 菜单留开
+            return
+        super().mouseReleaseEvent(e)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -460,8 +471,16 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addLayout(top)
 
         flt = QtWidgets.QHBoxLayout()
-        self.owner_combo = QtWidgets.QComboBox(); self.owner_combo.addItem("全部 owner")
-        self.owner_combo.currentIndexChanged.connect(self.apply_filter)
+        # owner 多选：QToolButton + 可勾选菜单（_owner_filter 空集=全部；勾多个=OR 任一命中即显示）
+        self._owner_filter = set()        # 选中的 owner（含 NO_OWNER 哨兵），空=全部
+        self._owner_acts = {}             # owner 显示键 -> QAction
+        self.owner_btn = QtWidgets.QToolButton()
+        self.owner_btn.setText("全部 owner")
+        self.owner_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.owner_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.owner_btn.setToolTip("按 owner 多选筛选：可勾多个，任一命中即显示（OR）。不勾=全部。")
+        self._owner_menu = _CheckableMenu(self.owner_btn)
+        self.owner_btn.setMenu(self._owner_menu)
         self.type_combo = QtWidgets.QComboBox(); self.type_combo.addItem("全部 type")
         self.type_combo.currentIndexChanged.connect(self.apply_filter)
         self.status_combo = QtWidgets.QComboBox()
@@ -474,7 +493,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.name_edit.textChanged.connect(self.apply_filter)
         self.top_only = QtWidgets.QCheckBox("仅 top_output=1")    # 默认显示全部，便于 debug
         self.top_only.stateChanged.connect(self.apply_filter)
-        for w in (QtWidgets.QLabel("筛选:"), self.owner_combo, self.type_combo,
+        for w in (QtWidgets.QLabel("筛选:"), self.owner_btn, self.type_combo,
                   self.status_combo, self.name_edit, self.top_only):
             flt.addWidget(w, 1 if w is self.name_edit else 0)
         flt.addStretch(1)
@@ -1406,19 +1425,62 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(msg)
 
     def _populate_filters(self):
-        owners = sorted({s.owner for s in self.signals if s.owner})
         types = sorted({s.suffix for s in self.signals if s.suffix})
         self.type_combo.blockSignals(True)
         self.type_combo.clear(); self.type_combo.addItem("全部 type"); self.type_combo.addItems(types)
         self.type_combo.blockSignals(False)
-        # owner 下拉：全部 → （无 owner）[仅当真有空 owner 信号时] → 具体 owner 名
+        self._owner_filter = set()         # 换表：owner 多选复位为「全部」
+        self._rebuild_owner_menu()
+
+    def _rebuild_owner_menu(self):
+        """据当前信号集重建 owner 多选菜单：（无 owner）[仅当真有空 owner 时] + 各具体 owner。
+        每项一个可勾 QAction（data=显示键），勾选触发 _on_owner_toggled。保留仍存在的已选。"""
+        owners = sorted({s.owner for s in self.signals if s.owner})
+        keep = set(self._owner_filter)
+        self._owner_menu.clear(); self._owner_acts = {}
         n_no_owner = sum(1 for s in self.signals if not s.owner)
-        self.owner_combo.blockSignals(True); self.owner_combo.clear()
-        self.owner_combo.addItem("全部 owner")
+        entries = []
         if n_no_owner:
-            self.owner_combo.addItem("%s ×%d" % (NO_OWNER, n_no_owner))
-        self.owner_combo.addItems(owners)
-        self.owner_combo.blockSignals(False)
+            entries.append((NO_OWNER, "%s ×%d" % (NO_OWNER, n_no_owner)))
+        entries += [(o, o) for o in owners]
+        for key, label in entries:
+            a = self._owner_menu.addAction(label)
+            a.setCheckable(True); a.setData(key)
+            a.setChecked(key in keep)      # setChecked 在 connect 之前 → 不误触处理器
+            a.toggled.connect(self._on_owner_toggled)
+            self._owner_acts[key] = a
+        self._owner_filter = {k for k in keep if k in self._owner_acts}  # 丢弃已不存在的旧 owner
+        self._update_owner_btn_text()
+
+    def _on_owner_toggled(self, checked):
+        """某 owner 项勾/取消 → 更新选中集 + 按钮文字，并重跑筛选。"""
+        act = self.sender()
+        if act is None:
+            return
+        key = act.data()
+        if checked:
+            self._owner_filter.add(key)
+        else:
+            self._owner_filter.discard(key)
+        self._update_owner_btn_text()
+        self.apply_filter()
+
+    def _update_owner_btn_text(self):
+        """owner 按钮文字：空=「全部 owner」；1 个=「owner: X」；多个=「owner ×N: …」。
+        tooltip 列全部已选，按钮不被长名撑爆。"""
+        sel = self._owner_filter
+        if not sel:
+            self.owner_btn.setText("全部 owner")
+            self.owner_btn.setToolTip("按 owner 多选筛选：可勾多个，任一命中即显示（OR）。不勾=全部。")
+            return
+        names = sorted(("（无 owner）" if k == NO_OWNER else k) for k in sel)
+        if len(names) == 1:
+            self.owner_btn.setText("owner: %s" % names[0])
+        else:
+            joined = ", ".join(names)
+            tail = joined if len(joined) <= 20 else names[0] + " …"
+            self.owner_btn.setText("owner ×%d: %s" % (len(names), tail))
+        self.owner_btn.setToolTip("已选 owner：" + "、".join(names) + "\n（任一命中即显示；取消全部=看全部）")
 
     def _populate_table(self):
         self._sig_loading = True
@@ -1524,7 +1586,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ───────────── 筛选 ─────────────
     def apply_filter(self):
         import re
-        owner = self.owner_combo.currentText()
+        owner_sel = self._owner_filter        # 空集=全部；含 NO_OWNER 哨兵=匹配空 owner
         typ = self.type_combo.currentText()
         statusf = self.status_combo.currentText()
         pat = self.name_edit.text().strip()
@@ -1541,11 +1603,10 @@ class MainWindow(QtWidgets.QMainWindow):
             sig = self._sig_of_row(r)
             st = self._analysis[self._idx_of_row(r)]["status"]
             show = True
-            if owner.startswith(NO_OWNER):           # 「（无 owner） ×N」：只看 owner 列留空的
-                if sig.owner:
+            if owner_sel:                            # 多选 OR：有 owner 须在选中集；无 owner 须勾了「（无 owner）」
+                match = (sig.owner in owner_sel) if sig.owner else (NO_OWNER in owner_sel)
+                if not match:
                     show = False
-            elif owner != "全部 owner" and sig.owner != owner:
-                show = False
             if typ != "全部 type" and sig.suffix != typ:
                 show = False
             if statusf == "仅 clean" and st != "clean":

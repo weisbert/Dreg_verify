@@ -347,6 +347,19 @@ h1{font-size:19px;margin:0 0 4px} h3{font-size:13px;margin:22px 0 0}
  width:300px;font-size:13px}
 .toolbar select{padding:5px;border:1px solid var(--bd);border-radius:5px}
 .toolbar label{font-size:13px;color:#444;user-select:none}
+/* owner 多选下拉：按钮 + 浮层复选列表（任一勾中即显示，OR） */
+.msel{position:relative;display:inline-block}
+.mselbtn{padding:5px 9px;border:1px solid var(--bd);border-radius:5px;background:#fff;cursor:pointer;
+ font-size:13px;color:#333}
+.mselbtn:hover{background:#f4f6f9}
+.mselpop{display:none;position:absolute;z-index:50;top:100%;left:0;margin-top:3px;max-height:260px;
+ overflow:auto;background:#fff;border:1px solid var(--bd);border-radius:6px;
+ box-shadow:0 3px 10px rgba(0,0,0,.15);padding:4px 0;min-width:170px}
+.msel.open .mselpop{display:block}
+.mselpop label{display:block;padding:4px 12px;font-size:13px;white-space:nowrap;cursor:pointer;color:#333}
+.mselpop label:hover{background:#eef3fb}
+.mselpop input{margin-right:7px;vertical-align:middle}
+.mselclr{border-top:1px solid var(--bd);color:#06c;margin-top:2px;padding-top:6px}
 #count{color:#888;font-size:12px;margin-left:auto}
 .tabs{display:flex;gap:4px;margin-top:8px}
 .tabbtn{border:1px solid var(--bd);border-bottom:none;background:#f4f6f9;cursor:pointer;
@@ -434,8 +447,10 @@ _REPORT_JS = """
 (function(){
   function $(id){return document.getElementById(id);}
   function jget(id){var el=$(id);return el?JSON.parse(el.textContent):[];}
-  var q=$('q'),ow=$('owner'),no=$('negonly'),cnt=$('count');
+  var q=$('q'),no=$('negonly'),cnt=$('count');
   var sig=$('sig'),typ=$('typ'),topf=$('topf');
+  var ownerSel=[];        /* owner 多选：勾中的值数组（含 '__no_owner__' 哨兵），空=全部 */
+  function ownerLabel(v){return v==='__no_owner__'?'（无 owner）':v;}
   var PER=[30,50,100,200];
   /* 每个 tab 一份数据 + 当前页/每页。重的真值表(②③)共用一份(check=True 标记)，③ 不再复制第二份 DOM。
      渲染只把"当前窗"注入 body，DOM 节点数恒定 ⇒ 6000 组也不卡。 */
@@ -450,12 +465,19 @@ _REPORT_JS = """
   var KEYS=['sum','tt','chk','det','ver'];
 
   function flt(){
-    var qq=(q.value||'').toLowerCase(),oo=ow.value,nn=no.checked,
-        ss=sig.value,tt=typ.value,tp=topf.value;
+    var qq=(q.value||'').toLowerCase(),nn=no.checked,
+        ss=sig.value,tt=typ.value,tp=topf.value,osel=ownerSel;
     return function(it){
       if(qq&&it.t.indexOf(qq)<0)return false;
-      if(oo==='__no_owner__'){if(it.o!=='')return false;}   /* 「（无 owner）」专项 */
-      else if(oo&&it.o!==oo)return false;
+      if(osel.length){                                      /* owner 多选 OR：任一命中即留 */
+        var hit=false,k;
+        for(k=0;k<osel.length;k++){
+          if(osel[k]==='__no_owner__'){if(it.o==='')hit=true;}   /* 「（无 owner）」 */
+          else if(it.o===osel[k])hit=true;
+          if(hit)break;
+        }
+        if(!hit)return false;
+      }
       if(ss&&it.s!==ss)return false;                        /* 信号名下拉(逐字匹配) */
       if(tt&&it.ty!==tt)return false;                       /* 类型下拉 */
       if(tp!==''&&String(it.tp)!==tp)return false;          /* top_output 下拉 */
@@ -563,8 +585,32 @@ _REPORT_JS = """
     render(active);                     /* 只重渲当前 tab；其余切过去时再渲 */
     cnt.textContent='匹配信号 '+filtered('sum').length;
   }
-  q.oninput=applyAll;ow.onchange=applyAll;no.onchange=applyAll;
+  q.oninput=applyAll;no.onchange=applyAll;
   sig.onchange=applyAll;typ.onchange=applyAll;topf.onchange=applyAll;
+
+  /* ===== owner 多选下拉：按钮开合 + 复选项勾选(OR) + 清除 + 点外部收起 ===== */
+  var ownerBox=$('ownerbox'),ownerBtn=$('ownerbtn'),ownerPop=$('ownerpop'),ownerClr=$('ownerclr');
+  function readOwnerSel(){
+    var cks=document.querySelectorAll('.ownerck'),arr=[],i;
+    for(i=0;i<cks.length;i++)if(cks[i].checked)arr.push(cks[i].value);
+    ownerSel=arr;
+    if(!arr.length)ownerBtn.textContent='全部 owner ▾';
+    else if(arr.length===1)ownerBtn.textContent=ownerLabel(arr[0])+' ▾';
+    else ownerBtn.textContent='owner ×'+arr.length+' ▾';
+  }
+  if(ownerBtn){
+    ownerBtn.onclick=function(e){e.stopPropagation();ownerBox.classList.toggle('open');};
+    ownerPop.onclick=function(e){e.stopPropagation();};        /* 浮层内点击不冒泡(不收起) */
+    var ocks=document.querySelectorAll('.ownerck'),j;
+    for(j=0;j<ocks.length;j++)ocks[j].onchange=function(){readOwnerSel();applyAll();};
+    if(ownerClr)ownerClr.onclick=function(e){
+      e.preventDefault();e.stopPropagation();
+      var cs=document.querySelectorAll('.ownerck'),k;
+      for(k=0;k<cs.length;k++)cs[k].checked=false;
+      readOwnerSel();applyAll();
+    };
+    document.addEventListener('click',function(){ownerBox.classList.remove('open');});
+  }
 
   /* ===== 真值表检查（designer 自测：遮 auto_out、期望变填空、回车判定）。按当前页进行。 ===== */
   var chkbtn=$('chkbtn'),chkscore=$('chkscore');
@@ -989,12 +1035,14 @@ def _write_report_html(path, rep, excel):
         return '<script type="application/json" id="%s">%s</script>' % (el_id, payload)
 
     owners = sorted({(r.get("owner") or "") for r in rep["summary"] if r.get("owner")})
-    # owner 列(P/L/AE)留空的信号：下拉给一个「（无 owner）×N」专项（哨兵值 __no_owner__），
+    # owner 多选下拉（复选浮层）：勾多个=OR，任一命中即显示；不勾=全部。
+    # owner 列(P/L/AE)留空的信号给一个「（无 owner）×N」复选项（哨兵值 __no_owner__），
     # 仅当真有空 owner 信号时才出现（都填好就不打扰）。
     n_no_owner = sum(1 for r in rep["summary"] if not r.get("owner"))
-    no_owner_opt = ('<option value="__no_owner__">（无 owner） ×%d</option>' % n_no_owner) if n_no_owner else ""
-    owner_opts = ('<option value="">全部 owner</option>' + no_owner_opt + "".join(
-        '<option value="%s">%s</option>' % (esc(o), esc(o)) for o in owners))
+    _ck = '<label><input type="checkbox" class="ownerck" value="%s">%s</label>'
+    no_owner_ck = (_ck % ("__no_owner__", "（无 owner） ×%d" % n_no_owner)) if n_no_owner else ""
+    owner_opts = (no_owner_ck + "".join(_ck % (esc(o), esc(o)) for o in owners)
+                  + '<label class="mselclr"><a href="#" id="ownerclr">清除选择</a></label>')
     # 信号名下拉：列全部信号(含 mux 组)，按名排序；选项 value=原始信号名(与 item.s 逐字匹配)
     sig_names = sorted({(r.get("signal") or "") for r in rep["summary"] if r.get("signal")})
     sig_opts = ('<option value="">全部信号</option>' + "".join(
@@ -1062,7 +1110,9 @@ def _write_report_html(path, rep, excel):
         '<span class="ex">　大表分页显示：用搜索/owner 过滤后翻页，DOM 只渲当前页，再多组也不卡。</span></p>'
         '<div class="toolbar">'
         '<input type="text" id="q" placeholder="搜索 信号名 / owner / 表达式…">'
-        '<select id="owner">%s</select>'
+        '<div class="msel" id="ownerbox">'
+        '<button type="button" class="mselbtn" id="ownerbtn">全部 owner ▾</button>'
+        '<div class="mselpop" id="ownerpop">%s</div></div>'
         '<select id="sig" title="按信号名筛选">%s</select>'
         '<select id="typ" title="按类型(to_logic/to_mux/ls/mux)筛选">%s</select>'
         '<select id="topf" title="按 top_output 筛选">%s</select>'

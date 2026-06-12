@@ -422,9 +422,9 @@ def test_lpbt_gui_header_single_ctrl(lpbt_win):
     assert "另一路径抽测" in txt        # LPBT 双路径文案
 
 
-# ───────────── ⑥ owner 留空的信号：下拉可筛「（无 owner）」 ─────────────
+# ───────────── ⑥ owner 留空的信号：多选菜单可筛「（无 owner）」 ─────────────
 def test_gui_filter_no_owner(wl_win):
-    """Excel owner 列(P/L/AE)留空 → sig.owner=''；下拉出现「（无 owner） ×N」，选中只显示这些。"""
+    """Excel owner 列(P/L/AE)留空 → sig.owner=''；多选菜单出现「（无 owner） ×N」，勾选只显示这些。"""
     from dreg_verify import gui as G
     w = wl_win
     for s in (w.signals[0], w.signals[1]):       # 模拟两个信号 owner 列留空
@@ -432,26 +432,47 @@ def test_gui_filter_no_owner(wl_win):
     w._populate_filters()
     n_blank = sum(1 for s in w.signals if not s.owner)
     assert n_blank >= 2
-    texts = [w.owner_combo.itemText(k) for k in range(w.owner_combo.count())]
-    item = next((t for t in texts if t.startswith(G.NO_OWNER)), None)
-    assert item == "%s ×%d" % (G.NO_OWNER, n_blank), texts     # 带计数
-    w.owner_combo.setCurrentText(item); w.apply_filter()
-    for r in range(w.table.rowCount()):                         # 只有无 owner 的行可见
+    assert G.NO_OWNER in w._owner_acts
+    act = w._owner_acts[G.NO_OWNER]
+    assert act.text() == "%s ×%d" % (G.NO_OWNER, n_blank)      # 带计数
+    act.setChecked(True)                                       # toggled → 只显示无 owner 的行
+    assert w._owner_filter == {G.NO_OWNER}
+    for r in range(w.table.rowCount()):
         s = w._sig_of_row(r)
         assert w.table.isRowHidden(r) == bool(s.owner), s.out_name
-    w.owner_combo.setCurrentText("全部 owner"); w.apply_filter()
+    act.setChecked(False)                                      # 取消 → 复位为全部
+    assert w._owner_filter == set()
+    assert w.owner_btn.text() == "全部 owner"
 
 
 def test_gui_filter_no_owner_absent_when_all_owned(wl_win):
-    """所有信号都有 owner 时，下拉不出现「（无 owner）」项（不打扰）。"""
+    """所有信号都有 owner 时，菜单不出现「（无 owner）」项（不打扰）。"""
     from dreg_verify import gui as G
     w = wl_win
     for s in w.signals:
         if not s.owner:
             s.owner = "someone"
     w._populate_filters()
-    texts = [w.owner_combo.itemText(k) for k in range(w.owner_combo.count())]
-    assert not any(t.startswith(G.NO_OWNER) for t in texts), texts
+    assert G.NO_OWNER not in w._owner_acts
+
+
+def test_gui_filter_owner_multi_select(wl_win):
+    """owner 多选：勾两个 owner → 这两人的信号都显示(OR)，其余隐藏；按钮文字带 ×2。"""
+    w = wl_win
+    # 指定可控 owner，保证至少两人可多选（与其它 owner 测试同款：直接改 sig.owner）
+    w.signals[0].owner = "Amy"; w.signals[1].owner = "Amy"; w.signals[2].owner = "Bob"
+    w._populate_filters()
+    assert "Amy" in w._owner_acts and "Bob" in w._owner_acts
+    w._owner_acts["Amy"].setChecked(True)
+    w._owner_acts["Bob"].setChecked(True)
+    assert w._owner_filter == {"Amy", "Bob"}
+    for r in range(w.table.rowCount()):
+        s = w._sig_of_row(r)
+        assert w.table.isRowHidden(r) == (s.owner not in ("Amy", "Bob")), (s.out_name, s.owner)
+    assert "×2" in w.owner_btn.text()
+    w._owner_acts["Amy"].setChecked(False)                    # 取消一个 → 只剩 Bob
+    assert w._owner_filter == {"Bob"}
+    assert w.owner_btn.text() == "owner: Bob"
 
 
 # ───────────── ⑦ mux 负向勾选跨会话持久化（bug 回归） ─────────────

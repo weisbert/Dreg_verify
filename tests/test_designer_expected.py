@@ -358,7 +358,7 @@ def test_html_check_toggle_perf(wb, tmp_path):
 
 
 def test_html_report_no_owner_filter(wb, tmp_path):
-    """owner 列留空 → 报告 owner 下拉给「（无 owner）×N」专项（哨兵 __no_owner__），仅在真有空 owner 时出现。"""
+    """owner 列留空 → 报告 owner 多选浮层给「（无 owner）×N」复选项（哨兵 __no_owner__），仅在真有空 owner 时出现。"""
     from dreg_verify import cli
     rep = generator.report(wb, generator.GenOptions(top_output_only=False))
     for r in rep["summary"][:2]:                    # 模拟两个信号 owner 列留空
@@ -367,11 +367,13 @@ def test_html_report_no_owner_filter(wb, tmp_path):
     cli.write_report(str(path), rep, "synthetic.xlsx")
     raw = path.read_text(encoding="utf-8")
     n_blank = sum(1 for r in rep["summary"] if not r.get("owner"))
-    assert ('<option value="__no_owner__">（无 owner） ×%d</option>' % n_blank) in raw
+    assert ('<label><input type="checkbox" class="ownerck" value="__no_owner__">（无 owner） ×%d</label>'
+            % n_blank) in raw
+    assert 'id="ownerbox"' in raw and 'class="ownerck"' in raw      # 多选浮层就位
 
 
 def test_html_report_no_owner_filter_absent_when_all_owned(wb, tmp_path):
-    """所有信号都有 owner 时，下拉不出现「（无 owner）」选项（JS 分支常驻无妨，但选项不生成）。"""
+    """所有信号都有 owner 时，浮层不出现「（无 owner）」复选项（不打扰）。"""
     from dreg_verify import cli
     rep = generator.report(wb, generator.GenOptions(top_output_only=False))
     for r in rep["summary"]:
@@ -379,7 +381,24 @@ def test_html_report_no_owner_filter_absent_when_all_owned(wb, tmp_path):
     path = tmp_path / "r.html"
     cli.write_report(str(path), rep, "synthetic.xlsx")
     raw = path.read_text(encoding="utf-8")
-    assert '<option value="__no_owner__"' not in raw
+    assert 'value="__no_owner__"' not in raw
+
+
+def test_html_report_owner_multi_select_markup(wb, tmp_path):
+    """owner 多选：每个 owner 一个复选项 + 多选浮层骨架(按钮/清除/OR 过滤 JS)就位，
+    且旧的单选 <select id="owner"> 已彻底移除。"""
+    from dreg_verify import cli
+    rep = generator.report(wb, generator.GenOptions(top_output_only=False))
+    rep["summary"][0]["owner"] = "Amy"
+    rep["summary"][1]["owner"] = "Bob"
+    path = tmp_path / "r.html"
+    cli.write_report(str(path), rep, "synthetic.xlsx")
+    raw = path.read_text(encoding="utf-8")
+    assert '<select id="owner">' not in raw                 # 单选已移除
+    assert 'id="ownerbox"' in raw and 'id="ownerbtn"' in raw and 'id="ownerclr"' in raw
+    assert '<input type="checkbox" class="ownerck" value="Amy">Amy</label>' in raw
+    assert '<input type="checkbox" class="ownerck" value="Bob">Bob</label>' in raw
+    assert "ownerSel" in raw and "readOwnerSel" in raw       # 多选 OR 过滤逻辑就位
 
 
 def test_csv_report_detail_has_auto_out_column(wb, tmp_path):
