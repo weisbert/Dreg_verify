@@ -416,9 +416,10 @@ tr.vrow.warn{background:#fff8ec} tr.vrow.bad{background:#ffecec}
 .pgbody.ttwrap{min-height:40px}
 /* ── 真值表「按值筛选」：第0列每个变化的输入挂下拉；选定取值后只留匹配的测试列(隐藏其余整列) ── */
 .tt .ttfx{display:none}
-.tt th.rowhdr select.ttf{margin-left:6px;font-size:11px;padding:1px 2px;border:1px solid #9fb4d6;
- border-radius:3px;background:#fff;vertical-align:middle;max-width:120px}
-.tt th.rowhdr select.ttf.set{border-color:#1558d6;background:#eaf1ff;font-weight:600}
+.tt th.rowhdr input.ttf{margin-left:6px;font-size:11px;padding:1px 4px;border:1px solid #9fb4d6;
+ border-radius:3px;background:#fff;vertical-align:middle;width:48px;text-align:center}
+.tt th.rowhdr input.ttf.set{border-color:#1558d6;background:#eaf1ff;font-weight:700;color:#1558d6}
+.tt th.rowhdr input.ttf::placeholder{color:#aab;font-weight:400}
 .ttfbar{margin-left:14px;font-size:12px;color:#666;font-weight:400;white-space:nowrap}
 .ttfbar .ttfcount{font-family:Consolas,monospace}
 .ttfbar .ttfcount.on{color:#1558d6;font-weight:700}
@@ -504,15 +505,15 @@ _REPORT_JS = """
   function ttBlock(el){while(el&&!(el.classList&&el.classList.contains('ttblock')))el=el.parentNode;return el;}
   function filterBlock(blk){
     if(!blk)return;
-    var sels=blk.querySelectorAll('select.ttf'),i,j,cons=[];
+    var sels=blk.querySelectorAll('.ttf'),i,j,cons=[];
     for(i=0;i<sels.length;i++){
-      var on=sels[i].value!=='';
+      var on=(sels[i].value||'').trim()!=='';
       sels[i].classList.toggle('set',on);
       if(on)cons.push(sels[i]);
     }
-    var hide={};                                   /* 任一选定输入不匹配 → 该列隐藏(AND 语义) */
+    var hide={};                                   /* 任一手填输入不匹配 → 该列隐藏(AND 语义) */
     for(i=0;i<cons.length;i++){
-      var ri=cons[i].getAttribute('data-ri'),want=cons[i].value;
+      var ri=cons[i].getAttribute('data-ri'),want=(cons[i].value||'').trim();
       var row=blk.querySelector('tr.inrow[data-ri="'+ri+'"]');
       if(!row)continue;
       var vc=row.querySelectorAll('td[data-c]');
@@ -531,8 +532,8 @@ _REPORT_JS = """
   /* 翻页/每页：文档级委托，data-k 指明属于哪个 tab（顶部条与页尾条共用一套处理） */
   document.addEventListener('click',function(e){
     var b=e.target;
-    if(b&&b.classList&&b.classList.contains('ttfclr')){      /* 真值表「清除筛选」：复位本块所有下拉 */
-      var blk=ttBlock(b),sels=blk?blk.querySelectorAll('select.ttf'):[],i;
+    if(b&&b.classList&&b.classList.contains('ttfclr')){      /* 真值表「清除筛选」：清空本块所有输入框 */
+      var blk=ttBlock(b),sels=blk?blk.querySelectorAll('.ttf'):[],i;
       for(i=0;i<sels.length;i++)sels[i].value='';
       filterBlock(blk);return;
     }
@@ -549,6 +550,10 @@ _REPORT_JS = """
     if(!t.classList||!t.classList.contains('pgsel'))return;
     var key=t.getAttribute('data-k'),sec=SEC[key];if(!sec)return;
     sec.per=parseInt(t.value,10);sec.page=0;render(key);
+  });
+  document.addEventListener('input',function(e){      /* 真值表按值筛选：边打边筛（手填输入框） */
+    var t=e.target;
+    if(t.classList&&t.classList.contains('ttf'))filterBlock(ttBlock(t));
   });
 
   function applyAll(){
@@ -872,13 +877,11 @@ def _write_report_html(path, rep, excel):
             for ri, inp in enumerate(t["inputs"]):
                 ltr = inp.get("letters") or ""               # 表达式变量(A/B/C…) → 物理信号
                 rh = ("%s → %s" % (ltr, inp["label"])) if ltr else inp["label"]
-                # 第0列：变化的输入挂「按值筛选」下拉（只列该输入真出现过的取值）
+                # 第0列：变化的输入挂「按值筛选」输入框（像 Excel 一样手填值，边打边筛，留匹配列）
                 sel = ""
                 if has_filter and len(distinct[ri]) > 1:
-                    opts = '<option value="">(全部)</option>' + "".join(
-                        '<option value="%s">%s</option>' % (esc(v), esc(v)) for v in distinct[ri])
-                    sel = ('<select class="ttf" data-ri="%d" title="按该输入取值筛选测试列">%s</select>'
-                           % (ri, opts))
+                    sel = ('<input class="ttf" type="text" data-ri="%d" placeholder="筛值"'
+                           ' title="手填该输入的值(如 0 / 1)，只保留该值匹配的测试列；留空=全部">' % ri)
                 cells = ['<th class="rowhdr">%s%s</th>' % (esc(rh), sel)]
                 for j, tc in enumerate(tests):
                     v = tc["values"][ri] if ri < len(tc["values"]) else ""

@@ -1027,9 +1027,9 @@ def test_html_report_maps_letters_to_signals(wb, tmp_path):
 
 
 def test_html_report_truth_table_value_filter(wb, tmp_path):
-    """⭐真值表「按值筛选」(2026-06-12)：穷举真值表列多时，designer 在第0列每个『变化的输入』挂的下拉里
-    选定取值 → 只留匹配的测试列（整列 display:none）。验证下拉/选项/列标 data-c/计数+清除/CSS+JS 通道都在，
-    且真值表块仍只在 JSON blob 里（不预渲进静态壳）。"""
+    """⭐真值表「按值筛选」(2026-06-12)：穷举真值表列多时，designer 在第0列每个『变化的输入』旁的输入框里
+    像 Excel 一样手填值 → 只留该值匹配的测试列（整列 display:none）。验证输入框/列标 data-c/计数+清除/
+    CSS+JS(含边打边筛 input)通道都在，且真值表块仍只在 JSON blob 里（不预渲进静态壳）。"""
     import json
     import re
     from dreg_verify import cli
@@ -1043,22 +1043,22 @@ def test_html_report_truth_table_value_filter(wb, tmp_path):
     assert m, "缺少 tt-data blob"
     items = json.loads(m.group(1))
     blk = next((it["h"] for it in items if 'class="ttf"' in it["h"]), None)
-    assert blk, "应至少有一个真值表块（多列+变化输入）挂上按值筛选下拉"
-    assert 'data-ri=' in blk and '(全部)' in blk            # 下拉含「(全部)」复位项
+    assert blk, "应至少有一个真值表块（多列+变化输入）挂上按值筛选输入框"
+    # 是手填输入框（不是下拉），带 data-ri，varying 输入才有
+    assert re.search(r'<input class="ttf" type="text" data-ri="\d+"', blk)
+    assert "<select" not in blk and "(全部)" not in blk     # 已不是下拉
     assert 'data-c="0"' in blk                             # 每列每格带列标（整列一起显隐）
     assert 'class="ttfcount"' in blk and 'class="ttfclr"' in blk   # 计数 + 清除
     assert 'class="inrow" data-ri=' in blk                 # 输入行可被 JS 定位读取本列取值
-    # 下拉只列「变化的输入」：含 select 的 rowhdr 一定不是常量输入（至少 (全部)+2 个值=3 个 option）
-    sel = re.search(r'<select class="ttf"[^>]*>(.*?)</select>', blk, re.S)
-    assert sel and sel.group(1).count("<option") >= 3
 
     # 真值表块仍只在 blob、不在静态壳；CSS/JS 通道齐
     shell = re.sub(r'<script type="application/json"[^>]*>.*?</script>', "", raw, flags=re.S)
     assert '<div class="ttblock">' not in shell
     assert '.tt .ttfx{display:none}' in shell               # 整列隐藏的 CSS
     assert 'function filterBlock' in shell                  # 筛选核心
-    assert "contains('ttf')" in shell                       # change 委托接上 .ttf 下拉
+    assert "contains('ttf')" in shell                       # 委托接上 .ttf 输入框
     assert "contains('ttfclr')" in shell                    # click 委托接上「清除」
+    assert "addEventListener('input'" in shell              # 边打边筛（live 输入）
 
 
 # ───────────── 面板可自由拖动大小（#2：FlowLayout + 不可塌陷） ─────────────
