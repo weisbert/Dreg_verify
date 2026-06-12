@@ -448,6 +448,11 @@ def probe_prefix_for(sig, opts):
     映射 key 兼容两套名字：Excel K 列名（d_ndiv_cnt_div_sel）和 RTL 网名（d_ndiv_cnt_div_sel_ls）。
     scan_rtl.py 导出的映射用 RTL 网名，手工配置常用 K 列名——都认。
     """
+    # level_shift 顶层口(top_out=1)：探针 = `ENV_RF.<_ls 口>，本就是顶层网——绝不套层级前缀。
+    # 即便残留/scan 出『裸基名→子模块』前缀(那是消费侧 input 端口，非这根 _ls 顶层网)也忽略
+    # (2026-06-12 Hi1108 datapath_clk_en_ls 实证：错套 U_WUR_PLL_DATAPATH_0 前缀 → CUVUNF)。
+    if getattr(sig, "_ls_name", None) and getattr(sig, "_ls_is_top", False):
+        return ""
     p = opts.probe_prefixes or {}
     rtl_base = getattr(sig, "rtl_base", sig.out_base)
     rtl_name = getattr(sig, "rtl_name", sig.out_name)

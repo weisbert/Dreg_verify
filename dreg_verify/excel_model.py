@@ -53,6 +53,7 @@ class LogicSignal:
         # lpbt_dig_top.v output)。非空时 rtl_base 直接返回它，压过 M 列/ref_suffix/加尾缀开关——
         # 因为这就是 RTL 顶层口真名。None=该信号不过 level_shift 或无此页(旧表 M=ls 直给后缀，不受影响)。
         self._ls_name = None
+        self._ls_is_top = False        # level_shift 页 E 列 top_out=1：顶层网，探针绝不套层级前缀
 
     @property
     def is_top(self):
@@ -219,6 +220,7 @@ class MuxGroup:
         self._append_to_logic = False
         # level_shift 页给的顶层 _ls 输出口真名（同 LogicSignal._ls_name；mux 输出若也过电平移位则回填）。
         self._ls_name = None
+        self._ls_is_top = False
 
     @property
     def ctrl_total_width(self):
@@ -977,10 +979,12 @@ def _apply_level_shift(logic, mux, ls_map):
         info = ls_map.get(sig.out_base.lower())
         if info and info.get("out"):
             sig._ls_name = info["out"]
+            sig._ls_is_top = bool(info.get("is_top"))
     for g in (mux or []):
         info = ls_map.get(g.out_base.lower())
         if info and info.get("out"):
             g._ls_name = info["out"]
+            g._ls_is_top = bool(info.get("is_top"))
 
 
 def load_workbook(path, logic_header_row=2, regmap_header_row=2):

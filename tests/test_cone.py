@@ -61,6 +61,13 @@ def test_level_shift_top_port_probe(tmp_path):
     # 对照：不过 level_shift 的输出按原逻辑（M=to_dft 非 ls + 自引用排除 → 裸名，无 _to_logic）
     assert plain._ls_name is None
     assert plain.rtl_name == "d_plain"
+    # ④ 顶层 _ls 口(top_out=1)绝不套层级前缀——即便残留『裸基名/_ls名→子模块』前缀也忽略
+    #    (2026-06-12 datapath_clk_en_ls 实证：错套 U_WUR_PLL_DATAPATH_0 → CUVUNF)
+    assert refbuf._ls_is_top is True
+    opts = generator.GenOptions(probe_prefixes={"d_en_refbuf": "U_WUR_PLL_DATAPATH_0",
+                                                "d_en_refbuf_ls": "U_WUR_PLL_DATAPATH_0"})
+    assert generator.probe_prefix_for(refbuf, opts) == ""        # 前缀被压掉 → 探针就是顶层网
+    assert generator.probe_prefix_for(plain, opts) == ""         # 对照信号本就无前缀
 
 
 # ───────────── expr.Part 节点 ─────────────

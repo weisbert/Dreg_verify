@@ -1671,6 +1671,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _prefix_of(self, sig):
         """该信号配置的探针前缀（无则空串）。
         映射 key 兼容 Excel K 列名与 RTL 网名(_ls 后缀)——scan_rtl.py 导出的是后者。"""
+        # level_shift 顶层口：顶层网、绝不套层级前缀（与 generator.probe_prefix_for 同口径）。
+        if getattr(sig, "_ls_name", None) and getattr(sig, "_ls_is_top", False):
+            return ""
         p = self._probe_prefixes
         # 全名(无视尾缀开关)也试一遍：尾缀开关关时 rtl_base 退裸名，scan_rtl/用户按 _to_logic 全名
         # 配的前缀才不会静默失配(与 generator.probe_prefix_for 同口径，2026-06-11 Hi1108 rxiq 实证)。
@@ -1691,8 +1694,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if ls:
             parts.append("探针口→%s (level_shift)" % sig.rtl_name)
             tips.append("『level_shift 页』声明此输出电平移位到顶层口 %s —— 探针已自动定到它"
-                        "（top_out 口，直接 `%s.%s、无需前缀；不受『logic 加尾缀』开关影响）。\n"
-                        "本功能随表自动生效，无需任何设置。" % (sig.rtl_name, W.ENV, sig.rtl_name))
+                        "（top_out 口，直接 `%s.%s）。\n"
+                        "顶层网：不套任何层级前缀（即便为它残留/配过前缀也自动忽略）；"
+                        "不受『logic 加尾缀』开关影响。\n本功能随表自动生效，无需任何设置。"
+                        % (sig.rtl_name, W.ENV, sig.rtl_name))
         out_pfx = self._prefix_of(sig)
         if out_pfx:
             parts.append("输出→%s" % out_pfx)
