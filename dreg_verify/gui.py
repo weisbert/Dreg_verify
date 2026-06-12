@@ -3075,9 +3075,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _collect_config(self):
         """收集【完整配置】(第二十六轮，用户拍板「不只mux，logic/勾选/全局/测试编辑等所有配置一键带走」)：
         信号勾选 + 全局工具栏设置 + 探针前缀 + 强制force + 全部 per-signal 测试编辑(含 mux 删除/清空)。
-        单点覆盖度【不含】——会话内临时档(见 _persist_edits 注释)。"""
+        单点覆盖度【不含】——会话内临时档(见 _persist_edits 注释)。
+        excel/excel_path：记下这份配置对应的源表(全路径+文件名)，导入时按文件名核对、配错表给提示。"""
+        excel = (self.path_edit.text() or "").strip()
         return {
             "dreg_verify_config": 2,
+            "excel": os.path.basename(excel),     # 文件名（跨机器比对用，路径常不同）
+            "excel_path": excel,                  # 全路径（本机来源参考）
             "signals_checked": self._collect_checked(),
             "global": {
                 "coverage_logic": self.coverage.currentText(),
@@ -3086,6 +3090,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "cascade_logic": self._logic_cascade(), "cascade_mux": self._mux_cascade(),
                 "append_to_logic": bool(self.append_to_logic_chk.isChecked()),
                 "append_to_mux": bool(self.append_to_mux_chk.isChecked()),
+                "include_risky": self._include_risky_on(),   # 缺前缀强制生成（改产物→须随配置带走）
             },
             "probe_prefixes": dict(self._probe_prefixes),
             "force_signals": sorted(self._force_signals),
@@ -3104,8 +3109,8 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _apply_global_settings(self, g):
-        """导入：套用全局工具栏设置(覆盖度/上限/级联/输出引用尾缀)。blockSignals 设值，避免逐项触发
-        联动(resolver 重建/编辑器重载由调用方统一做一次)；并写入 settings 持久化。"""
+        """导入：套用全局工具栏设置(覆盖度/上限/级联/输出引用尾缀/缺前缀强制生成)。blockSignals 设值，
+        避免逐项触发联动(resolver 重建/编辑器重载由调用方统一做一次)；并写入 settings 持久化。"""
         if not isinstance(g, dict):
             return
         for combo, key in ((self.coverage, "coverage_logic"), (self.coverage_mux, "coverage_mux")):
@@ -3134,11 +3139,20 @@ class MainWindow(QtWidgets.QMainWindow):
         atm = atm if isinstance(atm, bool) else False
         self.append_to_mux_chk.blockSignals(True); self.append_to_mux_chk.setChecked(atm)
         self.append_to_mux_chk.blockSignals(False)
+        ir = g.get("include_risky")
+        # include_risky(缺前缀强制生成)：与上面几个开关不同——【缺键时保持当前】而非复位默认。
+        # 这是较新字段，旧配置/pytest 基线本就无此键，不该翻动用户(或测试基线)刻意设的本机选择；
+        # 新配置必带此键，「整份载入」对它们仍确定。本字段会改产物(skip vs force 生成)，故 present 即套用。
+        if isinstance(ir, bool) and hasattr(self, "include_risky_chk"):
+            self.include_risky_chk.blockSignals(True); self.include_risky_chk.setChecked(ir)
+            self.include_risky_chk.blockSignals(False)
         self._persist_coverage()                 # coverage_logic/mux + max_tests
         st = _load_settings()
         st["cascade_logic"] = self._logic_cascade(); st["cascade_mux"] = self._mux_cascade()
         st["append_to_logic"] = bool(self.append_to_logic_chk.isChecked())
         st["append_to_mux"] = bool(self.append_to_mux_chk.isChecked())
+        if hasattr(self, "include_risky_chk"):
+            st["include_risky"] = bool(self.include_risky_chk.isChecked())
         _save_settings(st)
 
     def _reset_all_config_state(self):
@@ -3163,8 +3177,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                         "JSON (*.json)")
         if not path:
             return
-        payload = self._collect_config()
-        payload["excel"] = os.path.basename(excel)
+        payload = self._collect_config()   # 内含 excel/excel_path（源表文件名 + 全路径）
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=1)
@@ -3210,6 +3223,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, "导入失败",
                 "%s 不是 dreg_verify 配置/编辑文件(缺少 dreg_verify_config 或 edits/mux_* 段)。" % path)
             return
+        # 源表核对：配置里记的 excel 文件名与当前加载的不一致 → 末尾提示(仍照常导入)。
+        # 按【文件名】比对而非全路径——跨机器/跨同事路径不同是正常用法，不该误报。
+        cfg_excel = str(payload.get("excel")
+                        or os.path.basename(str(payload.get("excel_path") or ""))).strip()
+        cur_excel = os.path.basename((self.path_edit.text() or "").strip())
+        excel_mismatch = bool(cfg_excel and cur_excel and cfg_excel.lower() != cur_excel.lower())
         if is_full:
             # 完整配置：清空全部可编辑状态后照单恢复(= 加载这份工作状态)；先套全局/探针/force 并
             # 重建 resolver，再恢复编辑(编辑重算依赖正确的 resolver)，最后恢复勾选。
@@ -3258,6 +3277,10 @@ class MainWindow(QtWidgets.QMainWindow):
         msg = "已导入%s（%d 个信号的测试编辑）。" % (kind, n_restored)
         if is_full:
             msg += "\n勾选信号、全局档、探针前缀、强制force 均已套用。"
+        if excel_mismatch:
+            msg = ("⚠ 这份配置是为《%s》导出的，当前加载的是《%s》。\n"
+                   "  已照常导入；若两表信号不同，部分配置会落空(见下方跳过清单)。\n\n"
+                   % (cfg_excel, cur_excel)) + msg
         if missing:
             msg += "\n\n以下信号在文件里有配置、但当前 Excel 里找不到(已跳过)：\n" + \
                    "\n".join("  %s" % n for n in missing[:30])

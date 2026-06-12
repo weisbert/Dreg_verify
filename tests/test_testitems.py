@@ -1307,6 +1307,7 @@ def test_full_config_export_import_roundtrip(qapp, tmp_path_factory, monkeypatch
     w.table.item(r, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
     w.coverage.setCurrentText("全面"); w.coverage_mux.setCurrentText("穷举")
     w.max_tests.setValue(77)
+    w.include_risky_chk.setChecked(True)        # 缺前缀强制生成（pytest 默认不勾）
     w._probe_prefixes = {"d_foo": "U_X.U_Y"}
     w._force_signals = {"d_bar"}
     cfg = tmp_path_factory.mktemp("cfgout") / "cfg.json"
@@ -1316,10 +1317,14 @@ def test_full_config_export_import_roundtrip(qapp, tmp_path_factory, monkeypatch
     saved = json.load(open(str(cfg), encoding="utf-8"))
     assert saved["dreg_verify_config"] == 2
     assert saved["global"]["max_tests"] == 77
+    assert saved["global"]["include_risky"] is True       # 随配置带走
+    assert saved["excel"] == "synthetic_dreg.xlsx"        # 源表文件名
+    assert saved["excel_path"] == str(path)               # 源表全路径
     assert nm in saved["signals_checked"]
     w.close()
     # 新窗口导入 → 全部还原
     w2 = gui.MainWindow(); w2.path_edit.setText(str(path)); w2.on_load()
+    assert not w2.include_risky_chk.isChecked()            # 导入前=默认不勾
     monkeypatch.setattr(gui.QtWidgets.QFileDialog, "getOpenFileName",
                         staticmethod(lambda *a, **k: (str(cfg), "")))
     w2.on_import_edits()
@@ -1328,7 +1333,37 @@ def test_full_config_export_import_roundtrip(qapp, tmp_path_factory, monkeypatch
     assert w2.coverage.currentText() == "全面" and w2.coverage_mux.currentText() == "穷举"
     assert w2._probe_prefixes.get("d_foo") == "U_X.U_Y"
     assert "d_bar" in w2._force_signals
+    assert w2.include_risky_chk.isChecked()                # include_risky 已套用
     w2.close()
+
+
+def test_config_excel_mismatch_warns_but_imports(qapp, tmp_path_factory, monkeypatch):
+    """配置记的源表文件名与当前加载的不一致 → 导入完成弹窗带 ⚠ 提示，但仍照常导入。
+    缺前缀强制生成『缺键时保持当前』——旧配置不该翻动本机选择。"""
+    import json
+    from dreg_verify import gui
+    monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("mmp") / "edits.json"))
+    captured = {}
+    monkeypatch.setattr(gui.QtWidgets.QMessageBox, "information",
+                        staticmethod(lambda parent, title, text, *a, **k: captured.update(msg=text)))
+    path = tmp_path_factory.mktemp("mmw") / "synthetic_dreg.xlsx"
+    fixtures.build_workbook(str(path))
+    # 手写一份『为别的表』导出的配置（excel 文件名不同）；含 max_tests，故缺 include_risky 时不翻动
+    cfg = tmp_path_factory.mktemp("mmf") / "other.json"
+    json.dump({"dreg_verify_config": 2, "excel": "some_other_chip.xlsx",
+               "excel_path": "D:/elsewhere/some_other_chip.xlsx",
+               "global": {"coverage_logic": "全面", "max_tests": 42},
+               "signals_checked": []}, open(str(cfg), "w", encoding="utf-8"))
+    w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
+    risky_before = w.include_risky_chk.isChecked()
+    monkeypatch.setattr(gui.QtWidgets.QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(cfg), "")))
+    w.on_import_edits()
+    assert "some_other_chip.xlsx" in captured.get("msg", "")     # 弹窗提示了配错表
+    assert "synthetic_dreg.xlsx" in captured.get("msg", "")
+    assert w.max_tests.value() == 42                              # 仍照常导入
+    assert w.include_risky_chk.isChecked() == risky_before        # 缺键 → 保持当前，不翻动
+    w.close()
 
 
 def test_legacy_edits_import_still_merges(qapp, tmp_path_factory, monkeypatch):
