@@ -414,6 +414,17 @@ tr.vrow.warn{background:#fff8ec} tr.vrow.bad{background:#ffecec}
 .pgi{color:#555} .pgper{color:#666;margin-left:auto}
 .pgsel{padding:3px 5px;border:1px solid var(--bd);border-radius:4px}
 .pgbody.ttwrap{min-height:40px}
+/* ── 真值表「按值筛选」：第0列每个变化的输入挂下拉；选定取值后只留匹配的测试列(隐藏其余整列) ── */
+.tt .ttfx{display:none}
+.tt th.rowhdr select.ttf{margin-left:6px;font-size:11px;padding:1px 2px;border:1px solid #9fb4d6;
+ border-radius:3px;background:#fff;vertical-align:middle;max-width:120px}
+.tt th.rowhdr select.ttf.set{border-color:#1558d6;background:#eaf1ff;font-weight:600}
+.ttfbar{margin-left:14px;font-size:12px;color:#666;font-weight:400;white-space:nowrap}
+.ttfbar .ttfcount{font-family:Consolas,monospace}
+.ttfbar .ttfcount.on{color:#1558d6;font-weight:700}
+.ttfclr{margin-left:6px;font-size:11px;padding:1px 8px;border:1px solid var(--bd);
+ border-radius:4px;background:#fff;cursor:pointer;color:#555}
+.ttfclr:hover{background:#eef2f8}
 """
 
 _REPORT_JS = """
@@ -487,9 +498,45 @@ _REPORT_JS = """
   var btns=document.querySelectorAll('.tabbtn');
   for(var bi=0;bi<btns.length;bi++)(function(b){b.onclick=function(){tab(b.getAttribute('data-tab'));};})(btns[bi]);
 
+  /* ===== 真值表「按值筛选」：第0列下拉选定输入取值 → 只留匹配的测试列（整列 display:none）。
+     只在 change/清除 时跑一次、且只扫被操作的那一块(closest .ttblock)；翻页重渲后下拉自动复位(全部)。
+     用 data-c 给每列每格打标，靠一次 classList 切换整列显隐，不逐格轮询 → 128 列也不卡。 ===== */
+  function ttBlock(el){while(el&&!(el.classList&&el.classList.contains('ttblock')))el=el.parentNode;return el;}
+  function filterBlock(blk){
+    if(!blk)return;
+    var sels=blk.querySelectorAll('select.ttf'),i,j,cons=[];
+    for(i=0;i<sels.length;i++){
+      var on=sels[i].value!=='';
+      sels[i].classList.toggle('set',on);
+      if(on)cons.push(sels[i]);
+    }
+    var hide={};                                   /* 任一选定输入不匹配 → 该列隐藏(AND 语义) */
+    for(i=0;i<cons.length;i++){
+      var ri=cons[i].getAttribute('data-ri'),want=cons[i].value;
+      var row=blk.querySelector('tr.inrow[data-ri="'+ri+'"]');
+      if(!row)continue;
+      var vc=row.querySelectorAll('td[data-c]');
+      for(j=0;j<vc.length;j++){
+        if((vc[j].textContent||'').trim()!==want)hide[vc[j].getAttribute('data-c')]=1;
+      }
+    }
+    var all=blk.querySelectorAll('[data-c]');
+    for(i=0;i<all.length;i++)all[i].classList.toggle('ttfx',hide[all[i].getAttribute('data-c')]===1);
+    var heads=blk.querySelectorAll('thead [data-c]'),total=heads.length,shown=0;
+    for(i=0;i<heads.length;i++)if(hide[heads[i].getAttribute('data-c')]!==1)shown++;
+    var cs=blk.querySelector('.ttfcount');
+    if(cs){cs.textContent=shown+'/'+total;cs.classList.toggle('on',shown!==total);}
+  }
+
   /* 翻页/每页：文档级委托，data-k 指明属于哪个 tab（顶部条与页尾条共用一套处理） */
   document.addEventListener('click',function(e){
-    var b=e.target;while(b&&b.nodeType===1&&!(b.classList&&b.classList.contains('pgb')))b=b.parentNode;
+    var b=e.target;
+    if(b&&b.classList&&b.classList.contains('ttfclr')){      /* 真值表「清除筛选」：复位本块所有下拉 */
+      var blk=ttBlock(b),sels=blk?blk.querySelectorAll('select.ttf'):[],i;
+      for(i=0;i<sels.length;i++)sels[i].value='';
+      filterBlock(blk);return;
+    }
+    while(b&&b.nodeType===1&&!(b.classList&&b.classList.contains('pgb')))b=b.parentNode;
     if(!b||b.nodeType!==1||!b.classList.contains('pgb'))return;
     var sec=SEC[b.getAttribute('data-k')];if(!sec)return;
     var d=parseInt(b.getAttribute('data-d'),10);
@@ -497,7 +544,9 @@ _REPORT_JS = """
     render(b.getAttribute('data-k'));
   });
   document.addEventListener('change',function(e){
-    var t=e.target;if(!t.classList||!t.classList.contains('pgsel'))return;
+    var t=e.target;
+    if(t.classList&&t.classList.contains('ttf')){filterBlock(ttBlock(t));return;}   /* 真值表按值筛选 */
+    if(!t.classList||!t.classList.contains('pgsel'))return;
     var key=t.getAttribute('data-k'),sec=SEC[key];if(!sec)return;
     sec.per=parseInt(t.value,10);sec.page=0;render(key);
   });
@@ -771,12 +820,14 @@ def _write_report_html(path, rep, excel):
                           "s": sname, "ty": ty, "tp": tp})
         return th, items
 
-    def _exp_cell(tc, check):
+    def _exp_cell(tc, check, col=None):
         """期望行单元格：负向=红(错值)；手填=绿/红(与 auto_out 一致/不一致)；未填=灰(auto_out 兜底)。
-        check=True 时正向格变成『可填空自测』结构(span 显示值 + 隐藏的 input，JS 切换)。"""
+        check=True 时正向格变成『可填空自测』结构(span 显示值 + 隐藏的 input，JS 切换)。
+        col=本列序号(给『按值筛选』用 data-c，整列一起显隐)。"""
+        dc = (' data-c="%d"' % col) if col is not None else ""
         if tc["neg"]:
             title = ' title="负向：故意填错(预期 FAIL，自检 checker)。正确(auto_out)应为 %s"' % esc(tc["correct"])
-            return '<td class="neg"%s>%s</td>' % (title, esc(tc["expected"]))
+            return '<td class="neg"%s%s>%s</td>' % (title, dc, esc(tc["expected"]))
         filled = tc.get("designer_filled")
         same = tc.get("expected") == tc.get("auto_out", tc.get("correct"))
         if filled:
@@ -790,11 +841,11 @@ def _write_report_html(path, rep, excel):
             title = ' title="期望未手填，生成 .sv 时用 auto_out 兜底(未经 designer 人工核对)"'
             shown = esc(tc["expected"])
         if not check:
-            return '<td class="%s"%s>%s</td>' % (cls, title, shown)
+            return '<td class="%s"%s%s>%s</td>' % (cls, title, dc, shown)
         # 检查模式格：data-v=auto_out 数值(回车后 JS 比对)；input 平时隐藏
-        return ('<td class="cquiz %s" data-v="%d"%s><span class="cval">%s</span>'
+        return ('<td class="cquiz %s" data-v="%d"%s%s><span class="cval">%s</span>'
                 '<input class="cin" style="display:none" placeholder="?"></td>'
-                % (cls, tc.get("auto_num", 0), title, shown))
+                % (cls, tc.get("auto_num", 0), title, dc, shown))
 
     def truth_blocks(tabs):
         """②真值表 / ③真值表检查 共用：输入(带位宽)做行、各测试做列；auto_out 与 期望 分两行。
@@ -803,40 +854,59 @@ def _write_report_html(path, rep, excel):
         items = []
         for t in tabs:
             tests = t["tests"]
+            # 每个输入在各测试列中实际出现过的取值(去重、保持出现序)；>1 个的才是「变化的输入」，挂筛选下拉。
+            distinct = []
+            for ri in range(len(t["inputs"])):
+                seen, vals = set(), []
+                for tc in tests:
+                    sv = str(tc["values"][ri]) if ri < len(tc["values"]) else ""
+                    if sv not in seen:
+                        seen.add(sv); vals.append(sv)
+                distinct.append(vals)
+            has_filter = len(tests) >= 2 and any(len(v) > 1 for v in distinct)
             hdr = ['<th class="rowhdr">信号\\测试</th>']
-            for tc in tests:
-                hdr.append('<th class="%s">%s</th>' % ("negh" if tc["neg"] else "", esc(tc["name"])))
+            for j, tc in enumerate(tests):
+                hdr.append('<th class="%s" data-c="%d">%s</th>'
+                           % ("negh" if tc["neg"] else "", j, esc(tc["name"])))
             body = []
             for ri, inp in enumerate(t["inputs"]):
                 ltr = inp.get("letters") or ""               # 表达式变量(A/B/C…) → 物理信号
                 rh = ("%s → %s" % (ltr, inp["label"])) if ltr else inp["label"]
-                cells = ['<th class="rowhdr">%s</th>' % esc(rh)]
-                for tc in tests:
-                    cells.append('<td class="%s">%s</td>'
-                                 % ("neg" if tc["neg"] else "", esc(tc["values"][ri])))
-                body.append("<tr>%s</tr>" % "".join(cells))
+                # 第0列：变化的输入挂「按值筛选」下拉（只列该输入真出现过的取值）
+                sel = ""
+                if has_filter and len(distinct[ri]) > 1:
+                    opts = '<option value="">(全部)</option>' + "".join(
+                        '<option value="%s">%s</option>' % (esc(v), esc(v)) for v in distinct[ri])
+                    sel = ('<select class="ttf" data-ri="%d" title="按该输入取值筛选测试列">%s</select>'
+                           % (ri, opts))
+                cells = ['<th class="rowhdr">%s%s</th>' % (esc(rh), sel)]
+                for j, tc in enumerate(tests):
+                    v = tc["values"][ri] if ri < len(tc["values"]) else ""
+                    cells.append('<td class="%s" data-c="%d">%s</td>'
+                                 % ("neg" if tc["neg"] else "", j, esc(v)))
+                body.append('<tr class="inrow" data-ri="%d">%s</tr>' % (ri, "".join(cells)))
             # ── auto_out 行（表达式计算值，只读参考）。检查模式下负向列不参与遮盖(不是自测对象) ──
             auto_cells = ['<th class="rowhdr" title="程序按表达式算出的输出值(参考)。'
                           '用它当期望验证表达式有自证嫌疑，.sv 断言对比的是下面的期望">%s</th>'
                           % esc(t.get("auto_label", "auto_out"))]
-            for tc in tests:
+            for j, tc in enumerate(tests):
                 cls = "neg" if tc["neg"] else "cauto"
-                auto_cells.append('<td class="%s" data-v="%d">%s</td>'
-                                  % (cls, tc.get("auto_num", 0),
+                auto_cells.append('<td class="%s" data-v="%d" data-c="%d">%s</td>'
+                                  % (cls, tc.get("auto_num", 0), j,
                                      esc(tc.get("auto_out", tc.get("correct", "")))))
             body.append('<tr class="autorow">%s</tr>' % "".join(auto_cells))
             # ── 期望 行（designer 手填 > auto_out 兜底 > 负向错值；.sv 断言用这一行） ──
             exp_cells = ['<th class="rowhdr" title="designer 手填的期望，.sv 断言用它对比；'
                          '未填的列用 auto_out 兜底(灰)。绿=手填且与 auto_out 一致；红=手填但不一致">%s</th>'
                          % esc(t.get("exp_label", "期望(out)"))]
-            for tc in tests:
-                exp_cells.append(_exp_cell(tc, True))
+            for j, tc in enumerate(tests):
+                exp_cells.append(_exp_cell(tc, True, j))
             body.append('<tr class="exprow">%s</tr>' % "".join(exp_cells))
             for label, key in (("force", "force"), ("RF_WRITE", "rfwrite")):
                 cells = ['<th class="rowhdr">%s</th>' % label]
-                for tc in tests:
-                    cells.append('<td class="drv %s">%s</td>'
-                                 % ("neg" if tc["neg"] else "", esc(tc.get(key, ""))))
+                for j, tc in enumerate(tests):
+                    cells.append('<td class="drv %s" data-c="%d">%s</td>'
+                                 % ("neg" if tc["neg"] else "", j, esc(tc.get(key, ""))))
                 body.append("<tr>%s</tr>" % "".join(cells))
             neg_block = any(tc["neg"] for tc in tests)
             text = "%s %s %s" % (t["signal"], t.get("owner", ""), t["expr"])
@@ -856,10 +926,13 @@ def _write_report_html(path, rep, excel):
             # 标题序号: logic 显示 "R<序号>"; mux 的 R 已是 "mux<N>"，不再加 R 前缀
             rid = str(t["R"])
             rlabel = rid if rid.startswith("mux") else ("R" + rid)
+            ttfbar = (('<span class="ttfbar">显示 <span class="ttfcount">%d/%d</span> 列'
+                       '<button class="ttfclr" type="button">清除</button></span>')
+                      % (len(tests), len(tests))) if has_filter else ""
             h = ('<div class="ttblock">'
-                 '<h3>%s　<code>%s</code>　<span class="ex">%s</span></h3>%s'
+                 '<h3>%s　<code>%s</code>　<span class="ex">%s</span>%s</h3>%s'
                  '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
-                 % (esc(rlabel), esc(t["signal"]), esc(t["expr"]), chain_html,
+                 % (esc(rlabel), esc(t["signal"]), esc(t["expr"]), ttfbar, chain_html,
                     "".join(hdr), "".join(body)))
             items.append({"h": h, "t": text.lower(), "o": t.get("owner", "") or "",
                           "n": 1 if neg_block else 0,
