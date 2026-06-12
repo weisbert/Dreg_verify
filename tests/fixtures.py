@@ -222,6 +222,12 @@ def build_levelshift_workbook(path):
         "A": "d_plain_in_to_logic", "K": "d_plain", "L": "A",
         "M": "to_dft", "N": 0, "O": "ctrl", "P": "Yao Wang", "R": 8,
     })
+    # pll_n：经 level_shift 但【真名仍是裸名 pll_n】(C 列=pll_n，非 _ls)，且 RTL 在子模块里、需要前缀
+    #   —— 复刻真表：用户按 pll_n 配的前缀必须照常生效（续2 曾按 _ls_is_top 误清掉它）。
+    _set_row(ws, 5, {
+        "A": "pll_n_src_to_logic[31:0]", "K": "pll_n[31:0]", "L": "A",
+        "M": "to_dft", "N": 0, "O": "to_pll_ctrl", "P": "Yao Wang", "R": 9,
+    })
 
     ls = wb.create_sheet("level_shift")
     _set_row(ls, 2, {
@@ -230,6 +236,11 @@ def build_levelshift_workbook(path):
     })
     _set_row(ls, 3, {
         "A": "d_en_refbuf_to_ls", "B": "STD_SR_L2H", "C": "d_en_refbuf_ls",
+        "E": 1, "F": "Yao Wang",
+    })
+    # pll_n 的电平移位输出口【裸名 pll_n】（C 列无 _ls 后缀；真表里有这种）
+    _set_row(ls, 4, {
+        "A": "pll_n_to_ls", "B": "STD_SR_L2H", "C": "pll_n",
         "E": 1, "F": "Yao Wang",
     })
     wb.save(path)

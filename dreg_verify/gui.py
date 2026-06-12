@@ -1454,8 +1454,8 @@ class MainWindow(QtWidgets.QMainWindow):
             COL_PREFIX: "探针网名怎么来的：\n"
                         "  输出→U_BT_LP_PLL_DIG = 断言探针带层级前缀（信号在子模块里，点下方『设置探针前缀』）\n"
                         "  mon_active→U_BT_LP_PLL_DIG = 该输入的 force 路径带前缀\n"
-                        "  探针口→d_en_refbuf_ls (level_shift) = 经 level_shift 页定到顶层电平移位口"
-                        "（随表自动生效、无需任何设置）\n"
+                        "  探针口=d_en_refbuf_ls (level_shift) = 探针网名经 level_shift 页解析为该真网名"
+                        "（随表自动生效、无需设置；前缀只按此真名匹配）\n"
                         "蓝色 = 已生效；鼠标悬停可看完整路径/来源。",
         }
         for c, t in tips.items():
@@ -1671,17 +1671,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def _prefix_of(self, sig):
         """该信号配置的探针前缀（无则空串）。
         映射 key 兼容 Excel K 列名与 RTL 网名(_ls 后缀)——scan_rtl.py 导出的是后者。"""
-        # level_shift 顶层口：顶层网、绝不套层级前缀（与 generator.probe_prefix_for 同口径）。
-        if getattr(sig, "_ls_name", None) and getattr(sig, "_ls_is_top", False):
-            return ""
         p = self._probe_prefixes
         # 全名(无视尾缀开关)也试一遍：尾缀开关关时 rtl_base 退裸名，scan_rtl/用户按 _to_logic 全名
         # 配的前缀才不会静默失配(与 generator.probe_prefix_for 同口径，2026-06-11 Hi1108 rxiq 实证)。
         rb_full = getattr(sig, "rtl_base_full", sig.rtl_base)
         rn_full = getattr(sig, "rtl_name_full", sig.rtl_name)
-        return (p.get(sig.out_name.lower()) or p.get(sig.out_base.lower())
-                or p.get(sig.rtl_name.lower()) or p.get(sig.rtl_base.lower())
-                or p.get(rn_full.lower()) or p.get(rb_full.lower()) or "")
+        rtl_keys = (p.get(sig.rtl_name.lower()) or p.get(sig.rtl_base.lower())
+                    or p.get(rn_full.lower()) or p.get(rb_full.lower()) or "")
+        # 走 level_shift 的输出：前缀只认 _ls 真网名，不认 K 列裸名（按裸名配的指向移位前/消费侧那根网，
+        # 对这根 _ls 网无效）。与 generator.probe_prefix_for 同口径（2026-06-12 pll_n/datapath_clk_en）。
+        if getattr(sig, "_ls_name", None):
+            return rtl_keys
+        return p.get(sig.out_name.lower()) or p.get(sig.out_base.lower()) or rtl_keys
 
     def _prefix_cell(self, sig, analysis):
         """探针前缀列：探针网名怎么来的——① 经 level_shift 页定到顶层 _ls 口(自动、无需配置)
@@ -1692,12 +1693,10 @@ class MainWindow(QtWidgets.QMainWindow):
         parts, tips = [], []
         ls = getattr(sig, "_ls_name", None)
         if ls:
-            parts.append("探针口→%s (level_shift)" % sig.rtl_name)
-            tips.append("『level_shift 页』声明此输出电平移位到顶层口 %s —— 探针已自动定到它"
-                        "（top_out 口，直接 `%s.%s）。\n"
-                        "顶层网：不套任何层级前缀（即便为它残留/配过前缀也自动忽略）；"
-                        "不受『logic 加尾缀』开关影响。\n本功能随表自动生效，无需任何设置。"
-                        % (sig.rtl_name, W.ENV, sig.rtl_name))
+            parts.append("探针口=%s (level_shift)" % sig.rtl_name)
+            tips.append("探针网名经『level_shift 页』解析为 %s（随表自动生效，无需设置；"
+                        "不受『logic 加尾缀』开关影响）。\n层级前缀只按此真网名匹配——按电平移位前的"
+                        "裸名配的前缀指向移位前/消费侧那根网、对这根无效，会被忽略。" % sig.rtl_name)
         out_pfx = self._prefix_of(sig)
         if out_pfx:
             parts.append("输出→%s" % out_pfx)

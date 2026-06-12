@@ -448,11 +448,6 @@ def probe_prefix_for(sig, opts):
     映射 key 兼容两套名字：Excel K 列名（d_ndiv_cnt_div_sel）和 RTL 网名（d_ndiv_cnt_div_sel_ls）。
     scan_rtl.py 导出的映射用 RTL 网名，手工配置常用 K 列名——都认。
     """
-    # level_shift 顶层口(top_out=1)：探针 = `ENV_RF.<_ls 口>，本就是顶层网——绝不套层级前缀。
-    # 即便残留/scan 出『裸基名→子模块』前缀(那是消费侧 input 端口，非这根 _ls 顶层网)也忽略
-    # (2026-06-12 Hi1108 datapath_clk_en_ls 实证：错套 U_WUR_PLL_DATAPATH_0 前缀 → CUVUNF)。
-    if getattr(sig, "_ls_name", None) and getattr(sig, "_ls_is_top", False):
-        return ""
     p = opts.probe_prefixes or {}
     rtl_base = getattr(sig, "rtl_base", sig.out_base)
     rtl_name = getattr(sig, "rtl_name", sig.out_name)
@@ -461,9 +456,16 @@ def probe_prefix_for(sig, opts):
     # (2026-06-11 Hi1108 rxiq 实证)。两个名都试：用户按裸名或全名配的前缀都能命中。
     rtl_base_full = getattr(sig, "rtl_base_full", rtl_base)
     rtl_name_full = getattr(sig, "rtl_name_full", rtl_name)
-    return (p.get(sig.out_name.lower()) or p.get(sig.out_base.lower())
-            or p.get(rtl_name.lower()) or p.get(rtl_base.lower())
-            or p.get(rtl_name_full.lower()) or p.get(rtl_base_full.lower()) or "")
+    rtl_keys = (p.get(rtl_name.lower()) or p.get(rtl_base.lower())
+                or p.get(rtl_name_full.lower()) or p.get(rtl_base_full.lower()) or "")
+    # 走 level_shift 的输出：前缀【只认 _ls 真网名】(rtl_name/rtl_base)，不认 K 列裸名。
+    # 按裸名配的前缀指向的是【电平移位前/消费侧】那根网(datapath_clk_en 在 U_WUR_PLL_DATAPATH_0 的
+    # input 端口)——对这根 _ls 网是错的，忽略。真名=裸名时(pll_n 经 level_shift 后仍叫 pll_n)，用户按
+    # pll_n 配的前缀就是 rtl_base、照常命中。(2026-06-12：续2 曾按 _ls_is_top 一律清前缀→把 pll_n 配的
+    # U_BT_LP_PLL_DIG 也误清 CUVUNF；改为按真网名匹配，两种情形都对。)
+    if getattr(sig, "_ls_name", None):
+        return rtl_keys
+    return p.get(sig.out_name.lower()) or p.get(sig.out_base.lower()) or rtl_keys
 
 
 def _mux_ctrl_desc(grp):

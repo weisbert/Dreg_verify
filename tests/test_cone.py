@@ -61,13 +61,20 @@ def test_level_shift_top_port_probe(tmp_path):
     # 对照：不过 level_shift 的输出按原逻辑（M=to_dft 非 ls + 自引用排除 → 裸名，无 _to_logic）
     assert plain._ls_name is None
     assert plain.rtl_name == "d_plain"
-    # ④ 顶层 _ls 口(top_out=1)绝不套层级前缀——即便残留『裸基名/_ls名→子模块』前缀也忽略
-    #    (2026-06-12 datapath_clk_en_ls 实证：错套 U_WUR_PLL_DATAPATH_0 → CUVUNF)
-    assert refbuf._ls_is_top is True
-    opts = generator.GenOptions(probe_prefixes={"d_en_refbuf": "U_WUR_PLL_DATAPATH_0",
-                                                "d_en_refbuf_ls": "U_WUR_PLL_DATAPATH_0"})
-    assert generator.probe_prefix_for(refbuf, opts) == ""        # 前缀被压掉 → 探针就是顶层网
-    assert generator.probe_prefix_for(plain, opts) == ""         # 对照信号本就无前缀
+    # ④ 走 level_shift 的输出：前缀【只认 _ls 真网名，不认 K 列裸名】
+    #    (2026-06-12：续2 曾对 level_shift 输出一律清前缀，把 pll_n 配的真前缀也误清 → CUVUNF；改为按真名匹配)
+    # 4a. d_en_refbuf：真名=d_en_refbuf_ls。按裸名 d_en_refbuf 配的前缀(指向移位前/消费侧)→忽略
+    assert generator.probe_prefix_for(
+        refbuf, generator.GenOptions(probe_prefixes={"d_en_refbuf": "U_CONSUMER"})) == ""
+    # 4b. 按【_ls 真网名】配 → 生效
+    assert generator.probe_prefix_for(
+        refbuf, generator.GenOptions(probe_prefixes={"d_en_refbuf_ls": "U_RIGHT"})) == "U_RIGHT"
+    # 4c. pll_n：经 level_shift 但真名仍是裸名 pll_n、RTL 在子模块——用户按 pll_n 配的前缀必须生效(复刻真实 CUVUNF)
+    pll = next(s for s in wb.logic if s.out_base == "pll_n")
+    assert pll._ls_name == "pll_n"
+    assert pll.rtl_name == "pll_n[31:0]"
+    assert generator.probe_prefix_for(
+        pll, generator.GenOptions(probe_prefixes={"pll_n": "U_BT_LP_PLL_DIG"})) == "U_BT_LP_PLL_DIG"
 
 
 # ───────────── expr.Part 节点 ─────────────
