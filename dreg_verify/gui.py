@@ -384,6 +384,11 @@ class MainWindow(QtWidgets.QMainWindow):
                                  # mux 端口带尾缀信号(rxiq→True)。稳定的设计事实，故【存盘+随配置导入导出】
                                  # (区别于会话内临时的 _sig_cov)；按 Excel 路径记忆，启动恢复。
         self._suffix_loading = False  # 程序化设「本信号探尾缀网」勾选时屏蔽其 changed 信号
+        # RTL 补充逻辑（2026-06-12）：{信号基名小写: spec}，spec={enabled,expr,inputs:[{var,raw}],note,out_name?}。
+        # Excel 真表丢了某信号顶层口后的 ECO 级(如 d_en_vco_fc：SE 确认接了 2:1 mux+二级 iddq、真表只到 DREG)，
+        # 用户把 SE 给的 RTL 实情丢给 Claude→Claude 写出等价 logic 补充式→这里导入/启用，build 当合成 logic 行
+        # 扫真值表(ECO 新输入自动成维度)。稳定设计事实→【存盘+随配置导入导出】(同 _suffix_override)，按路径记忆。
+        self._logic_overrides = {}
         self._sig_cascade = {}   # 单点级联模式 {信号名小写: "cone"/"force"}——压过全局 logic/mux 下拉。
                                  # 会话内临时档（与 _sig_cov 同款，不存盘/恢复，避免静默盖过全局）。
         self._sig_cascade_loading = False  # 程序化设「本信号级联」下拉时屏蔽其 changed 信号
@@ -520,6 +525,13 @@ class MainWindow(QtWidgets.QMainWindow):
                            "用于覆盖工具的自动判断：撞名 RO 寄存器的内部信号(如 d_wl_rf_linectrl_band_sel)\n"
                            "等价于 for_test 的 force `ENV_RF.<基名>。cone 成环时工具已会自动回退，这里是手动指定。")
         b_force.clicked.connect(self.on_set_force_signals)
+        b_supp = QtWidgets.QPushButton("RTL 补充逻辑…")
+        b_supp.setToolTip("Excel 真表丢了某信号顶层口后的 ECO 级时(如 d_en_vco_fc：SE 确认接了 2:1 mux+二级 iddq、\n"
+                          "真表只到 DREG，缺的控制网悬空→X)，在这里【补一条等价 logic 表达式】，工具当合成 logic 行\n"
+                          "扫真值表，ECO 新输入(选择位/faston/二级iddq)自动成为真值表维度。\n"
+                          "用法：把 SE 给的 RTL 实情发给 Claude → Claude 写出补充 JSON → 这里【粘贴/导入】并启用。\n"
+                          "合成块顶会强制标 // ⚠ 供 SE 复核(偏离纯 Excel 推导)。")
+        b_supp.clicked.connect(self.on_logic_overrides)
         # 完整配置的导出/导入：给同事复用、入版本库、跨机器迁移（第二十六轮：不只测试编辑，
         # 信号勾选/全局档/探针前缀/强制force 等所有配置一起带走）
         b_exp_edits = QtWidgets.QPushButton("导出配置…")
@@ -543,6 +555,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bulk.addWidget(b_prefix)
         bulk.addWidget(b_nets)
         bulk.addWidget(b_force)
+        bulk.addWidget(b_supp)
         bulk.addWidget(QtWidgets.QLabel(" 编辑:"))
         bulk.addWidget(b_exp_edits)
         bulk.addWidget(b_imp_edits)
@@ -1040,6 +1053,20 @@ class MainWindow(QtWidgets.QMainWindow):
         st["suffix_override"] = all_maps
         _save_settings(st)
 
+    def _save_logic_overrides(self):
+        """RTL 补充逻辑按 Excel 路径写入 settings（pytest 下 no-op，同 suffix_override 策略）。"""
+        if "pytest" in sys.modules:
+            return
+        st = _load_settings()
+        all_maps = st.get("logic_overrides", {})
+        path = self.path_edit.text().strip()
+        if self._logic_overrides:
+            all_maps[path] = {k: dict(v) for k, v in self._logic_overrides.items()}
+        else:
+            all_maps.pop(path, None)
+        st["logic_overrides"] = all_maps
+        _save_settings(st)
+
     def _persist_coverage(self):
         """持久化两侧覆盖档（第二十二轮解耦）+ 用例上限（第二十六轮），下次启动恢复。pytest 下 no-op。"""
         st = _load_settings()
@@ -1311,6 +1338,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._suffix_override = {str(k).strip().lower(): bool(v) for k, v in
                                  _load_settings().get("suffix_override", {}).get(path, {}).items()
                                  if str(k).strip()}
+        # RTL 补充逻辑按 Excel 路径持久化：换表自动恢复（同 suffix_override；spec 原样存）
+        self._logic_overrides = {str(k).strip().lower(): dict(v) for k, v in
+                                 _load_settings().get("logic_overrides", {}).get(path, {}).items()
+                                 if str(k).strip() and isinstance(v, dict)}
         # 解析画像：逐信号 try，一个坏信号不连累整体加载
         self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                     force_overrides=self._force_signals,
@@ -1909,6 +1940,161 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reanalyze_all()
         self.status.showMessage("强制 force 信号已更新（共 %d 个）——这些信号跳过 cone、直接 force 顶层基名"
                                 "（状态列应变 clean/需前缀）" % len(names))
+
+    def _supplement_template(self):
+        """为【当前编辑器里的 logic 信号】生成一份补充 spec 模板：预填原表达式+原输入映射，
+        用户/Claude 只需把 ECO 级包在外面、加新输入。无选中信号 → 通用空模板。"""
+        sig = getattr(self, "_ti_sig", None)
+        if sig is not None and not isinstance(sig, excel_model.MuxGroup):
+            name = sig.out_base.lower()
+            inputs = [{"var": k, "raw": info.get("raw", "")}
+                      for k, info in sig.inputs.items()]
+            return {name: {
+                "_提示": "把 ECO 级(如 2:1 mux/二级 iddq)包在原表达式外面，并在 inputs 里加新输入；理由填 note",
+                "enabled": True,
+                "note": "（填理由：SE 说 RTL 顶层口后多了什么级）",
+                "expr": sig.expr,
+                "inputs": inputs,
+            }}
+        return {"<信号基名>": {
+            "_提示": "var=表达式里的变量名(大小写无关)，raw=真实网名(可带[msb:lsb])；理由填 note",
+            "enabled": True, "note": "（理由）",
+            "expr": "ECO_IDDQ ? 1'b0 : (VCO_FC_SEL ? VCO_EN_FASTON : (EN & ~IDDQ))",
+            "inputs": [{"var": "EN", "raw": "<原使能寄存器>"},
+                       {"var": "IDDQ", "raw": "iddq"},
+                       {"var": "VCO_FC_SEL", "raw": "d_vco_fc_sel_ls[0]"},
+                       {"var": "VCO_EN_FASTON", "raw": "d_vco_en_faston"},
+                       {"var": "ECO_IDDQ", "raw": "<ECO 二级 iddq 网>"}]}}
+
+    def _validate_supplements(self, data):
+        """校验 {信号: spec} 映射：返回 (规范化后的 dict, [错误串])。错误非空时不应保存。"""
+        if not isinstance(data, dict):
+            return {}, ["顶层必须是 JSON 对象 {信号基名: {expr, inputs, ...}}"]
+        out, errs = {}, []
+        for raw_name, spec in data.items():
+            name = str(raw_name).strip().lower()
+            if not name or name.startswith("<"):
+                errs.append("信号名 %r 无效(占位符未替换?)" % raw_name); continue
+            if not isinstance(spec, dict):
+                errs.append("%s: spec 必须是对象" % name); continue
+            expr = str(spec.get("expr", "") or "").strip()
+            if not expr:
+                errs.append("%s: 缺 expr" % name); continue
+            ins = spec.get("inputs")
+            if not isinstance(ins, list) or not ins:
+                errs.append("%s: inputs 应为非空列表 [{var,raw},...]" % name); continue
+            try:
+                node = E.parse(expr)
+            except Exception as ex:  # noqa: BLE001
+                errs.append("%s: 表达式解析失败 — %s" % (name, ex)); continue
+            try:
+                sigobj = generator.make_supplement_signal(name, spec, None)
+            except Exception as ex:  # noqa: BLE001
+                errs.append("%s: inputs 解析失败 — %s" % (name, ex)); continue
+            missing = set(E.collect_vars(node)) - set(sigobj.inputs.keys())
+            if missing:
+                errs.append("%s: 表达式用到的变量没有 input 映射: %s"
+                            % (name, ", ".join(sorted(missing))))
+                continue
+            out[name] = spec
+        return out, errs
+
+    def on_logic_overrides(self):
+        """RTL 补充逻辑编辑器：Excel 真表缺某信号 ECO 级时，手工补一条等价 logic 式扫真值表。
+
+        用 JSON 直接编辑/粘贴(主路径=把 SE 给的 RTL 发给 Claude→Claude 写 spec→这里粘贴)；
+        校验通过后存盘并随配置导入导出。合成块顶强制 // ⚠，偏离纯 Excel 推导供 SE 复核。
+        """
+        if not self.wb:
+            QtWidgets.QMessageBox.information(self, "提示", "请先加载 Excel")
+            return
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("RTL 补充逻辑（Excel 真表缺级时手工补等价式扫真值表）")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.addWidget(QtWidgets.QLabel(
+            "用途：Excel 真表丢了某信号顶层口后的 ECO 级(如 d_en_vco_fc：SE 确认接了 2:1 mux + 二级 iddq、\n"
+            "真表只到 DREG、缺的控制网悬空→X)。在这里补一条【等价 logic 表达式】，工具当合成 logic 行扫真值表，\n"
+            "ECO 新输入(选择位/faston/二级 iddq)自动成为真值表新维度；合成块顶强制标 // ⚠ 供 SE 复核。\n"
+            "格式 {信号基名: {enabled, expr, inputs:[{var,raw}], note}}：var=表达式里变量名(大小写无关)，\n"
+            "raw=真实网名(可带[msb:lsb])。enabled=false 临时停用。下面直接编辑/粘贴 Claude 写好的 JSON。\n"
+            "（补充在【生成/.sv 预览/报告】里生效并扫真值表；左表与右侧测试项编辑器仍显示 Excel 原逻辑。）"))
+        edit = QtWidgets.QPlainTextEdit()
+        cur = {k: dict(v) for k, v in self._logic_overrides.items()}
+        edit.setPlainText(json.dumps(cur, ensure_ascii=False, indent=2) if cur else "")
+        edit.setPlaceholderText("（空 = 没有补充。点「插入模板」或粘贴 Claude 写好的 JSON）")
+        self._mono(edit)
+        lay.addWidget(edit)
+        row = QtWidgets.QHBoxLayout()
+        b_tmpl = QtWidgets.QPushButton("插入模板(当前信号)")
+        b_tmpl.setToolTip("把当前编辑器选中信号的原表达式+原输入预填进来，你/Claude 在外面包 ECO 级")
+        b_file = QtWidgets.QPushButton("从文件导入…")
+
+        def _insert_tmpl():
+            tmpl = self._supplement_template()
+            txt = edit.toPlainText().strip()
+            if not txt:
+                edit.setPlainText(json.dumps(tmpl, ensure_ascii=False, indent=2))
+            else:
+                try:
+                    cur2 = json.loads(txt)
+                    if isinstance(cur2, dict):
+                        cur2.update(tmpl)
+                        edit.setPlainText(json.dumps(cur2, ensure_ascii=False, indent=2))
+                except ValueError:
+                    QtWidgets.QMessageBox.warning(dlg, "提示", "当前内容不是合法 JSON，无法合并模板；请先修好或清空。")
+
+        def _from_file():
+            fp, _ = QtWidgets.QFileDialog.getOpenFileName(dlg, "导入补充 JSON", "",
+                                                          "JSON (*.json);;全部文件 (*)")
+            if not fp:
+                return
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    edit.setPlainText(f.read())
+            except OSError as ex:
+                QtWidgets.QMessageBox.critical(dlg, "读取失败", str(ex))
+        b_tmpl.clicked.connect(_insert_tmpl)
+        b_file.clicked.connect(_from_file)
+        row.addWidget(b_tmpl); row.addWidget(b_file); row.addStretch(1)
+        lay.addLayout(row)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.resize(720, 560)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        txt = edit.toPlainText().strip()
+        if not txt:
+            self._logic_overrides = {}
+            self._save_logic_overrides()
+            self.status.showMessage("RTL 补充逻辑已清空")
+            return
+        try:
+            data = json.loads(txt)
+        except ValueError as ex:
+            QtWidgets.QMessageBox.critical(self, "JSON 解析失败",
+                                           "不是合法 JSON：\n%s" % ex)
+            return
+        norm, errs = self._validate_supplements(data)
+        if errs:
+            QtWidgets.QMessageBox.critical(
+                self, "补充逻辑有误（未保存）",
+                "请修正后重试：\n\n" + "\n".join("· %s" % e for e in errs[:20]))
+            return
+        # 文件里有、当前表里找不到基名的补充：允许(纯新增信号也是合法用法)，但提示一下
+        have = {s.out_base.lower() for s in self.wb.logic}
+        unknown = [n for n in norm if n not in have]
+        self._logic_overrides = norm
+        self._save_logic_overrides()
+        n_on = sum(1 for v in norm.values() if v.get("enabled", True) is not False)
+        msg = "已保存 %d 条 RTL 补充逻辑（%d 条启用）。生成/预览/报告时按补充式扫真值表，块顶带 // ⚠。" \
+              % (len(norm), n_on)
+        if unknown:
+            msg += "\n\n注意：以下基名不在当前 Excel logic 页(将作为【纯新增】合成信号生成)：\n" + \
+                   "\n".join("  %s" % n for n in unknown[:20])
+        QtWidgets.QMessageBox.information(self, "已保存", msg)
+        self.status.showMessage("RTL 补充逻辑已更新（共 %d 条）" % len(norm))
 
     def _analyze_one(self, sig):
         """单信号解析画像：logic 走 analyze_signal，mux 组走 analyze_mux_group（2026-06-03 第九轮）。"""
@@ -2843,6 +3029,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "probe_prefixes": dict(self._probe_prefixes),
             "force_signals": sorted(self._force_signals),
             "suffix_override": dict(self._suffix_override),
+            # RTL 补充逻辑：Excel 缺级时手工补的等价 logic 式（Claude 代写、用户导入复核）
+            "logic_overrides": {k: dict(v) for k, v in self._logic_overrides.items()},
             "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
             "neg_only": dict(self._neg_only),
             "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
@@ -2900,6 +3088,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mux_dropped = {}; self._mux_cleared = set(); self._mux_user_vecs = {}
         self._sig_cov = {}; self._sig_cascade = {}
         self._probe_prefixes = {}; self._force_signals = set(); self._suffix_override = {}
+        self._logic_overrides = {}
 
     def on_export_edits(self):
         """导出【完整配置】为 .json（给同事/版本库/跨机器）：信号勾选 + 全局设置 + 探针前缀 +
@@ -2979,6 +3168,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._suffix_override = {str(k).strip().lower(): bool(v)
                                          for k, v in so.items() if str(k).strip()}
                 self._save_suffix_override()
+            lo = payload.get("logic_overrides")
+            if isinstance(lo, dict):
+                self._logic_overrides = {str(k).strip().lower(): dict(v)
+                                         for k, v in lo.items()
+                                         if str(k).strip() and isinstance(v, dict)}
+                self._save_logic_overrides()
             self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                         force_overrides=self._force_signals,
                                         cascade_mode=self._logic_cascade(),
@@ -4536,7 +4731,9 @@ class MainWindow(QtWidgets.QMainWindow):
             suffix_override=dict(self._suffix_override),
             # 缺前缀强制生成（2026-06-10）：force 子模块内部网缺前缀的信号也照常生成裸名 force，
             # 交给仿真验证此设计是否真需要前缀（=CLI --include-risky）
-            include_risky=self._include_risky_on())
+            include_risky=self._include_risky_on(),
+            # RTL 补充逻辑（2026-06-12）：Excel 真表缺某信号 ECO 级时，用手工补的等价式扫真值表（块顶 ⚠）
+            logic_overrides={k: dict(v) for k, v in self._logic_overrides.items()})
 
     # ───────────── 收集 / 选项 ─────────────
     def _collect(self):

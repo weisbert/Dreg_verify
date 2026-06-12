@@ -278,7 +278,7 @@ def cmd_diagnose(wb, opts):
 SUMMARY_COLS = [("R", "R/序号"), ("signal", "信号(K)"), ("owner", "owner"), ("type", "类型"),
                 ("top", "top_output"), ("n_tests", "用例数"), ("n_neg", "负向数"),
                 ("control", "控制位"), ("data", "数据位"), ("expr", "表达式"),
-                ("unresolved", "未解析输入"), ("error", "错误")]
+                ("unresolved", "未解析输入"), ("supplement", "RTL补充⚠"), ("error", "错误")]
 DETAIL_COLS = [("R", "R"), ("signal", "信号(K)"), ("owner", "owner"), ("type", "类型"),
                ("test", "用例"), ("neg", "负向"), ("auto_out", "auto_out(表达式计算)"),
                ("expected", "期望(断言对比值)"), ("exp_src", "期望来源"),
@@ -426,6 +426,8 @@ tr.vrow.warn{background:#fff8ec} tr.vrow.bad{background:#ffecec}
 .ttfclr{margin-left:6px;font-size:11px;padding:1px 8px;border:1px solid var(--bd);
  border-radius:4px;background:#fff;cursor:pointer;color:#555}
 .ttfclr:hover{background:#eef2f8}
+.suppbar{margin:4px 0 8px;padding:5px 10px;border:1px solid #e6a23c;border-left:4px solid #e6a23c;
+ border-radius:4px;background:#fdf6ec;color:#a05a00;font-size:12px;line-height:1.5}
 """
 
 _REPORT_JS = """
@@ -932,10 +934,13 @@ def _write_report_html(path, rep, excel):
             ttfbar = (('<span class="ttfbar">显示 <span class="ttfcount">%d/%d</span> 列'
                        '<button class="ttfclr" type="button">清除</button></span>')
                       % (len(tests), len(tests))) if has_filter else ""
+            # RTL 补充逻辑(Excel 真表缺、手工补)：块内显眼红条 banner，提示本张真值表非纯 Excel 推导
+            supp = t.get("supplement") or ""
+            supp_html = ('<div class="suppbar">⚠ %s</div>' % esc(supp)) if supp else ""
             h = ('<div class="ttblock">'
-                 '<h3>%s　<code>%s</code>　<span class="ex">%s</span>%s</h3>%s'
+                 '<h3>%s　<code>%s</code>　<span class="ex">%s</span>%s</h3>%s%s'
                  '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
-                 % (esc(rlabel), esc(t["signal"]), esc(t["expr"]), ttfbar, chain_html,
+                 % (esc(rlabel), esc(t["signal"]), esc(t["expr"]), ttfbar, supp_html, chain_html,
                     "".join(hdr), "".join(body)))
             items.append({"h": h, "t": text.lower(), "o": t.get("owner", "") or "",
                           "n": 1 if neg_block else 0,
@@ -1299,6 +1304,15 @@ def _report(res, out):
             print("    - [R=%s] %s ← %s" % (aid, name, why))
         if len(res.get("regmap_warnings", [])) > 30:
             print("    ...(共 %d 个)" % len(res["regmap_warnings"]))
+    if s.get("n_supplement"):
+        # RTL 补充逻辑：Excel 真表缺此级(如 ECO 加的 mux/iddq)、由人工补一条等价 logic 式扫真值表。
+        # 偏离纯 Excel 推导 → 显式列出供 SE review（块顶也已有 // ⚠）。
+        print("  ⚠ %d 个信号用了【RTL 补充逻辑】（Excel 真表缺、手工补的等价式；请 SE 核对）："
+              % s["n_supplement"])
+        for name, aid, why in res.get("supplement_warnings", [])[:30]:
+            print("    - [R=%s] %s ← %s" % (aid, name, why))
+        if len(res.get("supplement_warnings", [])) > 30:
+            print("    ...(共 %d 个)" % len(res["supplement_warnings"]))
     if s.get("n_filtered_internal"):
         # 唯一'默认静默减少'的一类——把名字也亮出来，别让它无声无息
         fi = res.get("filtered_internal", [])

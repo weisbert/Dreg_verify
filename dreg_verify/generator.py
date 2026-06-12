@@ -27,7 +27,8 @@ class GenOptions:
                  append_to_logic=True, logic_mode=None, mux_mode=None, sig_cov=None,
                  mux_dropped=None, mux_cleared=None, mux_user_vecs=None,
                  suffix_override=None, append_to_mux=False,
-                 logic_cascade=None, mux_cascade=None, sig_cascade=None):
+                 logic_cascade=None, mux_cascade=None, sig_cascade=None,
+                 logic_overrides=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -133,6 +134,21 @@ class GenOptions:
         # 原样保留。与全局负向重叠的相同负向由 _dedup_negatives 去重。每条 vec 的 case_index 标它路由的 case。
         self.mux_user_vecs = {str(k).lower(): list(v) for k, v in
                               (mux_user_vecs or {}).items() if v}
+        # 「RTL 补充逻辑 / cone patch」(2026-06-12 用户拍板)：Excel 真表丢了某信号顶层口后的 ECO 级
+        # (如 d_en_vco_fc：SE 确认顶层口后接 2:1 mux + 二级 iddq，真表只到 DREG，缺的控制网悬空→X)。
+        # 允许为该信号【手工补一条等价 logic 表达式】，工具把它当成合成 logic 行塞进 wb.logic、走同一条
+        # 解析/扫真值表/审计路径——于是 ECO 新输入(d_vco_fc_sel/faston/二级iddq)自动成为真值表新维度，
+        # 并继承 designer 期望/覆盖度/R36 按值筛选/CSV/for_test 回填，零新渲染。这是【偏离纯 Excel 推导】，
+        # 故合成信号块顶强制 // ⚠ + 报告 banner + 汇总 + CLI(走 regmap_warnings 同款审计通道)，SE review 必见。
+        #   logic_overrides = {信号基名(小写): {
+        #       "enabled": bool(默认 True),      # False=不生效(GUI 开关关)，逐字节回退 Excel 原行
+        #       "expr":  "ECO_IDDQ ? 1'b0 : (VCO_FC_SEL ? VCO_EN_FASTON : (EN & ~IDDQ))",  # 变量=真实名(大小写无关)
+        #       "inputs": [{"var": "EN", "raw": "<原使能寄存器>"}, {"var": "VCO_FC_SEL", "raw": "d_vco_fc_sel_ls[0]"}, ...],
+        #       "out_name": "d_en_vco_fc",       # 可选，缺省=信号原名(继承位宽/assert号/owner/top_output/尾缀)
+        #       "note": "SE 确认 ECO 接 mux+二级iddq，真表只到 DREG",  # 理由，进块顶 ⚠ 与报告
+        #   }} —— var 缺省=raw 的基名(大写)；raw 带 [msb:lsb] 切片照解析。enabled=False 或无 expr 的项忽略。
+        # 未传(=None)→ 行为与旧版逐字节一致(build/report swap-and-restore 不动 wb.logic)。
+        self.logic_overrides = _norm_logic_overrides(logic_overrides)
 
     def logic_vec_params(self, name=None):
         """logic 向量生成参数 (mode, exhaustive)，供 V.generate_vectors。
@@ -193,6 +209,104 @@ def _norm_owner_set(x):
         return None
     out = {_ws(s) for s in x if s and s.strip()}
     return out or None
+
+
+def _norm_logic_overrides(x):
+    """规范 logic_overrides：{信号基名(小写): spec}。丢弃 enabled=False / 无 expr 的项。
+    spec 原样保留(splice 时才据 base_sig 构造合成 LogicSignal)。空/None → {}。"""
+    if not x:
+        return {}
+    out = {}
+    for k, spec in x.items():
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("enabled", True) is False:
+            continue
+        if not str(spec.get("expr", "") or "").strip():
+            continue
+        out[str(k).strip().lower()] = spec
+    return out
+
+
+def make_supplement_signal(base, spec, base_sig):
+    """据 logic_overrides 的一条 spec 构造【合成 LogicSignal】(RTL 补充逻辑)。
+
+    base     — 信号基名(小写)。
+    spec     — {"expr","inputs":[{"var","raw"}...],"out_name"?,"note"?,...}，见 GenOptions.logic_overrides。
+    base_sig — Excel 原 LogicSignal(同基名)或 None(纯新增信号)。命中时【继承】输出身份：
+               out_name/位宽、assert_id、owner、top_output、suffix、ref_suffix、_ls_name —— 补充只改
+               【喂给输出的逻辑】(expr+inputs)，不改【在哪儿探这个输出】。
+
+    变量名 = expr 里出现的标识符(parse 时统一 .upper())；inputs 的 var 缺省=raw 的基名(大写)，键须与之一致。
+    raw 带 [msb:lsb] 切片照 _strip_width 解析。返回的 LogicSignal 打 _is_supplement / _supplement_note 供审计。
+    """
+    inputs = {}
+    for it in (spec.get("inputs") or []):
+        raw = str(it.get("raw", "") or "").strip()
+        if not raw:
+            continue
+        base_with_tl, width, msb, lsb = excel_model._strip_width(raw)
+        in_base = excel_model.strip_to_logic(base_with_tl)
+        var = str(it.get("var", "") or "").strip() or in_base
+        inputs[var.upper()] = {
+            "raw": raw, "base": in_base, "width": width, "msb": msb, "lsb": lsb,
+        }
+
+    out_name = str(spec.get("out_name", "") or "").strip() \
+        or (base_sig.out_name if base_sig else base)
+    out_base, out_width, _, _ = excel_model._strip_width(out_name)
+    sig = excel_model.LogicSignal(
+        row=(base_sig.row if base_sig else -1),
+        out_name=out_name,
+        out_width=out_width,
+        expr=str(spec.get("expr", "")),
+        suffix=(base_sig.suffix if base_sig else str(spec.get("suffix", "") or "")),
+        top_output=(base_sig.top_output if base_sig else spec.get("top_output", "1")),
+        notes=(base_sig.notes if base_sig else str(spec.get("note", "") or "")),
+        owner=(base_sig.owner if base_sig else str(spec.get("owner", "") or "")),
+        assert_id=(base_sig.assert_id if base_sig else str(spec.get("assert_id", "") or "")),
+        inputs=inputs,
+    )
+    # 继承输出探针身份(补充只改逻辑、不改探点)
+    if base_sig is not None:
+        sig.ref_suffix = base_sig.ref_suffix
+        sig._append_to_logic = base_sig._append_to_logic
+        sig._ls_name = base_sig._ls_name
+        sig._ls_is_top = base_sig._ls_is_top
+    sig._is_supplement = True
+    sig._supplement_note = str(spec.get("note", "") or "").strip()
+    return sig
+
+
+def _logic_with_overrides(wb, opts):
+    """返回 logic 信号列表：命中 logic_overrides 的信号【替换】为合成 LogicSignal、纯新增信号【追加】。
+    原 LogicSignal 对象不被改动、wb.logic 不被原地改写(守 R32：build/report 用不同 opts 反复跑同一 wb
+    时不互相污染)。无 override → 直接返回 wb.logic 原对象(逐字节不变)。"""
+    ov = getattr(opts, "logic_overrides", None)
+    if not ov:
+        return wb.logic
+    have = {s.out_base.lower() for s in wb.logic}
+    out, used = [], set()
+    for s in wb.logic:
+        b = s.out_base.lower()
+        if b in ov and b not in used:
+            out.append(make_supplement_signal(b, ov[b], s))
+            used.add(b)
+        else:
+            out.append(s)
+    for b, spec in ov.items():            # 纯新增：基名不在 Excel logic 页
+        if b not in have:
+            out.append(make_supplement_signal(b, spec, None))
+    return out
+
+
+def _supplement_warning(sig):
+    """合成「RTL 补充」信号的块顶/汇总告警串：表达式 + 理由。"""
+    msg = "本信号逻辑为手工补充(Excel 真表缺此级 ECO/缺失)，已用补充式扫真值表: %s" % sig.expr
+    note = getattr(sig, "_supplement_note", "") or ""
+    if note:
+        msg += "　理由: %s" % note
+    return msg
 
 
 def _name_matches(sig, names):
@@ -707,7 +821,17 @@ def build(wb, opts):
       blocks: list[(lines, stats)]
       selected / skipped / errors: 诊断
       stats: 汇总
+    先应用 logic_overrides(合成「RTL 补充」信号替换/追加)，wb.logic swap-and-restore，不污染共享 wb。
     """
+    _saved_logic = wb.logic
+    wb.logic = _logic_with_overrides(wb, opts)
+    try:
+        return _build_core(wb, opts)
+    finally:
+        wb.logic = _saved_logic
+
+
+def _build_core(wb, opts):
     resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
@@ -725,6 +849,7 @@ def build(wb, opts):
     spec_conflicts = []  # mux 规格冲突跳过(同 case 不同源)——单列, 账目/报告/GUI 据此区别于普通跳过
     mux_warnings = []   # 照常生成但有提示的 mux 组（如 top_out=0 用裸名探针，可能要前缀）
     regmap_warnings = [] # 用到 regmap 同名重复字段的信号（已按首个采纳，块顶 ⚠ + 这里汇总）
+    supplement_warnings = []  # 用了「RTL 补充逻辑」(Excel 缺失、手工补)的信号——块顶 ⚠ + 汇总，偏离纯 Excel 推导必显式
     cone_fallbacks = [] # cone 成环 → 回退 force 基名的信号（for_test 那招），可见性用
     n_total_vectors = 0
     n_total_neg = 0
@@ -857,6 +982,11 @@ def build(wb, opts):
         if _rmdup:
             lines = ["// ⚠ %s" % _rmdup] + lines
             regmap_warnings.append((sig.out_name, sig.assert_id, _rmdup))
+        # RTL 补充逻辑(Excel 缺此级，手工补)：块顶强制 ⚠ + 汇总，偏离纯 Excel 推导必显式标注供 SE review
+        if getattr(sig, "_is_supplement", False):
+            _smsg = _supplement_warning(sig)
+            lines = ["// ⚠ %s" % _smsg] + lines
+            supplement_warnings.append((sig.out_name, sig.assert_id, _smsg))
         stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
         n_total_vectors += stats["n_vectors"]
@@ -1056,12 +1186,14 @@ def build(wb, opts):
         "n_mux_generated": len(blocks) - n_logic_blocks,
         "n_mux_warnings": len(mux_warnings),
         "n_regmap_warnings": len(regmap_warnings),
+        "n_supplement": len(supplement_warnings),
         # 默认静默过滤掉的 logic 内部节点（top_output=0）——拎出来给可见性
         "n_filtered_internal": len(filtered_internal),
     }
     return {"blocks": blocks, "selected": selected, "errors": errors,
             "skipped": skipped, "spec_conflicts": spec_conflicts,
             "mux_warnings": mux_warnings, "regmap_warnings": regmap_warnings,
+            "supplement_warnings": supplement_warnings,
             "cone_fallbacks": cone_fallbacks,
             "filtered_internal": filtered_internal,
             "dup_labels": dup_labels, "summary": summary,
@@ -1089,7 +1221,9 @@ def compose_account(wb, opts, res):
     internal_names = {s.out_name for s in res.get("filtered_internal", [])}
 
     items = []
-    for sig in wb.logic:
+    # 与 build/report 同口径：账目也走「应用 RTL 补充后」的 logic 列表，纯新增的合成信号才不会漏账
+    # (无补充时 _logic_with_overrides 返回 wb.logic 原对象 → 逐字节不变)。
+    for sig in _logic_with_overrides(wb, opts):
         n = sig.out_name
         if n in error_map:
             disp, reason = "错误", error_map[n]
@@ -1227,7 +1361,17 @@ def report(wb, opts):
       "detail":  [每条用例一行]（每行带 T编号/_NEG/期望/force/...，便于 Ctrl+F），
       "tables":  [每信号一个纵向真值表]（输入带位宽做行、各测试做列，供 HTML ② 段）,
     }
+    与 build() 同口径先应用 logic_overrides，wb.logic swap-and-restore，不污染共享 wb（报告与产出一致）。
     """
+    _saved_logic = wb.logic
+    wb.logic = _logic_with_overrides(wb, opts)
+    try:
+        return _report_core(wb, opts)
+    finally:
+        wb.logic = _saved_logic
+
+
+def _report_core(wb, opts):
     resolver = R.Resolver(wb, force_overrides=opts.force_overrides,
                           rfwrite_overrides=opts.rfwrite_overrides,
                           default_kind=opts.default_kind,
@@ -1293,6 +1437,9 @@ def report(wb, opts):
                               if _lbind(e) is not None else (None, None)))
         table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
+                 # RTL 补充逻辑(Excel 缺，手工补)的告警串——非空则 HTML 报告该表挂 banner、CSV/Excel 也带
+                 "supplement": (_supplement_warning(sig)
+                                if getattr(sig, "_is_supplement", False) else ""),
                  # is_logic：本表是 logic cone 真值表(回填 for_test 只处理它，mux 表结构不同跳过)
                  "is_logic": True, "out_width": sig.out_width or 1,
                  # chain = cone 展开链：[{"out","expr","subst"},...]，非 cone 信号为空 list
@@ -1368,6 +1515,8 @@ def report(wb, opts):
             "n_tests": len(vecs), "n_neg": sum(1 for v in vecs if v.is_negative),
             "control": ",".join(meta.get("control", [])), "data": ",".join(meta.get("data", [])),
             "unresolved": ";".join(sorted(unresolved_bases)),
+            "supplement": (_supplement_warning(sig)
+                           if getattr(sig, "_is_supplement", False) else ""),
             # 用户一键清空(空 override) → 报告也透出原因(与 build 跳过、mux 清空同口径)
             "error": ("用户已清空(零用例，本信号不产出测试)"
                       if (override is not None and len(override) == 0)
