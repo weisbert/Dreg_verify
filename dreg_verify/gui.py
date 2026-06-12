@@ -2452,7 +2452,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # iddq 门=横向输入行（2026-06-10，与 mux 侧同口径）：受门控的 logic 输出真值表
         # 多一行门网、每条测试取透传值（generator.pin_dft_gate 在 build/report 实际驱动）。
         # 输入行次序按 designer for_test 同组行序排（门也参与；无 for_test=原序+门殿后）。
-        self._ti_dft_pin = self._dft_pin_display(sig.out_base)
+        # 门若已是本信号显式输入(RTL 补充列了该 iddq / logic 行引用它)→ 不重复出门行（与 build/report 去重同口径）。
+        _ti_ibases = {b.base.lower() for b in bindings.values()
+                      if b is not None and getattr(b, "base", None)}
+        self._ti_dft_pin = self._dft_pin_display(sig.out_base, input_bases=_ti_ibases)
         _pin = self._ti_dft_pin
 
         def _lgbind(e):
@@ -3440,14 +3443,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 "role": "DFT门(iddq)·每条测试驱透传值", "kind": kind,
                 "drive": drive, "bold": True}
 
-    def _dft_pin_display(self, out_base):
+    def _dft_pin_display(self, out_base, input_bases=None):
         """真值表「DFT门」输入行的显示信息 (门基名, 透传值)；不被门控/门不可 force → None。
 
         2026-06-10 用户三轮澄清后定稿：iddq 是被门控输出的【横向输入参数】——必须像
         for_test 一样作为输入行出现在真值表里、每条测试有取值。判定与
-        generator.pin_dft_gate 同口径（编辑器显示的=每条向量 .sv 实际 force 的）。"""
+        generator.pin_dft_gate 同口径（编辑器显示的=每条向量 .sv 实际 force 的）。
+        input_bases：本信号已显式驱动的输入基名集合——门已是显式输入(如 RTL 补充列了该 iddq)→ 返回
+        None，不再单列 DFT 门行（否则同一 iddq 网真值表里出现两行；与 build/report 去重同口径）。"""
         g = (getattr(self.wb, "dft", None) or {}).get((out_base or "").lower())
         if not g or self._resolver is None:
+            return None
+        if input_bases and g["gate_base"] in input_bases:
             return None
         info = {"raw": g["gate_base"], "base": g["gate_base"],
                 "width": 1, "msb": None, "lsb": None}

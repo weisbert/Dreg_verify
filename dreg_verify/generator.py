@@ -462,7 +462,7 @@ def mux_data_for(opts, grp):
             or opts.mux_data.get(grp.out_base.lower()) or None)
 
 
-def _append_dft_vectors(out_base, vecs, wb, resolver):
+def _append_dft_vectors(out_base, vecs, wb, resolver, input_bases=None):
     """item③ iddq DFT 态拍（第二十二轮）：被 dft 页门控的输出，在功能向量外追加一条 DFT 态拍——
     force 门(iddq)到选中【常量支】的值、断言输出=该常量(0)，该拍后还原门态（S4：否则 force 的
     iddq=1 会钉死后续所有拍/块的门）。
@@ -472,11 +472,16 @@ def _append_dft_vectors(out_base, vecs, wb, resolver):
     输入源；designer 的 for_test 最小集也带 iddq，且每个被门控输出只多 1 条向量）。
     原地追加进 vecs（T 编号由调用方统一重排）。本拍后 release 门，让门回 RTL 默认(透传)（S4：否则
     force 的 iddq=1 会钉死后续所有拍/块的门）。
-    返回 None（正常补 / 该输出无 dft 门 → 无需补）或 str（被门控但补不了的原因，供 meta['iddq_skipped']）。
+    input_bases：本信号【已显式驱动】的输入基名集合(lowercase)。门网已是显式输入时不再补 DFT 拍——
+    门已被当作真值表输入扫了 0/1（含 iddq=1 那拍），再补 DFT 拍就重复（2026-06-12：SE 把 iddq 控制
+    挪进 dft 页后，与 RTL 补充里显式列的同一 iddq 撞成两行）。
+    返回 None（正常补 / 该输出无 dft 门 / 门已是显式输入 → 无需补）或 str（被门控但补不了的原因，供 meta['iddq_skipped']）。
     """
     g = wb.dft.get(out_base) if getattr(wb, "dft", None) else None
     if not g:
         return None                                   # 该输出不被 dft 门控 → 无需 DFT 拍
+    if input_bases and g["gate_base"] in input_bases:
+        return None                                   # 门网已是显式输入(被扫 0/1) → 不重复补 DFT 拍
     # 门网解析（与 pin_dft_gate 同口径）：必须是可 force 的 RO 网
     info = {"raw": g["gate_base"], "base": g["gate_base"], "width": 1, "msb": None, "lsb": None}
     b = resolver.resolve("dft_gate_" + g["gate_base"], info)
@@ -500,7 +505,7 @@ def _append_dft_vectors(out_base, vecs, wb, resolver):
     return None
 
 
-def pin_dft_gate(out_base, vecs, wb, resolver):
+def pin_dft_gate(out_base, vecs, wb, resolver, input_bases=None):
     """被 dft 页门控的输出：把门(iddq)当作每条测试的【显式输入】，force 到透传值。
 
     2026-06-10 用户三轮澄清后定稿：designer 的 for_test 输入信号清单里有 iddq
@@ -509,12 +514,19 @@ def pin_dft_gate(out_base, vecs, wb, resolver):
     DFT 拍除外（它本身 force 门=1 验常量支）。门解析不了/非 RO 时不钉（输入表红色
     未解析 + iddq_skipped 已有提示），返回 None。
 
+    input_bases：本信号【已显式驱动】的输入基名集合(lowercase)。门网已是显式输入时返回 None、
+    不再当 DFT 门钉一遍——否则真值表同一根 iddq 网出现两行（显式输入 + DFT 门）。2026-06-12：
+    SE 把 iddq 控制挪进 dft 页后，与 RTL 补充里显式列的同一 iddq 撞成两行，由此去重；显式输入
+    （被扫 0/1）比"钉到透传值"更完整，让它当家。
+
     幂等（同一门只加一次 extra_forces），GUI/build/report 可重复调用。
     返回 (门绑定, 透传值) 或 None——调用方拿去做显示（GUI 输入行 / 报告 inputs 行）。
     """
     g = wb.dft.get(out_base) if getattr(wb, "dft", None) else None
     if not g:
         return None
+    if input_bases and g["gate_base"] in input_bases:
+        return None                                   # 门网已是显式输入 → 不重复当 DFT 门
     info = {"raw": g["gate_base"], "base": g["gate_base"], "width": 1, "msb": None, "lsb": None}
     b = resolver.resolve("dft_gate_" + g["gate_base"], info)
     if not (b.resolved and b.kind == "RO"):
@@ -938,17 +950,22 @@ def _build_core(wb, opts):
                 for i, v in enumerate(vecs):   # 负向追加后按顺序重排 T 编号，标号不重复
                     v.index = i
 
+        # 本信号【已显式驱动】的输入基名集合——dft 门若已在其中(如 RTL 补充显式列了该 iddq、或
+        # logic 行本就引用它)则不再当 DFT 门重复钉/补，去重（2026-06-12 SE 把 iddq 挪进 dft 页后实证）。
+        _ibases = {b.base.lower() for b in bindings.values()
+                   if b is not None and getattr(b, "base", None)}
         # item③ iddq DFT 态拍（第二十二轮）：被 dft 门控的 logic 输出补一条 DFT 拍（所有档）。
         # 仅自动向量路径补（override=用户全定制，不注入工具拍）；放在负向之后 → DFT 拍不被自动负向翻倍。
         if override is None:
-            _dft_skip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver)
+            _dft_skip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
+                                            input_bases=_ibases)
             if _dft_skip:
                 meta["iddq_skipped"] = _dft_skip
             for i, v in enumerate(vecs):
                 v.index = i
         # iddq 门=显式输入（2026-06-10）：被门控输出的每条向量 force 门到透传值（override
         # 路径也钉——门是环境驱动，与用户定制的内容正交；for_test 输入集同口径）
-        pin_dft_gate(sig.out_base.lower(), vecs, wb, resolver)
+        pin_dft_gate(sig.out_base.lower(), vecs, wb, resolver, input_bases=_ibases)
 
         # 真·仅负向：只保留负向向量(编号不重排，与"全部"导出的 T 编号一致便于对照)；
         # 没有负向的信号整个不出现在产物里
@@ -1395,6 +1412,9 @@ def _report_core(wb, opts):
                             "unresolved": "", "error": "表达式解析/展开失败: %s" % ex})
             continue
         used = E.collect_vars(node)
+        # 本信号已显式驱动的输入基名（dft 门去重用，与 build 同口径）
+        _ribases = {b.base.lower() for b in bindings.values()
+                    if b is not None and getattr(b, "base", None)}
         # 与 build() 对齐：有 GUI 定制 override 就用 override，报告才不会与产出的 .sv 不符。
         override = (opts.vector_overrides.get(sig.out_name.lower())
                     if opts.vector_overrides else None)
@@ -1419,11 +1439,13 @@ def _report_core(wb, opts):
                 vecs = V.add_negatives(vecs, mode=opts.neg_mode, which=opts.neg_which,
                                        fixed_value=opts.neg_value)
             # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 logic 挂点；override 路径不注入）
-            _lskip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver)
+            _lskip = _append_dft_vectors(sig.out_base.lower(), vecs, wb, resolver,
+                                         input_bases=_ribases)
             if _lskip:
                 meta["iddq_skipped"] = _lskip   # 缺口可见(M2)：报告 error 列透出（.sv 已有 // ⚠）
-        # iddq 门=显式输入（与 build 同口径）；返回的绑定供报告 inputs 行 + for_test 回填
-        _lpin = pin_dft_gate(sig.out_base.lower(), vecs, wb, resolver)
+        # iddq 门=显式输入（与 build 同口径）；返回的绑定供报告 inputs 行 + for_test 回填。
+        # 门若已是显式输入(RTL 补充列了该 iddq / logic 行引用它)则去重，不重复出门行（与 build 同口径）。
+        _lpin = pin_dft_gate(sig.out_base.lower(), vecs, wb, resolver, input_bases=_ribases)
         groups = V.input_groups(node, bindings)
         # 输入行显示顺序 = for_test 行序（有样例组时）/ 寄存器地址+bit 位（默认，同 for_test 生成规则）
         def _lbind(e):

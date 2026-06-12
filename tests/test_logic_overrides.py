@@ -151,6 +151,36 @@ def test_supplement_self_reference_input_resolves_as_register(wbx):
     assert "RF_WRITE(10'h16" in sv                      # 自引用 EN 解析成 0x16 寄存器写
 
 
+# ───────────── DFT 门 与 显式输入 去重（SE 把 iddq 挪进 dft 页后的交互） ─────────────
+def test_dft_gate_deduped_when_already_explicit_input(wbx):
+    """门网已是本信号【显式输入】时，不再单列 DFT 门行 / 不重复补 DFT 拍。
+    reserve 表达式 (A?C:B)&~J 的 J 本就是 d_bt_lp_iddq；若 SE 又把它挪进 dft 页当门控 → 撞两行，去重。"""
+    opts = G.GenOptions(signals=["d_logic_bt_lp_reserve"])
+    base = G.report(wbx, opts)["tables"]
+    bt = [x for x in base if x["signal"].startswith("d_logic_bt_lp_reserve")][0]
+    n_in, n_col = len(bt["inputs"]), len(bt["tests"])
+    # SE：把 d_bt_lp_iddq 挪到 dft 页当 d_logic_bt_lp_reserve 的门——但它本就是 J 输入
+    wbx.dft["d_logic_bt_lp_reserve"] = {
+        "gate_base": "d_bt_lp_iddq", "gate_raw": "d_bt_lp_iddq", "transparent": 0}
+    t = [x for x in G.report(wbx, opts)["tables"]
+         if x["signal"].startswith("d_logic_bt_lp_reserve")][0]
+    assert all(i.get("letters") != "dft门" for i in t["inputs"])   # 没有单列的 DFT 门行
+    assert len(t["inputs"]) == n_in                                # 输入行数不变（没多一行 iddq）
+    assert len(t["tests"]) == n_col                                # 没多补 DFT 拍列
+    # build 侧同口径：不报 iddq_skipped、向量数不因 dft 门增加
+    res = G.build(wbx, opts)
+    assert "// ⚠" not in res["blocks"][0][0][0] or "iddq" not in res["blocks"][0][0][0].lower()
+
+
+def test_dft_gate_still_pins_when_not_an_explicit_input(wbx):
+    """门网【不是】显式输入时，DFT 门照常单列（去重不过度）。lna_agc 三输入都不是 d_bt_lp_iddq。"""
+    wbx.dft["d_logic_bt_lp_lna_agc"] = {
+        "gate_base": "d_bt_lp_iddq", "gate_raw": "d_bt_lp_iddq", "transparent": 0}
+    t = [x for x in G.report(wbx, G.GenOptions(signals=["d_logic_bt_lp_lna_agc"]))["tables"]
+         if x["signal"].startswith("d_logic_bt_lp_lna_agc")][0]
+    assert any(i.get("letters") == "dft门" for i in t["inputs"])   # 门不是输入 → 照常单列 DFT 门行
+
+
 # ───────────── GUI：校验 / 配置导出导入 / _opts 透传 ─────────────
 @pytest.fixture(scope="module")
 def qapp():
