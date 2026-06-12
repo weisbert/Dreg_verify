@@ -153,6 +153,30 @@ def test_export_nets_gui(gui_app, tmp_path, monkeypatch):
         w.close()
 
 
+def test_level_shift_prefix_hint_gui(gui_app, tmp_path):
+    """level_shift 顶层 _ls 口在 GUI『探针前缀』列有可见提示，且无需任何设置即自动生效（2026-06-12）。
+
+    用户顾虑：换张表怕『没生效又不知道』。验证：①d_en_refbuf 行该列显示 level_shift + 顶层口名
+    ②没过 level_shift 的对照信号不显示该提示 ③开 GUI 没动任何开关即生效（on_load 即出）。
+    """
+    from dreg_verify import gui as G
+    excel = tmp_path / "ls_gui.xlsx"
+    fixtures.build_levelshift_workbook(str(excel))
+    w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
+    try:
+        def _prefix_text(out_name):
+            for r in range(w.table.rowCount()):
+                if w.table.item(r, G.COL_K).text() == out_name:
+                    cell = w.table.item(r, G.COL_PREFIX)
+                    return cell.text() if cell else ""
+            raise AssertionError("找不到行 %s" % out_name)
+        refbuf_txt = _prefix_text("d_en_refbuf")
+        assert "level_shift" in refbuf_txt and "d_en_refbuf_ls" in refbuf_txt
+        assert "level_shift" not in _prefix_text("d_plain")    # 对照：无 level_shift 条目
+    finally:
+        w.close()
+
+
 def _mux_idx(w, out_base):
     """按 out_base 找到该 mux 组在 signals 里的行号。"""
     for i, s in enumerate(w.signals):

@@ -1451,10 +1451,12 @@ class MainWindow(QtWidgets.QMainWindow):
                         "  clean = 输入都解析到 net\n"
                         "  ⚠wire兜底 = 输入回退成 wire，elaboration 可能找不到\n"
                         "  ✗未解析/解析错 = 输入在 ENV_RF 层探不到（CUVUNF）",
-            COL_PREFIX: "探针层级前缀：信号网不在 ENV_RF 顶层、而在子模块里时配置（点下方『设置探针前缀』）。\n"
-                        "  输出→U_BT_LP_PLL_DIG = 断言探针带前缀（如 pll_n）\n"
+            COL_PREFIX: "探针网名怎么来的：\n"
+                        "  输出→U_BT_LP_PLL_DIG = 断言探针带层级前缀（信号在子模块里，点下方『设置探针前缀』）\n"
                         "  mon_active→U_BT_LP_PLL_DIG = 该输入的 force 路径带前缀\n"
-                        "蓝色 = 已生效；鼠标悬停可看完整路径。",
+                        "  探针口→d_en_refbuf_ls (level_shift) = 经 level_shift 页定到顶层电平移位口"
+                        "（随表自动生效、无需任何设置）\n"
+                        "蓝色 = 已生效；鼠标悬停可看完整路径/来源。",
         }
         for c, t in tips.items():
             it = self.table.horizontalHeaderItem(c)
@@ -1679,12 +1681,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 or p.get(rn_full.lower()) or p.get(rb_full.lower()) or "")
 
     def _prefix_cell(self, sig, analysis):
-        """探针前缀列：输出前缀 + 受前缀影响的输入(如 mon_active→U_BT_LP_PLL_DIG)。
+        """探针前缀列：探针网名怎么来的——① 经 level_shift 页定到顶层 _ls 口(自动、无需配置)
+        ② 配了层级前缀的输出/受前缀影响的输入(force 路径带前缀)。
 
-        让用户一眼看到"映射生效在哪"：输出探针带前缀、哪些输入 wire 的 force 路径带前缀。
-        非空时蓝色高亮；tooltip 给完整 force/assert 路径。
+        让用户一眼看到"探针网名解析在哪生效"。非空时蓝色高亮；tooltip 给完整路径/来源。
         """
         parts, tips = [], []
+        ls = getattr(sig, "_ls_name", None)
+        if ls:
+            parts.append("探针口→%s (level_shift)" % sig.rtl_name)
+            tips.append("『level_shift 页』声明此输出电平移位到顶层口 %s —— 探针已自动定到它"
+                        "（top_out 口，直接 `%s.%s、无需前缀；不受『logic 加尾缀』开关影响）。\n"
+                        "本功能随表自动生效，无需任何设置。" % (sig.rtl_name, W.ENV, sig.rtl_name))
         out_pfx = self._prefix_of(sig)
         if out_pfx:
             parts.append("输出→%s" % out_pfx)
@@ -1696,8 +1704,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 tips.append("输入 %s: %s" % (i["base"], i.get("net", "")))
         it = QtWidgets.QTableWidgetItem("；".join(parts))
         if parts:
-            it.setForeground(QtGui.QColor("#0a58c4"))    # 蓝 = 前缀已生效（区别于红=故障）
-            it.setToolTip("探针前缀已生效：\n" + "\n".join(tips))
+            it.setForeground(QtGui.QColor("#0a58c4"))    # 蓝 = 探针网名解析已生效（区别于红=故障）
+            it.setToolTip("探针网名解析：\n" + "\n".join(tips))
         return it
 
     def _save_probe_prefixes(self):
