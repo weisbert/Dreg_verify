@@ -48,6 +48,11 @@ class LogicSignal:
         # ref_suffix 也不补、直接探基名网（某些设计 <名>_to_xxx 撞了真实输入网时用）。ref_suffix 保持
         # 不变(=客观事实)，只由本开关 AND 决定是否真正追加。默认 True=随 Excel 补尾缀（旧行为）。
         self._append_to_logic = True
+        # level_shift 页给出的【顶层电平移位输出口】真名（2026-06-12 Hi1108 Pilot）：新表把 logic 输出
+        # (M=to_dft、top_output=0)的可探顶层口拆到 level_shift 页声明(d_en_refbuf → d_en_refbuf_ls，
+        # lpbt_dig_top.v output)。非空时 rtl_base 直接返回它，压过 M 列/ref_suffix/加尾缀开关——
+        # 因为这就是 RTL 顶层口真名。None=该信号不过 level_shift 或无此页(旧表 M=ls 直给后缀，不受影响)。
+        self._ls_name = None
 
     @property
     def is_top(self):
@@ -61,8 +66,11 @@ class LogicSignal:
 
     @property
     def rtl_base(self):
-        """RTL 真实网名(去位宽)。ls 行带 _ls 后缀；被下游引用的内部信号带其 Excel 引用尾缀
-        (_to_logic / _to_mux)。_append_to_logic 关时不补尾缀、直接探基名；_ls 不受此开关影响。"""
+        """RTL 真实网名(去位宽)。level_shift 页给的顶层 _ls 口最优先(_ls_name)；否则 ls 行带 _ls 后缀；
+        被下游引用的内部信号带其 Excel 引用尾缀(_to_logic / _to_mux)。_append_to_logic 关时不补尾缀、
+        直接探基名；_ls 不受此开关影响。"""
+        if getattr(self, "_ls_name", None):
+            return self._ls_name
         rs = self.ref_suffix if getattr(self, "_append_to_logic", True) else ""
         return rtl_net_name(self.out_base, self.suffix, is_top=self.is_top, ref_suffix=rs)
 
@@ -77,6 +85,8 @@ class LogicSignal:
         scan_rtl 导出/用户手配的探针前缀 key 往往是这个【全名】；开关关时 rtl_base 退成裸名，
         前缀查找若只认 rtl_base 就和 _to_logic key 对不上、把用户配的前缀静默丢掉
         (2026-06-11 Hi1108 rxiq_phase_ctrl CUVUNF 实证)。前缀查找两个名都试 → 不再失配。"""
+        if getattr(self, "_ls_name", None):
+            return self._ls_name
         return rtl_net_name(self.out_base, self.suffix, is_top=self.is_top,
                             ref_suffix=self.ref_suffix)
 
@@ -207,6 +217,8 @@ class MuxGroup:
         # 是否真把 ref_suffix 补到探针网名上。mux【默认 False=探裸名】(与 logic 默认 True 相反，因端口尾缀
         # 设计相关、不默认套)；Resolver 据 GenOptions.suffix_override 单点回填(rxiq 这类单点置 True)。
         self._append_to_logic = False
+        # level_shift 页给的顶层 _ls 输出口真名（同 LogicSignal._ls_name；mux 输出若也过电平移位则回填）。
+        self._ls_name = None
 
     @property
     def ctrl_total_width(self):
@@ -243,7 +255,9 @@ class MuxGroup:
         """mux 输出 RTL 网名。默认 = G 列基名【裸名】(顶层输出、以及绝大多数 mux 输出)。仅当本组被单点
         置「探尾缀网」(_append_to_logic=True，如 Hi1108 rxiq=2:1 mux 喂 sig_logic、端口真名带 _to_logic)
         才补其 Excel 去向尾缀(_to_logic/_to_mux)。mux 默认裸名——端口尾缀设计相关，Excel 推不出(WL 的 mux
-        输出就是裸名)。不走 _ls(mux 无 ls 语义)。"""
+        输出就是裸名)。level_shift 页给的顶层 _ls 口(_ls_name)最优先。"""
+        if getattr(self, "_ls_name", None):
+            return self._ls_name
         rs = self.ref_suffix if getattr(self, "_append_to_logic", False) else ""
         return rtl_net_name(self.out_base, self.suffix, is_top=self.is_top, ref_suffix=rs)
 
@@ -251,6 +265,8 @@ class MuxGroup:
     def rtl_base_full(self):
         """rtl_base 但【无视 _append_to_logic 开关】，总按 ref_suffix 补尾缀——仅供探针前缀 key 匹配
         (与 LogicSignal.rtl_base_full 同口径：scan_rtl/用户配的前缀 key 常是带尾缀的全名)。"""
+        if getattr(self, "_ls_name", None):
+            return self._ls_name
         return rtl_net_name(self.out_base, self.suffix, is_top=self.is_top,
                             ref_suffix=self.ref_suffix)
 
@@ -919,6 +935,54 @@ def _apply_mux_output_ref_suffix(logic, mux):
             g.ref_suffix = "_to_mux"
 
 
+def read_level_shift(ws, header_row=2):
+    """读 level_shift 页 → {数字域输出基名low: {"out": 顶层电平移位输出口真名, "is_top": bool}}。
+
+    新表(Hi1108 Pilot, 2026-06)把『level shift → 顶层输出口』拆成独立页。实证列：
+      A=level_shift_input(<base>_to_ls)  C=level_shift_output_name(顶层口真名)  E=top_out
+    例：d_en_refbuf_to_ls →(STD_SR_L2H)→ d_en_refbuf_ls(E=1，lpbt_dig_top.v:95 output)。
+    输出口真名【按设计而异】：d_* 类带 _ls(d_en_refbuf_ls)，en_pll* 类是裸名(en_pll_ld)——
+    故 out 取 C 列原值(不自己拼后缀)、key 取 A 列剥 _to_ls 的基名。
+    无此页 / 任一行缺 A 或 C → 跳过；整页空 → 空 dict（旧表 M=ls 直给后缀的路径完全不受影响）。
+    """
+    out = {}
+    if ws is None:
+        return out
+    for r in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        in_raw = _s(r[0]) if len(r) > 0 else ""     # A 列：level_shift 输入(<base>_to_ls)
+        out_raw = _s(r[2]) if len(r) > 2 else ""    # C 列：顶层输出口真名
+        top_raw = _s(r[4]) if len(r) > 4 else ""    # E 列：top_out
+        if not in_raw or not out_raw:
+            continue
+        low = _strip_width(in_raw)[0].lower()
+        for suf in ("_to_ls", "_ls"):               # 从输入名剥得数字域基名(d_en_refbuf)
+            if low.endswith(suf):
+                low = low[: -len(suf)]
+                break
+        is_top = top_raw.strip() in ("1", "1.0", "True", "true")
+        out.setdefault(low, {"out": _strip_width(out_raw)[0], "is_top": is_top})
+    return out
+
+
+def _apply_level_shift(logic, mux, ls_map):
+    """据 level_shift 页把 logic/mux 输出的探针网名定到顶层电平移位口（2026-06-12 Hi1108 Pilot）。
+
+    新表 logic 输出 M=to_dft、top_output=0，裸名在 RTL 不存在——真顶层口是 d_en_refbuf_ls
+    (level_shift 页 + lpbt_dig_top.v output 双证)。给输出基名命中 level_shift 输入基名的信号设
+    _ls_name=顶层口真名，rtl_base/rtl_name 改返回它(压过 M 列/ref_suffix/加尾缀开关)。
+    无 level_shift 页 → ls_map 空 → 一个信号都不动（旧 LPBT/WL 表逐字节不变）。"""
+    if not ls_map:
+        return
+    for sig in logic:
+        info = ls_map.get(sig.out_base.lower())
+        if info and info.get("out"):
+            sig._ls_name = info["out"]
+    for g in (mux or []):
+        info = ls_map.get(g.out_base.lower())
+        if info and info.get("out"):
+            g._ls_name = info["out"]
+
+
 def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     ws_logic = _find_sheet(wb, "logic")
@@ -929,6 +993,7 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     ws_tmm = _find_sheet(wb, "total_memory_map", "total memory map", "memory_map")
     ws_mux = _find_sheet(wb, "mux")
     ws_dft = _find_sheet(wb, "dft")
+    ws_ls = _find_sheet(wb, "level_shift", "level shift", "levelshift")
     ws_ft = _find_sheet(wb, "for_test")
 
     logic = read_logic(ws_logic, logic_header_row)
@@ -937,6 +1002,8 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     mux = read_mux(ws_mux) if ws_mux is not None else []
     _apply_mux_ref_suffix(logic, mux)        # 跨页：mux 以 _to_mux 引用的 logic 输出 → 回填 _to_mux 尾缀
     _apply_mux_output_ref_suffix(logic, mux) # 跨页：被 logic/mux 引用的 top_out=0 mux 输出 → 回填去向尾缀
+    # 跨页：level_shift 页声明的顶层电平移位口 → 把 logic/mux 输出探针定到 _ls 顶层口(_ls_name 最优先)
+    _apply_level_shift(logic, mux, read_level_shift(ws_ls) if ws_ls is not None else {})
     dft = read_dft(ws_dft) if ws_dft is not None else {}
     fortest_order = read_fortest_order(ws_ft) if ws_ft is not None else {}
     names = list(wb.sheetnames)

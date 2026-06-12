@@ -195,6 +195,47 @@ def build_workbook(path, with_pll_chain=False, with_mux=False):
     return path
 
 
+def build_levelshift_workbook(path):
+    """镜像 Hi1108 Pilot 新表(2026-06)：logic 输出 M=to_dft / top_output=0，真顶层口经独立的
+    level_shift 页声明为 <base>_ls（lpbt_dig_top.v output）。用于验证探针网名定到 _ls 顶层口。
+
+    两个 logic 输出：
+      d_en_refbuf —— M=to_dft, N=0, 自引用输入 d_en_refbuf_to_logic（撞名陷阱）；level_shift 有条目
+                    → 顶层口 d_en_refbuf_ls
+      d_plain     —— 无 level_shift 条目（对照：不受影响，自引用排除后仍裸名）
+    level_shift 页布局(实证)：A=level_shift_input(<base>_to_ls) C=output_name(顶层口) E=top_out。
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "logic"
+    _set_row(ws, 2, {
+        "A": "in_A", "K": "logic_out_signal_name", "L": "logic expression",
+        "M": "suffix", "N": "top_output", "O": "Notes", "P": "owner", "R": "no",
+    })
+    # 过 level_shift 的输出：M=to_dft、top_output=0、自引用输入（与真表 d_en_refbuf 同构）
+    _set_row(ws, 3, {
+        "A": "d_en_refbuf_to_logic", "K": "d_en_refbuf", "L": "A",
+        "M": "to_dft", "N": 0, "O": "to_dft", "P": "Yao Wang", "R": 7,
+    })
+    # 不过 level_shift 的对照输出：保持原 M/ref_suffix 出名
+    _set_row(ws, 4, {
+        "A": "d_plain_in_to_logic", "K": "d_plain", "L": "A",
+        "M": "to_dft", "N": 0, "O": "ctrl", "P": "Yao Wang", "R": 8,
+    })
+
+    ls = wb.create_sheet("level_shift")
+    _set_row(ls, 2, {
+        "A": "level_shift_input", "B": "level", "C": "level_shift_output_name",
+        "D": "suffix", "E": "top_out", "F": "Owner",
+    })
+    _set_row(ls, 3, {
+        "A": "d_en_refbuf_to_ls", "B": "STD_SR_L2H", "C": "d_en_refbuf_ls",
+        "E": 1, "F": "Yao Wang",
+    })
+    wb.save(path)
+    return path
+
+
 def build_wl_workbook(path):
     """构造镜像 WL_RFTRX 真表结构的合成工作簿（2026-06-03 两轮 inspect_mux 实证）。
 

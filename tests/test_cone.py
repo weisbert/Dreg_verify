@@ -36,6 +36,33 @@ def resolver(wb):
     return R.Resolver(wb)
 
 
+def test_level_shift_top_port_probe(tmp_path):
+    """新表 level_shift 页 → logic 输出探针定到顶层电平移位口 _ls（2026-06-12 Hi1108 Pilot）。
+
+    d_en_refbuf: M=to_dft、top_output=0、自引用输入 d_en_refbuf_to_logic（撞名）——裸名在 RTL
+    不存在，真顶层口是 d_en_refbuf_ls（level_shift 页 + lpbt_dig_top.v output 双证）。验证：
+      ① 探针网名 = d_en_refbuf_ls（不是裸名、不是 _to_logic）
+      ② 『logic 加尾缀』开关 ON/OFF 都压不动它（_ls_name 最优先，治『点了加尾缀没生效』）
+      ③ 无 level_shift 条目的 d_plain 不受影响（自引用排除后仍裸名）
+    """
+    path = tmp_path / "levelshift.xlsx"
+    fixtures.build_levelshift_workbook(str(path))
+    wb = excel_model.load_workbook(str(path))
+    refbuf = next(s for s in wb.logic if s.out_base == "d_en_refbuf")
+    plain = next(s for s in wb.logic if s.out_base == "d_plain")
+    assert refbuf._ls_name == "d_en_refbuf_ls"
+    assert refbuf.rtl_name == "d_en_refbuf_ls"
+    assert refbuf.rtl_base_full == "d_en_refbuf_ls"
+    # 加尾缀开关两态都压不动 _ls 顶层口（这正是用户『点了 logic 加尾缀没生效』的根因解法）
+    refbuf._append_to_logic = False
+    assert refbuf.rtl_name == "d_en_refbuf_ls"
+    refbuf._append_to_logic = True
+    assert refbuf.rtl_name == "d_en_refbuf_ls"
+    # 对照：不过 level_shift 的输出按原逻辑（M=to_dft 非 ls + 自引用排除 → 裸名，无 _to_logic）
+    assert plain._ls_name is None
+    assert plain.rtl_name == "d_plain"
+
+
 # ───────────── expr.Part 节点 ─────────────
 def test_part_eval_and_width():
     node = E.Part(E.Var("A"), 30, 23)
