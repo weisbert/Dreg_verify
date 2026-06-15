@@ -12,6 +12,7 @@ vectors.py — 为一个 logic 信号生成测试向量（控制位穷举 + 数�
 """
 
 import itertools
+import math
 
 from . import expr as E
 
@@ -188,12 +189,16 @@ def generate_vectors(node, bindings, out_width, mode="min", max_tests=256,
             vv.index = i
         return vectors, meta
 
-    # 控制位（按 base 代表）全组合
+    # 控制位（按 base 代表）全组合。⚠ 保持【惰性迭代器】不要 list() 物化——R38 跨边界展开会把深 mux
+    # 控制链拍平成几十个控制位，全组合可达 2^30+，物化会挂死/OOM；下面消费循环本就在 max_tests 处早 break，
+    # 惰性 product 只按需产出 ~max_tests 个组合。组合总数用算术求积(O(N)，不迭代)，仅供 planned/dropped 统计。
     if control_reps:
         control_value_lists = [_control_levels(rep_width[r]) for r in control_reps]
-        control_combos = list(itertools.product(*control_value_lists))
+        control_combos = itertools.product(*control_value_lists)
+        n_ctrl_combos = math.prod(len(x) for x in control_value_lists)
     else:
         control_combos = [()]
+        n_ctrl_combos = 1
 
     # 数据模式主题
     if mode == "max":
@@ -219,7 +224,8 @@ def generate_vectors(node, bindings, out_width, mode="min", max_tests=256,
             break
 
     # 截断丢弃数 = 计划组合 - 实际生成（去重前），明确指"因 max_tests 未生成的计划组合数"
-    planned = len(control_combos) * len(themes)
+    # planned 用算术积 n_ctrl_combos（不能对惰性 control_combos 取 len，且 2^N 取 len 本就不可接受）。
+    planned = n_ctrl_combos * len(themes)
     generated = len(vectors)               # 截断后、去重前
     if generated < planned:
         meta["truncated"] = True

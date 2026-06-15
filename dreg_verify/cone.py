@@ -35,10 +35,22 @@ MAX_DEPTH = 8
 EXPANDABLE = ("logic-internal", "logic-computed")
 
 
-def find_internal_inputs(node, bindings):
-    """返回表达式里"可展开输入"(内部信号/上游计算网)的变量字母列表。空 = 不需要 cone 展开。"""
-    return [ltr for ltr in E.collect_vars(node)
-            if bindings.get(ltr) is not None and bindings[ltr].found_in in EXPANDABLE]
+def find_internal_inputs(node, bindings, resolver=None):
+    """返回表达式里"可展开输入"的变量字母列表。空 = 不需要 cone 展开。
+
+    传入 resolver 且 cascade_mode=='cone'（展开模式，默认=对齐 VBA）时，mux 输出也算可展开
+    （跨 logic↔mux 边界，让 expand 把该 mux 合成等价 AST 代入并递归）；force 模式或 resolver
+    缺省 → 只认 logic 上游(EXPANDABLE)，与历史逐字节相同。"""
+    expand_mux = (resolver is not None
+                  and getattr(resolver, "cascade_mode", "cone") == "cone")
+    out = []
+    for ltr in E.collect_vars(node):
+        b = bindings.get(ltr)
+        if b is None:
+            continue
+        if b.found_in in EXPANDABLE or (expand_mux and b.found_in == "mux-output"):
+            out.append(ltr)
+    return out
 
 
 def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
@@ -99,6 +111,23 @@ def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
                 mapping[letter] = E.Part(child_node, b.slice_msb, b.slice_lsb)
             else:
                 mapping[letter] = child_node
+        elif (b.found_in == "mux-output"
+              and getattr(resolver, "cascade_mode", "cone") == "cone"
+              and _mux_expandable_at(wb, b.base)):
+            # ⭐ 跨 logic↔mux 边界(2026-06-15 R38)：输入是某 mux 组的输出 → 不再 force 衔接网，而是把该
+            # mux 合成等价 AST(选择?数据…)代入并递归(数据/控制还是 mux/logic 就继续展开)，对齐 VBA 端到端
+            # 驱动真寄存器、顺手免探针前缀。仅展开模式(cascade=cone)且该 mux 可安全完整展开(mux_expandable)
+            # 才走这里；force 模式 / 宽 select / 有 hole 的 mux 落 else 叶子(force 衔接网，与旧行为同)。
+            from . import mux_gen           # 惰性 import 破循环
+            grp = _find_mux(wb, b.base)
+            child_node, child_leaves = mux_gen.synthesize_mux_expr(
+                wb, resolver, grp, _depth + 1, stack, chain_out)
+            for key, leaf in child_leaves.items():
+                _merge_leaf(leaves, key, leaf, getattr(leaf, "xl_letters", None) or [])
+            if b.slice_msb is not None:
+                mapping[letter] = E.Part(child_node, b.slice_msb, b.slice_lsb)
+            else:
+                mapping[letter] = child_node
         else:
             # 叶子输入：变量名 = 大写基名；同一寄存器的多个切片共享同一个叶子 binding
             # self_base=root_base：叶子重解析时保持自引用语义
@@ -129,6 +158,26 @@ def _find_logic(wb, base):
         if s.out_base.lower() == low:
             return s
     return None
+
+
+def _find_mux(wb, base):
+    """对称 _find_logic：按基名(小写)在 wb.mux 找 MuxGroup，找不到返回 None。
+    供 expand 跨边界展开时按输入基名找回它引用的 mux 组。"""
+    low = str(base).strip().lower()
+    for g in (getattr(wb, "mux", None) or []):
+        if g.out_base.lower() == low:
+            return g
+    return None
+
+
+def _mux_expandable_at(wb, base):
+    """base 命中一个【可安全完整展开】的 mux 组吗（mux_gen.mux_expandable）。否则 cone 不展开、当叶子
+    force 衔接网(旧行为)，避免宽 select 假绿 / hole 假红。"""
+    grp = _find_mux(wb, base)
+    if grp is None:
+        return False
+    from . import mux_gen           # 惰性 import 破循环
+    return mux_gen.mux_expandable(grp)
 
 
 def _full_binding(key, b, resolver, self_base=None):

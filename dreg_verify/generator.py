@@ -737,7 +737,7 @@ def expand_signal(wb, resolver, sig, chain_out=None, fallback_notes=None):
     """
     node = E.parse(sig.expr)
     bindings = resolver.resolve_signal_inputs(sig)
-    internal = cone.find_internal_inputs(node, bindings)
+    internal = cone.find_internal_inputs(node, bindings, resolver)
     if internal:
         try:
             node2, bindings2 = cone.expand(sig, wb, resolver, chain_out=chain_out)
@@ -751,6 +751,15 @@ def expand_signal(wb, resolver, sig, chain_out=None, fallback_notes=None):
                 if chain_out is not None:
                     del chain_out[:]      # cone 半途成环可能已写入残缺展开链 → 回退非 cone，清掉
                 return node, fb, False
+            # mux 跨界展开失败(环/超深，R38) → 回退非展开：mux 输出当叶子 force 衔接网(=force 模式/今天)，
+            # 不让整信号崩。仅当确有 mux-output 内部输入时走这条；否则维持原 raise(纯 logic 兜不住)。
+            if any(bindings.get(l) is not None and bindings[l].found_in == "mux-output"
+                   for l in internal):
+                if chain_out is not None:
+                    del chain_out[:]
+                if fallback_notes is not None:
+                    fallback_notes.append("%s: mux 跨界展开失败(环/超深)，回退 force 衔接网" % sig.out_name)
+                return node, bindings, False
             raise
     return node, bindings, False
 

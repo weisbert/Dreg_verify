@@ -50,10 +50,19 @@ def test_account_accounts_for_everything(tmp_path):
     # WL mux 默认无前缀 → 全部"生成(裸名探针)"
     assert all(i["disposition"].startswith("生成") for i in mux_items)
     assert any("裸名" in i["disposition"] for i in mux_items)
-    # logic：fb_en 生成；lna_gain_dly（输入是 mux 输出，需前缀）被跳过——都在账目里，去向不同
+    # logic：fb_en 与 lna_gain_dly 都生成——后者输入是 mux 输出，R38 跨 logic↔mux 边界展开把该 mux
+    # 拆成源寄存器(选择 mode + 数据 local/线控)端到端驱动(对齐 VBA)，不再因"需前缀"被跳过；都在账目里。
     by_name = {i["name"]: i for i in logic_items}
     dly = next(i for n, i in by_name.items() if "lna_gain_dly" in n)
-    assert dly["disposition"] == "跳过" and dly["reason"]
+    assert dly["disposition"].startswith("生成")
+    # 展开后的输入 = mux 的源寄存器(全 tmm 干净叶子，无需探针前缀)
+    drep = next(t for t in generator.report(wb, opts)["tables"] if "lna_gain_dly" in t["signal"])
+    dlabels = {x["label"] for x in drep["inputs"]}
+    assert any("lna_gain_ctrl_mode" in n for n in dlabels)       # mux 选择
+    assert any("lna_gain_local" in n for n in dlabels)            # mux 寄存器数据
+    assert any("linectrl_lna_gain" in n for n in dlabels)         # mux 线控数据
+    # 原来那根 mux 输出衔接网不再作为输入残留（已被拆成上面三块源寄存器）
+    assert not any(n == "d_wl_rf_lna_gain" or "lna_gain_to_logic" in n for n in dlabels)
 
 
 def test_account_disposition_with_top_output_filter(tmp_path):

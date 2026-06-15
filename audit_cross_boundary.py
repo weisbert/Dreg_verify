@@ -39,7 +39,9 @@ def main():
     args = ap.parse_args()
 
     wb = excel_model.load_workbook(args.excel)
-    res = R.Resolver(wb)                     # 默认 cascade=cone：logic 链最大化展开，mux 输出仍是叶子
+    res = R.Resolver(wb)
+    res.cascade_mode = "force"               # ⚠ R38 后默认 cascade=cone 会就地把 mux 边界展开掉 → gap① 自审计失效；
+                                             #   force 模式让 mux 输出保持叶子，才数得出「有多少 logic 信号本来跨界引用 mux」。
     mux_out = dict(res._mux_outputs)         # mux 输出基名(小写) -> (..., group_no)
     logic_out = set(res._logic_outputs)      # logic 输出基名(小写) 集合
 

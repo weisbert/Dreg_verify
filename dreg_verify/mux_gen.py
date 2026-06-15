@@ -416,6 +416,133 @@ def _looks_like_twins(a, b):
             and len(mid_a) <= 4 and len(mid_b) <= 4)
 
 
+def mux_expandable(group):
+    """该 mux 能否被「合成 AST + generate_vectors 泛化枚举」安全【且完整】地展开。全满足才 True，
+    否则 cone 跨边界回退 force 衔接网(旧行为，需探针前缀)——宁可保守不展开，绝不产假红/假绿：
+
+      ① 每个控制信号位宽 ≤ 2：generate_vectors 对 ≤2bit 控制全枚举，>2bit 只取 {0,全1}
+         → 宽 select 的中间 case 永不被驱动=【假绿】(测试 PASS 却没测到)。
+      ② 各 case 值位宽 == 控制拼接总宽：否则比较错位。
+      ③ 各 case 覆盖的控制取值并集 == 全部 2^总宽 个值(无 hole)：否则枚举到「不命中任何 case」的
+         hole 控制值时，合成 AST 的末位 catch-all 会拿末 case 数据当期望=【假红】(真 RTL 是 latch/x)。
+
+    （这三条是本轮保守边界；宽 select / 有 default 的 mux 留下一轮按真实 case 值枚举。）"""
+    ctrls = getattr(group, "ctrls", None) or []
+    cases = getattr(group, "cases", None) or []
+    if not ctrls or not cases:
+        return False
+    if any((c.width or 1) > 2 for c in ctrls):       # ① 宽 select
+        return False
+    total_w = group.ctrl_total_width
+    covered = set()
+    for case in cases:
+        try:
+            cv, cw, dc = E.parse_case_literal(case.case_raw)
+        except E.ExprError:
+            return False
+        if cw != total_w:                            # ② case 位宽不符
+            return False
+        covered.update(E.expand_case_values(cv, cw, dc))
+    return covered == set(range(1 << total_w))        # ③ 必须无 hole 全覆盖
+
+
+def synthesize_mux_expr(wb, resolver, group, _depth=0, _stack=None, chain_out=None):
+    """把一个 MuxGroup 编译成【等价 expr AST + 干净叶子 bindings】，供 cone 跨 logic↔mux 边界展开。
+
+    返回 (node, leaves)：
+      node   — 仅含 expr.py 七种节点的选路 AST：case(ctrl){v0:d0; v1:d1; …}
+               编成嵌套三元 cond0?d0:(cond1?d1:…:d_last)（首次匹配优先=Verilog case 语义）；
+               cond_i = (sel & care_i) == (cv_i & care_i)（无 don't-care 退化为 sel == cv_i）。
+      leaves — {叶子大写基名: InputBinding}，控制位 + 各 case 数据寄存器/线控；控制/数据若又是
+               logic/mux 输出 → 递归 cone.expand / synthesize_mux_expr（深链一路展到真寄存器/顶层
+               线控），叶子键与 AST 变量名同口径(base.upper())。
+
+    环/超深检测与 cone 统一：mux 名加 'mux:' 前缀进【共享】_stack（与 logic 裸基名不撞），深度共用
+    cone.MAX_DEPTH；环/超深 → 抛 cone.ConeError（上层 expand_signal 兜底回退 force 衔接网）。
+    只在 cascade_mode=='cone'（展开模式，默认=对齐 VBA）时被 cone 调用；force 模式 cone 把 mux 输出
+    当叶子 force 衔接网（旧行为逐字节不变），不进这里。
+    """
+    from . import cone           # 惰性 import 破循环（cone 也 import mux_gen）
+
+    stack = list(_stack or [])
+    me = "mux:" + group.out_base.lower()
+    if me in stack:
+        raise cone.ConeError("mux 跨界级联成环: %s" % " → ".join(stack + [me]))
+    if _depth > cone.MAX_DEPTH:
+        raise cone.ConeError("cone 展开深度超过 %d（链: %s）"
+                             % (cone.MAX_DEPTH, " → ".join(stack + [me])))
+    stack = stack + [me]
+    leaves = {}
+
+    def _subtree(raw, base, width, msb, lsb, src):
+        """一个控制/数据输入 → 子 AST，并把其叶子并入 leaves。
+        base 命中 logic 行 → cone.expand 递归（mux←logic 对称缺口在此自动展开）；
+        命中 mux 组 → synthesize 递归；否则 = 寄存器/线控叶子 Var(base.upper())。"""
+        child_logic = cone._find_logic(wb, base)
+        if child_logic is not None:
+            cnode, cleaves = cone.expand(child_logic, wb, resolver, _depth + 1, stack, chain_out)
+            for k, lf in cleaves.items():
+                cone._merge_leaf(leaves, k, lf, getattr(lf, "xl_letters", None) or [])
+            return E.Part(cnode, msb, lsb) if msb is not None else cnode
+        child_mux = cone._find_mux(wb, base)
+        if child_mux is not None:
+            # 嵌套 mux 也必须可安全展开；不可展开 → 抛错让整条信号回退 force 衔接网(不半途产错位/漏测)
+            if not mux_expandable(child_mux):
+                raise cone.ConeError(
+                    "嵌套 mux 组 %s 不可安全展开(宽 select/有 hole/case 位宽不符)，整条回退 force 衔接网"
+                    % child_mux.group_no)
+            cnode, cleaves = synthesize_mux_expr(wb, resolver, child_mux, _depth + 1, stack, chain_out)
+            for k, lf in cleaves.items():
+                cone._merge_leaf(leaves, k, lf, getattr(lf, "xl_letters", None) or [])
+            return E.Part(cnode, msb, lsb) if msb is not None else cnode
+        # 叶子：寄存器(RW→RF_WRITE) / 线控(RO→force 裸名)。叶子 binding 走 cone._full_binding(全字段宽，
+        # 切片在 Var 层表达)，不传 self_base（mux 内部叶子与根 logic 输出无自引用）。
+        b = resolver.resolve("mux_leaf_" + str(base).lower(),
+                             {"raw": raw, "base": base, "width": width, "msb": msb, "lsb": lsb})
+        key = str(base).upper()
+        cone._merge_leaf(leaves, key, cone._full_binding(key, b, resolver), [src])
+        return E.Var(key, msb, lsb)
+
+    if not group.ctrls:
+        raise cone.ConeError("mux 组 %s 无控制信号，无法合成选路 AST" % group.group_no)
+    if not group.cases:
+        raise cone.ConeError("mux 组 %s 无 case，无法合成选路 AST" % group.group_no)
+
+    # ① 控制 sel 子树（多控制 B/C/D/E 拼接，B 在最高位 = Concat parts[0]）
+    ctrl_nodes = [_subtree(c.raw, c.base, c.width, c.msb, c.lsb,
+                           "mux%s.ctrl%d" % (group.group_no, i))
+                  for i, c in enumerate(group.ctrls)]
+    sel_node = ctrl_nodes[0] if len(ctrl_nodes) == 1 else E.Concat(list(ctrl_nodes))
+    total_w = group.ctrl_total_width
+
+    # ② 逐 case 数据子树 + case 值解码（don't-care 位记入 care 掩码；case 位宽必须 == 控制拼接总宽）
+    data_nodes, conds = [], []
+    for i, case in enumerate(group.cases):
+        data_nodes.append(_subtree(case.input_raw, case.input_base, case.input_width,
+                                   case.input_msb, case.input_lsb,
+                                   "mux%s.d%d" % (group.group_no, i)))
+        cv, cw, dc = E.parse_case_literal(case.case_raw)
+        if cw != total_w:                       # case 位宽不符 → 跨边界展开会错位，回退 force 衔接网
+            raise cone.ConeError("mux 组 %s case %s 位宽(%d)≠控制拼接总宽(%d)——跨边界展开会错位"
+                                 % (group.group_no, case.case_raw, cw, total_w))
+        conds.append((cv, E.mask(total_w) & ~dc))
+
+    # ③ 嵌套三元（从最后一个 case 往前 fold → 靠前 case 在外层 then = 首次匹配优先=Verilog case）。
+    #    始终用掩码比较 (sel & care) == (cv & care)：care 限定在 total_w 内，把展开后可能更宽的 sel 高位
+    #    屏蔽掉(防 self_width≠声明宽时错位)，don't-care 位也只比 care 位。
+    node = data_nodes[-1]                       # 最内层 els = 最后一个 case（默认/catch-all）
+    for i in range(len(group.cases) - 2, -1, -1):
+        cv, care = conds[i]
+        cond = E.Binary("==", E.Binary("&", sel_node, E.Const(care, total_w)),
+                        E.Const(cv & care, total_w))
+        node = E.Ternary(cond, data_nodes[i], node)
+
+    if chain_out is not None and all(c.get("out") != "mux%s" % group.group_no for c in chain_out):
+        chain_out.append({"out": "mux%s" % group.group_no, "expr": group.expr,
+                          "subst": E.to_text(node)})
+    return node, leaves
+
+
 def resolve_upstream_recipe(wb, resolver, upstream, _stack, _depth):
     """上游 mux 的『驱到任意目标值』配方（mux 级联，cone「展开上游」思路）。
 
