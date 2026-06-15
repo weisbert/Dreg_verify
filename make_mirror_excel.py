@@ -58,6 +58,14 @@ ADDR_BWCTRL = 90         # bwctrl_mode(bit0) + bwctrl_local[2:1] RW —— 深�
 ADDR_BWLINE = 91         # linectrl_rfabb_bwctrl[1:0] RO【寄存器】(force 名即可,不需前缀——这是 [~] 与 [XX] 的关键差别)
 ADDR_CORNER = 92         # lpf_corner_sel 数据源（2bit×2 打包）RW —— 中间层 mux 载体
 ADDR_CMAIN = 93          # lpf_cmain 数据源（4bit×2 打包）RW —— 最下游数据
+# 第三十八轮 logic↔mux 跨边界夹具（2026-06-15）：
+ADDR_LOGEN = 100         # logen_lobuf_en_ctrl_mode(bit0) + logen_mixer_en_local(bit1) RW
+ADDR_LOGENLINE = 101     # linectrl_logen_mixer_en RO（线控，force 裸名，不要前缀）
+ADDR_LO2G5G = 387        # lo2g5g_bias_en(bit0) + lo2g5g_bias_test_en(bit14) RW —— 真表 h183
+ADDR_FREQLOCAL = 102     # freq_sel_local[1:0] RW（freq_sel mux 的 mode=1 数据）
+ADDR_FREQLINE = 105      # freq_sel_line[1:0] RO（linectrl_freq_sel 的源，深链终端）
+ADDR_TX2GEN = 103        # tx2g_en_mode(bit0) + tx2g_en_local(bit1) RW
+ADDR_EPAMIX = 104        # tx_epa_2g_mixer_en(bit0) self RW
 
 
 def _d(n):
@@ -120,6 +128,24 @@ def build(path):
     # 验证修复对【非 linectrl 命名】的线控源也成立(audit [XX] 里 rx5g_en_line/txcal5g_en_line/... 这一族)。
     _set(ws, 4, {"A": "d_wl_rf_rx5g_en_pin_to_logic", "K": "d_wl_rf_rx5g_en_line",
                  "L": "A", "M": "to_mux", "N": "0", "O": "线控 rx5g 使能(管脚)", "P": "shenzheng", "R": "2"})
+    # ── 第三十八轮 logic↔mux 跨边界夹具（2026-06-15）──
+    # ① 锚点 lo2g5g_bias_en = A&(B|C)：B=logen_mixer_en 是【mux 输出】(下方 mux 组3)，工具现 force 衔接网=4 输入；
+    #    VBA 端到端拆 mux=6 输入。对齐目标 = 展开 B → {选择 logen_lobuf_en_ctrl_mode(RW) + 数据 local(RW)/line(RO)}。
+    #    A=自引用(cone 成环→回退 force 基名)，C=bias_test_en(RW)，再加 dft 页 iddq 门 = VBA 的 6 个输入。
+    _set(ws, 5, {"A": "d_wl_rf_lo2g5g_bias_en_to_logic", "B": "d_wl_rf_logen_mixer_en_to_logic",
+                 "C": "d_wl_rf_lo2g5g_bias_test_en_to_logic", "K": "d_wl_rf_lo2g5g_bias_en",
+                 "L": "A&(B|C)", "M": "to_dft", "N": "0", "O": "logic←mux 锚点(对齐 VBA 6 输入)",
+                 "P": "law/chenhao", "R": "3"})
+    # ② 深链：tx_epa_2g_mixer_en(logic) ← tx2g_en(mux30) ← tx2g_en_line(logic) ← freq_sel(mux6) ← linectrl_freq_sel(logic)
+    #    —— 测两引擎跨边界【互递归】到真寄存器(logic←mux←logic←mux←logic 五层)。
+    _set(ws, 6, {"A": "d_wl_rf_freq_sel_line_to_logic[1:0]", "K": "d_wl_rf_linectrl_freq_sel[1:0]",
+                 "L": "A", "M": "to_mux", "N": "0", "O": "线控 freq 选择→喂 freq_sel mux", "P": "yangteng", "R": "4"})
+    _set(ws, 7, {"A": "d_wl_rf_freq_sel_to_logic[1]", "B": "d_wl_rf_freq_sel_to_logic[0]",
+                 "K": "d_wl_rf_tx2g_en_line", "L": "(~A)&(~B)", "M": "to_mux", "N": "0",
+                 "O": "freq_sel==0 解码 tx2g(输入=freq_sel mux 输出的切片)→喂 tx2g_en mux", "P": "yangteng", "R": "5"})
+    _set(ws, 8, {"A": "d_wl_rf_tx_epa_2g_mixer_en_to_logic", "B": "d_wl_rf_tx2g_en_to_logic",
+                 "K": "d_wl_rf_tx_epa_2g_mixer_en", "L": "A&B", "M": "to_dft", "N": "0",
+                 "O": "logic←mux 深链末端(B=tx2g_en mux 输出)", "P": "Jiangxudong", "R": "6"})
 
     # ========================= mux 页 =========================
     mx = wb.create_sheet("mux")
@@ -228,6 +254,24 @@ def build(path):
                   "d_wl_rf_lpf_corner_sel_to_mux[0]", "1'b%d" % k,
                   "d_wl_rf_lpf_cmain[3:0]", 202, dest="to_dft", owner="luqi")
 
+    # ── 第三十八轮 logic↔mux 跨边界夹具的 mux 组 ──
+    # logen_mixer_en（组3，对齐真表 mux 行7/8）：select=logen_lobuf_en_ctrl_mode；0:线控 RO；1:local RW。
+    #   被 logic 行 lo2g5g_bias_en 以 _to_logic 引用 → dest=to_logic（跨页回填 _to_logic 尾缀）。
+    r = _mrow(mx, r, "d_wl_rf_linectrl_logen_mixer_en_to_mux", "d_wl_rf_logen_lobuf_en_ctrl_mode_to_mux",
+              "1'b0", "d_wl_rf_logen_mixer_en", 3, dest="to_logic", owner="yangteng")
+    r = _mrow(mx, r, "d_wl_rf_logen_mixer_en_local_to_mux", "d_wl_rf_logen_lobuf_en_ctrl_mode_to_mux",
+              "1'b1", "d_wl_rf_logen_mixer_en", 3, dest="to_logic", owner="yangteng")
+    # freq_sel（组6）：select=freq_sel_mode；0:linectrl_freq_sel(logic 输出！=mux←logic 对称缺口)；1:freq_sel_local RW。
+    r = _mrow(mx, r, "d_wl_rf_linectrl_freq_sel_to_mux[1:0]", "d_wl_rf_freq_sel_mode_to_mux",
+              "1'b0", "d_wl_rf_freq_sel[1:0]", 6, dest="to_logic", owner="yangteng")
+    r = _mrow(mx, r, "d_wl_rf_freq_sel_local_to_mux[1:0]", "d_wl_rf_freq_sel_mode_to_mux",
+              "1'b1", "d_wl_rf_freq_sel[1:0]", 6, dest="to_logic", owner="yangteng")
+    # tx2g_en（组30）：select=tx2g_en_mode；0:tx2g_en_line(logic 输出！=mux←logic)；1:tx2g_en_local RW。
+    r = _mrow(mx, r, "d_wl_rf_tx2g_en_line_to_mux", "d_wl_rf_tx2g_en_mode_to_mux",
+              "1'b0", "d_wl_rf_tx2g_en", 30, dest="to_logic", owner="yangteng")
+    r = _mrow(mx, r, "d_wl_rf_tx2g_en_local_to_mux", "d_wl_rf_tx2g_en_mode_to_mux",
+              "1'b1", "d_wl_rf_tx2g_en", 30, dest="to_logic", owner="yangteng")
+
     # ========================= dft 页（4 个输出被 iddq_mode 门控，B?0:A）=========================
     dft = wb.create_sheet("dft")
     _set(dft, 2, {"A": "A", "B": "gate(to_dft)", "C": "C", "D": "observed_out", "E": "gate_expr"})
@@ -236,7 +280,9 @@ def build(path):
                     "d_wl_rf_lp5g_rxrf_lna_lctune[5:0]",
                     "d_wl_rf_lo2g5g_mixer2g_trim[1:0]",
                     "d_wl_rf_lo2g5g_mixer5g_trim[2:0]",
-                    "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim[3:0]"):   # 真表 dft 行 203 也门控它
+                    "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim[3:0]",   # 真表 dft 行 203 也门控它
+                    "d_wl_rf_lo2g5g_bias_en",            # R38 锚点（真表 dft 行63 B?0:A）
+                    "d_wl_rf_tx_epa_2g_mixer_en"):       # R38 深链末端也门控
         _set(dft, r, {"A": out_sig.split("[")[0] + "_to_dft",
                       "B": "d_wl_rf_trx_reg_dft_iddq_mode_to_dft",
                       "D": out_sig, "E": "B?0:A"})
@@ -281,6 +327,17 @@ def build(path):
         r = _regmap(rm, r, "CORNER", "RW", "d_wl_rf_lpf_corner%d[1:0]" % k, 2 * k + 1, 2 * k, ADDR_CORNER, "luqi")
     for k in range(2):
         r = _regmap(rm, r, "CMAIN", "RW", "d_wl_rf_lpf_cmain%d[3:0]" % k, 4 * k + 3, 4 * k, ADDR_CMAIN, "luqi")
+    # 第三十八轮 logic↔mux 跨边界寄存器
+    r = _regmap(rm, r, "LO_CTRL_mode", "RW", "d_wl_rf_logen_lobuf_en_ctrl_mode", 0, 0, ADDR_LOGEN, "yangteng")
+    r = _regmap(rm, r, "LO_CTRL", "RW", "d_wl_rf_logen_mixer_en_local", 1, 1, ADDR_LOGEN, "yangteng")
+    r = _regmap(rm, r, "LO_LINE", "RO", "d_wl_rf_linectrl_logen_mixer_en", 0, 0, ADDR_LOGENLINE, "yangteng")
+    r = _regmap(rm, r, "LO2G5G_MIXER_CTRL", "RW", "d_wl_rf_lo2g5g_bias_en", 0, 0, ADDR_LO2G5G, "law/chenhao")
+    r = _regmap(rm, r, "LO2G5G_MIXER_CTRL", "RW", "d_wl_rf_lo2g5g_bias_test_en", 14, 14, ADDR_LO2G5G, "law/chenhao")
+    r = _regmap(rm, r, "FREQ_LOCAL", "RW", "d_wl_rf_freq_sel_local[1:0]", 1, 0, ADDR_FREQLOCAL, "yangteng")
+    r = _regmap(rm, r, "FREQ_LINE", "RO", "d_wl_rf_freq_sel_line[1:0]", 1, 0, ADDR_FREQLINE, "yangteng")
+    r = _regmap(rm, r, "TX2GEN", "RW", "d_wl_rf_tx2g_en_mode", 0, 0, ADDR_TX2GEN, "yangteng")
+    r = _regmap(rm, r, "TX2GEN", "RW", "d_wl_rf_tx2g_en_local", 1, 1, ADDR_TX2GEN, "yangteng")
+    r = _regmap(rm, r, "EPA2G", "RW", "d_wl_rf_tx_epa_2g_mixer_en", 0, 0, ADDR_EPAMIX, "Jiangxudong")
 
     # ========================= total_memory_map 页 =========================
     tmm = wb.create_sheet("total_memory_map")
@@ -336,6 +393,24 @@ def build(path):
     for k in range(2):
         r = _tmm_field(tmm, r, "d_wl_rf_lpf_cmain%d[3:0]" % k, "%d:%d" % (4 * k + 3, 4 * k),
                        ADDR_CMAIN, "N", "RW", "lpf cmain data %d" % k)
+    # 第三十八轮 logic↔mux 跨边界寄存器
+    r = _tmm_reg(tmm, r, "LO_CTRL_mode", ADDR_LOGEN)
+    r = _tmm_field(tmm, r, "d_wl_rf_logen_lobuf_en_ctrl_mode", "0", ADDR_LOGEN, "N", "RW", "logen lobuf en ctrl mode(0:line 1:reg)")
+    r = _tmm_field(tmm, r, "d_wl_rf_logen_mixer_en_local", "1", ADDR_LOGEN, "N", "RW", "logen mixer en local(mode=1)")
+    r = _tmm_reg(tmm, r, "LO_LINE", ADDR_LOGENLINE)
+    r = _tmm_field(tmm, r, "d_wl_rf_linectrl_logen_mixer_en", "0", ADDR_LOGENLINE, "Y", "RO", "logen mixer en 线控(管脚,RO,force裸名)")
+    r = _tmm_reg(tmm, r, "LO2G5G_MIXER_CTRL", ADDR_LO2G5G)
+    r = _tmm_field(tmm, r, "d_wl_rf_lo2g5g_bias_en", "0", ADDR_LO2G5G, "N", "RW", "lo2g5g total bias enable")
+    r = _tmm_field(tmm, r, "d_wl_rf_lo2g5g_bias_test_en", "14", ADDR_LO2G5G, "N", "RW", "lo2g5g bias test mode")
+    r = _tmm_reg(tmm, r, "FREQ_LOCAL", ADDR_FREQLOCAL)
+    r = _tmm_field(tmm, r, "d_wl_rf_freq_sel_local[1:0]", "1:0", ADDR_FREQLOCAL, "N", "RW", "freq sel local(mode=1)")
+    r = _tmm_reg(tmm, r, "FREQ_LINE", ADDR_FREQLINE)
+    r = _tmm_field(tmm, r, "d_wl_rf_freq_sel_line[1:0]", "1:0", ADDR_FREQLINE, "Y", "RO", "freq sel 线控(管脚,RO,force裸名)")
+    r = _tmm_reg(tmm, r, "TX2GEN", ADDR_TX2GEN)
+    r = _tmm_field(tmm, r, "d_wl_rf_tx2g_en_mode", "0", ADDR_TX2GEN, "N", "RW", "tx2g en mode(0:line 1:reg)")
+    r = _tmm_field(tmm, r, "d_wl_rf_tx2g_en_local", "1", ADDR_TX2GEN, "N", "RW", "tx2g en local")
+    r = _tmm_reg(tmm, r, "EPA2G", ADDR_EPAMIX)
+    r = _tmm_field(tmm, r, "d_wl_rf_tx_epa_2g_mixer_en", "0", ADDR_EPAMIX, "N", "RW", "tx epa 2g mixer enable(self)")
 
     # ========================= for_test 页（留空：真表这份文件 for_test 也是空的）=========================
     ft = wb.create_sheet("for_test")
