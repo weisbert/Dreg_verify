@@ -826,3 +826,33 @@ def test_self_ref_logic_but_downstream_mux_keeps_mux_suffix():
     sigs = {s.out_base: s for s in M.read_logic(ws)}
     assert sigs["d_w"].ref_suffix == "_to_mux"
     assert sigs["d_w"].rtl_base == "d_w_to_mux"
+
+
+# ── 第二缺口(2026-06-16 全表审计实证): mux 跨页回填也得守自引用不变量 ──
+class _MC:                       # mux case / ctrl 替身（只含 _apply_mux_ref_suffix 用到的字段）
+    def __init__(self, raw, base): self.input_raw = raw; self.input_base = base
+class _MG:
+    def __init__(self, cases): self.cases = cases; self.ctrls = []
+
+
+def test_mux_backfill_respects_self_ref_to_mux():
+    """X 自读 X_to_mux（_line 类形态），且【只被 mux 页】以 X_to_mux 引用（logic 页没引用它）：
+    read_logic 的逻辑页抑制管不到这条跨页路径——_apply_mux_ref_suffix 必须用同一闸门，
+    否则 X 输出探针被回填成 X_to_mux = 它自己的输入前级网（仿真假绿/假红）。"""
+    ws = _logic_ws([
+        {"K": "d_line", "L": "A?B:1'b0", "M": "", "N": 0,
+         "A": "d_line_to_mux", "B": "d_src_to_logic"},       # 自引用 _to_mux
+    ])
+    logic = M.read_logic(ws)
+    assert logic[0].ref_suffix == ""                          # read_logic 已抑制（逻辑页没引用，本就 ""）
+    # mux 页以 d_line_to_mux 引用它 → 旧行为会回填 _to_mux；新行为用闸门挡住
+    M._apply_mux_ref_suffix(logic, [_MG([_MC("d_line_to_mux", "d_line")])])
+    assert logic[0].ref_suffix == ""                          # ⭐ 仍是 bare，没被回填成自己的输入网
+    assert logic[0].rtl_base == "d_line"
+
+    # 反面对照：非自引用的 logic 输出被 mux 页引用 → 照常回填 _to_mux（没误伤正常 logic→mux 网）
+    ws2 = _logic_ws([{"K": "d_norm", "L": "A", "M": "", "N": 0, "A": "cfg_to_logic"}])
+    logic2 = M.read_logic(ws2)
+    M._apply_mux_ref_suffix(logic2, [_MG([_MC("d_norm_to_mux", "d_norm")])])
+    assert logic2[0].ref_suffix == "_to_mux"
+    assert logic2[0].rtl_base == "d_norm_to_mux"

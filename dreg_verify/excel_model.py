@@ -54,6 +54,12 @@ class LogicSignal:
         # 因为这就是 RTL 顶层口真名。None=该信号不过 level_shift 或无此页(旧表 M=ls 直给后缀，不受影响)。
         self._ls_name = None
         self._ls_is_top = False        # level_shift 页 E 列 top_out=1：顶层网，探针绝不套层级前缀
+        # ⭐ 该信号【读自己】用到的后缀集合（{"_to_logic"} / {"_to_mux"} / 两者）。X 自读 <X>_后缀 ⟹
+        # 那根 <X>_后缀 是 X 的【前级输入网】(regfile 导出/上游)，**不是 X 的输出网**(否则组合环)。
+        # 不变量：ref_suffix 绝不能取这里面的后缀——否则输出探针 = 自己的输入网(=直接读输入,假绿/假红)。
+        # 由 read_logic 填；read_logic 与 _apply_mux_ref_suffix 两处赋 ref_suffix 都必须尊重它(2026-06-16
+        # WL_C0C1 审计实证：mux 跨页回填也会踩 _to_mux 自引用，故把抑制收口成中心不变量、不再各打各的)。
+        self._self_ref_suffixes = set()
 
     @property
     def is_top(self):
@@ -453,19 +459,21 @@ def read_logic(ws, header_row=2):
     #   故：base==本行输出基名(自引用)时不计入。只有【别的】信号引用 <X>_to_logic 才算真·下游引用。
     #   (正常级联如 pll_n1 不受影响：pll_n1 的 _to_logic 来自 pll_n2 的引用，非 pll_n1 自己的输入。)
     #
-    # ⭐⭐ 自引用【抑制输出尾缀】(2026-06-16 Hi1108 WL_C0C1 d_wl_rf_5g_tx_lodiv_en 实证)：
-    #   若 X 自己读 <X>_to_logic 当输入（self_ref_logic），那根 <X>_to_logic 是 X 的【前级输入网】
-    #   (端口/寄存器 X → regfile → X_to_logic → logic)，**不是 X 的输出网**；X 的输出是 bare 基名
-    #   (顶层 pin / 计算结果)。此时即便【别的行】也引用 <X>_to_logic（如 trxbuf 行引用
-    #   d_wl_rf_5g_tx_lodiv_en_to_logic），它们读的也是【同一根前级网】，不能据此把 X 的【输出探针】
-    #   补成 X_to_logic —— 那会让 assert 探到 X 自己的输入(=直接读输入信号，仿真假绿/假红)。
-    #   故：X ∈ self_ref_logic 时，其输出尾缀强制清空（探 bare 基名）。
-    #   resolver 输入侧早已同口径(把 <X>_to_logic 自输入 force 成 bare 基名)，这里把输出侧对齐。
-    #   仅当自引用后缀==下游引用后缀时抑制（X 自读 _to_logic 但被别人按 _to_mux 引用 → _to_mux 是
-    #   另一根真·输出网，不抑制）。M=ls 行不受影响(rtl_net_name 的 ls 分支优先于 ref_suffix)。
+    # ⭐⭐ 自引用【抑制输出尾缀】(2026-06-16 Hi1108 WL_C0C1 d_wl_rf_5g_tx_lodiv_en + 全表审计实证)：
+    #   若 X 自己读 <X>_后缀 当输入，那根 <X>_后缀 是 X 的【前级输入网】(端口/寄存器 X → regfile →
+    #   X_后缀 → logic/mux)，**不是 X 的输出网**(否则组合环)；X 的输出是 bare 基名(顶层 pin/计算结果)。
+    #   此时即便【别的行】也引用 <X>_后缀（如 trxbuf 行引用 d_wl_rf_5g_tx_lodiv_en_to_logic），它们读的
+    #   也是【同一根前级网】，不能据此把 X 的【输出探针】补成 X_后缀 —— 那会让 assert 探到 X 自己的输入
+    #   (=直接读输入信号，仿真假绿/假红)。
+    #   ⟹ 把「X 自读的后缀」记进 sig._self_ref_suffixes（中心不变量），所有给 ref_suffix 赋值的地方
+    #     （这里 + 跨页 _apply_mux_ref_suffix）都用 _pick_ref_suffix 过滤掉它，不再各打各的（审计发现
+    #     mux 跨页回填也会踩 _to_mux 自引用，单点抑制堵不全 → 收口成不变量）。
+    #   仅抑制【与自引用同后缀】的那一个：X 自读 _to_logic 但被别人按 _to_mux 引用 → _to_mux 是另一根
+    #     真·输出网，不抑制(linectrl_band_sel 实证：自读 _to_logic、输出 _to_mux 驱 mux)。
+    #   resolver 输入侧早已同口径(把自输入 force 成 bare 基名)。M=ls 行不受影响(ls 分支优先于 ref_suffix)。
     ref_logic, ref_mux = set(), set()
-    self_ref_logic, self_ref_mux = set(), set()
     for sig in signals:
+        sig._self_ref_suffixes = set()
         ob = sig.out_base.lower()
         for info in sig.inputs.values():
             rb = _strip_width(info["raw"])[0].lower()
@@ -474,22 +482,27 @@ def read_logic(ws, header_row=2):
                 if base != ob:                       # 排除自引用（前级信号，非下游引用）
                     ref_logic.add(base)
                 else:
-                    self_ref_logic.add(ob)           # X 读自己的 X_to_logic → 那是输入前级网
+                    sig._self_ref_suffixes.add("_to_logic")  # X 读自己的 X_to_logic → 输入前级网
             elif rb.endswith("_to_mux"):
                 base = rb[: -len("_to_mux")]
                 if base != ob:
                     ref_mux.add(base)
                 else:
-                    self_ref_mux.add(ob)
+                    sig._self_ref_suffixes.add("_to_mux")
     for sig in signals:
         b = sig.out_base.lower()
         cand = "_to_logic" if b in ref_logic else ("_to_mux" if b in ref_mux else "")
-        if cand == "_to_logic" and b in self_ref_logic:
-            cand = ""                                # 自引用：输出探 bare 基名，不补 _to_logic
-        elif cand == "_to_mux" and b in self_ref_mux:
-            cand = ""
-        sig.ref_suffix = cand
+        sig.ref_suffix = _pick_ref_suffix(sig, cand)
     return signals
+
+
+def _pick_ref_suffix(sig, cand):
+    """给 logic 信号选 ref_suffix 的中心闸门：候选后缀若是该信号【自读】的后缀则清空(那是它的输入
+    前级网，不是输出网)，否则照用。read_logic 与 _apply_mux_ref_suffix 共用，保证不变量
+    『ref_suffix ∉ _self_ref_suffixes』在所有赋值路径上都成立。"""
+    if cand and cand in getattr(sig, "_self_ref_suffixes", ()):
+        return ""
+    return cand
 
 
 # ───────────────────────────── 读取 mux 页 ─────────────────────────────
@@ -937,8 +950,11 @@ def _apply_mux_ref_suffix(logic, mux):
             if _strip_width(ct.raw)[0].lower().endswith("_to_mux"):
                 mux_refs.add(ct.base.lower())
     for sig in logic:
+        # _pick_ref_suffix 守不变量：X 若自读 X_to_mux，则 X_to_mux 是它的【输入前级网】，绝不能当
+        # 输出探针(2026-06-16 审计实证：纯 mux 跨页引用的 _line 类自引用信号也会踩这个坑，read_logic
+        # 的逻辑页抑制管不到这条跨页路径 → 用同一闸门收口)。
         if not sig.ref_suffix and sig.out_base.lower() in mux_refs:
-            sig.ref_suffix = "_to_mux"
+            sig.ref_suffix = _pick_ref_suffix(sig, "_to_mux")
 
 
 def _apply_mux_output_ref_suffix(logic, mux):
