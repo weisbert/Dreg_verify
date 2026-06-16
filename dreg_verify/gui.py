@@ -2945,6 +2945,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # cone 标记：表达式里引用了内部信号/上游计算网 → 输入已展开成叶子寄存器，
         # 『输入信号』表的字母列显示 Excel 来源坐标("上游行名.字母")而非本行 A/B/C
         cone_tag = "   [已展开上游→输入为叶子寄存器]" if getattr(self, "_ti_cone", False) else ""
+        # 本信号【实际生效】的级联模式 + 来源——永远显示。让"为什么真值表没展开/输入数对不上"一眼可
+        # 见：若这里写 force级联网/单点，但你以为是展开上游，就抓到了真凶(GUI 没重启读旧码/单点档遗留)。
+        _cm = self._cascade_for(self._ti_sig)
+        _cm_src = "本信号单点" if self._ti_name_low in self._sig_cascade else "logic全局"
+        casc_tag = "   级联=%s(%s)" % ("展开上游" if _cm == "cone" else "force级联网", _cm_src)
         # 期望手填进度：designer 手填了几条/共几条正向（其余生成时 auto_out 兜底）
         pos_rows = [rd for rd in self._ti_rows if rd.get("kind") != "neg"]
         n_filled = sum(1 for rd in pos_rows if rd.get("designer_expected") is not None)
@@ -2968,9 +2973,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ti_header.setStyleSheet("color:#445;")
         # 表达式写成 "输出 = RHS" 等式；字母对照已下移到『输入信号』表，头部保持精简
         self.ti_header.setText(
-            "信号 %s     %s = %s     用例 %d 条%s%s%s%s%s"
+            "信号 %s     %s = %s     用例 %d 条%s%s%s%s%s%s"
             % (self._ti_sig.out_name, self._ti_sig.out_base or "out", self._ti_sig.expr,
-               len(self._ti_rows), fill_tag, tag, cone_tag, iddq_tag, supp_tag))
+               len(self._ti_rows), casc_tag, fill_tag, tag, cone_tag, iddq_tag, supp_tag))
 
     def _ti_mark_customized(self):
         if not self._ti_sig:
