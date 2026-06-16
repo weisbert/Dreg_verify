@@ -753,3 +753,76 @@ def test_negative_self_ref_e2e():
     assert "_NEG" in text
     assert "force `ENV_RF.d2a_cnt_sclk=" in text
     assert "force `ENV_RF.d2a_cnt_sclk_ls" not in text
+
+
+# ── 追加(2026-06-16 Hi1108 WL_C0C1 d_wl_rf_5g_tx_lodiv_en 实证): 自引用信号【抑制输出尾缀】──
+# 真表实证结构(diag_to_logic_suffix.py)：
+#   row101 K=d_wl_rf_5g_tx_lodiv_en  A=d_wl_rf_5g_tx_lodiv_en_to_logic(自引用 _to_logic)
+#   row85/86 也以 d_wl_rf_5g_tx_lodiv_en_to_logic 当输入（下游引用）
+# 旧 bug: 下游引用把 d_wl_rf_5g_tx_lodiv_en 的 ref_suffix 设成 _to_logic →【输出探针】=X_to_logic，
+#   而那根 X_to_logic 是 X 自己的【前级输入网】→ assert 读回输入(=直接读输入信号，仿真假绿/假红)。
+# 修复: X 自读 X_to_logic ⟹ X ∈ self_ref_logic ⟹ 抑制输出尾缀，探 bare 基名。
+def _logic_ws(rows, header_row=2):
+    """构造最小 logic 工作表（表头在 header_row，数据从下一行）供 read_logic 读。
+    rows: list[dict{列字母: 值}]。"""
+    from openpyxl.utils import column_index_from_string
+    wbx = openpyxl.Workbook()
+    ws = wbx.active
+    ws.title = "logic"
+    ws.cell(row=header_row, column=column_index_from_string("K"), value="output")
+    ws.cell(row=header_row, column=column_index_from_string("L"), value="expr")
+    for i, rd in enumerate(rows, start=header_row + 1):
+        for col, val in rd.items():
+            ws.cell(row=i, column=column_index_from_string(col), value=val)
+    return ws
+
+
+def test_self_ref_suppresses_to_logic_output_suffix():
+    ws = _logic_ws([
+        # ★定义行：自引用 _to_logic + 被下游引用 → 应抑制尾缀（探 bare 基名）
+        {"K": "d_x", "L": "A?C:B", "M": "to_dft,to_logic", "N": 0,
+         "A": "d_x_to_logic", "B": "d_y_to_logic", "C": "d_z_to_logic"},
+        # 下游行：引用 d_x_to_logic（它自己也自引用，不该被本测试干扰）
+        {"K": "d_down", "L": "A?B:1'b0", "M": "to_dft", "N": 0,
+         "A": "d_down_to_logic", "B": "d_x_to_logic"},
+        # 对照①：非自引用、被下游引用 → 仍补 _to_logic（正常级联不受影响）
+        {"K": "d_p1", "L": "A", "M": "", "N": 0, "A": "rawcfg_to_logic"},
+        {"K": "d_p2", "L": "A", "M": "", "N": 0, "A": "d_p1_to_logic"},
+    ])
+    sigs = {s.out_base: s for s in M.read_logic(ws)}
+
+    # ⭐ 自引用 + 被下游引用：尾缀被抑制，输出探针 = bare 基名
+    assert sigs["d_x"].ref_suffix == ""
+    assert sigs["d_x"].rtl_base == "d_x"
+    assert sigs["d_x"].rtl_name == "d_x"
+    # rtl_base_full 也跟随抑制（前缀 key 该用 bare 名，不再是 d_x_to_logic）
+    assert sigs["d_x"].rtl_base_full == "d_x"
+
+    # 对照①：非自引用、被下游引用 → 保持 _to_logic（没误伤正常级联）
+    assert sigs["d_p1"].ref_suffix == "_to_logic"
+    assert sigs["d_p1"].rtl_base == "d_p1_to_logic"
+
+
+def test_self_ref_via_to_mux_suppresses_mux_suffix():
+    """对称：X 自读 X_to_mux（mux 衔接的自引用）→ 抑制 _to_mux 输出尾缀。"""
+    ws = _logic_ws([
+        {"K": "d_m", "L": "A?B:1'b0", "M": "", "N": 0,
+         "A": "d_m_to_mux", "B": "d_k_to_mux"},
+        {"K": "d_use", "L": "A", "M": "", "N": 0, "A": "d_m_to_mux"},
+    ])
+    sigs = {s.out_base: s for s in M.read_logic(ws)}
+    assert sigs["d_m"].ref_suffix == ""
+    assert sigs["d_m"].rtl_base == "d_m"
+
+
+def test_self_ref_logic_but_downstream_mux_keeps_mux_suffix():
+    """X 自读 X_to_logic（_to_logic 是输入前级网），但被【mux 页式】以 X_to_mux 引用：
+    _to_mux 是另一根真·输出网，不该被 _to_logic 自引用抑制。"""
+    ws = _logic_ws([
+        {"K": "d_w", "L": "A?B:1'b0", "M": "", "N": 0,
+         "A": "d_w_to_logic", "B": "d_q_to_logic"},          # 自引用 _to_logic
+        {"K": "d_other", "L": "A", "M": "", "N": 0, "A": "d_w_to_mux"},  # 下游按 _to_mux 引用
+    ])
+    sigs = {s.out_base: s for s in M.read_logic(ws)}
+    assert sigs["d_w"].ref_suffix == "_to_mux"
+    assert sigs["d_w"].rtl_base == "d_w_to_mux"

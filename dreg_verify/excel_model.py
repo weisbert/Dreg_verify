@@ -452,7 +452,19 @@ def read_logic(ws, header_row=2):
     #   消费 X 输出网的引用。若据此给 X 补 _to_logic，X 的输出探针网名就 = 它自己的输入网名 → 撞名探错。
     #   故：base==本行输出基名(自引用)时不计入。只有【别的】信号引用 <X>_to_logic 才算真·下游引用。
     #   (正常级联如 pll_n1 不受影响：pll_n1 的 _to_logic 来自 pll_n2 的引用，非 pll_n1 自己的输入。)
+    #
+    # ⭐⭐ 自引用【抑制输出尾缀】(2026-06-16 Hi1108 WL_C0C1 d_wl_rf_5g_tx_lodiv_en 实证)：
+    #   若 X 自己读 <X>_to_logic 当输入（self_ref_logic），那根 <X>_to_logic 是 X 的【前级输入网】
+    #   (端口/寄存器 X → regfile → X_to_logic → logic)，**不是 X 的输出网**；X 的输出是 bare 基名
+    #   (顶层 pin / 计算结果)。此时即便【别的行】也引用 <X>_to_logic（如 trxbuf 行引用
+    #   d_wl_rf_5g_tx_lodiv_en_to_logic），它们读的也是【同一根前级网】，不能据此把 X 的【输出探针】
+    #   补成 X_to_logic —— 那会让 assert 探到 X 自己的输入(=直接读输入信号，仿真假绿/假红)。
+    #   故：X ∈ self_ref_logic 时，其输出尾缀强制清空（探 bare 基名）。
+    #   resolver 输入侧早已同口径(把 <X>_to_logic 自输入 force 成 bare 基名)，这里把输出侧对齐。
+    #   仅当自引用后缀==下游引用后缀时抑制（X 自读 _to_logic 但被别人按 _to_mux 引用 → _to_mux 是
+    #   另一根真·输出网，不抑制）。M=ls 行不受影响(rtl_net_name 的 ls 分支优先于 ref_suffix)。
     ref_logic, ref_mux = set(), set()
+    self_ref_logic, self_ref_mux = set(), set()
     for sig in signals:
         ob = sig.out_base.lower()
         for info in sig.inputs.values():
@@ -461,13 +473,22 @@ def read_logic(ws, header_row=2):
                 base = rb[: -len("_to_logic")]
                 if base != ob:                       # 排除自引用（前级信号，非下游引用）
                     ref_logic.add(base)
+                else:
+                    self_ref_logic.add(ob)           # X 读自己的 X_to_logic → 那是输入前级网
             elif rb.endswith("_to_mux"):
                 base = rb[: -len("_to_mux")]
                 if base != ob:
                     ref_mux.add(base)
+                else:
+                    self_ref_mux.add(ob)
     for sig in signals:
         b = sig.out_base.lower()
-        sig.ref_suffix = "_to_logic" if b in ref_logic else ("_to_mux" if b in ref_mux else "")
+        cand = "_to_logic" if b in ref_logic else ("_to_mux" if b in ref_mux else "")
+        if cand == "_to_logic" and b in self_ref_logic:
+            cand = ""                                # 自引用：输出探 bare 基名，不补 _to_logic
+        elif cand == "_to_mux" and b in self_ref_mux:
+            cand = ""
+        sig.ref_suffix = cand
     return signals
 
 
