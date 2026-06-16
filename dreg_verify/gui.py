@@ -2505,6 +2505,11 @@ class MainWindow(QtWidgets.QMainWindow):
         name_low = sig.out_name.lower()
         if name_low != self._ti_name_low:
             self._ti_user_widths = False     # 换信号 → 列宽恢复自动适应(手动宽度只在同一信号内保留)
+        # ★本信号的级联模式（与 _analyze_one/build/report 同口径）。必须在 _expand_sig 前显式设——
+        #   否则沿用 _reanalyze_all 循环【最后一个信号】(=末尾 mux 组)留下的 cascade_mode，会把
+        #   logic 信号的真值表错按【mux 全局】级联渲染。实测：logic=展开上游 但 mux=force级联网 时，
+        #   lo2g5g_bias_en(logic) 被错当 force → 上游 mux 不展开 → 只 4 输入（应 6，R38 跨边界展开）。
+        self._resolver.cascade_mode = self._cascade_for(sig)
         node, bindings, groups, chain, err = self._expand_sig(sig)
         if node is None:
             self._clear_test_items("信号: %s — %s（无法生成测试项）" % (sig.out_name, err))
@@ -2582,6 +2587,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_suffix_chk(grp)             # 探尾缀网勾选置到本信号实际状态
         self._set_sig_cascade_combo(grp)      # 本信号级联下拉置到本信号档
         self._set_ti_buttons_for_mux(True)    # mux 信号：置灰列结构/CSV 按钮(无 mux 分支)，给准确 tooltip
+        # 本信号级联模式（与 _analyze_one 同口径）——别沿用循环末尾残留值；单点 _sig_cascade 也才能生效。
+        self._resolver.cascade_mode = self._cascade_for(grp)
         exp = mux_gen.expand_mux_group(self.wb, self._resolver, grp)
         self._ti_mux_exp = exp                # 缓存：导出CSV/用户向量编辑复用(避免重复展开)
         # 『输入信号』表：解析有问题也照样填（哪个输入坏了一眼看到）——修"mux 点开输入信号框空白"

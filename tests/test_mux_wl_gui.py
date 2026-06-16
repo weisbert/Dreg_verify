@@ -30,6 +30,18 @@ def gui_app():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gui_settings(monkeypatch, tmp_path):
+    """把 GUI 持久化配置指向临时文件，与用户真实 ~/.dreg_verify_gui.json 隔离。
+
+    _save_settings 在 pytest 下已不写盘，但 _load_settings 仍【读】真实文件——用户持久化的
+    级联偏好(如 R32 用户把 mux级联设成 force级联网)会被测试读到，使 test_cascade_decouple_gui
+    等「默认 cone」断言、及 mux 渲染断言非确定性地失败。指到空临时文件 → 永远走默认(cone)。"""
+    pytest.importorskip("PySide6")
+    from dreg_verify import gui as G
+    monkeypatch.setattr(G, "SETTINGS_PATH", str(tmp_path / "gui_settings.json"))
+
+
 @pytest.fixture()
 def wl_win(gui_app, tmp_path):
     """加载 WL 表（探针前缀未配 → 状态列应为"需探针前缀"）。"""
@@ -581,6 +593,49 @@ def test_cascade_decouple_gui(wl_win):
     w.sig_cascade_combo.setCurrentText("跟随全局")
     assert w._cascade_for(mux) == "force"
     assert mux.out_name.lower() not in w._sig_cascade
+
+
+def _ti_input_bases(w):
+    return sorted({b.base.lower() for b in w._ti_bindings.values()
+                   if b is not None and getattr(b, "base", None)})
+
+
+def test_logic_signal_truth_table_uses_logic_cascade_not_mux(wl_win):
+    """⭐R38 续：logic 信号的真值表必须按【logic 级联】渲染，与全局 mux 级联无关。
+
+    修前 bug：_load_test_items 不显式设 resolver.cascade_mode，沿用 _reanalyze_all 循环末尾
+    (=最后一个 mux 组) 留下的级联 → logic 信号被错按 mux 全局渲染。复现用户实况：mux 级联=force
+    (R32 续7 设的、持久化)、logic 级联=cone(R38)时，lna_gain_dly(logic、输入是 mux 输出)被错当
+    force → 上游 mux 不展开、只剩衔接网。修后：logic=cone 必展开成源寄存器(对齐 VBA)，不受 mux 全局影响。"""
+    w = wl_win
+    dly = next(s for s in w.signals if "lna_gain_dly" in getattr(s, "out_name", ""))
+    raw_net = "d_wl_rf_lna_gain"          # mux 输出衔接网（不展开时残留的单一输入）
+
+    # logic=展开上游 / mux=force级联网（用户实况组合）
+    w.cascade_logic_combo.setCurrentIndex(0)   # cone
+    w.cascade_mux_combo.setCurrentIndex(1)     # force
+    w.on_cascade_mode_changed()
+    assert w._logic_cascade() == "cone" and w._mux_cascade() == "force"
+    w._load_test_items(dly)
+    bases = _ti_input_bases(w)
+    # 展开到 mux 的源寄存器(选择 mode + 数据 local/线控)，不再是裸 mux 输出衔接网
+    assert any("lna_gain_ctrl_mode" in b for b in bases), bases
+    assert any("lna_gain_local" in b for b in bases), bases
+    assert any("linectrl_lna_gain" in b for b in bases), bases
+    assert raw_net not in bases, bases       # ← 修前这里会是 [raw_net]（4 输入塌成 1）
+
+    # 先点一个 mux 信号(把 resolver 留在 mux 模式)，再回 logic 信号——仍须按 logic 级联展开(无残留污染)
+    mg = next(s for s in w.signals if isinstance(s, excel_model.MuxGroup))
+    w._load_test_items(mg)
+    w._load_test_items(dly)
+    assert raw_net not in _ti_input_bases(w)
+
+    # logic=force：logic 级联管展开 → 回退裸衔接网(即便 mux 全局=cone 也不影响 logic 信号)
+    w.cascade_logic_combo.setCurrentIndex(1)   # force
+    w.cascade_mux_combo.setCurrentIndex(0)     # cone
+    w.on_cascade_mode_changed()
+    w._load_test_items(dly)
+    assert _ti_input_bases(w) == [raw_net]
 
 
 # ───────────── ⑨ 第二十轮 B2：mux 数据值可手填 + 落盘 + 重开恢复 ─────────────
