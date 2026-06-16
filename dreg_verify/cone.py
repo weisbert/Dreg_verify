@@ -112,6 +112,18 @@ def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
 
     mapping = {}      # 原表达式变量字母 -> 替换 AST
     leaves = {}       # 叶子大写基名 -> InputBinding
+
+    def _emit_leaf(letter, b):
+        # 叶子输入：变量名 = 大写基名；同一寄存器的多个切片共享同一个叶子 binding
+        # self_base=root_base：叶子重解析时保持自引用语义
+        # （否则自引用叶子会被误判级联 → force 被断言的输出网 → 原 d2a bug 在 cone 路径复活）
+        key = b.base.upper()
+        # Excel 来源坐标(纯显示)：根行直接输入 = 列字母本身；上游行的输入 = "行名.字母"
+        src = letter if _depth == 0 else "%s.%s" % (sig.out_base, letter)
+        _merge_leaf(leaves, key,
+                    _full_binding(key, b, resolver, self_base=root_base), [src])
+        mapping[letter] = E.Var(key, b.slice_msb, b.slice_lsb)
+
     for letter in E.collect_vars(node):
         b = bindings.get(letter)
         if b is None:
@@ -138,24 +150,27 @@ def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
             # 才走这里；force 模式 / 宽 select / 有 hole 的 mux 落 else 叶子(force 衔接网，与旧行为同)。
             from . import mux_gen           # 惰性 import 破循环
             grp = _find_mux(wb, b.base)
-            child_node, child_leaves = mux_gen.synthesize_mux_expr(
-                wb, resolver, grp, _depth + 1, stack, chain_out)
-            for key, leaf in child_leaves.items():
-                _merge_leaf(leaves, key, leaf, getattr(leaf, "xl_letters", None) or [])
-            if b.slice_msb is not None:
-                mapping[letter] = E.Part(child_node, b.slice_msb, b.slice_lsb)
+            _chain_mark = len(chain_out) if chain_out is not None else 0
+            try:
+                child_node, child_leaves = mux_gen.synthesize_mux_expr(
+                    wb, resolver, grp, _depth + 1, stack, chain_out)
+            except ConeError:
+                # ⭐ 该 mux 展开时撞环/超深(2026-06-16 实证：其控制链一路展到 linectrl_band_sel 自引用环)
+                # → 不连累整个信号变"未解析"，把【这一个】mux 输出回退当叶子 force 衔接网(= 配前缀前/
+                # force 模式的旧行为)，其余输入照常展开。与"配前缀就不展开"的旧表现一致，但只对真撞环的
+                # 那批 mux 生效；能干净展开的 mux 仍展开(对齐 VBA)。
+                if chain_out is not None:
+                    del chain_out[_chain_mark:]   # 清掉半途写入的残缺展开链(否则显示串味)
+                _emit_leaf(letter, b)
             else:
-                mapping[letter] = child_node
+                for key, leaf in child_leaves.items():
+                    _merge_leaf(leaves, key, leaf, getattr(leaf, "xl_letters", None) or [])
+                if b.slice_msb is not None:
+                    mapping[letter] = E.Part(child_node, b.slice_msb, b.slice_lsb)
+                else:
+                    mapping[letter] = child_node
         else:
-            # 叶子输入：变量名 = 大写基名；同一寄存器的多个切片共享同一个叶子 binding
-            # self_base=root_base：叶子重解析时保持自引用语义
-            # （否则自引用叶子会被误判级联 → force 被断言的输出网 → 原 d2a bug 在 cone 路径复活）
-            key = b.base.upper()
-            # Excel 来源坐标(纯显示)：根行直接输入 = 列字母本身；上游行的输入 = "行名.字母"
-            src = letter if _depth == 0 else "%s.%s" % (sig.out_base, letter)
-            _merge_leaf(leaves, key,
-                        _full_binding(key, b, resolver, self_base=root_base), [src])
-            mapping[letter] = E.Var(key, b.slice_msb, b.slice_lsb)
+            _emit_leaf(letter, b)
 
     return _substitute(node, mapping), leaves
 

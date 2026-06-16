@@ -258,9 +258,52 @@ def test_cross_boundary_cycle_falls_back_not_crash():
     res = R.Resolver(wb)
     with pytest.raises(cone.ConeError):
         mux_gen.synthesize_mux_expr(wb, res, grp)        # 裸 synthesize 成环报错
-    # 经 expand_signal：不崩，回退非展开（expanded=False）
-    node, bindings, expanded = generator.expand_signal(wb, res, sig)
-    assert expanded is False
+    # 经 expand_signal：不崩、不无限递归——撞环的【那个 mux】被局部回退成 force 衔接网叶子(d_loop)，
+    # 不连累整信号(续3 起：在 cone mux 分支就地兜 ConeError，而非整信号退非展开)。
+    node, bindings, _expanded = generator.expand_signal(wb, res, sig)
+    bases = {(getattr(b, "base", "") or "").lower() for b in bindings.values() if b is not None}
+    assert "d_loop" in bases                 # 撞环 mux 输出退成衔接网叶子
+    assert "d_sel" not in bases              # 没真展开成 mux 的选择寄存器
     # build 整体不崩
     out = generator.build(wb, generator.GenOptions())
     assert isinstance(out["summary"], dict)
+
+
+def test_nested_mux_cycle_does_not_unresolve_whole_signal():
+    """⭐回归(2026-06-16 d_wl_rf_tx2g_lodiv_cal_line 实证)：mux 嵌在 logic 展开的【更深处】、其控制链
+    一路展到自引用环(linectrl_band_sel→自己)时，撞环的【那一个 mux】局部回退成 force 衔接网叶子即可，
+    不该让整个顶层信号变"未解析"。续3 把配前缀的 mux 解禁展开后，这类深链自引用环被暴露——旧
+    expand_signal 顶层兜底够不着【嵌套】的 mux(顶层内部输入是 logic 不是 mux)，故必须在 cone 的 mux
+    分支就地兜 ConeError、回退该 mux，其余输入照常展开。"""
+    def LS(name, expr, inputs, suf="to_mux", top="0"):
+        return excel_model.LogicSignal(row=1, out_name=name, out_width=1, expr=expr, suffix=suf,
+                                       top_output=top, notes="", owner="", assert_id="1", inputs=inputs)
+
+    def IN(var, raw, base):
+        return {var: {"raw": raw, "base": base, "width": 1, "msb": None, "lsb": None}}
+
+    d_top = LS("d_top", "B?A:1'b0",
+               {**IN("A", "d_areg", "d_areg"), **IN("B", "d_mid_to_logic", "d_mid")},
+               suf="to_dft", top="1")
+    d_mid = LS("d_mid", "C", IN("C", "d_mux_to_logic", "d_mux"))         # logic 引用 mux 输出(嵌套)
+    d_lfs = LS("d_lfs", "E", IN("E", "d_lbs_to_logic", "d_lbs"))         # mux 控制链
+    d_lbs = LS("d_lbs", "F", IN("F", "d_lbs_to_logic", "d_lbs"))         # ← 自引用环
+    cases = [excel_model.MuxCase(3, "1'b0", "d_d0_to_mux", "d_d0", 1, None, None),
+             excel_model.MuxCase(4, "1'b1", "d_d1_to_mux", "d_d1", 1, None, None)]
+    ctrls = [excel_model.MuxCtrl("B", "d_lfs_to_mux", "d_lfs", 1)]
+    mux = excel_model.MuxGroup(1, "d_mux", 1, "", "", 1, "", 0, cases, ctrls=ctrls)
+    tmm = {n: _tmm(n, 0, 0, 0x10 + i, "RW") for i, n in enumerate(["d_areg", "d_d0", "d_d1"])}
+    wb = excel_model.DregWorkbook(logic=[d_top, d_mid, d_lfs, d_lbs], regmap={},
+                                  tmm=tmm, sheet_names=[], mux=[mux])
+    # 配不配前缀都不该崩/不该未解析(用户实况=配了前缀)
+    for pfx in ({}, {"d_mux_to_logic": "ENV_RF.U_SUB"}):
+        res = R.Resolver(wb, wire_prefixes=pfx)
+        res.cascade_mode = "cone"
+        _node, bindings, _e = generator.expand_signal(wb, res, d_top)    # 不抛 = 没未解析
+        bases = {(getattr(b, "base", "") or "").lower() for b in bindings.values() if b is not None}
+        assert "d_areg" in bases                              # 寄存器输入照常在
+        assert "d_mux" in bases                               # 撞环 mux 局部回退成衔接网叶子
+        assert "d_d0" not in bases and "d_d1" not in bases    # 该 mux 没真展成数据寄存器
+    # build 不崩；配了前缀(撞环 mux 退成的衔接网有前缀=可 force)→ d_top 正常生成、非"未解析"跳过
+    out = generator.build(wb, generator.GenOptions(probe_prefixes={"d_mux_to_logic": "ENV_RF.U_SUB"}))
+    assert "d_top" in {st["out_name"] for _l, st in out["blocks"]}
