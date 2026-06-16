@@ -227,6 +227,12 @@ class MuxGroup:
         # level_shift 页给的顶层 _ls 输出口真名（同 LogicSignal._ls_name；mux 输出若也过电平移位则回填）。
         self._ls_name = None
         self._ls_is_top = False
+        # ⭐ 该 mux 输出【读自己】用到的后缀集合（同 LogicSignal._self_ref_suffixes，2026-06-16 SUF-2）：
+        # mux 输出 X 若在自己的 case/控制列引用 <X>_to_mux/<X>_to_logic，那根网是 X 的【输入前级网】、
+        # 不是 X 的输出网；ref_suffix 绝不能取它（否则探针=自己输入=假绿/假红）。由 _apply_mux_output_ref_suffix
+        # 填，赋 ref_suffix 一律过 _pick_ref_suffix 中心闸门（此前 991/993 裸赋值、MuxGroup 又没这字段 →
+        # 与 R40 logic 自引用同一盲区，只是 mux 默认探裸名把它掩住；勾 append_to_mux/suffix_override 即暴露）。
+        self._self_ref_suffixes = set()
 
     @property
     def ctrl_total_width(self):
@@ -497,9 +503,10 @@ def read_logic(ws, header_row=2):
 
 
 def _pick_ref_suffix(sig, cand):
-    """给 logic 信号选 ref_suffix 的中心闸门：候选后缀若是该信号【自读】的后缀则清空(那是它的输入
-    前级网，不是输出网)，否则照用。read_logic 与 _apply_mux_ref_suffix 共用，保证不变量
-    『ref_suffix ∉ _self_ref_suffixes』在所有赋值路径上都成立。"""
+    """给 logic 信号 / mux 组选 ref_suffix 的中心闸门：候选后缀若是该对象【自读】的后缀则清空(那是它的
+    输入前级网，不是输出网)，否则照用。鸭子类型——任何带 _self_ref_suffixes 的对象(LogicSignal/MuxGroup)
+    都可传入。read_logic / _apply_mux_ref_suffix / _apply_mux_output_ref_suffix 三处赋值共用，保证不变量
+    『ref_suffix ∉ _self_ref_suffixes』在所有赋值路径上都成立(2026-06-16 SUF-2：补上 mux 输出回填这条路)。"""
     if cand and cand in getattr(sig, "_self_ref_suffixes", ()):
         return ""
     return cand
@@ -984,13 +991,27 @@ def _apply_mux_output_ref_suffix(logic, mux):
             if _strip_width(ct.raw)[0].lower().endswith("_to_mux"):
                 ref_mux.add(ct.base.lower())
     for g in (mux or []):
+        # 先标注本组【自引用】后缀(g 自己的 case/控制列引用 <g 基名>_to_xxx → 那根网是 g 的输入前级网、
+        # 不是 g 的输出网)，无论是否 top/已有 ref_suffix 都填——检查1 闸门稍后据它判"探针==自己输入"。
+        # 2026-06-16 SUF-2：此前这里裸赋值 ref_suffix 不过闸门、MuxGroup 也没这字段 → 与 R40 logic
+        # 自引用同盲区(mux 默认探裸名掩住、勾 append_to_mux/suffix_override 就暴露)。
+        gb = g.out_base.lower()
+        for c in g.cases:
+            rb = _strip_width(c.input_raw)[0].lower()
+            if rb == gb + "_to_logic":
+                g._self_ref_suffixes.add("_to_logic")
+            elif rb == gb + "_to_mux":
+                g._self_ref_suffixes.add("_to_mux")
+        for ct in g.ctrls:
+            rb = _strip_width(ct.raw)[0].lower()
+            if rb == gb + "_to_logic":
+                g._self_ref_suffixes.add("_to_logic")
+            elif rb == gb + "_to_mux":
+                g._self_ref_suffixes.add("_to_mux")
         if g.is_top or g.ref_suffix:
             continue
-        b = g.out_base.lower()
-        if b in ref_logic:
-            g.ref_suffix = "_to_logic"
-        elif b in ref_mux:
-            g.ref_suffix = "_to_mux"
+        cand = "_to_logic" if gb in ref_logic else ("_to_mux" if gb in ref_mux else "")
+        g.ref_suffix = _pick_ref_suffix(g, cand)   # 过中心闸门：自读后缀绝不当输出探针尾缀
 
 
 def read_level_shift(ws, header_row=2):

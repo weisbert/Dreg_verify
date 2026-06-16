@@ -51,6 +51,9 @@ def build_argparser():
     p.add_argument("--report", default=None,
                    help="导出'给人看'的测试用例表格(按扩展名: .csv 用 Excel 打开 / .html 网页)。"
                         "可与 --out 同时用(同时出 .sv 和报告)；只传 --report 则只出报告")
+    p.add_argument("--export-claims", default=None, metavar="claims.json",
+                   help="导出探针/force 网名声明清单(JSON)——红区 scan_rtl 校验器的输入契约：带进红区"
+                        "校验'探针是真·RTL 输出网、force 网真实存在'。可与 --out 同时用")
     p.add_argument("--list", action="store_true", help="只列出可生成信号清单，不生成")
     p.add_argument("--account", action="store_true",
                    help="完整账目：列出每个 logic 信号 + mux 组的去向（生成/跳过原因/过滤原因），"
@@ -1252,8 +1255,14 @@ def _dispatch(args, opts):
                   % (vc.get("clean", 0), vc.get("wire-fallback", 0),
                      vc.get("unresolved", 0), vc.get("parse-err", 0),
                      vc.get("spec-collision", 0)))
-        if args.out is None:
+        if args.out is None and not args.export_claims:
             return 0   # 只要报告
+
+    # 只导 claims(无 --out)：build 一次拿 res 即可，不出 .sv
+    if args.out is None and args.export_claims:
+        res = generator.build(wb, opts)
+        _export_claims(res, args.export_claims, args.excel)
+        return 0
 
     out = args.out or "wr_rf_tc.sv"
 
@@ -1264,6 +1273,7 @@ def _dispatch(args, opts):
         pos_res = generator.build(wb, pos_opts)
         _write(out, generator.render(pos_res, comments=opts.comments))
         _report(pos_res, out)
+        _export_claims(pos_res, args.export_claims, args.excel)   # 设了 --export-claims 才导
         # 负向文件：真·仅负向(每信号只留负向向量，无负向的信号不出现)；
         # 汇总命名块加 _neg 后缀 → 与主文件贴进同一作用域也不重名
         neg_path = _neg_path(out)
@@ -1276,7 +1286,31 @@ def _dispatch(args, opts):
     text = generator.render(res, comments=opts.comments)
     _write(out, text)
     _report(res, out)
+    _export_claims(res, args.export_claims, args.excel)          # 设了 --export-claims 才导
     return 0
+
+
+def _export_claims(res, path, excel):
+    """把 build 结果里的 claim 清单写成 JSON——红区 scan_rtl 校验器的输入契约。path 为空则不导。"""
+    if not path:
+        return
+    import json
+    claims = res.get("claims", [])
+    payload = {
+        "source_excel": os.path.basename(excel),
+        "n_claims": len(claims),
+        "schema": list(generator._CLAIM_KEYS),
+        "note": ("红区 scan_rtl 校验器输入契约：probe 须为真·RTL 输出网(不是某 assign 的 RHS 输入网)、"
+                 "force 网须真实存在；self_ref_suffixes 非空且 == 探针后缀 = 自引用假绿(应为空)"),
+        "claims": claims,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    n_probe = sum(1 for c in claims if c.get("kind") == "probe")
+    n_force = sum(1 for c in claims if c.get("kind") == "force")
+    n_rfw = sum(1 for c in claims if c.get("kind") == "rfwrite")
+    print("claim 清单已导出: %s（%d 条：探针 %d / force %d / rfwrite %d）"
+          % (path, len(claims), n_probe, n_force, n_rfw))
 
 
 def _copy_opts(opts, **overrides):
@@ -1363,6 +1397,15 @@ def _report(res, out):
             print("    - [R=%s] %s ← %s" % (aid, name, why))
         if len(res.get("supplement_warnings", [])) > 30:
             print("    ...(共 %d 个)" % len(res["supplement_warnings"]))
+    if s.get("n_selfaudit_warnings"):
+        # 生成期"自检闸门"命中(假绿可疑)：探针读回自身输入 / K列漏标位宽 / RW写值截断。
+        # 这些是"仿真可能静默通过但其实没真验"的隐患，块顶也已有 // ⚠，务必逐条核对。
+        print("  ⚠ %d 处生成期自检闸门命中（假绿可疑——探针读回自身输入 / K列漏标位宽 / RW写值截断）："
+              % s["n_selfaudit_warnings"])
+        for name, aid, why in res.get("selfaudit_warnings", [])[:30]:
+            print("    - [R=%s] %s ← %s" % (aid, name, why))
+        if len(res.get("selfaudit_warnings", [])) > 30:
+            print("    ...(共 %d 个)" % len(res["selfaudit_warnings"]))
     if s.get("n_filtered_internal"):
         # 唯一'默认静默减少'的一类——把名字也亮出来，别让它无声无息
         fi = res.get("filtered_internal", [])

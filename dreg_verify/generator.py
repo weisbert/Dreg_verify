@@ -273,6 +273,22 @@ def make_supplement_signal(base, spec, base_sig):
         sig._append_to_logic = base_sig._append_to_logic
         sig._ls_name = base_sig._ls_name
         sig._ls_is_top = base_sig._ls_is_top
+    # 自引用后缀(中心不变量，2026-06-16 SUF-2)：从本补充自己输入列引用 <out_base>_to_xxx 推，再重过闸门——
+    # 补充可能引入原信号没有的 ECO 自引用输入，避免合成信号绕过自引用抑制。
+    # ⚠ 只在 out_base 与原信号一致时才继承原信号的自引用集——_self_ref_suffixes 是【绑 out_base 的事实】，
+    #   若补充用 out_name 改了基名，原集合对的是另一身份，继承过来会按错对象抑制/保留(对抗审查实证)。
+    if base_sig is not None and sig.out_base.lower() == base_sig.out_base.lower():
+        sig._self_ref_suffixes = set(getattr(base_sig, "_self_ref_suffixes", ()))
+    else:
+        sig._self_ref_suffixes = set()
+    _ob = sig.out_base.lower()
+    for _info in inputs.values():
+        _rb = excel_model._strip_width(_info["raw"])[0].lower()
+        if _rb == _ob + "_to_logic":
+            sig._self_ref_suffixes.add("_to_logic")
+        elif _rb == _ob + "_to_mux":
+            sig._self_ref_suffixes.add("_to_mux")
+    sig.ref_suffix = excel_model._pick_ref_suffix(sig, sig.ref_suffix)
     sig._is_supplement = True
     sig._supplement_note = str(spec.get("note", "") or "").strip()
     return sig
@@ -307,6 +323,150 @@ def _supplement_warning(sig):
     if note:
         msg += "　理由: %s" % note
     return msg
+
+
+# ───────────────────────────── 生成期"自检闸门"（2026-06-16 R42：把假绿做成块顶 ⚠）─────────────────────────────
+# 总思路：工具靠命名约定/cone 猜 RTL 网名，假绿(探到真实但语义错的网、仿真静默通过)是最致命失败。
+# 这三条在生成期主动查、命中即块顶 ⚠ + 汇总，让"少验一支/读错对象"无声无息变成看得见。红区真 nets 当
+# 裁判是治本(本轮不碰)，这是工具侧能独立做的"使假绿可见"。logic/mux 共用 selfaudit_warnings 通道。
+def _selfaudit_probe_self_ref(sig):
+    """检查1(纵深防御)：输出探针网名 == 本信号自己的某条输入前级网(<基名>_后缀)。
+    _pick_ref_suffix 已保证 ref_suffix ∉ _self_ref_suffixes、正常恒不触发(=0)；一旦触发=有新的
+    ref_suffix 赋值路径绕过了中心闸门(同 R40/SUF-2 结构)→ 块顶 ⚠ 暴露。比【全名】rtl_base(含尾缀/
+    开关/_ls)而非基名——基名比会误伤正常直通(force 寄存器 X、探顶层 pin X 同基名不同网，是对的)。
+    logic / mux 通用(鸭子类型，都有 _self_ref_suffixes/rtl_base/out_base)。"""
+    srs = getattr(sig, "_self_ref_suffixes", None)
+    if not srs:
+        return None
+    probe = (getattr(sig, "rtl_base", "") or "").lower()
+    ob = sig.out_base.lower()
+    for s in sorted(srs):
+        if probe == (ob + s).lower():
+            return ("探针网名 %s == 本信号自己的输入前级网 <%s>%s —— assert 在读回自身输入(假绿/假红)；"
+                    "ref_suffix 绕过了自引用闸门，需排查赋值路径" % (sig.rtl_base, sig.out_base, s))
+    return None
+
+
+def _selfaudit_output_width(sig, node, env):
+    """检查2：K 列漏标位宽 → out_width 默认 1 → 断言只验最低 1 bit、高位选路/拼接故障静默假绿。
+    仅当 K 列【无显式位宽】(_strip_width msb 为 None)且表达式自决宽 > 1 时报；显式写 X[0](msb 非 None、
+    宽 1)是有意 1 bit、不报。self_width 已把约简/比较/位选算成 1 bit，故 X=|gain 这类不误伤。
+    _ls 顶层口由 level_shift 页给名、宽度不走 K 列推断 → 跳过。"""
+    if getattr(sig, "_ls_name", None):
+        return None
+    _, _, omsb, _olsb = excel_model._strip_width(sig.out_name)
+    if omsb is not None:                   # K 列写了 [n] 或 [m:n] → 有意为之、不报
+        return None
+    try:
+        sw = E.self_width(node, env)
+    except Exception:                      # noqa: BLE001 — 求宽失败(如 Repeat 缺值)不阻断生成
+        return None
+    if sw and sw > 1:
+        return ("K 列可能漏标位宽：表达式自决宽 %d bit、但输出按 1 bit 断言(K 列无 [msb:lsb])——"
+                "高位选路/拼接故障不会被发现(假绿)；如确为 1 bit 输出可忽略，否则补 K 列位宽" % sw)
+    return None
+
+
+def _selfaudit_rw_truncation(bindings):
+    """检查3：RW 输入写进寄存器字段时被静默截断——输入占位 slice_lsb+width 超出字段容量
+    (reg_msb-reg_lsb+1) → sv_writer 的 & mask(fw) 会丢高位、designer 对照 for_test 也看不出。
+    结构判据(与测试值无关)。字段边界未知时与 compute_drives 同口径用默认 16 位、不漏报。返回告警串或 None。"""
+    bad = []
+    for b in bindings.values():
+        if b is None or not getattr(b, "resolved", False) or b.kind != "RW":
+            continue
+        # 字段宽度必须与生成 .sv 的权威路径 sv_writer.compute_drives 同口径：reg_msb/reg_lsb 已知→真实宽；
+        # 【未知→默认 16】(compute_drives:139 在 None 时 fw=16 并 & mask(16) → 真会按 16 位截断)。早先直接
+        # continue 跳过 None 路径 = 漏报 compute_drives 的默认-16 截断(对抗审查实证盲区)。
+        if b.reg_msb is not None and b.reg_lsb is not None:
+            fw = b.reg_msb - b.reg_lsb + 1
+        else:
+            fw = 16
+        need = (b.slice_lsb or 0) + b.width
+        if need > fw:
+            bad.append("%s(占 %d bit@lsb%d > 字段 %d bit)"
+                       % (b.base, b.width, (b.slice_lsb or 0), fw))
+    if bad:
+        return ("RW 写值可能被截断：%s —— 高位会被字段宽度静默丢弃(假绿)，"
+                "请核对输入位宽与 regmap 字段宽" % "、".join(bad))
+    return None
+
+
+# ───────────────────────── claim 清单导出（2026-06-16 R42：红区 scan_rtl 校验器的输入契约）─────────────────────────
+# 治本=红区真 nets 当裁判：把工具【声称】要探/要 force 的每根网名带进红区，scan_rtl 校验"探针是真·RTL
+# 输出网(不是某 assign 的 RHS 输入网)、force 网真实存在"。红区只能放出小文本/OCR → 大 claim 清单【进】、
+# 只放出小报告(本轮不碰红区)。这里把字段定死 + 能从生成结果忠实导出(纯工具侧)。每条 claim 字段固定：
+#   signal/aid    — 归属信号(K 名)与 assert 序号
+#   kind          — probe(输出探针) / force(RO 输入强制网) / rfwrite(RW 输入寄存器写，非物理网)
+#   identity      — output / input
+#   net_base/slice/prefix/full — 网基名 / [msb:lsb] / 层级前缀 / .sv 里的完整字符串
+#   found_in      — 来源(probe: level_shift/ref_xxx/bare；input: tmm/regmap/wire/needs-prefix/mux-output…)
+#   addr          — rfwrite 的寄存器地址(其余 None)
+#   self_ref_suffixes — 该信号自读后缀(校验器交叉核对自引用，应为空)
+#   is_mux/top_output — 来自 mux 页 / 是否芯片顶层输出
+_CLAIM_KEYS = ("signal", "aid", "kind", "identity", "net_base", "slice", "prefix",
+               "full", "found_in", "addr", "self_ref_suffixes", "is_mux", "top_output")
+
+
+def _probe_provenance(obj):
+    if getattr(obj, "_ls_name", None):
+        return "level_shift"
+    rs = getattr(obj, "ref_suffix", "")
+    base = getattr(obj, "rtl_base", "") or ""
+    if rs and base.lower().endswith(rs.lower()):
+        return "ref%s" % rs
+    return "bare"
+
+
+def _claim(**kw):
+    c = {k: None for k in _CLAIM_KEYS}
+    c.update(kw)
+    return c
+
+
+def collect_claims(obj, bindings, prefix, is_mux):
+    """为一个已生成的 logic 信号 / mux 组导出网名声明(探针 + force/rfwrite 输入)。
+
+    探针网名取 rtl_base/rtl_name(=.sv 里 assert 的真名，已含尾缀/开关/_ls/前缀逻辑)；输入网取 resolver
+    解析出的 b.wire(RO) 或 b.base+addr(RW)。同信号内按网名去重。纯导出、不改产物。"""
+    claims = []
+    base = getattr(obj, "rtl_base", obj.out_base)
+    name = getattr(obj, "rtl_name", obj.out_name)
+    slc = name[len(base):] if name.startswith(base) else ""
+    full = ("%s.%s" % (prefix.strip("."), name)) if prefix else name
+    claims.append(_claim(
+        signal=obj.out_name, aid=obj.assert_id or "", kind="probe", identity="output",
+        net_base=base, slice=slc, prefix=prefix or "", full=full,
+        found_in=_probe_provenance(obj),
+        self_ref_suffixes=sorted(getattr(obj, "_self_ref_suffixes", ())),
+        is_mux=bool(is_mux), top_output=bool(getattr(obj, "is_top", False))))
+    seen = set()
+    for _ltr, b in (bindings or {}).items():
+        if b is None or not getattr(b, "resolved", False):
+            continue
+        if b.kind == "RO":
+            # full = .sv 里真正 force 的 LHS(= b.wire_lhs，多位带 [msb:lsb] 切片)，与探针 claim 同口径
+            # (探针 full 也含切片)；按 lhs 去重 → 同网不同切片(x[3:1] 与 x[0])算两条 force、不误并。
+            lhs = b.wire_lhs
+            if ("force", lhs) in seen:
+                continue
+            seen.add(("force", lhs))
+            slc = lhs[len(b.wire):] if lhs.startswith(b.wire) else ""
+            claims.append(_claim(
+                signal=obj.out_name, aid=obj.assert_id or "", kind="force",
+                identity="input", net_base=b.wire, slice=slc, prefix="", full=lhs,
+                found_in=b.found_in or "", self_ref_suffixes=[],
+                is_mux=bool(is_mux), top_output=False))
+        elif b.kind == "RW":
+            if ("rfwrite", b.base, b.address) in seen:
+                continue
+            seen.add(("rfwrite", b.base, b.address))
+            claims.append(_claim(
+                signal=obj.out_name, aid=obj.assert_id or "", kind="rfwrite",
+                identity="input", net_base=b.base, slice="", prefix="", full=b.base,
+                found_in=b.found_in or "", addr=("0x%X" % b.address) if b.address is not None else None,
+                self_ref_suffixes=[], is_mux=bool(is_mux), top_output=False))
+    return claims
 
 
 def _name_matches(sig, names):
@@ -872,6 +1032,8 @@ def _build_core(wb, opts):
     mux_warnings = []   # 照常生成但有提示的 mux 组（如 top_out=0 用裸名探针，可能要前缀）
     regmap_warnings = [] # 用到 regmap 同名重复字段的信号（已按首个采纳，块顶 ⚠ + 这里汇总）
     supplement_warnings = []  # 用了「RTL 补充逻辑」(Excel 缺失、手工补)的信号——块顶 ⚠ + 汇总，偏离纯 Excel 推导必显式
+    selfaudit_warnings = []  # 生成期"自检闸门"命中(假绿可疑)：探针读回自身输入/K列漏标位宽/RW写值截断——块顶 ⚠ + 汇总
+    claims = []  # 探针/force 网名声明清单(红区 scan_rtl 校验器输入契约，--export-claims 导出)
     cone_fallbacks = [] # cone 成环 → 回退 force 基名的信号（for_test 那招），可见性用
     n_total_vectors = 0
     n_total_neg = 0
@@ -1014,8 +1176,18 @@ def _build_core(wb, opts):
             _smsg = _supplement_warning(sig)
             lines = ["// ⚠ %s" % _smsg] + lines
             supplement_warnings.append((sig.out_name, sig.assert_id, _smsg))
+        # 生成期自检闸门(logic)：探针读回自身输入(检查1) / K列漏标位宽(检查2) / RW写值截断(检查3)。
+        # 检查1 在 _pick_ref_suffix 修复后正常恒 0(纵深防御)；检查2/3 命中真实潜伏 bug → 块顶 ⚠。
+        _sa_env = E.Env({ltr: b.width for ltr, b in bindings.items() if b is not None})
+        for _samsg in (_selfaudit_probe_self_ref(sig),
+                       _selfaudit_output_width(sig, node, _sa_env),
+                       _selfaudit_rw_truncation(bindings)):
+            if _samsg:
+                lines = ["// ⚠ %s" % _samsg] + lines
+                selfaudit_warnings.append((sig.out_name, sig.assert_id, _samsg))
         stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
+        claims.extend(collect_claims(sig, bindings, probe_prefix_for(sig, opts), False))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
         n_total_designer += stats.get("n_designer", 0)
@@ -1184,9 +1356,17 @@ def _build_core(wb, opts):
         if _rmdup:
             lines = ["// ⚠ %s" % _rmdup] + lines
             regmap_warnings.append((grp.out_name, grp.assert_id, _rmdup))
+        # 生成期自检闸门(mux)：探针读回自身输入(检查1) / RW写值截断(检查3)。检查2(输出位宽)mux 不走
+        # expr 求值，G 列漏标位宽的同类风险留待后续(需比 G 列宽 vs 各 case 数据宽)，本轮 logic 先做。
+        for _samsg in (_selfaudit_probe_self_ref(grp),
+                       _selfaudit_rw_truncation(exp["bindings"])):
+            if _samsg:
+                lines = ["// ⚠ %s" % _samsg] + lines
+                selfaudit_warnings.append((grp.out_name, grp.assert_id, _samsg))
         stats["is_mux"] = True
         stats["scan_path"] = meta.get("scan_path")
         blocks.append((lines, stats))
+        claims.extend(collect_claims(grp, exp["bindings"], probe_prefix_for(grp, opts), True))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
         n_total_designer += stats.get("n_designer", 0)
@@ -1214,6 +1394,7 @@ def _build_core(wb, opts):
         "n_mux_warnings": len(mux_warnings),
         "n_regmap_warnings": len(regmap_warnings),
         "n_supplement": len(supplement_warnings),
+        "n_selfaudit_warnings": len(selfaudit_warnings),
         # 默认静默过滤掉的 logic 内部节点（top_output=0）——拎出来给可见性
         "n_filtered_internal": len(filtered_internal),
     }
@@ -1221,6 +1402,8 @@ def _build_core(wb, opts):
             "skipped": skipped, "spec_conflicts": spec_conflicts,
             "mux_warnings": mux_warnings, "regmap_warnings": regmap_warnings,
             "supplement_warnings": supplement_warnings,
+            "selfaudit_warnings": selfaudit_warnings,
+            "claims": claims,
             "cone_fallbacks": cone_fallbacks,
             "filtered_internal": filtered_internal,
             "dup_labels": dup_labels, "summary": summary,
