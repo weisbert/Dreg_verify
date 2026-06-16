@@ -35,6 +35,24 @@ MAX_DEPTH = 8
 EXPANDABLE = ("logic-internal", "logic-computed")
 
 
+def _is_mux_out_binding(b, resolver):
+    """该输入是否是某 mux 组的输出——【即便用户给那根衔接网配了探针前缀】也认得出。
+
+    背景(2026-06-16 d_wl_rf_lo2g5g_lcbufc0_bias_en 实证)：resolver 给 mux 输出标 found_in=
+    'mux-output'(resolver.py:348)，但若用户为该衔接网【配了探针前缀】，resolver 会把它重标成
+    'prefixed-wire'(resolver.py:364)。R38 跨边界展开只认 found_in=='mux-output' → 【配了前缀就
+    停止展开】=bug：cone 模式本就要把 mux 展成源寄存器、前缀反而多余(展开后根本不 force 那根网)。
+    故识别 mux 输出要回看 base 是否真是 mux 组输出，不能只认 found_in。
+    """
+    if b is None or not getattr(b, "base", None):
+        return False
+    if b.found_in == "mux-output":
+        return True
+    if b.found_in == "prefixed-wire" and resolver is not None:
+        return str(b.base).lower() in getattr(resolver, "_mux_outputs", {})
+    return False
+
+
 def find_internal_inputs(node, bindings, resolver=None):
     """返回表达式里"可展开输入"的变量字母列表。空 = 不需要 cone 展开。
 
@@ -48,7 +66,7 @@ def find_internal_inputs(node, bindings, resolver=None):
         b = bindings.get(ltr)
         if b is None:
             continue
-        if b.found_in in EXPANDABLE or (expand_mux and b.found_in == "mux-output"):
+        if b.found_in in EXPANDABLE or (expand_mux and _is_mux_out_binding(b, resolver)):
             out.append(ltr)
     return out
 
@@ -111,7 +129,7 @@ def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
                 mapping[letter] = E.Part(child_node, b.slice_msb, b.slice_lsb)
             else:
                 mapping[letter] = child_node
-        elif (b.found_in == "mux-output"
+        elif (_is_mux_out_binding(b, resolver)
               and getattr(resolver, "cascade_mode", "cone") == "cone"
               and _mux_expandable_at(wb, b.base)):
             # ⭐ 跨 logic↔mux 边界(2026-06-15 R38)：输入是某 mux 组的输出 → 不再 force 衔接网，而是把该

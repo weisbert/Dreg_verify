@@ -86,6 +86,26 @@ def test_force_mode_falls_back_to_connecting_net():
     assert not any("logen_lobuf_en_ctrl_mode" in n for n in labels)  # 不展开 → 无选择/数据叶子
 
 
+def test_configured_probe_prefix_does_not_suppress_expansion():
+    """⭐回归(2026-06-16 d_wl_rf_lo2g5g_lcbufc0_bias_en 实证)：给 mux 输出衔接网【配了探针前缀】
+    不该让 cone 停止展开。配前缀 → resolver 把 found_in 从 'mux-output' 重标成 'prefixed-wire'
+    (resolver.py:364)，cone 若只认 'mux-output' 就不展开了——用户实况正是：诊断脚本【无前缀】出 6、
+    GUI【有前缀】出 4。修后 cone 认 base 是不是 mux 组输出(_is_mux_out_binding)，配不配前缀都照常
+    展开成源寄存器(展开后根本不 force 那根网，前缀变多余)。前缀 key 用衔接网名或基名都要命中。"""
+    for key in ("d_wl_rf_logen_mixer_en_to_logic", "d_wl_rf_logen_mixer_en"):
+        opts = generator.GenOptions(probe_prefixes={key: "ENV_RF.U_SUB.U_DREG"})
+        t, labels = _inputs(opts, "d_wl_rf_lo2g5g_bias_en")
+        assert len(t["inputs"]) == 6, (key, labels)                       # 配前缀仍展开成 6
+        assert any("logen_lobuf_en_ctrl_mode" in n for n in labels), (key, labels)
+        assert not any("logen_mixer_en_to_logic" in n for n in labels), (key, labels)
+    # force 模式 + 配前缀：仍不展开、B 保留衔接网(前缀本就给 force 用)——配前缀不改 force 行为
+    t2, labels2 = _inputs(
+        generator.GenOptions(cascade_mode="force",
+                             probe_prefixes={"d_wl_rf_logen_mixer_en_to_logic": "ENV_RF.U_SUB.U_DREG"}),
+        "d_wl_rf_lo2g5g_bias_en")
+    assert len(t2["inputs"]) == 4 and "d_wl_rf_logen_mixer_en" in labels2
+
+
 def test_exhaustive_deep_chain_no_explosion():
     """深链穷举档：自由变量多但 max_tests 硬封顶，不爆、不 OOM。"""
     wb = excel_model.load_workbook(MIRROR)

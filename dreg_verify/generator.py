@@ -752,9 +752,10 @@ def expand_signal(wb, resolver, sig, chain_out=None, fallback_notes=None):
                     del chain_out[:]      # cone 半途成环可能已写入残缺展开链 → 回退非 cone，清掉
                 return node, fb, False
             # mux 跨界展开失败(环/超深，R38) → 回退非展开：mux 输出当叶子 force 衔接网(=force 模式/今天)，
-            # 不让整信号崩。仅当确有 mux-output 内部输入时走这条；否则维持原 raise(纯 logic 兜不住)。
-            if any(bindings.get(l) is not None and bindings[l].found_in == "mux-output"
-                   for l in internal):
+            # 不让整信号崩。仅当确有 mux 输出内部输入时走这条；否则维持原 raise(纯 logic 兜不住)。
+            # 用 _is_mux_out_binding：配了探针前缀的 mux 输出 found_in 是 'prefixed-wire' 而非 'mux-output'，
+            # 也要算进来（否则配前缀的 mux 输出 cone 失败时不回退、直接崩）。
+            if any(cone._is_mux_out_binding(bindings.get(l), resolver) for l in internal):
                 if chain_out is not None:
                     del chain_out[:]
                 if fallback_notes is not None:
