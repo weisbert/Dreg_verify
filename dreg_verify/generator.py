@@ -28,7 +28,7 @@ class GenOptions:
                  mux_dropped=None, mux_cleared=None, mux_user_vecs=None,
                  suffix_override=None, append_to_mux=False,
                  logic_cascade=None, mux_cascade=None, sig_cascade=None,
-                 logic_overrides=None):
+                 logic_overrides=None, on_missing=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -106,6 +106,11 @@ class GenOptions:
         #   空=只跟类型默认(老调用方逐字节不变)。
         self.suffix_override = {str(k).strip().lower(): bool(v)
                                 for k, v in (suffix_override or {}).items()}
+        # 红区 binder「配了前缀但真名不存在」时的处置策略(甲/乙)，per-signal（goal-redzone-binder M0）：
+        #   {信号名/基名(小写): "warn"(甲,默认,只警告不擅改) / "fallback"(乙,binder 退到真名跑通)}。
+        #   不在表=warn。纯随 claims.json 进红区给 binder 用，不碰 .sv（默认逐字节不变）。
+        self.on_missing = {str(k).strip().lower(): v for k, v in (on_missing or {}).items()
+                           if v in ("warn", "fallback")}
         # 覆盖档位 logic/mux 解耦（第二十二轮，用户拍板互不绑定）：logic_mode/mux_mode ∈
         # {min,max,exhaustive}。未显式传(=None)则该侧回退到 (mode, exhaustive) 合成的档位——
         # 所有旧调用方(CLI/GUI/436 测试)不传新参时产物逐字节不变。读取统一走
@@ -404,8 +409,11 @@ def _selfaudit_rw_truncation(bindings):
 #   addr          — rfwrite 的寄存器地址(其余 None)
 #   self_ref_suffixes — 该信号自读后缀(校验器交叉核对自引用，应为空)
 #   is_mux/top_output — 来自 mux 页 / 是否芯片顶层输出
+#   on_missing    — 配了前缀但真名不存在时的策略：warn(甲,默认,只警告不擅改) / fallback(乙,binder 退到真名)
+#   input_nets    — 该信号期望输入网基名清单(红区 binder 拿 assign 的 RHS 做指纹、定哪条 assign 才是它)
 _CLAIM_KEYS = ("signal", "aid", "kind", "identity", "net_base", "slice", "prefix",
-               "full", "found_in", "addr", "self_ref_suffixes", "is_mux", "top_output")
+               "full", "found_in", "addr", "self_ref_suffixes", "is_mux", "top_output",
+               "on_missing", "input_nets")
 
 
 def _probe_provenance(obj):
@@ -424,11 +432,14 @@ def _claim(**kw):
     return c
 
 
-def collect_claims(obj, bindings, prefix, is_mux):
+def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn"):
     """为一个已生成的 logic 信号 / mux 组导出网名声明(探针 + force/rfwrite 输入)。
 
     探针网名取 rtl_base/rtl_name(=.sv 里 assert 的真名，已含尾缀/开关/_ls/前缀逻辑)；输入网取 resolver
-    解析出的 b.wire(RO) 或 b.base+addr(RW)。同信号内按网名去重。纯导出、不改产物。"""
+    解析出的 b.wire(RO) 或 b.base+addr(RW)。同信号内按网名去重。纯导出、不改产物。
+
+    on_missing(甲warn/乙fallback) 与 input_nets(期望输入网基名清单,= 各输入绑定的 b.wire/b.base)
+    挂在探针 claim 上，供红区 binder：前者定配错网的处置策略、后者拿 assign 的 RHS 做指纹。"""
     claims = []
     base = getattr(obj, "rtl_base", obj.out_base)
     name = getattr(obj, "rtl_name", obj.out_name)
@@ -439,12 +450,15 @@ def collect_claims(obj, bindings, prefix, is_mux):
         net_base=base, slice=slc, prefix=prefix or "", full=full,
         found_in=_probe_provenance(obj),
         self_ref_suffixes=sorted(getattr(obj, "_self_ref_suffixes", ())),
-        is_mux=bool(is_mux), top_output=bool(getattr(obj, "is_top", False))))
+        is_mux=bool(is_mux), top_output=bool(getattr(obj, "is_top", False)),
+        on_missing=on_missing if on_missing in ("warn", "fallback") else "warn"))
     seen = set()
+    in_nets = set()
     for _ltr, b in (bindings or {}).items():
         if b is None or not getattr(b, "resolved", False):
             continue
         if b.kind == "RO":
+            in_nets.add(b.wire)
             # full = .sv 里真正 force 的 LHS(= b.wire_lhs，多位带 [msb:lsb] 切片)，与探针 claim 同口径
             # (探针 full 也含切片)；按 lhs 去重 → 同网不同切片(x[3:1] 与 x[0])算两条 force、不误并。
             lhs = b.wire_lhs
@@ -458,6 +472,7 @@ def collect_claims(obj, bindings, prefix, is_mux):
                 found_in=b.found_in or "", self_ref_suffixes=[],
                 is_mux=bool(is_mux), top_output=False))
         elif b.kind == "RW":
+            in_nets.add(b.base)
             if ("rfwrite", b.base, b.address) in seen:
                 continue
             seen.add(("rfwrite", b.base, b.address))
@@ -466,7 +481,18 @@ def collect_claims(obj, bindings, prefix, is_mux):
                 identity="input", net_base=b.base, slice="", prefix="", full=b.base,
                 found_in=b.found_in or "", addr=("0x%X" % b.address) if b.address is not None else None,
                 self_ref_suffixes=[], is_mux=bool(is_mux), top_output=False))
+    claims[0]["input_nets"] = sorted(n for n in in_nets if n)
     return claims
+
+
+def _on_missing_for(obj, opts):
+    """该信号「配了前缀但真名不存在」的策略(甲warn/乙fallback)——按全名/基名查 opts.on_missing，缺省 warn。"""
+    om = getattr(opts, "on_missing", None) or {}
+    for k in (getattr(obj, "out_name", ""), getattr(obj, "out_base", "")):
+        v = om.get(str(k).lower())
+        if v in ("warn", "fallback"):
+            return v
+    return "warn"
 
 
 def _name_matches(sig, names):
@@ -1187,7 +1213,8 @@ def _build_core(wb, opts):
                 selfaudit_warnings.append((sig.out_name, sig.assert_id, _samsg))
         stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
-        claims.extend(collect_claims(sig, bindings, probe_prefix_for(sig, opts), False))
+        claims.extend(collect_claims(sig, bindings, probe_prefix_for(sig, opts), False,
+                                     _on_missing_for(sig, opts)))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
         n_total_designer += stats.get("n_designer", 0)
@@ -1366,7 +1393,8 @@ def _build_core(wb, opts):
         stats["is_mux"] = True
         stats["scan_path"] = meta.get("scan_path")
         blocks.append((lines, stats))
-        claims.extend(collect_claims(grp, exp["bindings"], probe_prefix_for(grp, opts), True))
+        claims.extend(collect_claims(grp, exp["bindings"], probe_prefix_for(grp, opts), True,
+                                     _on_missing_for(grp, opts)))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
         n_total_designer += stats.get("n_designer", 0)

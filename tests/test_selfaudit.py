@@ -251,3 +251,35 @@ def test_export_claims_writes_json(tmp_path):
     assert data["n_claims"] == len(res["claims"])
     assert data["schema"] == list(G._CLAIM_KEYS)
     assert any(c["kind"] == "probe" for c in data["claims"])
+
+
+# ── M0(goal-redzone-binder)：claims 补 input_nets + on_missing 两字段 ──
+def _sel_wb():
+    sig = _logic("d_sel[3:0]", "A", {"A": {"raw": "a_in[3:0]", "base": "a_in", "width": 4,
+                                           "msb": 3, "lsb": 0}}, out_width=4, top_output=1)
+    return DregWorkbook(logic=[sig], regmap={}, tmm={}, sheet_names=[])
+
+
+def test_probe_claim_carries_input_nets():
+    """探针 claim 的 input_nets = 该信号各输入绑定的网基名(红区 binder 拿 assign RHS 做指纹用)；
+    非探针 claim 不挂(None)。"""
+    res = G.build(_sel_wb(), G.GenOptions(include_risky=True))
+    probe = next(c for c in res["claims"] if c["kind"] == "probe")
+    assert "a_in" in (probe["input_nets"] or [])
+    for c in res["claims"]:
+        if c["kind"] != "probe":
+            assert c["input_nets"] is None
+
+
+def test_on_missing_defaults_warn_and_per_signal_override():
+    """on_missing 挂在探针 claim：缺省 warn(甲)；GenOptions.on_missing 单点可设 fallback(乙)。"""
+    p0 = next(c for c in G.build(_sel_wb(), G.GenOptions(include_risky=True))["claims"]
+              if c["kind"] == "probe")
+    assert p0["on_missing"] == "warn"
+    res = G.build(_sel_wb(), G.GenOptions(include_risky=True, on_missing={"d_sel": "fallback"}))
+    p1 = next(c for c in res["claims"] if c["kind"] == "probe")
+    assert p1["on_missing"] == "fallback"
+    # 非法值被规整回 warn，不污染契约
+    res2 = G.build(_sel_wb(), G.GenOptions(include_risky=True, on_missing={"d_sel": "bogus"}))
+    p2 = next(c for c in res2["claims"] if c["kind"] == "probe")
+    assert p2["on_missing"] == "warn"
