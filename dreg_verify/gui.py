@@ -537,7 +537,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b_nets = QtWidgets.QPushButton("导出 nets.txt…")
         b_nets.setToolTip("把当前表需要在 ENV_RF 层级定位的网清单导出为 nets.txt，传到仿真服务器跑\n"
                           "scan_rtl.py 扫 RTL → 得到 probe_prefixes.txt → 回来用『设置探针前缀 → 导入…』套用。\n"
-                          "（等价于 CLI：python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt）")
+                          "（等价于 CLI：python redzone_tools/scan_rtl.py --excel 真表.xlsx --export-nets nets.txt）")
         b_nets.clicked.connect(self.on_export_nets)
         b_force = QtWidgets.QPushButton("强制 force 信号")
         b_force.setToolTip("列出要『直接 force 顶层基名网、跳过 cone 展开』的信号基名(每行一个)。\n"
@@ -1973,7 +1973,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self, "已导出 nets.txt",
             "共 %d 个网已写出（logic %d · mux %d · dft %d，去重并集）：\n%s\n\n"
             "下一步（跨机器两段式）：\n"
-            "  ① 把 scan_rtl.py + 这个 nets.txt 一起传到仿真服务器\n"
+            "  ① 把 redzone_tools/ 里的 scan_rtl.py + 这个 nets.txt 一起传到仿真服务器\n"
             "  ② source dreg 环境后跑：python3 scan_rtl.py\n"
             "  ③ 把生成的 probe_prefixes.txt 拷回 → 『设置探针前缀 → 导入…』套用"
             % (len(nets), n_logic, len(mux_nets), len(dft_nets), path))

@@ -114,16 +114,18 @@ python -m dreg_verify.gui
 elaboration 失败；**点信号**看它 force/RF_WRITE 哪些 net 的明细（对比 `ENV_RF` 层是否真有该 net）；
 **覆盖诊断**按钮列出所有 wire兜底/未解析输入；**状态筛选**可只看有问题的信号，用来二分定位"跑不出结果"。
 
-## RTL 层级扫描与探针前缀（`scan_rtl.py`）
+## RTL 层级扫描与探针前缀（`redzone_tools/scan_rtl.py`）
+
+> 要传到红区/仿真服务器的单文件零依赖脚本都在 **`redzone_tools/`** 文件夹（见该夹 `README.md`）。
 
 `.sv` 里 force / assert 的网如果不在 DUT 顶层，必须带层级前缀（如 `` `ENV_RF.U_BT_LP_PLL_DIG.pll_n ``），
-否则仿真报 **CUVUNF（找不到 net）**。`scan_rtl.py`（单文件零依赖，可直接拷到仿真服务器）
+否则仿真报 **CUVUNF（找不到 net）**。`redzone_tools/scan_rtl.py`（单文件零依赖，可直接拷到仿真服务器）
 静态扫描 RTL，把 Excel 里每个信号的层级**一次找全**，不再"仿真→报错→grep→重生成"逐个试错：
 
 ```bat
 :: ① Windows: 从 Excel 导出需要定位的网
-python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
-:: ② 把 scan_rtl.py + nets.txt 上传仿真服务器
+python redzone_tools/scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
+:: ② 把 redzone_tools/scan_rtl.py + nets.txt 上传仿真服务器
 :: ③ 服务器(source 过 dreg 环境后)零参数全自动:
 ::      python3 scan_rtl.py
 :: ④ 生成的 probe_prefixes.txt 拷回 Windows:
@@ -225,11 +227,13 @@ dreg_verify/            生成器后端（CLI 与 GUI 共用）
   mux_gen.py            mux 测试生成：控制路径发现/互异值/覆盖度三档
   sv_writer.py          渲染 .sv（含同地址 RW 合并、负向标记、汇总块）
   generator.py          编排 + 筛选 + 报告（build/report 双轨）
-  rtl_scan.py           Excel→需定位网清单（scan_rtl.py 的 Excel 侧配套）
+  rtl_scan.py           Excel→需定位网清单（redzone_tools/scan_rtl.py 的 Excel 侧配套）
   cli.py                命令行入口
   gui.py                PySide6 图形界面（筛选/测试项编辑/探针前缀/预览/导出）
 
-scan_rtl.py             RTL 层级扫描 → 探针前缀映射（单文件零依赖，可拷到仿真服务器）
+redzone_tools/          要传红区/仿真服务器的单文件零依赖脚本（见该夹 README.md）
+  scan_rtl.py             RTL 层级扫描 → 探针前缀映射
+  diag_rtl_binding.py     红区只读诊断：探针是真输出还是探到了自己输入(假绿)
 inspect_excel.py        Excel 结构导出 + 表达式形态覆盖报告(--expr-forms)
 inspect_mux.py          mux 页排版探查（新设计首次做 mux 验证前跑）
 inspect_vba.py          .xlsm 的 VBA 宏源码抽取

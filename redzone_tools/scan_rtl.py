@@ -254,7 +254,8 @@ def render_prefix_file(prefixes, at_top, missing, top_module=""):
 # ───────────────────────────── CLI ─────────────────────────────
 def _load_excel_nets(excel_path):
     """从 Excel 抽取需要定位的网（需要 dreg_verify 包 + openpyxl，只在 Windows 工具机用）。"""
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    # 本脚本在 redzone_tools/ 下 → 仓库根(含 dreg_verify 包)是上一级
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
         from dreg_verify import excel_model, rtl_scan
     except ImportError as ex:

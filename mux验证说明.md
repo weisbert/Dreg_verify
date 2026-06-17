@@ -177,8 +177,8 @@ WL 的 mux 输出**全部 top_out=0**。`top_out`（I 列）= 是不是**芯片�
 
 ```bat
 :: ① 从 Excel 导出需要定位的网（含 mux 输出 / 线控网 / 级联衔接网）
-python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
-:: ② 上传 scan_rtl.py + nets.txt 到仿真服务器，source dreg 环境后零参数扫描
+python redzone_tools/scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
+:: ② 上传 redzone_tools/scan_rtl.py + nets.txt 到仿真服务器，source dreg 环境后零参数扫描
 ::      python3 scan_rtl.py
 :: ③ probe_prefixes.txt 拷回，导入工具：
 ::      GUI「设置探针前缀 → 导入…」 或 CLI --probe-prefix-file probe_prefixes.txt

@@ -23,7 +23,7 @@ mux 页的测试要在 RTL 上碰三类网。designer 的 .sv 证明它们在他
 
 ```bat
 git pull
-python scan_rtl.py --excel "Hi1108_Pilot_BT_LP_DREG_95P_28May.xlsx" --export-nets nets.txt
+python redzone_tools/scan_rtl.py --excel "Hi1108_Pilot_BT_LP_DREG_95P_28May.xlsx" --export-nets nets.txt
 ```
 
 ✅ 确认控制台出现这一行（没有这行 = mux 页没读到，停下来反馈）：

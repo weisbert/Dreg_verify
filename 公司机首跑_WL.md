@@ -88,8 +88,8 @@ python -m dreg_verify.cli --excel "Hi1108V100_WL_RFTRX_C0C1_DREG_to_dig_95P.xlsx
 - **报 CUVUNF（找不到 net）** → 说明那个输出/输入确实埋在子模块里。这时才需要 scan_rtl：
   ```bat
   :: ① 本机导出要定位的网
-  python scan_rtl.py --excel "…95P.xlsx" --export-nets nets.txt
-  :: ② nets.txt + scan_rtl.py 传到仿真服务器，source dreg 环境后：
+  python redzone_tools/scan_rtl.py --excel "…95P.xlsx" --export-nets nets.txt
+  :: ② nets.txt + redzone_tools/scan_rtl.py 传到仿真服务器，source dreg 环境后：
   python3 scan_rtl.py
   :: ③ 把生成的 probe_prefixes.txt 拷回本机，重新生成：
   python -m dreg_verify.cli --excel "…95P.xlsx" --probe-prefix-file probe_prefixes.txt --out wr_rf_tc.sv

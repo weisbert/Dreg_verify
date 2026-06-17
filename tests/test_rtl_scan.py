@@ -346,7 +346,8 @@ def test_collect_mux_nets_wl(tmp_path):
 def test_scan_rtl_is_stdlib_only():
     """scan_rtl.py 必须保持零第三方依赖（要能直接拷到无 openpyxl 的服务器上跑）。"""
     import ast
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scan_rtl.py")
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "redzone_tools", "scan_rtl.py")
     with open(path, "r", encoding="utf-8") as f:
         tree = ast.parse(f.read())
     # 顶层 import 只允许标准库

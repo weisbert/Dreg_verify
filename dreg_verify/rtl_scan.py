@@ -2,7 +2,7 @@
 """
 rtl_scan.py — Excel 侧的 RTL 扫描配套：把 Excel 信号转换成"需要在 ENV_RF 层级存在的网"清单。
 
-RTL 解析的全部实现在仓库根目录的 scan_rtl.py（单文件、零第三方依赖，可直接拷到仿真服务器）。
+RTL 解析的全部实现在 redzone_tools/scan_rtl.py（单文件、零第三方依赖，可直接拷到仿真服务器/红区）。
 本模块复用其实现，并补充需要 dreg_verify/openpyxl 的部分：
     collect_excel_nets(wb)  Excel → {网名: 用途}
     match_excel(wb, sigmap) 对照 Excel 与 RTL 层级
@@ -14,8 +14,8 @@ import os
 import re
 import sys
 
-# 仓库根目录加入 path，导入单文件版 scan_rtl 的解析实现
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# redzone_tools/ 加入 path，导入单文件版 scan_rtl 的解析实现（红区脚本已独立成该文件夹）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "redzone_tools"))
 from scan_rtl import (KEYWORDS, build_signal_map, find_verilog_files,            # noqa: F401,E402
                       match_nets, parse_modules, parse_nets_text,
                       render_nets_text, render_prefix_file, scan_files,

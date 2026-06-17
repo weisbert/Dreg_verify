@@ -38,7 +38,7 @@ elaboration 直接失败。
 ### ① Windows 工具机：从 Excel 导出"需要定位的网"清单
 
 ```bat
-python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
+python redzone_tools/scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
 ```
 
 nets.txt = 所有输出的探针网 + 所有 force 输入网（**两种级联模式的并集**，之后切模式不用重扫）
@@ -82,7 +82,7 @@ python3 scan_rtl.py --nets nets.txt \
 ## 四、单机工作流（Excel 和 RTL 在同一台机器）
 
 ```bat
-python scan_rtl.py --excel 真表.xlsx --top lpbt_dig_top.v --rtl-dirs rtl目录 --out probe_prefixes.txt
+python redzone_tools/scan_rtl.py --excel 真表.xlsx --top lpbt_dig_top.v --rtl-dirs rtl目录 --out probe_prefixes.txt
 ```
 
 一步到位（= 两段式的 ① 和 ③ 合并，需要本机有 openpyxl）。
