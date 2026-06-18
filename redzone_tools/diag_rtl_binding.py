@@ -170,6 +170,7 @@ def diagnose(claim, ctx):
     in_nets = {n.lower() for n in (claim.get("input_nets") or [])}
     r = {"signal": claim.get("signal"), "probe_net": claim.get("net_base"),
          "prefix": prefix, "on_missing": claim.get("on_missing") or "warn",
+         "input_nets": list(claim.get("input_nets") or []),
          "exists": None, "location": None, "prefix_check": None,
          "verdict": "unknown", "evidence": "", "real_output": None,
          "candidates": []}
@@ -257,6 +258,28 @@ def diagnose_claims(claims, ctx):
     return [diagnose(c, ctx) for c in claims if c.get("kind") == "probe"]
 
 
+def find_driving_assigns(net, ctx):
+    """返回 LHS 基名【精确等于】net 基名的 assign 原文，保 RTL 出现顺序。
+
+    职责 = 回答『这根真网凭什么是输出』：把驱动它的 assign 整条原文摆出来，
+    让用户在 GUI 详情面板逐条肉眼核对（这是把"我不懂"变成"哦原来如此"的核心证据）。
+
+    返回 [{"lhs_raw": str, "rhs_raw": str}, ...]；net 不命中任何 LHS → []。
+
+    ⚠ 必须【精确相等】匹配基名，绝不用 startswith——实证 startswith('d_x') 会误捞
+       d_xy_to_logic。GUI 永远对 real_output/candidate 这类【真网名】调它（不对裸名调），
+       故精确匹配既正确又完整。纯函数、零副作用、不依赖 tk。
+    """
+    tb = _sig_base(net)
+    if not tb:
+        return []
+    out = []
+    for a in ctx.get("assigns", []):
+        if tb in [b.lower() for b in a["lhs_bases"]]:
+            out.append({"lhs_raw": a["lhs_raw"], "rhs_raw": a["rhs_raw"]})
+    return out
+
+
 # ───────────────────────────── 报告 ─────────────────────────────
 _MARK = {"output": "✓ OUTPUT", "input-suspect": "⚠ INPUT-suspect(假绿嫌疑)", "unknown": "? UNKNOWN"}
 
@@ -302,6 +325,57 @@ def format_report(results, only=None):
     return "\n".join(lines)
 
 
+# ───────────────────────────── 共享加载流水线（CLI 与 GUI 单一真相来源）─────────────────────────────
+def load_results(args, log=print):
+    """读 claims + 扫 RTL + 诊断的完整流水线，返回 (ctx, results, meta)。
+
+    CLI 与 GUI 复用同一份加载逻辑，避免漂移。三处进度打印走 log 回调：
+    CLI 传 log=print（标准输出逐字节不变）；GUI 传一个收进状态栏/或忽略的回调。
+    （scan_rtl._infer_from_dreg_env 内部 print 不属本边界、仍直接打印——它本就在加载序中那个位置打。）
+
+    meta = {claims_name, n_probes, n_files, top_module, n_nets, n_assigns}（仅供 GUI 显示，CLI 不消费）。
+    """
+    if scan_rtl is None:
+        sys.exit("⛔ 需要同目录的 scan_rtl.py（复用其 RTL 解析）")
+    with open(args.claims, "r", encoding="utf-8-sig") as f:   # 容 BOM（Windows 编辑/传输可能带）
+        data = json.load(f)
+    claims = data.get("claims", data if isinstance(data, list) else [])
+    probes = [c for c in claims if c.get("kind") == "probe"]
+    log("claims: %s（%d 探针）" % (os.path.basename(args.claims), len(probes)))
+
+    scan_rtl._infer_from_dreg_env(args)
+    if not args.top or not args.rtl_dirs:
+        sys.exit("⛔ 缺 --top / --rtl-dirs（先 source dreg 环境，或手动指定）")
+    dirs = [d.strip() for d in args.rtl_dirs.split(",") if d.strip()]
+    files = scan_rtl.find_verilog_files(dirs)
+    if args.top not in files:
+        files.append(args.top)
+    log("RTL 文件: %d 个" % len(files))
+
+    texts = []
+    for p in files:
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                texts.append(f.read())
+        except OSError:
+            pass
+    modules = scan_rtl.scan_files(files)
+    top_module = scan_rtl.resolve_top_module(
+        args.top_module or (list(scan_rtl.parse_modules(texts[-1]))[0] if texts else ""),
+        modules, args.top)
+    sigmap = scan_rtl.build_signal_map(modules, top_module, max_depth=args.max_depth)
+    n_assigns = sum(len(parse_assigns(t)) for t in texts)
+    log("DUT 顶层: %s  RTL 网总数: %d  assign 语句: %d\n"
+        % (top_module, len(sigmap), n_assigns))
+
+    ctx = build_context(texts, sigmap=sigmap)
+    results = diagnose_claims(probes, ctx)
+    meta = {"claims_name": os.path.basename(args.claims), "n_probes": len(probes),
+            "n_files": len(files), "top_module": top_module,
+            "n_nets": len(sigmap), "n_assigns": n_assigns}
+    return ctx, results, meta
+
+
 # ───────────────────────────── CLI ─────────────────────────────
 def main():
     ap = argparse.ArgumentParser(
@@ -318,45 +392,13 @@ def main():
     ap.add_argument("--excel", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
-    if scan_rtl is None:
-        sys.exit("⛔ 需要同目录的 scan_rtl.py（复用其 RTL 解析）")
-    with open(args.claims, "r", encoding="utf-8-sig") as f:   # 容 BOM（Windows 编辑/传输可能带）
-        data = json.load(f)
-    claims = data.get("claims", data if isinstance(data, list) else [])
-    probes = [c for c in claims if c.get("kind") == "probe"]
-    print("claims: %s（%d 探针）" % (os.path.basename(args.claims), len(probes)))
-
-    scan_rtl._infer_from_dreg_env(args)
-    if not args.top or not args.rtl_dirs:
-        sys.exit("⛔ 缺 --top / --rtl-dirs（先 source dreg 环境，或手动指定）")
-    dirs = [d.strip() for d in args.rtl_dirs.split(",") if d.strip()]
-    files = scan_rtl.find_verilog_files(dirs)
-    if args.top not in files:
-        files.append(args.top)
-    print("RTL 文件: %d 个" % len(files))
-
-    texts = []
-    for p in files:
-        try:
-            with open(p, "r", encoding="utf-8", errors="replace") as f:
-                texts.append(f.read())
-        except OSError:
-            pass
-    modules = scan_rtl.scan_files(files)
-    top_module = scan_rtl.resolve_top_module(
-        args.top_module or (list(scan_rtl.parse_modules(texts[-1]))[0] if texts else ""),
-        modules, args.top)
-    sigmap = scan_rtl.build_signal_map(modules, top_module, max_depth=args.max_depth)
-    print("DUT 顶层: %s  RTL 网总数: %d  assign 语句: %d\n"
-          % (top_module, len(sigmap), sum(len(parse_assigns(t)) for t in texts)))
-
-    ctx = build_context(texts, sigmap=sigmap)
+    ctx, results, meta = load_results(args, log=print)
     only = None
     if args.only:
         _m = {"suspect": "input-suspect", "input-suspect": "input-suspect",
               "unknown": "unknown", "output": "output"}
         only = {_m.get(x.strip().lower()) for x in args.only.split(",")} - {None}
-    report = format_report(diagnose_claims(probes, ctx), only=only)
+    report = format_report(results, only=only)
     print(report)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:

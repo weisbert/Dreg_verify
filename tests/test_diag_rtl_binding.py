@@ -5,6 +5,7 @@
 headline = 探针落在本信号 assign 的右边(=探到自己输入)=假绿嫌疑，要被揪出并给真输出建议。
 """
 
+import ast
 import os
 import sys
 
@@ -151,3 +152,140 @@ def test_report_only_filter_hides_output_detail():
     filt = D.format_report(results, only={"input-suspect", "unknown"})
     assert "──── ✓ OUTPUT" in full and "──── ✓ OUTPUT" not in filt
     assert "✓OUTPUT 1" in filt    # 摘要计数仍含全部
+
+
+# ───────────── find_driving_assigns（M2 新增纯函数）─────────────
+def test_find_driving_assigns_hit():
+    ctx = _ctx("assign d_x_to_mux = sel ? a : b;")
+    drivers = D.find_driving_assigns("d_x_to_mux", ctx)
+    assert len(drivers) == 1
+    assert "d_x_to_mux" in drivers[0]["lhs_raw"]
+    assert "sel ? a : b" in drivers[0]["rhs_raw"]
+
+
+def test_find_driving_assigns_with_bit_select():
+    """带位选 d_x_to_mux[3:0] 按基名仍命中。"""
+    ctx = _ctx("assign d_x_to_mux = sel ? a : b;")
+    drivers = D.find_driving_assigns("d_x_to_mux[3:0]", ctx)
+    assert len(drivers) == 1 and "d_x_to_mux" in drivers[0]["lhs_raw"]
+
+
+def test_find_driving_assigns_not_present():
+    ctx = _ctx("assign d_x_to_mux = sel ? a : b;")
+    assert D.find_driving_assigns("d_nope", ctx) == []
+
+
+def test_find_driving_assigns_concat_lhs():
+    """concat LHS：assign {d_x_to_mux, d_y_to_mux}=... 时按基名命中该条。"""
+    ctx = _ctx("assign {d_x_to_mux, d_y_to_mux} = data;")
+    dy = D.find_driving_assigns("d_y_to_mux", ctx)
+    assert len(dy) == 1 and "d_y_to_mux" in dy[0]["lhs_raw"]
+
+
+def test_find_driving_assigns_exact_match_not_startswith():
+    """⭐关键：精确基名匹配，不用 startswith。
+    裸名 d_x 非任何 LHS → []；d_x_to_mux 只返自己那条，不误捞同前缀的 d_xy_to_logic。"""
+    ctx = _ctx("assign d_x_to_mux = a;\nassign d_xy_to_logic = b;\n")
+    assert D.find_driving_assigns("d_x", ctx) == []
+    hit = D.find_driving_assigns("d_x_to_mux", ctx)
+    assert len(hit) == 1 and "d_x_to_mux" in hit[0]["lhs_raw"]
+    assert "d_xy_to_logic" not in hit[0]["lhs_raw"]
+
+
+def test_find_driving_assigns_multiple_same_base_preserve_order():
+    """多条同基名（concat + 直驱）全返回且保 RTL 出现顺序。"""
+    ctx = _ctx("assign {d_z_to_mux, other} = p;\nassign d_z_to_mux = q;\n")
+    drivers = D.find_driving_assigns("d_z_to_mux", ctx)
+    assert len(drivers) == 2
+    # 第一条是 concat（rhs=p），第二条是直驱（rhs=q）—— 保 RTL 顺序
+    assert drivers[0]["rhs_raw"] == "p" and drivers[1]["rhs_raw"] == "q"
+
+
+# ───────────── load_results 抽取 + CLI 黄金回归 ─────────────
+def _fake_scan(monkeypatch):
+    """monkeypatch scan_rtl 的 RTL 加载，使 load_results 不碰真磁盘。"""
+    import scan_rtl
+    monkeypatch.setattr(scan_rtl, "_infer_from_dreg_env", lambda args: None)
+    monkeypatch.setattr(scan_rtl, "find_verilog_files", lambda dirs: ["fake_top.v"])
+    monkeypatch.setattr(scan_rtl, "scan_files",
+                        lambda files: {"TOP": {"signals": {"d_x_to_mux"}, "instances": []}})
+    monkeypatch.setattr(scan_rtl, "resolve_top_module", lambda tm, mods, top: "TOP")
+    monkeypatch.setattr(scan_rtl, "build_signal_map",
+                        lambda mods, top, max_depth=16: {"d_x_to_mux": [""]})
+    monkeypatch.setattr(scan_rtl, "parse_modules", lambda text: {"TOP": None})
+
+
+def _write_claims(tmp_path):
+    import json
+    from types import SimpleNamespace
+    claims = {"claims": [
+        {"kind": "probe", "net_base": "d_x_to_mux", "signal": "d_x",
+         "prefix": "", "input_nets": ["sel", "a", "d_x_to_logic"], "on_missing": "warn"},
+        {"kind": "force", "net_base": "ignore_me"},   # 非 probe → 被过滤
+    ]}
+    p = tmp_path / "claims.json"
+    p.write_text(json.dumps(claims), encoding="utf-8")
+    return SimpleNamespace(claims=str(p), top="fake_top.v", top_module=None,
+                           rtl_dirs="rtl", max_depth=16, out=None, only=None,
+                           nets=None, excel=None)
+
+
+def test_load_results_structure(tmp_path, monkeypatch):
+    _fake_scan(monkeypatch)
+    args = _write_claims(tmp_path)
+    # load_results 内部读 fake_top.v 文本 → 写一份让 open 能读到
+    (tmp_path / "fake_top.v").write_text("assign d_x_to_mux = sel ? a : b;", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    args.top = "fake_top.v"
+    ctx, results, meta = D.load_results(args, log=lambda m: None)
+    assert isinstance(ctx, dict) and "assigns" in ctx
+    assert len(results) == 1 and results[0]["signal"] == "d_x"   # force 被过滤
+    assert meta["n_probes"] == 1 and meta["top_module"] == "TOP"
+    assert set(meta) == {"claims_name", "n_probes", "n_files", "top_module",
+                         "n_nets", "n_assigns"}
+
+
+def test_load_results_golden_log_lines(tmp_path, monkeypatch):
+    """黄金串：log 收集器跑 load_results，三条打印行文本/顺序与 CLI 一字不差。"""
+    _fake_scan(monkeypatch)
+    args = _write_claims(tmp_path)
+    (tmp_path / "fake_top.v").write_text("assign d_x_to_mux = sel ? a : b;", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    args.top = "fake_top.v"
+    logs = []
+    D.load_results(args, log=logs.append)
+    assert logs[0] == "claims: claims.json（1 探针）"
+    assert logs[1] == "RTL 文件: 1 个"
+    assert logs[2].startswith("DUT 顶层: TOP  RTL 网总数: 1  assign 语句: ")
+    assert logs[2].endswith("\n")
+    assert len(logs) == 3
+
+
+def test_load_results_is_read_only_no_egress():
+    """GUI 把全部文件 IO 委托给 load_results → 这个函数必须钉死【只读】：
+    无写模式 open、无 socket/urllib/subprocess 等外发符号。否则将来有人给它加写/缓存，
+    会在 GUI 侧静默开一条 egress 路径，而 GUI 自己的源码守卫一条都抓不到（红区头号铁律无人值守）。"""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "redzone_tools", "diag_rtl_binding.py")
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    tree = ast.parse(src)
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "load_results"), None)
+    assert fn is not None, "找不到 load_results"
+    bad = {"socket", "urllib", "subprocess", "requests", "http", "smtplib", "ftplib"}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "open":
+            for a in node.args[1:2]:                 # open 的 mode 实参
+                if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                    m = a.value
+                    assert "w" not in m and "a" not in m and "x" not in m, \
+                        "load_results 出现写模式 open(...,%r)" % m
+        if isinstance(node, ast.Name):
+            assert node.id not in bad, "load_results 引用外发符号 %s" % node.id
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            assert node.value.id not in bad, \
+                "load_results 引用外发符号 %s.%s" % (node.value.id, node.attr)
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mod = (node.names[0].name if isinstance(node, ast.Import) else node.module) or ""
+            assert mod.split(".")[0] not in bad, "load_results 内 import 外发模块 %s" % mod
