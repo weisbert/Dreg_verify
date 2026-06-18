@@ -146,9 +146,16 @@ def build_context(texts, sigmap=None):
         outputs |= o
     all_lhs = {b.lower() for a in assigns for b in a["lhs_bases"]} | {b.lower() for b in always_lhs}
     pure_inputs = {n.lower() for n in inputs} - all_lhs - {n.lower() for n in outputs}
+    # 真实网域(小写→原大小写)：sigmap(声明+层级)的网 ∪ assign 左边网。
+    # 给"裸名 missing 但带 _to_logic/_to_mux/_bN 后缀的真网其实存在"搜候选用。
+    universe_real = {k.lower(): k for k in (sigmap or {})}
+    for a in assigns:
+        for b in a["lhs_bases"]:
+            universe_real.setdefault(b.lower(), b)
     return {"assigns": assigns, "all_lhs": all_lhs, "pure_inputs": pure_inputs,
             "sigmap_lc": {k.lower(): v for k, v in (sigmap or {}).items()},
-            "sigmap_real": {k.lower(): k for k in (sigmap or {})}}
+            "sigmap_real": {k.lower(): k for k in (sigmap or {})},
+            "universe_real": universe_real}
 
 
 def diagnose(claim, ctx):
@@ -181,6 +188,11 @@ def diagnose(claim, ctx):
         else:
             r["exists"], r["location"] = False, "missing"
 
+    # 全网域候选：RTL 里以信号基名打头的真实网（含 _to_logic/_to_mux/_bN 等后缀真名）。
+    # 裸名 missing 时这是"真网其实在这儿"的关键线索。
+    r["candidates"] = sorted(v for k, v in ctx.get("universe_real", {}).items()
+                             if sig_base and k.startswith(sig_base) and k != base)
+
     # ② 输出 vs 输入：先找"本信号"的 assign（LHS 基名以信号基名打头，含 _to_xxx 真名）
     cand = [a for a in ctx["assigns"]
             if any(lb.lower().startswith(sig_base) for lb in a["lhs_bases"])] if sig_base else []
@@ -189,8 +201,6 @@ def diagnose(claim, ctx):
         if in_nets and len(cand) > 1:                     # 指纹：RHS 命中 input_nets 最多者
             cand.sort(key=lambda a: len(in_nets & {n.lower() for n in a["rhs_names"]}), reverse=True)
         best = cand[0]
-        r["candidates"] = sorted({lb for a in cand for lb in a["lhs_bases"]
-                                  if lb.lower().startswith(sig_base)})
 
     if best is not None:
         lhs_lc = [b.lower() for b in best["lhs_bases"]]
@@ -228,29 +238,44 @@ def diagnose_claims(claims, ctx):
 _MARK = {"output": "✓ OUTPUT", "input-suspect": "⚠ INPUT-suspect(假绿嫌疑)", "unknown": "? UNKNOWN"}
 
 
-def format_report(results):
-    lines = []
-    order = {"input-suspect": 0, "unknown": 1, "output": 2}
-    for r in sorted(results, key=lambda x: (order.get(x["verdict"], 9), x["signal"] or "")):
-        lines.append("[%s] %s" % (_MARK.get(r["verdict"], r["verdict"]), r["signal"]))
-        loc = r["location"]
-        if loc is not None:
-            ex = "存在" if r["exists"] else "❌ RTL 中找不到"
-            pc = {"ok": "前缀一致", "mismatch": "⚠ 前缀对不上真层级", None: ""}.get(r["prefix_check"], "")
-            lines.append("    探针网=%s  位置=%s(%s) %s" % (r["probe_net"], loc, ex, pc))
-        lines.append("    判定：%s" % r["evidence"])
-        if r["real_output"] and r["verdict"] != "output":
-            lines.append("    → 真输出建议探：%s" % r["real_output"])
-        if len(r["candidates"]) > 1:
-            lines.append("    （同前缀候选：%s）" % ", ".join(r["candidates"]))
-        lines.append("")
-    n = {"output": 0, "input-suspect": 0, "unknown": 0}
+def _detail_lines(r):
+    out = ["[%s] %s" % (_MARK.get(r["verdict"], r["verdict"]), r["signal"])]
+    if r["location"] is not None:
+        ex = "存在" if r["exists"] else "❌ RTL 中找不到"
+        pc = {"ok": "前缀一致", "mismatch": "⚠ 前缀对不上真层级"}.get(r["prefix_check"], "")
+        out.append("    探针网=%s  位置=%s(%s) %s" % (r["probe_net"], r["location"], ex, pc))
+    out.append("    判定：%s" % r["evidence"])
+    if r["real_output"] and r["verdict"] != "output":
+        out.append("    → 真输出建议探：%s" % r["real_output"])
+    if r["candidates"]:
+        cs = r["candidates"]
+        shown = ", ".join(cs[:12]) + ("  …(共 %d)" % len(cs) if len(cs) > 12 else "")
+        out.append("    RTL 同基名真实网：%s" % shown)
+    return out
+
+
+def format_report(results, only=None):
+    """摘要置顶 + 按判定分组：问题项(suspect/unknown)详列、OUTPUT 仅列名（它们是好的）。
+    only=判定集合时只渲染这些组（摘要计数仍含全部）。"""
+    by = {"input-suspect": [], "unknown": [], "output": []}
     for r in results:
-        n[r["verdict"]] = n.get(r["verdict"], 0) + 1
-    lines.append("─" * 60)
-    lines.append("汇总：✓OUTPUT %d  ⚠INPUT-suspect %d  ?UNKNOWN %d  （共 %d 探针）"
-                 % (n["output"], n["input-suspect"], n["unknown"], len(results)))
-    lines.append("⚠ 这是只读诊断：INPUT-suspect / UNKNOWN 请逐条对真 RTL 人工核对再处理。")
+        by.setdefault(r["verdict"], []).append(r)
+    show = set(only) if only else {"input-suspect", "unknown", "output"}
+    lines = ["=" * 64,
+             "汇总：⚠INPUT-suspect %d   ?UNKNOWN %d   ✓OUTPUT %d   （共 %d 探针）"
+             % (len(by["input-suspect"]), len(by["unknown"]), len(by["output"]), len(results)),
+             "=" * 64]
+    for v in ("input-suspect", "unknown"):
+        if v not in show or not by[v]:
+            continue
+        lines += ["", "──── %s （%d）────" % (_MARK[v], len(by[v]))]
+        for r in sorted(by[v], key=lambda x: x["signal"] or ""):
+            lines += _detail_lines(r)
+            lines.append("")
+    if "output" in show and by["output"]:
+        lines += ["", "──── ✓ OUTPUT （%d，已认定探到真输出，仅列名）────" % len(by["output"])]
+        lines += ["    %s" % r["signal"] for r in sorted(by["output"], key=lambda x: x["signal"] or "")]
+    lines += ["", "⚠ 只读诊断：INPUT-suspect / UNKNOWN 请逐条对真 RTL 人工核对再处理。"]
     return "\n".join(lines)
 
 
@@ -264,6 +289,8 @@ def main():
     ap.add_argument("--top-module", default=None, help="顶层模块名（默认 $dreg_top）")
     ap.add_argument("--rtl-dirs", help="RTL 目录（逗号分隔；默认 $dreg_dir 上的 digital/）")
     ap.add_argument("--max-depth", type=int, default=16)
+    ap.add_argument("--out", help="把完整报告写到文件（留在红区里 grep/翻页用，不往外导）")
+    ap.add_argument("--only", help="只看某些判定：逗号分隔 suspect,unknown,output（缺省全看；摘要计数始终含全部）")
     ap.add_argument("--nets", help=argparse.SUPPRESS)  # 占位，与 scan_rtl 自动推断兼容
     ap.add_argument("--excel", help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -301,7 +328,17 @@ def main():
           % (top_module, len(sigmap), sum(len(parse_assigns(t)) for t in texts)))
 
     ctx = build_context(texts, sigmap=sigmap)
-    print(format_report(diagnose_claims(probes, ctx)))
+    only = None
+    if args.only:
+        _m = {"suspect": "input-suspect", "input-suspect": "input-suspect",
+              "unknown": "unknown", "output": "output"}
+        only = {_m.get(x.strip().lower()) for x in args.only.split(",")} - {None}
+    report = format_report(diagnose_claims(probes, ctx), only=only)
+    print(report)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(report + "\n")
+        print("\n报告已写出: %s（留在红区，grep/翻页用）" % args.out)
     return 0
 
 

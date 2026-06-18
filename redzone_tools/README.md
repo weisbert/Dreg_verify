@@ -23,6 +23,8 @@
   `python -m dreg_verify.cli --excel 真表.xlsx --include-risky --export-claims claims.json`
 - **红区**诊断（已 source dreg 环境时 RTL 参数自动推断）：
   `python3 diag_rtl_binding.py --claims claims.json`
+  - 信号多时：`--out report.txt` 把完整报告写文件（留红区，grep/翻页用）；`--only suspect,unknown` 只看要处理的。
+  - 报告摘要置顶，问题项（INPUT-suspect / UNKNOWN）详列、OUTPUT 仅列名；每个问题项给出 RTL 同基名真实网当线索。
 
 ## 注意
 - **两个脚本一起上传**（`diag_rtl_binding.py` import `scan_rtl.py`，须同目录）。

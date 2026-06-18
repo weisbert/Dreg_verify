@@ -112,3 +112,32 @@ def test_report_renders_and_counts():
          _pc("d_x_to_logic", signal="d_x", input_nets=["sel", "a", "d_x_to_logic"])], ctx)
     txt = D.format_report(results)
     assert "INPUT-suspect" in txt and "汇总" in txt
+
+
+# ───────────── 候选搜全网域 + 报告分组/筛选 ─────────────
+def test_universe_candidates_surface_suffixed_real_net_for_missing_bare():
+    """裸名 RTL 里没有，但带后缀真网存在(sigmap/assign 里) → candidates 把它捞出来当线索。"""
+    ctx = _ctx("assign d_x_to_mux = sel ? a : b;",
+               sigmap={"d_x_to_mux": [""], "d_x_to_logic": ["U_SUB"]})
+    r = D.diagnose(_pc("d_x", signal="d_x"), ctx)        # 探裸名 d_x（RTL 没有）
+    assert r["exists"] is False
+    assert "d_x_to_mux" in r["candidates"] and "d_x_to_logic" in r["candidates"]
+
+
+def test_report_summary_on_top_and_groups():
+    ctx = _ctx("assign d_x_to_mux = s ? a : d_x_to_logic;")
+    results = D.diagnose_claims(
+        [_pc("d_x_to_mux", signal="d_x"),
+         _pc("d_x_to_logic", signal="d_x", input_nets=["s", "a", "d_x_to_logic"])], ctx)
+    txt = D.format_report(results)
+    assert txt.startswith("===") and "汇总：" in txt
+    assert "──── ⚠ INPUT-suspect" in txt and "──── ✓ OUTPUT" in txt
+
+
+def test_report_only_filter_hides_output_detail():
+    ctx = _ctx("assign d_x_to_mux = s ? a : d_x_to_logic;")
+    results = D.diagnose_claims([_pc("d_x_to_mux", signal="d_x")], ctx)   # 一个 output
+    full = D.format_report(results)
+    filt = D.format_report(results, only={"input-suspect", "unknown"})
+    assert "──── ✓ OUTPUT" in full and "──── ✓ OUTPUT" not in filt
+    assert "✓OUTPUT 1" in filt    # 摘要计数仍含全部
