@@ -158,6 +158,10 @@ def build_context(texts, sigmap=None):
             "universe_real": universe_real}
 
 
+# 已知输出尾缀（优先级从高到低）：规范真输出 = <信号基名>+其中之一，压过带 _tN/_gN 中缀的子变体。
+_KNOWN_SUF = ("_to_mux", "_to_logic", "_ls")
+
+
 def diagnose(claim, ctx):
     """单条 probe claim 的诊断结果。"""
     base = (claim.get("net_base") or "").lower()
@@ -193,6 +197,14 @@ def diagnose(claim, ctx):
     r["candidates"] = sorted(v for k, v in ctx.get("universe_real", {}).items()
                              if sig_base and k.startswith(sig_base) and k != base)
 
+    # 规范真输出：RTL 里恰为 <信号基名>+<已知尾缀> 的那根（如 X_to_mux），压过 X_tN_to_mux 等子变体。
+    canon = None
+    for _suf in _KNOWN_SUF:
+        hit = ctx.get("universe_real", {}).get(sig_base + _suf) if sig_base else None
+        if hit:
+            canon = hit
+            break
+
     # ② 输出 vs 输入：先找"本信号"的 assign（LHS 基名以信号基名打头，含 _to_xxx 真名）
     cand = [a for a in ctx["assigns"]
             if any(lb.lower().startswith(sig_base) for lb in a["lhs_bases"])] if sig_base else []
@@ -214,10 +226,15 @@ def diagnose(claim, ctx):
                                      if b.lower().startswith(sig_base)), best["lhs_bases"][0])
         else:
             r["verdict"] = "unknown"
-            r["evidence"] = ("找到本信号 assign（左边 %s），但探针网既不在左也不在右 → 人工核对"
-                             % "/".join(best["lhs_bases"]))
-            r["real_output"] = next((b for b in best["lhs_bases"]
-                                     if b.lower().startswith(sig_base)), best["lhs_bases"][0])
+            if canon:
+                r["evidence"] = ("探针探裸名(RTL 无此网)，真网带尾缀 → 应改探 %s"
+                                 "（开 mux/logic 尾缀或配前缀到该网）" % canon)
+                r["real_output"] = canon
+            else:
+                r["evidence"] = ("找到本信号 assign（左边 %s），但探针网既不在左也不在右 → 人工核对"
+                                 % "/".join(best["lhs_bases"]))
+                r["real_output"] = next((b for b in best["lhs_bases"]
+                                         if b.lower().startswith(sig_base)), best["lhs_bases"][0])
     else:
         # 没找到本信号 assign：保守兜底，只在有【正面证据】时下结论
         if base in ctx["all_lhs"]:
@@ -226,7 +243,13 @@ def diagnose(claim, ctx):
             r["verdict"], r["evidence"] = "input-suspect", "探针网被声明为 input 端口且从不被驱动 → 输入网嫌疑"
         else:
             r["verdict"] = "unknown"
-            r["evidence"] = "找不到本信号 assign、探针网也非显式 input；驱动可能来自端口连接（本诊断未解析）→ 人工核对"
+            if canon:
+                r["evidence"] = ("探针探裸名(RTL 无此网)，真网带尾缀 → 应改探 %s"
+                                 "（开 mux/logic 尾缀或配前缀到该网）" % canon)
+                r["real_output"] = canon
+            else:
+                r["evidence"] = ("找不到本信号 assign、探针网也非显式 input；"
+                                 "驱动可能来自端口连接（本诊断未解析）→ 人工核对")
     return r
 
 

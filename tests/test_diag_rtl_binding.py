@@ -134,6 +134,16 @@ def test_report_summary_on_top_and_groups():
     assert "──── ⚠ INPUT-suspect" in txt and "──── ✓ OUTPUT" in txt
 
 
+def test_canonical_suffix_real_output_preferred_over_subvariant():
+    """真网有规范 X_to_mux 和一堆 X_tN_to_mux 时，真输出建议应指向 X_to_mux、而非子变体
+    （真表反馈：bias_trim_g6 建议曾错指 _t0_to_mux，应指 _g6_to_mux）。"""
+    rtl = "assign d_g6_t0_to_mux = a; assign d_g6_to_mux = b;"
+    ctx = _ctx(rtl, sigmap={"d_g6_t0_to_mux": [""], "d_g6_to_mux": [""]})
+    r = D.diagnose(_pc("d_g6", signal="d_g6"), ctx)     # 探裸名 d_g6（RTL 无）
+    assert r["real_output"] == "d_g6_to_mux"
+    assert "应改探 d_g6_to_mux" in r["evidence"]
+
+
 def test_report_only_filter_hides_output_detail():
     ctx = _ctx("assign d_x_to_mux = s ? a : d_x_to_logic;")
     results = D.diagnose_claims([_pc("d_x_to_mux", signal="d_x")], ctx)   # 一个 output
