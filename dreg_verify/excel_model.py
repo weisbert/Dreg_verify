@@ -307,6 +307,40 @@ class MuxGroup:
             self.group_no, self.out_name, self.ctrl_base, len(self.cases))
 
 
+class TopoutSignal:
+    """Topout 页的一行 = 一个【要验证的顶层输出信号】（新模型锚点，2026-06-23）。
+
+    B 列 = TOP Out Signal（要验信号的顶层真名，无中间路由后缀或带 _ls）；A 列 = Owner。
+    C–G 列是【独立的寄存器地址图】(TOPrw_reg_N/offset/描述/地址/复位)，与 B 列【同行并列但语义无关】
+    （真表 row3 B=aac_ctf_bit_sel 而 C–G 描述的是另一寄存器）——故 reg_* 字段仅作旁注保留，不参与
+    把 B 信号 cone 展开（cone 的叶子地址来自 regmap/tmm，不来自这里）。
+    """
+
+    def __init__(self, row, name, width, owner, msb=None, lsb=None, raw="",
+                 reg_name="", reg_offset="", reg_desc="", reg_addr=None, reg_reset=""):
+        self.row = row
+        self.raw = raw                  # B 列原文（含位宽切片）
+        self.name = name                # B 列去位宽后的顶层真名（cone 根 / 断言探针基名）
+        self.width = width
+        self.msb = msb
+        self.lsb = lsb
+        self.owner = owner              # A 列 Owner（报告/账目 owner 直接取它，不必 join 回 logic/mux）
+        # C–G 独立寄存器图（旁注，不参与 cone）
+        self.reg_name = reg_name
+        self.reg_offset = reg_offset
+        self.reg_desc = reg_desc
+        self.reg_addr = reg_addr
+        self.reg_reset = reg_reset
+
+    @property
+    def base(self):
+        """与 LogicSignal.out_base / MuxGroup.out_base 对齐的小写无关基名（匹配用）。"""
+        return self.name
+
+    def __repr__(self):
+        return "TopoutSignal(%s, w=%d, owner=%s)" % (self.name, self.width, self.owner)
+
+
 # ───────────────────────────── 工具 ─────────────────────────────
 def _s(v):
     if v is None:
@@ -833,7 +867,7 @@ def _normalize_type(v):
 # ───────────────────────────── 顶层装载 ─────────────────────────────
 class DregWorkbook:
     def __init__(self, logic, regmap, tmm, sheet_names, mux=None, dft=None,
-                 fortest_order=None, regmap_dups=None):
+                 fortest_order=None, regmap_dups=None, topout=None):
         self.logic = logic              # list[LogicSignal]
         self.regmap = regmap            # dict
         self.tmm = tmm                  # dict
@@ -846,6 +880,9 @@ class DregWorkbook:
         self.dft = dft if dft is not None else {}
         # {输出基名low: [输入基名low顺序]}（for_test 页；无/空页=空）。真值表输入行排序对照用。
         self.fortest_order = fortest_order if fortest_order is not None else {}
+        # list[TopoutSignal]（Topout 页；无/空页=空）。新模型『要验信号清单』锚点，2026-06-23。
+        # 旧 logic-rooted 路径完全不读它（默认空）；新 Topout 引擎(topout.py)以它为外层枚举源。
+        self.topout = topout if topout is not None else []
 
 
 def _dft_strip(name):
@@ -930,6 +967,116 @@ def read_fortest_order(ws):
             if cur and ob:
                 out.setdefault(ob, list(cur))
             cur = []
+    return out
+
+
+_SIZED_LIT = re.compile(r"\s*(\d+)?'([bBdDhH])([0-9a-fA-FxXzZ_]+)\s*$")
+
+
+def _parse_ft_value(text, sized):
+    """for_test 单元格取值 → int（None=空/不可解析）。
+      sized=True (OUT 行)：Verilog 定宽字面量 3'b101 / 4'hC / 7'd25。
+      sized=False(输入行)：纯位串 0011001（按二进制读，**不是十进制**——输入行就是定宽 bit 串）。
+    don't-care 位 x/z 按 0 读。"""
+    t = _s(text)
+    if t == "":
+        return None
+    m = _SIZED_LIT.match(t)
+    if m:
+        radix = {"b": 2, "d": 10, "h": 16}[m.group(2).lower()]
+        digits = re.sub(r"[xXzZ]", "0", m.group(3).replace("_", ""))
+        try:
+            return int(digits, radix)
+        except ValueError:
+            return None
+    if sized:
+        return None
+    body = re.sub(r"[xXzZ]", "0", t)
+    if re.fullmatch(r"[01]+", body):
+        return int(body, 2)
+    return None
+
+
+def read_fortest_golden(ws, header_row=2, max_col=80):
+    """读 for_test 页的【金标准真值表】(竖向布局) → list[block]（新模型等价性对照用，2026-06-23）。
+
+    真表/镜像竖向排版(make_mirror_btlp._ft_block 实证，与真表 for_test 同构)：每个 case 块 =
+      若干输入行(F=输入名, O.. = 各列 bit 串) + OUT 行(D=输出名, O.. = 各列定宽期望) + 标签行(G='label')。
+    返回每块 {
+      'out':      输出基名(小写,去位宽), 'out_width': 位宽,
+      'inputs':   [{'base':基名小写, 'is_ro':bool, 'bits':K列, 'values':[int|None,…逐列]}],
+      'expected': [int|None,…逐列]（OUT 行，逐列金标准期望值）,
+      'labels':   [str,…逐列]（标签行，可空）,
+      'ncol':     有效列数（OUT 行非空尾列+1）,
+    }
+    以"遇到 D 非空(OUT 行)"给当前块封口（与 read_fortest_order 同口径）。无此页/空 → 空 list。
+    """
+    out = []
+    if ws is None:
+        return out
+    o_idx = column_index_from_string("O") - 1           # T0 列 0-based
+    pending_inputs = []
+    for row in ws.iter_rows(min_row=header_row + 1, max_col=max_col, values_only=True):
+        fval = _s(_col(row, "F"))
+        dval = _s(_col(row, "D"))
+        gval = _s(_col(row, "G"))
+        tcols = list(row[o_idx:]) if len(row) > o_idx else []
+        if dval:                                        # OUT 行：封口
+            exp = [_parse_ft_value(v, sized=True) for v in tcols]
+            ncol = 0
+            for i, v in enumerate(exp):
+                if v is not None:
+                    ncol = i + 1
+            ob, ow, _m, _l = _strip_width(dval)
+            block = {
+                "out": ob.lower(), "out_width": ow,
+                "inputs": [
+                    {"base": _strip_width(ip["name"])[0].lower(),
+                     "is_ro": ip["is_ro"], "bits": ip["bits"],
+                     "values": [_parse_ft_value(v, sized=False) for v in ip["tcols"][:ncol]]}
+                    for ip in pending_inputs],
+                "expected": exp[:ncol], "labels": [], "ncol": ncol,
+            }
+            out.append(block)
+            pending_inputs = []
+        elif gval.lower() == "label" and out:           # 标签行：贴到刚封口的块
+            out[-1]["labels"] = [_s(v) for v in tcols[:out[-1]["ncol"]]]
+        elif fval:                                       # 输入行：累积
+            pending_inputs.append({
+                "name": fval, "is_ro": _s(_col(row, "J")).lower() in ("true", "1", "ro"),
+                "bits": _s(_col(row, "K")), "tcols": tcols})
+    return out
+
+
+def read_topout(ws, header_row=2):
+    """读 Topout 页 → list[TopoutSignal]（新模型验证锚点，2026-06-23）。
+
+    真表列（inspect dump 实证）：A=Owner B=TOP Out Signal C=Reg Name D=Offset
+      E=Reg Description F=Address G=ResetValue。表头第 2 行，数据从第 3 行起。
+    只保留 B(要验信号名)非空的行。B 列带位宽切片(如 d_bt_lp_lna_itrim[3:0])→ 剥成基名+位宽。
+    A 列 Owner 直接挂到信号上(报告/账目 owner 取它，免 join)。C–G 是【独立寄存器图】仅旁注保留。
+
+    无此页 / 整页空 → 空 list（旧 logic-rooted 路径完全不受影响）。
+    """
+    out = []
+    if ws is None:
+        return out
+    for ri, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True),
+                             start=header_row + 1):
+        name_raw = _s(_col(row, "B"))
+        if name_raw == "":
+            continue
+        # 跳过把表头文字写进数据区的行（防御：'TOP Out Signal' 之类）
+        if name_raw.lower() in ("top out signal", "top_out_signal", "topout"):
+            continue
+        base, width, msb, lsb = _strip_width(name_raw)
+        out.append(TopoutSignal(
+            row=ri, name=base, width=width, owner=_s(_col(row, "A")),
+            msb=msb, lsb=lsb, raw=name_raw,
+            reg_name=_s(_col(row, "C")), reg_offset=_s(_col(row, "D")),
+            reg_desc=_s(_col(row, "E")),
+            reg_addr=parse_hex_addr(_col(row, "F")), reg_reset=_s(_col(row, "G")),
+        ))
     return out
 
 
@@ -1076,6 +1223,7 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     ws_dft = _find_sheet(wb, "dft")
     ws_ls = _find_sheet(wb, "level_shift", "level shift", "levelshift")
     ws_ft = _find_sheet(wb, "for_test")
+    ws_top = _find_sheet(wb, "Topout", "top_out", "topoutput", "top out")
 
     logic = read_logic(ws_logic, logic_header_row)
     regmap, regmap_dups = (read_regmap(ws_regmap, regmap_header_row)
@@ -1088,7 +1236,9 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     _apply_level_shift(logic, mux, read_level_shift(ws_ls) if ws_ls is not None else {})
     dft = read_dft(ws_dft) if ws_dft is not None else {}
     fortest_order = read_fortest_order(ws_ft) if ws_ft is not None else {}
+    topout = read_topout(ws_top) if ws_top is not None else []
     names = list(wb.sheetnames)
     wb.close()
     return DregWorkbook(logic, regmap, tmm, names, mux=mux, dft=dft,
-                        fortest_order=fortest_order, regmap_dups=regmap_dups)
+                        fortest_order=fortest_order, regmap_dups=regmap_dups,
+                        topout=topout)
