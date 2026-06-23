@@ -41,3 +41,6 @@ ppt/
 *.swp
 .DS_Store
 Thumbs.db
+
+# 真表 inspect 转储/重构参考(含真实信号名，勿push)
+refactor_notes/
