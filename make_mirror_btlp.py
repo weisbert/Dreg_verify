@@ -2,28 +2,25 @@
 """make_mirror_btlp.py — 镜像【新模型】Hi1108_Pilot_BT_LP_DREG 表的开发夹具 Excel。
 
 ⭐ Topout-rooted 重构(2026-06-23)用的测试夹具。与老的 make_mirror_excel.py(WL_RFTRX、
-logic-rooted、复现 R23/24/38 历史 bug、喂 mirror_wl_dreg.xlsx 给 test_cross_boundary_mux_expand)
-**并行存在、互不影响**——那张别动，这张是新模型。
+logic-rooted、喂 mirror_wl_dreg.xlsx 给 test_cross_boundary_mux_expand)**并行存在、互不影响**。
 
-数据来源：用户 2026-06-23 inspect 真表 Hi1108_Pilot_BT_LP_DREG_95P_20260623.xlsx 两半 dump
-(消化见 refactor_notes/inspect_dump_20260623.md、memory refactor-topout-rooted.md)。地址用真表 d-号
-为主、缺的取代表值；信号名取真名(BT_LP)。**这是【小而全】代表性切片，不是整表**——目的是覆盖
-重构 cone 引擎要处理的每一类路径，方便写解析器/真值表时对着跑。
+⭐ 2026-06-23 rebuild：for_test 金标准从【1 条手验】升级成【7 条真族】——
+   值逐字来自 refactor_notes/extracted_validation_examples.md(真表 for_test/SignalPath dump 实证)。
+   族 = BT_LP RX 选路(mode? local : line [& ~iddq])，覆盖 选路 + iddq 门 + 1/3/4/7 bit + RW写/RO force。
+   rx_en 表达式由真表 SignalPath 实证((A?C:B)&(~J), logic:109)，同族其余由 for_test line/local 标签+值实证。
 
 新模型要点(夹具忠实体现)：
-  · 要验信号 = Topout 页 B 列(TOP Out Signal)，无后缀真名/带 _ls；**B 列与 C–G 寄存器图两套独立清单同行并列**。
-  · logic N(top_output) 全=0、mux I(top_out) 全=0 —— "要验什么"不由它们定。
+  · 要验信号 = Topout 页 B 列；logic N(top_output) 全 0、mux I(top_out) 全 0。
   · 流水线：regmap 字段(RW 主输入) →(_to_logic/_to_mux/_to_dft/_to_ls 路由)→ logic/mux/dft/ls 组合 → Topout。
   · iddq 页空、ISO 页空(只 schema)；dft 多为恒等观测(E=A)；level_shift X_to_ls→X_ls。
-  · SignalPath = VBA 一次性查询工具(开发期对照 oracle，不进产物)。
+  · SignalPath = VBA 一次性查询(开发期对照 oracle)。
 
-夹具里的 5 类代表性 cone(对应 Topout B 列 6 个信号)：
-  ① logic 选路(mode?local:line & ~iddq)   d_logic_bt_lp_rx_en  ← 4 寄存器 (for_test 金标准就是它)
-  ② mux 选路(控制=另一 logic 输出)        d_bt_lp_lna_itrim[3:0] ← mux(控制 d_logic_bt_lp_tsensor) + 8 trim 寄存器
-  ②' 既是输出又是 mux 控制               d_logic_bt_lp_tsensor[3:0]
-  ③ 直连寄存器(dft 恒等观测)             clk_force_on  ← 寄存器本身
-  ④ 电平移位输出(_ls)                    d_en_refbuf_ls ← level_shift ← logic ← 5 寄存器
-  ⑤ RO 回读(非寄存器组合函数,验法待定)   pll_lock_indicator ← 无 cone(FSM/模拟状态)
+夹具里的 cone 类型(对应 Topout B)：
+  ① logic 选路族(7 条真族,for_test 金标准)：rx_en / reserve / lna_agc / lpf_agc / rx_dcoc_i / rx_dcoc_q / tsensor
+  ② mux 选路(控制=logic 输出 tsensor)：d_bt_lp_lna_itrim[3:0]
+  ③ 直连寄存器(dft 恒等观测)：clk_force_on / en_dig_clk
+  ④ 电平移位输出(_ls)：d_en_refbuf_ls ← level_shift ← logic ← 寄存器
+  ⑤ RO 回读(无 cone,跳过+记账)：pll_lock_indicator
 
 用法:  python make_mirror_btlp.py [输出路径=mirror_btlp_dreg.xlsx]
 """
@@ -43,32 +40,96 @@ def _d(n):
     return "d%d" % n
 
 
-# ───────────── 地址(十进制 d-号，与真表对齐处取真值)─────────────
+def _ws(w):
+    """位宽串：w>1 → '[w-1:0]'，否则空。"""
+    return "[%d:0]" % (w - 1) if w > 1 else ""
+
+
+def _bin(val, w):
+    """无符号二进制串(定宽)，输入行/数据用。"""
+    return format(val & ((1 << w) - 1), "0%db" % w)
+
+
+def _sized(val, w):
+    """Verilog 定宽字面量 1'b1 / 3'b101，OUT 行用。"""
+    return "%d'b%s" % (w, _bin(val, w))
+
+
+# ───────────── 地址(十进制 d-号，RW 写地址与真表对齐：2D/2E/2F/32 = 45/46/47/50)─────────────
 ADDR_TOP_EN = 1       # en_pll[0] / en_dig_clk[8] / clk_force_on[9]
 ADDR_TESTMODE = 9     # testmode[15] / d_en_refbuf[14]
 ADDR_PLL_LINE = 23    # 0x17: d_pll_line_ctrl_mode[14]
-ADDR_RO41 = 41        # 0x29 readro_reg_41: bt_mode_sel[0]/linectrl_rx_en[1]/iddq_mode[2]/pll_en[3] (虚拟/线控 RO)
-ADDR_RX_LOCAL = 45    # 0x2D: linelocal_mode_ctrl[0]/linelocal_tsensor_ctrl[2]/rx_en_local[4] (RW)
-ADDR_TSENS_RO = 42    # 0x2A readro: linectrl_tsensor[3:0] (线控 RO)
-ADDR_TSENS_LOCAL = 50 # 0x32: tsensor_local[3:0] (RW)
-ADDR_ITRIM_A = 96     # lna_itrim t1..t4 打包 (RW, _to_mux 数据)
-ADDR_ITRIM_B = 97     # lna_itrim t5..t8 打包
-ADDR_RO38 = 56        # READro_reg_38: pll_lock_indicator[15] 等 (RO 回读)
+ADDR_RO41 = 41        # 0x29 readro: bt_mode_sel[0]/linectrl_rx_en[1]/iddq_mode[2]/pll_en[3]
+ADDR_RO42 = 42        # 0x2A readro: linectrl_lna_agc[2:0]/linectrl_lpf_agc[6:4]
+ADDR_RO43 = 43        # 0x2B readro: linectrl_rx_dcoc_i[6:0]/linectrl_rx_dcoc_q[14:8]
+ADDR_RO44 = 44        # 0x2C readro: linectrl_tsensor[3:0]
+ADDR_RX_LOCAL = 45    # 0x2D: linelocal_mode_ctrl[0]/bt_mode_sel_local[1]/linelocal_tsensor_ctrl[2]/rx_en_local[4]
+ADDR_DCOC_LOCAL = 46  # 0x2E: local_rx_dcoc_i[6:0]/local_rx_dcoc_q[14:8]
+ADDR_AGC_LOCAL = 47   # 0x2F: local_lna_agc[2:0]/local_lpf_agc[6:4]
+ADDR_TSENS_LOCAL = 50 # 0x32: tsensor_local[3:0]
+ADDR_ITRIM_A = 96     # lna_itrim t1..t4 (RW, _to_mux 数据)
+ADDR_ITRIM_B = 97     # lna_itrim t5..t8
+ADDR_RO38 = 56        # READro_reg_38: pll_lock_indicator[15] (RO 回读)
 
 
-# ───────────── regmap：D=Reg_Name F=Type G=Signal_Name H=addr I=default J..Y=bit15..bit0(Y=bit0)
-#               Z=suffix(去向) AA=suffix2 AB=top_output AE=Owner ─────────────
-def _regmap(ws, r, reg, typ, signal, bit_msb, bit_lsb, addr_dec,
-            suffix="to_logic", suffix2="", owner="Yao Wang"):
+# ───────────── BT_LP RX 选路族(7 条真例，值逐字来自 extracted_validation_examples.md)─────────────
+# 每条：out 基名 / 位宽 / 表达式(字母变量) / inputs[每个输入一 dict] / cols[每列=(标签,{字母:值},输出值)]
+# input dict：L=字母 base=信号基名 w=位宽 kind=RW/RO addr=RW写地址(RO为None) bit=寄存器bit串
+FAMILY = [
+    dict(out="d_logic_bt_lp_rx_en", w=1, expr="(A?C:B)&(~D)", note="选路&iddq门(SignalPath实证)",
+         ins=[dict(L="A", base="d_bt_lp_linelocal_mode_ctrl", w=1, kind="RW", addr="10'h2D", bit="0"),
+              dict(L="B", base="d_bt_lp_linectrl_rx_en", w=1, kind="RO", addr=None, bit="1"),
+              dict(L="C", base="d_bt_lp_rx_en_local", w=1, kind="RW", addr="10'h2D", bit="4"),
+              dict(L="D", base="d_bt_lp_pll_dig_dft_iddq_mode", w=1, kind="RO", addr=None, bit="2")],
+         cols=[("Line1", dict(A=0, B=1, C=0, D=0), 1), ("Line0", dict(A=0, B=0, C=1, D=0), 0),
+               ("Local1", dict(A=1, B=0, C=1, D=0), 1), ("Local0", dict(A=1, B=1, C=0, D=0), 0),
+               ("iddq", dict(A=0, B=1, C=0, D=1), 0)]),
+    dict(out="d_logic_bt_lp_reserve", w=1, expr="(A?C:B)&(~D)", note="选路&iddq门",
+         ins=[dict(L="A", base="d_bt_lp_linelocal_mode_ctrl", w=1, kind="RW", addr="10'h2D", bit="0"),
+              dict(L="B", base="d_bt_lp_bt_mode_sel", w=1, kind="RO", addr=None, bit="0"),
+              dict(L="C", base="d_bt_lp_bt_mode_sel_local", w=1, kind="RW", addr="10'h2D", bit="1"),
+              dict(L="D", base="d_bt_lp_pll_dig_dft_iddq_mode", w=1, kind="RO", addr=None, bit="2")],
+         cols=[("Line1", dict(A=0, B=1, C=0, D=0), 1), ("Line0", dict(A=0, B=0, C=1, D=0), 0),
+               ("Local1", dict(A=1, B=0, C=1, D=0), 1), ("Local0", dict(A=1, B=1, C=0, D=0), 0),
+               ("iddq", dict(A=0, B=1, C=0, D=1), 0)]),
+    dict(out="d_logic_bt_lp_lna_agc", w=3, expr="A?C:B", note="选路(bus)",
+         ins=[dict(L="A", base="d_bt_lp_linelocal_mode_ctrl", w=1, kind="RW", addr="10'h2D", bit="0"),
+              dict(L="B", base="d_bt_lp_linectrl_lna_agc", w=3, kind="RO", addr=None, bit="2:0"),
+              dict(L="C", base="d_bt_lp_local_lna_agc", w=3, kind="RW", addr="10'h2F", bit="2:0")],
+         cols=[("line", dict(A=0, B=5, C=0), 5), ("local", dict(A=1, B=0, C=6), 6)]),
+    dict(out="d_logic_bt_lp_lpf_agc", w=3, expr="A?C:B", note="选路(bus)",
+         ins=[dict(L="A", base="d_bt_lp_linelocal_mode_ctrl", w=1, kind="RW", addr="10'h2D", bit="0"),
+              dict(L="B", base="d_bt_lp_linectrl_lpf_agc", w=3, kind="RO", addr=None, bit="6:4"),
+              dict(L="C", base="d_bt_lp_local_lpf_agc", w=3, kind="RW", addr="10'h2F", bit="6:4")],
+         cols=[("line", dict(A=0, B=5, C=0), 5), ("local", dict(A=1, B=0, C=6), 6)]),
+    dict(out="d_logic_bt_lp_rx_dcoc_i", w=7, expr="A?C:B", note="选路(bus,7bit)",
+         ins=[dict(L="A", base="d_bt_lp_linelocal_mode_ctrl", w=1, kind="RW", addr="10'h2D", bit="0"),
+              dict(L="B", base="d_bt_lp_linectrl_rx_dcoc_i", w=7, kind="RO", addr=None, bit="6:0"),
+              dict(L="C", base="d_bt_lp_local_rx_dcoc_i", w=7, kind="RW", addr="10'h2E", bit="6:0")],
+         cols=[("line", dict(A=0, B=25, C=0), 25), ("local", dict(A=1, B=0, C=115), 115)]),
+    dict(out="d_logic_bt_lp_rx_dcoc_q", w=7, expr="A?C:B", note="选路(bus,7bit)",
+         ins=[dict(L="A", base="d_bt_lp_linelocal_mode_ctrl", w=1, kind="RW", addr="10'h2D", bit="0"),
+              dict(L="B", base="d_bt_lp_linectrl_rx_dcoc_q", w=7, kind="RO", addr=None, bit="14:8"),
+              dict(L="C", base="d_bt_lp_local_rx_dcoc_q", w=7, kind="RW", addr="10'h2E", bit="14:8")],
+         cols=[("line", dict(A=0, B=25, C=0), 25), ("local", dict(A=1, B=0, C=115), 115)]),
+    dict(out="d_logic_bt_lp_tsensor", w=4, expr="A?C:B", note="选路(bus,4bit;也当 lna_itrim mux 控制)",
+         ins=[dict(L="A", base="d_bt_lp_linelocal_tsensor_ctrl", w=1, kind="RW", addr="10'h2D", bit="2"),
+              dict(L="B", base="d_bt_lp_linectrl_tsensor", w=4, kind="RO", addr=None, bit="3:0"),
+              dict(L="C", base="d_bt_lp_tsensor_local", w=4, kind="RW", addr="10'h32", bit="3:0")],
+         cols=[("line", dict(A=0, B=3, C=0), 3), ("local", dict(A=1, B=0, C=12), 12)]),
+]
+
+
+# ───────────── regmap：D=Reg F=Type G=Signal H=addr J..Y=bit15..bit0 Z=suffix AA=suffix2 AB=top_output AE=Owner ─────
+def _regmap(ws, r, reg, typ, signal, bit_msb, bit_lsb, addr_dec, suffix="to_logic", suffix2="", owner="Yao Wang"):
     _set(ws, r, {"D": reg, "F": typ, "G": signal, "H": _d(addr_dec),
                  "Z": suffix, "AA": suffix2, "AB": 0, "AE": owner})
     for b in range(bit_lsb, bit_msb + 1):
-        col = column_index_from_string("Y") - b      # Y=bit0
+        col = column_index_from_string("Y") - b
         ws.cell(row=r, column=col, value=1)
     return r + 1
 
 
-# ───────────── total_memory_map：块结构 A=名 B=bit C=reset D=DIG_TOP_PIN E=desc F=addr ─────────────
 def _tmm_reg(ws, r, name, addr_dec, reset="h0"):
     _set(ws, r, {"A": name, "B": "h%X" % addr_dec, "C": reset, "D": "RW", "E": name})
     r += 1
@@ -81,9 +142,7 @@ def _tmm_field(ws, r, name, bit, typ="N", desc=""):
     return r + 1
 
 
-# ───────────── logic：A..J=输入变量(列字母=表达式变量) K=输出 L=表达式 M=suffix N=top_output(全0) P=owner R=no ─────────────
-def _logic(ws, r, out, expr, inputs, suffix="to_dft", owner="Yao Wang", note=""):
-    """inputs: 按 A,B,C... 顺序的输入网名列表(已带 _to_logic 与位宽)。"""
+def _logic(ws, r, out, expr, inputs, suffix="to_dft", owner="Wan Xu", note=""):
     m = {"K": out, "L": expr, "M": suffix, "N": 0, "O": note or out, "P": owner, "R": r - 2}
     for i, name in enumerate(inputs):
         m[chr(ord("A") + i)] = name
@@ -91,7 +150,6 @@ def _logic(ws, r, out, expr, inputs, suffix="to_dft", owner="Yao Wang", note="")
     return r + 1
 
 
-# ───────────── mux：A=input B..E=ctrl F=case G=out H=suffix I=top_out(全0) L=owner N=组号 ─────────────
 def _mux(ws, r, mux_input, ctrls, case, out, group_no, dest="to_dft", owner="Jiao Yexiang"):
     if isinstance(ctrls, str):
         ctrls = [ctrls]
@@ -102,15 +160,42 @@ def _mux(ws, r, mux_input, ctrls, case, out, group_no, dest="to_dft", owner="Jia
     return r + 1
 
 
-# ───────────── dft：A=input(_to_dft) D=out put signal E=logic expression(多为 A 恒等) F=observe ─────────────
 def _dft(ws, r, out, in_net, expr="A", observe="16", owner="Yao Wang"):
     _set(ws, r, {"A": in_net, "D": out, "E": expr, "F": observe, "H": owner, "I": in_net})
     return r + 1
 
 
-# ───────────── level_shift：A=input(_to_ls) B=level C=output_name E=top_out=1 F=owner ─────────────
 def _ls(ws, r, in_net, out_name, owner="Yao Wang"):
     _set(ws, r, {"A": in_net, "B": "STD_SR_L2H", "C": out_name, "E": 1, "F": owner, "G": in_net})
+    return r + 1
+
+
+def _ft_block(ws, r, case_no, mem):
+    """写一个 for_test case 块：各输入行(每列 T 值) + OUT 行 + 标签行。布局忠实真表竖向 for_test。"""
+    out_base, w, ins, cols = mem["out"], mem["w"], mem["ins"], mem["cols"]
+    for i, inp in enumerate(ins):
+        iw = _ws(inp["w"])
+        fname = inp["base"] + iw
+        addr = inp["addr"] if inp["kind"] == "RW" else (inp["base"] + iw)
+        m = {"F": fname, "I": addr, "J": "True" if inp["kind"] == "RO" else "False",
+             "K": inp["bit"], "N": case_no}
+        if i == 0:
+            m["A"] = out_base            # case 名只放首输入行
+        for j, (_lab, vals, _o) in enumerate(cols):
+            m[chr(ord("O") + j)] = _bin(vals[inp["L"]], inp["w"])
+        _set(ws, r, m)
+        r += 1
+    # OUT 行(待验输出 + 每列定宽期望值)
+    m = {"D": out_base + _ws(w), "N": case_no}
+    for j, (_lab, _vals, outv) in enumerate(cols):
+        m[chr(ord("O") + j)] = _sized(outv, w)
+    _set(ws, r, m)
+    r += 1
+    # 标签行(line/local/iddq)
+    m = {"G": "label", "N": case_no}
+    for j, (lab, _vals, _o) in enumerate(cols):
+        m[chr(ord("O") + j)] = lab
+    _set(ws, r, m)
     return r + 1
 
 
@@ -125,118 +210,110 @@ def build(path):
                  "K": "logic_out_signal_name", "L": "logic expression", "M": "suffix",
                  "N": "top_output", "O": "Notes", "P": "Owner", "Q": "export_from_regmap", "R": "no"})
     r = 3
-    # ① 选路 + iddq 门：d_logic_bt_lp_rx_en = (A?C:B)&(~D)  (for_test 金标准；SignalPath logic:109)
-    r = _logic(ws, r, "d_logic_bt_lp_rx_en", "(A?C:B)&(~D)",
-               ["d_bt_lp_linelocal_mode_ctrl_to_logic", "d_bt_lp_linectrl_rx_en_to_logic",
-                "d_bt_lp_rx_en_local_to_logic", "d_bt_lp_pll_dig_dft_iddq_mode_to_logic"],
-               suffix="to_dft", owner="Wan Xu", note="RX en 选路&iddq门")
-    # ②' tsensor 选路：既是 Topout 输出、又当 lna_itrim mux 的控制(suffix 含 to_mux)
-    r = _logic(ws, r, "d_logic_bt_lp_tsensor[3:0]", "A?C:B",
-               ["d_bt_lp_linelocal_tsensor_ctrl_to_logic", "d_bt_lp_linectrl_tsensor_to_logic[3:0]",
-                "d_bt_lp_tsensor_local_to_logic[3:0]"],
-               suffix="to_mux,to_dft", owner="Jiao Yexiang", note="温度码选路→喂 lna_itrim mux 当控制")
-    # ④ d_en_refbuf = D?(B?A:(A&C)):E  → 经 level_shift 出 d_en_refbuf_ls
+    # ① 7 条选路真族
+    for mem in FAMILY:
+        out = mem["out"] + _ws(mem["w"])
+        inputs = [inp["base"] + "_to_logic" + _ws(inp["w"]) for inp in mem["ins"]]
+        suffix = "to_mux,to_dft" if mem["out"].endswith("tsensor") else "to_dft"
+        r = _logic(ws, r, out, mem["expr"], inputs, suffix=suffix, note=mem["note"])
+    # ④ d_en_refbuf（经 level_shift 出顶层 _ls）
     r = _logic(ws, r, "d_en_refbuf", "D?(B?A:(A&C)):E",
                ["d_en_refbuf_to_logic", "testmode_to_logic", "en_pll_to_logic",
                 "d_pll_line_ctrl_mode_to_logic", "d_bt_lp_pll_en_to_logic"],
                suffix="to_dft", owner="Yao Wang", note="refbuf 使能(经 ls 出顶层 _ls)")
 
-    # ========================= mux 页 =========================
+    # ========================= mux 页（② lna_itrim，控制=logic 输出 tsensor）=========================
     mx = wb.create_sheet("mux")
     _set(mx, 2, {"A": "mux_input", "B": "mux_ctrl_sig1", "C": "mux_ctrl_sig2", "F": "case",
                  "G": "mux_out", "H": "suffix", "I": "top_out", "J": "Notes",
                  "K": "输入是否Input端口", "L": "Owner", "M": "export_from_regmap", "N": "组号"})
     r = 3
-    # ② d_bt_lp_lna_itrim[3:0] = case(d_logic_bt_lp_tsensor[3:0]) → t1..t8，控制本身是 logic 输出(_to_mux)
     cases = ["4'b000x", "4'b001x", "4'b010x", "4'b011x", "4'b100x", "4'b101x", "4'b110x", "4'b111x"]
     for k, case in enumerate(cases, start=1):
         r = _mux(mx, r, "d_bt_lp_lna_itrim_t%d_to_mux[3:0]" % k,
                  "d_logic_bt_lp_tsensor_to_mux[3:0]", case,
                  "d_bt_lp_lna_itrim[3:0]", 6, dest="to_dft", owner="Jiao Yexiang")
 
-    # ========================= dft 页(③ 恒等观测 + 选路输出门控观测)=========================
+    # ========================= dft 页（③ 恒等观测）=========================
     dft = wb.create_sheet("dft")
     _set(dft, 2, {"A": "A", "B": "B", "C": "C", "D": "out put signal", "E": "logic expression",
                   "F": "observe", "G": "suffix", "H": "owner", "I": "Exported Signals",
                   "J": "Owner of exported Signals"})
     r = 3
-    r = _dft(dft, r, "clk_force_on", "clk_force_on_to_dft")          # ③ 直连寄存器→恒等观测
+    r = _dft(dft, r, "clk_force_on", "clk_force_on_to_dft")
     r = _dft(dft, r, "en_dig_clk", "en_dig_clk_to_dft")
-    r = _dft(dft, r, "d_logic_bt_lp_rx_en", "d_logic_bt_lp_rx_en_to_dft")
-    r = _dft(dft, r, "d_bt_lp_lna_itrim[3:0]", "d_bt_lp_lna_itrim_to_dft[3:0]")
+    for mem in FAMILY:
+        r = _dft(dft, r, mem["out"] + _ws(mem["w"]), mem["out"] + "_to_dft" + _ws(mem["w"]))
 
-    # ========================= regmap 页(RW 主输入 + 线控/RO)=========================
+    # ========================= regmap 页 =========================
     rm = wb.create_sheet("regmap")
     _set(rm, 2, {"A": "BLOCK", "D": "Reg_Name", "F": "Reg Type", "G": "Signal_Name", "H": "Address",
                  "I": "default", "J": "15", "Y": "0", "Z": "suffix", "AA": "suffix2",
                  "AB": "top_output", "AE": "Owner"})
     r = 3
-    # TOP_EN @ d1
+    # 直连寄存器 / refbuf cone
     r = _regmap(rm, r, "TOP_EN", "RW", "en_pll", 0, 0, ADDR_TOP_EN, "to_logic,to_dft", "to_pll_ctrl")
     r = _regmap(rm, r, "TOP_EN", "RW", "en_dig_clk", 8, 8, ADDR_TOP_EN, "to_logic", "to_logic")
     r = _regmap(rm, r, "TOP_EN", "RW", "clk_force_on", 9, 9, ADDR_TOP_EN, "to_dft", "to_pll_crg")
-    # TESTMODE1 @ d9
     r = _regmap(rm, r, "TESTMODE1", "RW", "testmode", 15, 15, ADDR_TESTMODE, "to_logic", "to_logic")
     r = _regmap(rm, r, "TESTMODE1", "RW", "d_en_refbuf", 14, 14, ADDR_TESTMODE, "to_logic", "to_logic")
-    # PLL line ctrl mode @ d23
     r = _regmap(rm, r, "REG_0x17", "RW", "d_pll_line_ctrl_mode", 14, 14, ADDR_PLL_LINE, "to_logic", "to_logic")
-    # readro_reg_41 @ d41 (虚拟/线控 RO)
-    r = _regmap(rm, r, "readro_reg_41", "RO", "d_bt_lp_bt_mode_sel", 0, 0, ADDR_RO41, "to_logic", "", "Yao Wang")
-    r = _regmap(rm, r, "readro_reg_41", "RO", "d_bt_lp_linectrl_rx_en", 1, 1, ADDR_RO41, "to_logic", "", "Yao Wang")
+    # readro_reg_41(虚拟/线控 RO)
+    r = _regmap(rm, r, "readro_reg_41", "RO", "d_bt_lp_bt_mode_sel", 0, 0, ADDR_RO41, "to_logic", "")
+    r = _regmap(rm, r, "readro_reg_41", "RO", "d_bt_lp_linectrl_rx_en", 1, 1, ADDR_RO41, "to_logic", "")
     r = _regmap(rm, r, "readro_reg_41", "RO", "d_bt_lp_pll_dig_dft_iddq_mode", 2, 2, ADDR_RO41, "to_logic", "")
     r = _regmap(rm, r, "readro_reg_41", "RO", "d_bt_lp_pll_en", 3, 3, ADDR_RO41, "to_logic", "")
-    # RX local / mode ctrl @ d45 (RW)
+    # readro_reg_42/43/44(线控数据 RO，bus)
+    r = _regmap(rm, r, "readro_reg_42", "RO", "d_bt_lp_linectrl_lna_agc[2:0]", 2, 0, ADDR_RO42, "to_logic", "")
+    r = _regmap(rm, r, "readro_reg_42", "RO", "d_bt_lp_linectrl_lpf_agc[2:0]", 6, 4, ADDR_RO42, "to_logic", "")
+    r = _regmap(rm, r, "readro_reg_43", "RO", "d_bt_lp_linectrl_rx_dcoc_i[6:0]", 6, 0, ADDR_RO43, "to_logic", "")
+    r = _regmap(rm, r, "readro_reg_43", "RO", "d_bt_lp_linectrl_rx_dcoc_q[6:0]", 14, 8, ADDR_RO43, "to_logic", "")
+    r = _regmap(rm, r, "readro_reg_44", "RO", "d_bt_lp_linectrl_tsensor[3:0]", 3, 0, ADDR_RO44, "to_logic", "")
+    # RW 本地控制 / 选路位(@2D)
     r = _regmap(rm, r, "RX_LOCAL", "RW", "d_bt_lp_linelocal_mode_ctrl", 0, 0, ADDR_RX_LOCAL, "to_logic", "", "Wan Xu")
+    r = _regmap(rm, r, "RX_LOCAL", "RW", "d_bt_lp_bt_mode_sel_local", 1, 1, ADDR_RX_LOCAL, "to_logic", "", "Wan Xu")
     r = _regmap(rm, r, "RX_LOCAL", "RW", "d_bt_lp_linelocal_tsensor_ctrl", 2, 2, ADDR_RX_LOCAL, "to_logic", "", "Wan Xu")
     r = _regmap(rm, r, "RX_LOCAL", "RW", "d_bt_lp_rx_en_local", 4, 4, ADDR_RX_LOCAL, "to_logic", "", "Wan Xu")
-    # tsensor 线控(RO) + local(RW)
-    r = _regmap(rm, r, "readro_reg_42", "RO", "d_bt_lp_linectrl_tsensor[3:0]", 3, 0, ADDR_TSENS_RO, "to_logic", "")
+    # RW 本地数据(bus，@2E/2F/32)
+    r = _regmap(rm, r, "DCOC_LOCAL", "RW", "d_bt_lp_local_rx_dcoc_i[6:0]", 6, 0, ADDR_DCOC_LOCAL, "to_logic", "", "Wan Xu")
+    r = _regmap(rm, r, "DCOC_LOCAL", "RW", "d_bt_lp_local_rx_dcoc_q[6:0]", 14, 8, ADDR_DCOC_LOCAL, "to_logic", "", "Wan Xu")
+    r = _regmap(rm, r, "AGC_LOCAL", "RW", "d_bt_lp_local_lna_agc[2:0]", 2, 0, ADDR_AGC_LOCAL, "to_logic", "", "Wan Xu")
+    r = _regmap(rm, r, "AGC_LOCAL", "RW", "d_bt_lp_local_lpf_agc[2:0]", 6, 4, ADDR_AGC_LOCAL, "to_logic", "", "Wan Xu")
     r = _regmap(rm, r, "TSENSOR_LOCAL", "RW", "d_bt_lp_tsensor_local[3:0]", 3, 0, ADDR_TSENS_LOCAL, "to_logic", "", "Jiao Yexiang")
-    # lna_itrim 8 个 trim 数据源(RW, _to_mux)
+    # lna_itrim 8 trim 数据源(RW, _to_mux)
     for k in range(1, 5):
         r = _regmap(rm, r, "ITRIM_A", "RW", "d_bt_lp_lna_itrim_t%d[3:0]" % k,
                     4 * (k - 1) + 3, 4 * (k - 1), ADDR_ITRIM_A, "to_mux", "", "Jiao Yexiang")
     for k in range(5, 9):
         r = _regmap(rm, r, "ITRIM_B", "RW", "d_bt_lp_lna_itrim_t%d[3:0]" % k,
                     4 * (k - 5) + 3, 4 * (k - 5), ADDR_ITRIM_B, "to_mux", "", "Jiao Yexiang")
-    # READro_reg_38 @ d56：pll_lock_indicator(RO 回读，⑤ 无 cone)
-    r = _regmap(rm, r, "READro_reg_38", "RO", "pll_lock_indicator", 15, 15, ADDR_RO38, "to_dft", "", "Yao Wang")
+    # READro_reg_38：pll_lock_indicator(RO 回读,⑤)
+    r = _regmap(rm, r, "READro_reg_38", "RO", "pll_lock_indicator", 15, 15, ADDR_RO38, "to_dft", "")
 
-    # ========================= total_memory_map 页 =========================
+    # ========================= total_memory_map 页(精简) =========================
     tmm = wb.create_sheet("total_memory_map")
     r = 1
     r = _tmm_reg(tmm, r, "TOP_EN", ADDR_TOP_EN, "h0200")
     r = _tmm_field(tmm, r, "en_dig_clk", "8")
     r = _tmm_field(tmm, r, "clk_force_on", "9")
     r = _tmm_field(tmm, r, "en_pll", "0")
-    r = _tmm_reg(tmm, r, "TESTMODE1", ADDR_TESTMODE, "h4000")
-    r = _tmm_field(tmm, r, "testmode", "15")
-    r = _tmm_field(tmm, r, "d_en_refbuf", "14")
-    r = _tmm_reg(tmm, r, "REG_0x17", ADDR_PLL_LINE)
-    r = _tmm_field(tmm, r, "d_pll_line_ctrl_mode", "14")
-    r = _tmm_reg(tmm, r, "readro_reg_41", ADDR_RO41)
-    r = _tmm_field(tmm, r, "d_bt_lp_bt_mode_sel", "0", "Y", "线控/回读")
-    r = _tmm_field(tmm, r, "d_bt_lp_linectrl_rx_en", "1", "Y", "线控/回读")
-    r = _tmm_field(tmm, r, "d_bt_lp_pll_dig_dft_iddq_mode", "2", "Y", "iddq 门")
-    r = _tmm_field(tmm, r, "d_bt_lp_pll_en", "3", "Y")
     r = _tmm_reg(tmm, r, "RX_LOCAL", ADDR_RX_LOCAL)
     r = _tmm_field(tmm, r, "d_bt_lp_linelocal_mode_ctrl", "0")
+    r = _tmm_field(tmm, r, "d_bt_lp_bt_mode_sel_local", "1")
     r = _tmm_field(tmm, r, "d_bt_lp_linelocal_tsensor_ctrl", "2")
     r = _tmm_field(tmm, r, "d_bt_lp_rx_en_local", "4")
-    r = _tmm_reg(tmm, r, "readro_reg_42", ADDR_TSENS_RO)
-    r = _tmm_field(tmm, r, "d_bt_lp_linectrl_tsensor[3:0]", "3:0", "Y", "线控/回读")
+    r = _tmm_reg(tmm, r, "AGC_LOCAL", ADDR_AGC_LOCAL)
+    r = _tmm_field(tmm, r, "d_bt_lp_local_lna_agc[2:0]", "2:0")
+    r = _tmm_field(tmm, r, "d_bt_lp_local_lpf_agc[2:0]", "6:4")
+    r = _tmm_reg(tmm, r, "DCOC_LOCAL", ADDR_DCOC_LOCAL)
+    r = _tmm_field(tmm, r, "d_bt_lp_local_rx_dcoc_i[6:0]", "6:0")
+    r = _tmm_field(tmm, r, "d_bt_lp_local_rx_dcoc_q[6:0]", "14:8")
     r = _tmm_reg(tmm, r, "TSENSOR_LOCAL", ADDR_TSENS_LOCAL)
     r = _tmm_field(tmm, r, "d_bt_lp_tsensor_local[3:0]", "3:0")
-    r = _tmm_reg(tmm, r, "ITRIM_A", ADDR_ITRIM_A)
-    for k in range(1, 5):
-        r = _tmm_field(tmm, r, "d_bt_lp_lna_itrim_t%d[3:0]" % k, "%d:%d" % (4 * (k - 1) + 3, 4 * (k - 1)))
-    r = _tmm_reg(tmm, r, "ITRIM_B", ADDR_ITRIM_B)
-    for k in range(5, 9):
-        r = _tmm_field(tmm, r, "d_bt_lp_lna_itrim_t%d[3:0]" % k, "%d:%d" % (4 * (k - 5) + 3, 4 * (k - 5)))
     r = _tmm_reg(tmm, r, "READro_reg_38", ADDR_RO38)
     r = _tmm_field(tmm, r, "pll_lock_indicator", "15", "N", "RO 回读(FSM/模拟状态,无 cone)")
 
-    # ========================= level_shift 页(④ X_to_ls → X_ls)=========================
+    # ========================= level_shift 页(④)=========================
     lvl = wb.create_sheet("level_shift")
     _set(lvl, 2, {"A": "level_shift_input", "B": "level", "C": "level_shift_output_name",
                   "D": "suffix", "E": "top_out", "F": "Owner", "G": "Exported Signals",
@@ -245,25 +322,31 @@ def build(path):
     r = _ls(lvl, r, "d_en_refbuf_to_ls", "d_en_refbuf_ls")
     r = _ls(lvl, r, "d_en_pfd_to_ls", "d_en_pfd_ls")
 
-    # ========================= for_test 页(① 的金标准真值表)=========================
+    # ========================= for_test 页(① 7 条真族金标准)=========================
     ft = wb.create_sheet("for_test")
-    _fill_fortest(ft)
-    # for_test_gen_tc：同结构(生成版)，本夹具放同一个 rx_en case 作占位
+    _fill_fortest_header(ft)
+    r = 4
+    for n, mem in enumerate(FAMILY, start=2):
+        r = _ft_block(ft, r, n, mem)
+    # for_test_gen_tc：同结构(生成版占位，放同样 7 条)
     ftg = wb.create_sheet("for_test_gen_tc")
-    _fill_fortest(ftg)
+    _fill_fortest_header(ftg)
+    r = 4
+    for n, mem in enumerate(FAMILY, start=2):
+        r = _ft_block(ftg, r, n, mem)
 
     # ========================= Topout 页(要验清单 B 列 + 独立寄存器图 C–G)=========================
     top = wb.create_sheet("Topout")
     _set(top, 2, {"A": "Owner", "B": "TOP Out Signal", "C": "Reg Name", "D": "Offset",
                   "E": "Reg Description", "F": "Address", "G": "ResetValue"})
-    # B 列(字母序，无后缀真名/带 _ls)= 要验的信号；C–G(独立)=寄存器图(故意不对齐 B)
-    sigs = ["clk_force_on", "d_bt_lp_lna_itrim[3:0]", "d_en_refbuf_ls",
-            "d_logic_bt_lp_rx_en", "d_logic_bt_lp_tsensor[3:0]", "en_dig_clk", "pll_lock_indicator"]
+    sigs = (["clk_force_on", "en_dig_clk", "d_bt_lp_lna_itrim[3:0]", "d_en_refbuf_ls"]
+            + [m["out"] + _ws(m["w"]) for m in FAMILY]
+            + ["pll_lock_indicator"])
     regs = [("TOPrw_reg_1", "10'h1", "[8] en_dig_clk\n[9] clk_force_on\n[0] en_pll", "16'h0200"),
-            ("TESTrw_reg_9", "10'h9", "[15] testmode\n[14] d_en_refbuf", "16'h4000"),
+            ("RXrw_reg_45", "10'h2D", "[0] linelocal_mode_ctrl\n[4] rx_en_local ...", "16'h0000"),
             ("READro_reg_38", "ld_dig_done", "[15] pll_lock_indicator ...", "16'd1")]
     r = 3
-    for i, s in enumerate(sigs):
+    for i, s in enumerate(sorted(sigs)):
         m = {"A": "Yao Wang", "B": s}
         if i < len(regs):
             rn, off, desc, rst = regs[i]
@@ -271,9 +354,8 @@ def build(path):
         _set(top, r, m)
         r += 1
 
-    # ========================= SignalPath 页(VBA 一次性查询；开发期对照 oracle)=========================
+    # ========================= SignalPath 页(rx_en 全解析块；开发期对照)=========================
     sp = wb.create_sheet("SignalPath")
-    # d_logic_bt_lp_rx_en 的全解析块(忠实真表不规整布局的简化版)
     _set(sp, 4, {"B": "Reg:d41", "C": "d_bt_lp_pll_dig_dft_iddq_mode", "D": "A",
                  "E": "d_logic_bt_lp_rx_en_to_logic", "F": "logic:1", "G": "(A?C:B)&(~D)"})
     _set(sp, 5, {"F": "A", "G": "d_bt_lp_linelocal_mode_ctrl_to_logic", "H": "Reg:d45",
@@ -325,31 +407,11 @@ def build(path):
     return path
 
 
-def _fill_fortest(ft):
-    """① d_logic_bt_lp_rx_en 的金标准真值表块(忠实真表竖向布局，T0..T4=Line1/Line0/Local1/Local0/iddq)。
-
-    expr=(A?C:B)&(~D)：A=linelocal_mode_ctrl B=linectrl_rx_en C=rx_en_local D=iddq_mode
-      T0 A0 B1 C0 D0 →1  T1 A0 B0 C1 D0 →0  T2 A1 B0 C1 D0 →1  T3 A1 B1 C0 D0 →0  T4 A0 B1 C0 D1 →0
-    """
+def _fill_fortest_header(ft):
     _set(ft, 2, {"A": "case", "B": "输入寄存器地址", "C": "value", "D": "待验证输出信号", "E": "预计输出",
                  "F": "验证信号的输入信号", "G": "Signal Value(bin)", "H": "Reg(dec)", "I": "Addr",
                  "J": "RO", "K": "Bits", "L": "Bit Addr", "M": "Bit ADDR", "N": "1",
-                 "O": "T0", "P": "T1", "Q": "T2", "R": "T3", "S": "T4"})
-    # 输入行
-    _set(ft, 4, {"A": "d_logic_bt_lp_rx_en", "B": "d_bt_lp_linectrl_rx_en", "C": "16'h1", "E": "1'b0",
-                 "F": "d_bt_lp_linectrl_rx_en", "G": "1", "H": "1", "I": "d_bt_lp_linectrl_rx_en",
-                 "J": "True", "K": "1", "N": "3", "O": 1, "P": 0, "Q": 0, "R": 1, "S": 1})
-    _set(ft, 5, {"B": "d_bt_lp_pll_dig_dft_iddq_mode", "C": "16'h1", "F": "d_bt_lp_pll_dig_dft_iddq_mode",
-                 "G": "1", "H": "1", "I": "d_bt_lp_pll_dig_dft_iddq_mode", "J": "True", "K": "2",
-                 "N": "3", "O": 0, "P": 0, "Q": 0, "R": 0, "S": 1})
-    _set(ft, 6, {"F": "d_bt_lp_linelocal_mode_ctrl", "G": "0", "H": "0", "I": "10'h2D", "J": "False",
-                 "K": "0", "N": "3", "O": 0, "P": 0, "Q": 1, "R": 1, "S": 0})
-    _set(ft, 7, {"B": "10'h2D", "C": "16'h0", "F": "d_bt_lp_rx_en_local", "G": "0", "H": "0",
-                 "I": "10'h2D", "J": "False", "K": "4", "N": "3", "O": 0, "P": 1, "Q": 1, "R": 0, "S": 0})
-    # 输出行 + 标签行
-    _set(ft, 8, {"D": "d_logic_bt_lp_rx_en", "E": "1'b0", "G": "1'b1", "N": "3",
-                 "O": "1'b1", "P": "1'b0", "Q": "1'b1", "R": "1'b0", "S": "1'b0"})
-    _set(ft, 9, {"G": "Line1", "N": "3", "O": "Line1", "P": "Line0", "Q": "Local1", "R": "Local0", "S": "iddq"})
+                 "O": "T0", "P": "T1", "Q": "T2", "R": "T3", "S": "T4", "T": "T5"})
 
 
 if __name__ == "__main__":
