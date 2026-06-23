@@ -18,6 +18,7 @@ import make_mirror_excel                       # WL 镜像（判据二硬案）
 from dreg_verify import excel_model as M
 from dreg_verify import expr as E
 from dreg_verify import resolver as R
+from dreg_verify import rtl_scan
 from dreg_verify import topout as T
 
 
@@ -303,3 +304,52 @@ def test_iddq_as_a_cone_level():
     r = T.analyze_signal(wb, res, M.TopoutSignal(4, "top_i", 1, "WL"))
     bases = _leaf_bases(r)
     assert "d_iddq_src" in bases               # 理想：展进 iddq 页溯到源寄存器（当前会 xfail）
+
+
+# ═════════════════════════ DoD 5：claim 干净名 provenance + nets 可选过滤 ═════════════════════════
+def test_claim_provenance_topout():
+    """C1：Topout 路径 collect_claims(is_topout=True) → 探针 provenance='topout'(顶层真名权威)。"""
+    from dreg_verify import generator as G
+    from dreg_verify.excel_model import LogicSignal
+    sig = LogicSignal(row=3, out_name="d_top_x[3:0]", out_width=4, expr="A", suffix="to_dft",
+                      top_output="0", notes="", owner="WL", assert_id="1",
+                      inputs={"A": {"raw": "a_in[3:0]", "base": "a_in", "width": 4,
+                                    "msb": 3, "lsb": 0}})
+    # 旧路径(默认)：provenance 'bare'；Topout 路径：'topout'
+    old = G.collect_claims(sig, {}, "", is_mux=False)
+    new = G.collect_claims(sig, {}, "", is_mux=False, is_topout=True)
+    assert old[0]["found_in"] == "bare"
+    assert new[0]["found_in"] == "topout"
+
+
+def test_nets_filter_by_signal(wl_wb):
+    """C3：collect_excel_nets(signals=...) 只导指定信号的网；无参全导(逐字节不变)。"""
+    all_nets = rtl_scan.collect_excel_nets(wl_wb)
+    one = rtl_scan.collect_excel_nets(wl_wb, signals=["d_wl_rf_lo2g5g_bias_en"])
+    assert len(one) <= len(all_nets)
+    assert "d_wl_rf_lo2g5g_bias_en" in one     # 该信号探针网在
+    # 无参 = 旧全导，与不传 signals 一致
+    assert rtl_scan.collect_excel_nets(wl_wb) == all_nets
+
+
+def test_collect_nets_pages_and_dest_suffix(wl_wb):
+    """C3：collect_nets 按页过滤 + 按目的地后缀过滤(Q3 同源多消费方选一页)。"""
+    only_mux = rtl_scan.collect_nets(wl_wb, pages=["mux"])
+    only_dft = rtl_scan.collect_nets(wl_wb, pages=["dft"])
+    assert only_mux and only_dft
+    # dft 页网都是门/衔接网，不含 mux 输出探针 d_wl_rf_lo2g5g_mixer2g_trim
+    assert "d_wl_rf_lo2g5g_mixer2g_trim" in rtl_scan.collect_nets(wl_wb, pages=["mux"])
+    # 目的地后缀过滤：只留 *_to_mux 衔接网
+    to_mux = rtl_scan.collect_nets(wl_wb, pages=["mux"], dest_suffix="to_mux")
+    assert to_mux
+    assert all(n.lower().endswith("_to_mux") for n in to_mux)
+    # 全页全导（无过滤）≥ 单页
+    assert len(rtl_scan.collect_nets(wl_wb)) >= len(only_mux)
+
+
+def test_filter_nets_by_dest_helper():
+    """C3：filter_nets_by_dest 容 'to_dft' 与 '_to_dft' 两种写法，空后缀原样返回。"""
+    nets = {"a_to_dft": "x", "b_to_iddq": "y", "c": "z"}
+    assert set(rtl_scan.filter_nets_by_dest(nets, "to_dft")) == {"a_to_dft"}
+    assert set(rtl_scan.filter_nets_by_dest(nets, "_to_iddq")) == {"b_to_iddq"}
+    assert rtl_scan.filter_nets_by_dest(nets, None) == nets

@@ -22,7 +22,14 @@ from scan_rtl import (KEYWORDS, build_signal_map, find_verilog_files,           
                       strip_comments)
 
 
-def collect_excel_nets(wb):
+def _sig_filter(signals):
+    """signals=None → 收全部；否则归一成小写集合，只收 out_base 命中的信号(C3 可选过滤)。"""
+    if signals is None:
+        return None
+    return {str(s).strip().lower() for s in signals}
+
+
+def collect_excel_nets(wb, signals=None):
     """Excel → 需要在 ENV_RF 层级存在的网名集合：
 
     ① 每个输出的 RTL 网名 —— assert 探针：
@@ -33,13 +40,19 @@ def collect_excel_nets(wb):
 
     ⭐ 两种级联模式(cone 展开上游 / force 级联网)需要的网都导出——
     一次 RTL 扫描同时覆盖两种模式，之后在 GUI/CLI 里切换模式不用重新扫。
+
+    signals(C3 可选过滤,2026-06-23)：只导这些信号(按 out_base)的网；None=全导(逐字节不变)。
+    新 Topout 主流程基本不需 nets(顶层无前缀)，唯一需要=单独测某页/某信号(块D2)→按需过滤。
     """
     from . import expr as E
     from . import generator
     from . import resolver as R
 
+    want = _sig_filter(signals)
     nets = {}
     for sig in wb.logic:
+        if want is not None and sig.out_base.lower() not in want:
+            continue
         # 探针网名用默认尾缀(LPBT 约定的真实网名)，显式设定使其不受同进程内先前 Resolver 的
         # append_to_logic 开关残留影响（scan 找的是 RTL 真实网名；--no-to-logic-suffix 不经此路）。
         sig._append_to_logic = True
@@ -50,6 +63,8 @@ def collect_excel_nets(wb):
         resolver = R.Resolver(wb, cascade_mode=mode)
         tag = "" if mode == "cone" else "（force级联网模式）"
         for sig in wb.logic:
+            if want is not None and sig.out_base.lower() not in want:
+                continue
             try:
                 node, bindings, _ = generator.expand_signal(wb, resolver, sig)
             except Exception:  # noqa: BLE001  cone 失败时退回原始绑定
@@ -66,8 +81,10 @@ def collect_excel_nets(wb):
     return nets
 
 
-def collect_mux_nets(wb):
+def collect_mux_nets(wb, signals=None):
     """mux 页 → 需要在 ENV_RF 层级核对/定位的网（2026-06-03 第十四轮：WL_RFTRX 多控制 + 非顶层输出）。
+
+    signals(C3 可选过滤)：只导这些 mux 组(按 G 列 out_base)的网；None=全导(逐字节不变)。
 
     从已装载的工作簿 wb（excel_model.DregWorkbook）的 wb.mux 取数据——不再二次打开 Excel，
     自动拿到 read_mux 的多控制 / 全局归并能力。导出三类网：
@@ -94,10 +111,13 @@ def collect_mux_nets(wb):
         """合法信号名才导出（过滤 '(reserved)' 等占位）。"""
         return bool(re.match(r"^[A-Za-z_]\w*$", name or ""))
 
+    want = _sig_filter(signals)
     nets = {}
     try:
         groups = getattr(wb, "mux", None) or []
         for grp in groups:
+            if want is not None and grp.out_base.lower() not in want:
+                continue
             # ① 输出探针网（G 列基名，已去位宽）——WL 输出不在顶层，靠 scan_rtl 定层级
             if valid_net(grp.out_base):
                 nets.setdefault(grp.out_base,
@@ -126,16 +146,21 @@ def collect_mux_nets(wb):
     return nets
 
 
-def collect_dft_nets(wb):
+def collect_dft_nets(wb, signals=None):
     """dft 页 → iddq 门网（2026-06-10 Hi1108：IDDQ 漏电态拍要 force 门网，此前不导出——
     门若埋在子模块，scan_rtl 定不到层级 → force CUVUNF 且无提示）。
 
     导出门基名（force 目标）+ _to_dft 衔接网（核对用，宁多勿漏，同 mux 网原则）。
     无 dft 页 / 任何异常 → 返回空 dict，绝不波及 logic/mux 网导出。
+
+    signals(C3 可选过滤)：只导这些被门控输出(dft D 列输出基名)的门网；None=全导(逐字节不变)。
     """
+    want = _sig_filter(signals)
     nets = {}
     try:
         for ob, g in sorted((getattr(wb, "dft", None) or {}).items()):
+            if want is not None and str(ob).lower() not in want:
+                continue
             gb, graw = g.get("gate_base"), g.get("gate_raw")
             if gb and re.match(r"^[A-Za-z_]\w*$", gb):
                 nets.setdefault(gb, "dft 页 iddq 门（IDDQ 漏电态拍的 force 目标；门控输出 %s 等）" % ob)
@@ -144,6 +169,46 @@ def collect_dft_nets(wb):
     except Exception:  # noqa: BLE001
         return {}
     return nets
+
+
+def filter_nets_by_dest(nets, dest_suffix):
+    """按【目的地后缀】过滤网集合（C3，Q3 后缀规则）：只保留网名以 `_<dest_suffix>` 结尾的。
+
+    Q3：同一源 A 可扇出多消费方(A_to_dft / A_to_iddq)——单独测某一页时，用 dest_suffix='to_dft'
+    只导 *_to_dft 那批衔接网(而非 A_to_iddq)。dest_suffix 容『to_dft』或『_to_dft』两种写法。
+    dest_suffix 为空 → 原样返回。"""
+    if not dest_suffix:
+        return dict(nets)
+    suf = str(dest_suffix).strip().lower()
+    if not suf.startswith("_"):
+        suf = "_" + suf
+    return {n: u for n, u in nets.items() if n.lower().endswith(suf)}
+
+
+def collect_nets(wb, signals=None, pages=None, dest_suffix=None):
+    """统一【可选过滤】网导出（C3 块D2，2026-06-23）：合并 logic/mux/dft 三页网，按需过滤。
+
+    signals    — 只导这些信号(out_base/G 列基名/dft 输出基名)的网；None=全部。
+    pages      — 取这些页：{'logic','mux','dft'} 的子集；None=三页全取。
+    dest_suffix— 只留以 `_<dest_suffix>` 结尾的衔接网(同源多目的地时选一页)；None=不按后缀过滤。
+
+    返回 {网名: 用途}。新 Topout 主流程顶层无前缀基本不需 nets；这是『单独测某页/某信号』的入口。
+    旧全导调用方(collect_excel_nets() 无参)逐字节不变；本函数是新增叠加层。"""
+    want_pages = None if pages is None else {str(p).strip().lower() for p in pages}
+
+    def _on(p):
+        return want_pages is None or p in want_pages
+
+    nets = {}
+    if _on("logic"):
+        nets.update(collect_excel_nets(wb, signals=signals))
+    if _on("mux"):
+        for k, v in collect_mux_nets(wb, signals=signals).items():
+            nets.setdefault(k, v)
+    if _on("dft"):
+        for k, v in collect_dft_nets(wb, signals=signals).items():
+            nets.setdefault(k, v)
+    return filter_nets_by_dest(nets, dest_suffix)
 
 
 def match_excel(wb, sigmap):

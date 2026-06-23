@@ -426,7 +426,15 @@ NAMING_MODEL_LOGIC = "logic-rooted"
 NAMING_MODEL_TOPOUT = "topout"
 
 
-def _probe_provenance(obj):
+def _probe_provenance(obj, is_topout=False):
+    """探针网名【从哪来】(红区 binder 据此判可信度)：
+      'topout'      = Topout 顶层真名(C1,2026-06-23)，无路由后缀、cone 已展到源，理应直接命中；
+      'level_shift' = level_shift 页给的 _ls 顶层口；
+      'ref_to_xxx'  = 被下游引用补的尾缀(猜的，可能假绿)；
+      'bare'        = 裸基名。
+    is_topout=True(Topout 路径传入) → 直接标 topout(顶层真名权威，压过尾缀/ls 推断)。"""
+    if is_topout:
+        return "topout"
     if getattr(obj, "_ls_name", None):
         return "level_shift"
     rs = getattr(obj, "ref_suffix", "")
@@ -442,14 +450,17 @@ def _claim(**kw):
     return c
 
 
-def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn"):
+def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn", is_topout=False):
     """为一个已生成的 logic 信号 / mux 组导出网名声明(探针 + force/rfwrite 输入)。
 
     探针网名取 rtl_base/rtl_name(=.sv 里 assert 的真名，已含尾缀/开关/_ls/前缀逻辑)；输入网取 resolver
     解析出的 b.wire(RO) 或 b.base+addr(RW)。同信号内按网名去重。纯导出、不改产物。
 
     on_missing(甲warn/乙fallback) 与 input_nets(期望输入网基名清单,= 各输入绑定的 b.wire/b.base)
-    挂在探针 claim 上，供红区 binder：前者定配错网的处置策略、后者拿 assign 的 RHS 做指纹。"""
+    挂在探针 claim 上，供红区 binder：前者定配错网的处置策略、后者拿 assign 的 RHS 做指纹。
+
+    is_topout(C1,2026-06-23)：本探针来自 Topout 路径——探针名是顶层真名(无路由后缀)，provenance 标
+    'topout'(binder 据此知道这名字权威、需前缀=意外埋件)。默认 False=旧 logic-rooted 路径(逐字节不变)。"""
     claims = []
     base = getattr(obj, "rtl_base", obj.out_base)
     name = getattr(obj, "rtl_name", obj.out_name)
@@ -458,7 +469,7 @@ def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn"):
     claims.append(_claim(
         signal=obj.out_name, aid=obj.assert_id or "", kind="probe", identity="output",
         net_base=base, slice=slc, prefix=prefix or "", full=full,
-        found_in=_probe_provenance(obj),
+        found_in=_probe_provenance(obj, is_topout=is_topout),
         self_ref_suffixes=sorted(getattr(obj, "_self_ref_suffixes", ())),
         is_mux=bool(is_mux), top_output=bool(getattr(obj, "is_top", False)),
         on_missing=on_missing if on_missing in ("warn", "fallback") else "warn"))
