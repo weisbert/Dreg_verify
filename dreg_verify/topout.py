@@ -20,6 +20,7 @@ from . import cone
 from . import expr as E
 from . import generator as G
 from . import mux_gen
+from . import sv_writer as W
 from . import vectors as V
 
 
@@ -398,7 +399,201 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False)
         if nm is not None:
             t = dict(t)
             t["owner"] = owner_of.get(nm, t.get("owner", ""))
+            t["topout_name"] = nm                # 块B：标回 Topout B 列名（视图模型/账目 join 用，纯附加）
             kept_tables.append(t)
     rep = dict(rep)
     rep["tables"] = kept_tables
     return rep
+
+
+# ═════════════════════════ 块B（续）：Topout .sv 产出路径（report_for_topout 的 .sv 孪生） ═════════════════════════
+class _PassthroughSig:
+    """直连寄存器(RW)根的 .sv 渲染占位（dft 恒等观测：顶层口 == 寄存器字段）。
+
+    render_signal_block 只读 out_name/out_base/rtl_name/assert_id/owner/out_width；node 已传入
+    故不读 expr。assert_id 用 'TOP<i>'（不与 logic 数字 R / mux 'mux<N>' 标号撞，保证全局唯一）。"""
+
+    suffix = "topout-reg"
+    _self_ref_suffixes = ()
+
+    def __init__(self, name, width, owner, aid):
+        self.out_name = name
+        self.out_base = name
+        self.rtl_name = name            # Topout 顶层真名（无前后缀，断言直接贴它）
+        self.assert_id = aid
+        self.owner = owner
+        self.out_width = width or 1
+        self.expr = "A"
+
+
+def _account_block(name, kind, status, reason, owner):
+    """RO 回读 / 未解析 / error / 同源已覆盖 → 块顶注释记账（护栏3：绝不静默丢、绝不崩）。
+    注释行不进 SV 字符串字面量，可含中文（与 generator 现有 '// ⚠ <中文>' 一致）。"""
+    lines = ["// [topout] %s (%s/%s)：%s —— 本信号不产出断言（已记账，未静默丢弃）"
+             % (name, kind, status, reason)]
+    stats = {"out_name": name, "rtl_name": name, "assert_id": "-", "owner": owner or "",
+             "n_vectors": 0, "n_negative": 0, "n_designer": 0,
+             "unresolved": [], "truncated": False, "cone_expanded": False,
+             "topout_name": name, "topout_kind": kind, "topout_status": status}
+    return (lines, stats)
+
+
+def _register_passthrough_block(result, owner, aid, comments=False, counters=False):
+    """直连寄存器根 → 平凡 passthrough .sv 块：RF_WRITE 该寄存器 + 断言 顶层口 == 写值。"""
+    sig = _PassthroughSig(result.topo.name, result.out_width, owner, aid)
+    meta = dict(result.meta or {})
+    meta.setdefault("truncated", False)
+    lines, stats = W.render_signal_block(sig, result.bindings, result.vectors, meta,
+                                         comments=comments, node=result.node,
+                                         counters=counters)
+    stats["topout_name"] = result.topo.name
+    stats["topout_kind"] = REGISTER
+    stats["topout_status"] = result.status
+    stats["cone_expanded"] = False
+    return (lines, stats)
+
+
+def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
+                     comments=False, sv_summary=False, owner_in_msg=False):
+    """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
+
+    · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
+      owner 用 Topout A 列覆盖 stats）——所有 DFT 拍/负向/去重/警告/dup-label 检查照旧。
+    · 直连寄存器(RW)根：渲染平凡 passthrough 块（顶层口 == 写值）。
+    · RO 回读 / 未解析 / error / 同源已覆盖：块顶注释记账（护栏3，绝不静默丢）。
+
+    cone 默认级联、include_risky=True（Topout 名 cone 已展到源、前后缀整类问题消失，逃生阀属『排查(旧)』）。
+    sv_summary=True 时各块带计数器（counters）——调用方须 render_file(summary=True) 包一次命名块。
+
+    返回 {'blocks':[(lines,stats)], 'results':[TopoutResult], 'accounted':[…], 'summary':{…}}。"""
+    from . import resolver as R
+    resolver = R.Resolver(wb)                       # 干净 cone 默认（与 generator.build 内部一致）
+    results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+
+    # logic/mux 根 → 源对象名集合（generator.build 据此选；out_name 与 out_base 都给，匹配两种写法）
+    want_names = set()
+    for r in results:
+        if r.status == "ok" and r.root.kind in (LOGIC, MUX):
+            want_names.add(r.root.obj.out_name.lower())
+            want_names.add(r.root.obj.out_base.lower())
+
+    opts = G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                        include_risky=True, comments=comments, sv_summary=sv_summary,
+                        owner_in_msg=owner_in_msg, signals=want_names)
+    built = G.build(wb, opts)
+    by_src = {st["out_name"].lower(): (ln, st) for ln, st in built["blocks"]}
+
+    blocks, accounted, seen_src = [], [], set()
+    reg_i = 0
+    for r in results:
+        name, owner = r.topo.name, r.topo.owner
+        if r.status == "ok" and r.root.kind in (LOGIC, MUX):
+            src = r.root.obj.out_name.lower()
+            if src in seen_src:                    # 两个 Topout 名映到同一源对象 → 只产出一次（防 dup-label）
+                blk = _account_block(name, r.root.kind, "dup-source",
+                                     "与已产出的同源信号共用一个源对象（避免断言标号重复）", owner)
+                blocks.append(blk)
+                accounted.append({"name": name, "kind": r.root.kind, "status": "dup-source",
+                                  "reason": blk[1]["topout_status"]})
+                continue
+            blk = by_src.get(src)
+            if blk is None:                        # include_risky=True 仍被 build 跳过（规格冲突/空向量等）
+                reason = "; ".join(r.issues) or "generator.build 未产出该块（规格冲突/空向量/被跳过，见账目）"
+                blocks.append(_account_block(name, r.root.kind, "skipped", reason, owner))
+                accounted.append({"name": name, "kind": r.root.kind, "status": "skipped", "reason": reason})
+                continue
+            seen_src.add(src)
+            ln, st = blk
+            st = dict(st); st["owner"] = owner; st["topout_name"] = name
+            st["topout_kind"] = r.root.kind; st["topout_status"] = "ok"
+            blocks.append((list(ln), st))
+        elif r.status == "ok" and r.root.kind == REGISTER:
+            blk = _register_passthrough_block(r, owner, "TOP%d" % reg_i,
+                                              comments=comments, counters=sv_summary)
+            reg_i += 1
+            blocks.append(blk)
+        else:                                       # skip(RO) / unresolved / error
+            reason = (r.note or "; ".join(r.issues) or r.status)
+            blocks.append(_account_block(name, r.root.kind, r.status, reason, owner))
+            accounted.append({"name": name, "kind": r.root.kind, "status": r.status, "reason": reason})
+
+    n_emitted = sum(1 for _l, s in blocks if s.get("n_vectors", 0) > 0)
+    summary = {
+        "n_total": len(results),
+        "n_emitted": n_emitted,
+        "n_accounted": len(accounted),
+        "n_vectors": sum(s.get("n_vectors", 0) for _l, s in blocks),
+        "n_negative": sum(s.get("n_negative", 0) for _l, s in blocks),
+    }
+    return {"blocks": blocks, "results": results, "accounted": accounted, "summary": summary}
+
+
+def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
+                     comments=False, sv_summary=False, owner_in_msg=False):
+    """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。"""
+    b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                         comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg)
+    text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
+    return text, b
+
+
+# ═════════════════════════ 块B（续）：Topout GUI 视图模型（每信号一个，按 B 列序） ═════════════════════════
+def _fill_register_model(m, result):
+    """直连寄存器根的真值表视图（与 report 表同形：inputs/tests/auto_label/exp_label）。"""
+    groups = V.input_groups(result.node, result.bindings)
+    m["inputs"] = [G._input_meta(g, result.bindings) for g in groups]
+    out_w = result.out_width or 1
+    slc = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+    m["auto_label"] = "auto_out%s" % slc
+    m["exp_label"] = "期望(out)%s" % slc
+    tests = []
+    for vec in result.vectors:
+        bv = V.vector_to_base_values(vec, groups)
+        tests.append({
+            "name": W.test_label(vec), "neg": vec.is_negative,
+            "values": [G._fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups],
+            "auto_out": G._fmt_cell(vec.exp_value, vec.exp_width),
+            "expected": G._fmt_cell(vec.asserted_value, vec.exp_width),
+        })
+    m["tests"] = tests
+    m["n_vectors"] = len(tests)
+
+
+def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False):
+    """每个 Topout 信号一个【视图模型】（GUI / 无头测试消费），按 Topout B 列序。
+
+    干净 cone 默认（Topout 视图不放级联/尾缀/top_output——那些属『排查(旧)』）。
+      · logic/mux 根 → 复用 report_for_topout 富格式表（chain/inputs/tests，值已格式化）；
+      · 直连寄存器根 → 从 TopoutResult 建平凡表；
+      · RO 回读 / 未解析 / error → 只记账（无真值表，note/issues 说明原因，绝不崩）。
+    每个模型：{name, owner, width, kind, status, note, issues, matched_name, n_leaves,
+              chain:[{out,expr,subst}], inputs:[…], tests:[…], auto_label, exp_label, n_vectors}。"""
+    from . import resolver as R
+    resolver = R.Resolver(wb)
+    results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    tbl_by_topout = {}
+    for t in rep.get("tables", []):
+        nm = t.get("topout_name")
+        if nm:
+            tbl_by_topout.setdefault(nm.lower(), t)
+
+    models = []
+    for r in results:
+        m = {"name": r.topo.name, "owner": r.topo.owner, "width": r.out_width,
+             "kind": r.root.kind, "status": r.status, "note": r.note,
+             "issues": list(r.issues), "matched_name": r.root.matched_name,
+             "n_leaves": r.n_leaves, "n_vectors": len(r.vectors),
+             "chain": [], "inputs": [], "tests": [], "auto_label": "", "exp_label": ""}
+        t = tbl_by_topout.get(r.topo.name.lower())
+        if t is not None:
+            m["chain"] = t.get("chain", [])
+            m["inputs"] = t.get("inputs", [])
+            m["tests"] = t.get("tests", [])
+            m["auto_label"] = t.get("auto_label", "")
+            m["exp_label"] = t.get("exp_label", "")
+            m["n_vectors"] = len(t.get("tests", []))
+        elif r.root.kind == REGISTER and r.status == "ok":
+            _fill_register_model(m, r)
+        models.append(m)
+    return models

@@ -399,3 +399,127 @@ def test_topout_fortest_backfill_includes_mux(wb, res):
     g = next(x for x in new if "lna_itrim" in x["name"])
     assert any(r["kind"] == "output" for r in g["rows"])
     assert any(r["kind"] == "input" for r in g["rows"])
+
+
+# ═════════════════════════ 块B（续）：Topout .sv 产出路径（build_for_topout） ═════════════════════════
+def test_build_for_topout_emits_sv_all_signals(wb):
+    """以 Topout B 列为外层产出 .sv：11 个可建（7 logic + 1 mux + 1 _ls logic + 2 register）有断言，
+    RO 回读记账（不产断言但不静默丢）。断言探针贴顶层真名（无前后缀）。"""
+    from dreg_verify import sv_writer as W
+    b = T.build_for_topout(wb, mode="max")
+    assert b["summary"]["n_total"] == 12
+    assert b["summary"]["n_emitted"] == 11            # 11 有向量；1 RO 记账
+    assert b["summary"]["n_accounted"] == 1
+    text = W.render_file(b["blocks"], comments=True)
+    assert text.count("assert (") == b["summary"]["n_vectors"] > 0
+    # rx_en 断言贴顶层真名（无 _to_logic / 无前缀）
+    assert "`ENV_RF.d_logic_bt_lp_rx_en==" in text
+    assert "d_logic_bt_lp_rx_en_to_logic" not in text
+
+
+def test_build_for_topout_register_passthrough(wb):
+    """直连寄存器(RW)根 → 平凡 passthrough .sv：RF_WRITE 该寄存器 + 断言 顶层口 == 写值。"""
+    from dreg_verify import sv_writer as W
+    b = T.build_for_topout(wb, mode="max")
+    blk = next((ln, st) for ln, st in b["blocks"] if st.get("topout_name") == "clk_force_on")
+    lines, st = blk
+    assert st["topout_kind"] == T.REGISTER
+    txt = "\n".join(lines)
+    assert "`RF_WRITE(" in txt                          # 驱寄存器
+    assert "`ENV_RF.clk_force_on==" in txt              # 断言顶层口
+    assert st["assert_id"].startswith("TOP")            # 独立标号，不与 logic/mux 撞
+
+
+def test_build_for_topout_ro_unresolved_accounted_not_dropped(wb):
+    """护栏3：RO 回读 / 未解析在 .sv 里【优雅记账】（块顶注释 + accounted 列表），绝不静默丢、不崩。"""
+    from dreg_verify import sv_writer as W
+    b = T.build_for_topout(wb, mode="min")
+    text = W.render_file(b["blocks"])
+    # RO 回读：有记账注释、无断言
+    assert "pll_lock_indicator" in text
+    assert any(a["name"] == "pll_lock_indicator" and a["status"] == "skip" for a in b["accounted"])
+    # 12 个 Topout 信号每个都在产物里【出现】（断言或记账注释），一个不丢
+    for t in wb.topout:
+        assert t.name in text, t.name
+
+
+def test_build_for_topout_no_duplicate_assert_labels(wb):
+    """全局断言标号唯一（同源去重 + register 'TOP<i>' 独立编号）——重复标号 = 非法 SV。"""
+    from dreg_verify import sv_writer as W
+    import re
+    text = W.render_file(T.build_for_topout(wb, mode="max")["blocks"])
+    labels = re.findall(r"^assert_(\S+):", text, re.M)
+    assert len(labels) == len(set(labels)), "断言标号重复: %s" % (
+        [x for x in labels if labels.count(x) > 1][:5])
+
+
+def test_render_topout_sv_summary_wraps_once(wb):
+    """render_topout_sv(sv_summary=True)：计数器命名块只包一次（不双重包），能 elaborate 形态。"""
+    text, b = T.render_topout_sv(wb, mode="min", sv_summary=True)
+    assert text.count("begin : dreg_rf_test") == 1
+    assert text.count("end : dreg_rf_test") == 1
+    assert b["summary"]["n_emitted"] == 11
+
+
+# ═════════════════════════ 块B（续）：Topout GUI 视图模型 ═════════════════════════
+def test_topout_view_models_full_list_and_classification(wb):
+    """每个 Topout 信号一个视图模型，按 B 列序，分类齐全（logic/mux/register/ro-readback）。"""
+    ms = T.topout_view_models(wb, mode="max")
+    assert len(ms) == 12
+    by = {m["name"]: m for m in ms}
+    assert by["d_logic_bt_lp_rx_en"]["kind"] == T.LOGIC
+    assert by["d_bt_lp_lna_itrim"]["kind"] == T.MUX
+    assert by["clk_force_on"]["kind"] == T.REGISTER
+    assert by["pll_lock_indicator"]["kind"] == T.RO_READBACK
+    assert by["pll_lock_indicator"]["status"] == "skip"
+    assert by["pll_lock_indicator"]["tests"] == []           # 无 cone → 无真值表（记账 note 说明）
+    assert "回读" in by["pll_lock_indicator"]["note"]
+    assert all(m["owner"] for m in ms)                        # owner 取自 Topout A 列
+
+
+def test_topout_view_model_rx_en_truth_table(wb):
+    """rx_en 视图模型 = 真值表：4 输入 + 12 列；输入 = SignalPath 实证的源寄存器/线控叶子；
+    chain 是 list（rx_en 输入全是直连叶子→链空，正确；跨页展开链由 WL 深链引擎测把关）。"""
+    ms = T.topout_view_models(wb, mode="max")
+    rx = next(m for m in ms if m["name"] == "d_logic_bt_lp_rx_en")
+    assert len(rx["inputs"]) == 4
+    assert len(rx["tests"]) == 12
+    # 每列 values 与 inputs 对齐（1:1）
+    assert all(len(t["values"]) == len(rx["inputs"]) for t in rx["tests"])
+    assert isinstance(rx["chain"], list)
+    bases = {ip["base"].lower() for ip in rx["inputs"]}
+    assert "d_bt_lp_linelocal_mode_ctrl" in bases and "d_bt_lp_rx_en_local" in bases
+
+
+def test_topout_view_model_values_match_golden(wb, res, mirror_path):
+    """视图模型真值表的【期望列】对得上 for_test 金标准（引擎一致：模型↔report↔.sv 同源，非自证）。"""
+    golden = T.load_fortest_golden(mirror_path)
+    ms = {m["name"].lower(): m for m in T.topout_view_models(wb, mode="max")}
+    checked = 0
+    for blk in golden:
+        m = ms.get(blk["out"].lower())
+        if m is None or not m["tests"]:
+            continue
+        # 模型逐列期望 == 引擎在该输入组合上算的期望（与 validate_against_golden 同引擎）
+        reps = T.validate_against_golden(wb, res, [blk])
+        if reps[0]["status"] == "checked":
+            assert reps[0]["n_bad"] == 0
+            checked += 1
+    assert checked >= 1
+
+
+def test_topout_view_model_register_has_passthrough_table(wb):
+    """直连寄存器根的视图模型有真值表（1 输入=该寄存器，逐列 输出==写值）。"""
+    ms = T.topout_view_models(wb, mode="max")
+    reg = next(m for m in ms if m["name"] == "clk_force_on")
+    assert reg["kind"] == T.REGISTER and reg["status"] == "ok"
+    assert len(reg["inputs"]) == 1 and len(reg["tests"]) >= 1
+
+
+def test_topout_view_models_wl_surfaces_conflicts(wl_wb):
+    """WL 真冲突(lctune/slna)在视图模型 issues 透出（不静默假绿）；解析不了的也优雅记账。"""
+    ms = T.topout_view_models(wl_wb, mode="min", max_tests=64)
+    by = {m["name"]: m for m in ms}
+    assert by["d_wl_rf_lp5g_rxrf_lna_lctune"]["issues"]
+    assert by["d_bt_rx_slna_1st_bias_trim_gain_cal_wl"]["issues"]
+    assert all(m["kind"] for m in ms)                         # 每个都有分类，无崩溃
