@@ -425,12 +425,41 @@ def build(path):
     _stub_sheet(wb, "level_shift",
                 ["level_shift_input", "level", "level_shift_output_name", "suffix", "top_out", "Notes", "Owner"],
                 [["d_wl_rf_temp_code_mode", "down", "d_wl_rf_temp_code_mode_ls", "ls", "0", "stub", "WL"]])
-    _stub_sheet(wb, "Topout",
-                ["Owner", "TOP Out Signal", "Reg Name", "Offset", "Reg Description", "RegAddress"],
-                [["WL", "(本表 4 个问题信号 top_out=0，非顶层输出)", "", "", "", ""]])
+
+    # ========================= Topout 页（新增；判据二硬案锚点，2026-06-23）=========================
+    # 【只新增此页，不改 logic/mux/regmap/tmm/dft】。新模型『要验信号清单』= 这些顶层终端输出
+    # （dft 门控的 + 终端 mux 输出）；temp_code/band_2g_sel/rx5g_en/bwctrl/lpf_corner_sel/logen_mixer_en/
+    # freq_sel/tx2g_en 是中间级（控制/数据载体，被上面这些消费）→ 不在 Topout。
+    # 名字 = 各 G/K 列【裸名】（顶层真名，无路由后缀）。引擎要把每个展到源头寄存器（cone 硬案）。
+    _build_wl_topout(wb)
 
     wb.save(path)
     return path
+
+
+# WL 顶层要验信号（裸名+位宽, owner）——判据二硬案：每个都要 cone 展到源头寄存器。
+WL_TOPOUT = [
+    ("law/chenhao", "d_wl_rf_lo2g5g_bias_en", ""),               # R38 锚点 logic←mux，端到端 6 输入
+    ("Jiangxudong", "d_wl_rf_tx_epa_2g_mixer_en", ""),           # 五层深链(logic←mux←logic←mux←logic)
+    ("law/chenhao", "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim", "[3:0]"),  # band_trim 两级级联(mode0/1)
+    ("law/chenhao", "d_wl_rf_lo2g5g_mixer2g_trim", "[1:0]"),     # 含重复行→去重
+    ("law/chenhao", "d_wl_rf_lo2g5g_mixer5g_trim", "[2:0]"),     # 干净 8 选 1
+    ("shenzheng", "d_wl_rf_lp5g_rxrf_lna_lctune", "[5:0]"),      # 宽 select(冲突案)
+    ("Konglingshan", "d_bt_rx_slna_1st_bias_trim_gain_cal_wl", "[3:0]"),  # 18 行挤一名(冲突案)
+    ("shenzheng", "d_wl_rf_lp5g_gm_itrim", "[3:0]"),             # *_en 型 mode mux 级联
+    ("luqi", "d_wl_rf_lpf_cmain", "[3:0]"),                      # 深层(第2层)级联+RO寄存器源
+]
+
+
+def _build_wl_topout(wb):
+    top = wb.create_sheet("Topout")
+    _set(top, 2, {"A": "Owner", "B": "TOP Out Signal", "C": "Reg Name", "D": "Offset",
+                  "E": "Reg Description", "F": "Address", "G": "ResetValue"})
+    r = 3
+    for owner, base, width in WL_TOPOUT:
+        _set(top, r, {"A": owner, "B": base + width})
+        r += 1
+    return top
 
 
 def _stub_sheet(wb, name, headers, samples):
