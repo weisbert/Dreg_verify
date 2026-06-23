@@ -353,3 +353,49 @@ def test_filter_nets_by_dest_helper():
     assert set(rtl_scan.filter_nets_by_dest(nets, "to_dft")) == {"a_to_dft"}
     assert set(rtl_scan.filter_nets_by_dest(nets, "_to_iddq")) == {"b_to_iddq"}
     assert rtl_scan.filter_nets_by_dest(nets, None) == nets
+
+
+# ═════════════════════════ DoD 6：Topout 报告/账目路径（块B,只新增,堵3陷阱）═════════════════════════
+def test_topout_account_default_not_empty_and_owner(wb, res):
+    """陷阱①默认不空：以 Topout B 列为外层，不套 top_output_only → 12 行全在(真表 N/I 全0 也不空)。
+    owner 直接取 Topout A 列(免 join)。"""
+    acc = T.compose_topout_account(wb, res, mode="min")
+    assert acc["summary"]["n_total"] == 12               # 默认不空（旧 top_output_only 会选 0）
+    assert acc["summary"]["n_ok"] == 11 and acc["summary"]["n_skip"] == 1
+    assert all(r["owner"] for r in acc["rows"])           # owner 来自 Topout A 列
+    assert acc["summary"]["n_unresolved"] == 0 and acc["summary"]["n_error"] == 0
+
+
+def test_topout_account_no_false_top_out0_warnings(wb, res):
+    """陷阱②不刷 top_out=0 假警告：BT_LP 全干净(无冲突)→ n_with_issues==0、ok 行无 issues。"""
+    acc = T.compose_topout_account(wb, res, mode="min")
+    assert acc["summary"]["n_with_issues"] == 0
+    assert all(not r["issues"] for r in acc["rows"] if r["status"] == "ok")
+    # provenance = topout（顶层真名权威）
+    assert all(r["provenance"] == "topout" for r in acc["rows"] if r["status"] != "unresolved")
+
+
+def test_topout_account_surfaces_real_conflicts(wl_wb, wl_res):
+    """对照：WL 的真冲突(lctune/slna)被账目如实列出(真 issues，不是 top_out=0 噪声)。"""
+    acc = T.compose_topout_account(wl_wb, wl_res, mode="min", max_tests=64)
+    assert acc["summary"]["n_unresolved"] == 0
+    assert acc["summary"]["n_with_issues"] >= 2           # lctune + slna 冲突
+    bad = {r["name"] for r in acc["rows"] if r["issues"]}
+    assert "d_wl_rf_lp5g_rxrf_lna_lctune" in bad
+    assert "d_bt_rx_slna_1st_bias_trim_gain_cal_wl" in bad
+
+
+def test_topout_fortest_backfill_includes_mux(wb, res):
+    """陷阱③ for_test 回填含 mux：topout_fortest_rows 含 mux 真值表(lna_itrim)；
+    旧 build_fortest_rows(默认 include_mux=False) 仍只回填 logic(逐字节不变)。"""
+    from dreg_verify import fortest_writer as F
+    rep = T.report_for_topout(wb, res, mode="min")
+    old = F.build_fortest_rows(rep)                        # 默认 = 旧行为，丢 mux
+    new = F.build_fortest_rows(rep, include_mux=True)      # 块B = 含 mux
+    assert len(new) == len(old) + 1                        # 多出 lna_itrim mux 表
+    assert any("lna_itrim" in g["name"] for g in new)
+    assert not any("lna_itrim" in g["name"] for g in old)  # 旧路径确实丢了 mux
+    # mux 回填表有输出行 + 输入行（不是空壳）
+    g = next(x for x in new if "lna_itrim" in x["name"])
+    assert any(r["kind"] == "output" for r in g["rows"])
+    assert any(r["kind"] == "input" for r in g["rows"])

@@ -1914,14 +1914,24 @@ def _report_core(wb, opts):
         for ent in _mentries:
             if ent[0] == "gate":
                 # iddq 门作为输入行（2026-06-10，与 logic 表同口径）：HTML 真值表带上
-                inp_rows.append({"label": _mpin[0].base, "letters": "dft门(force)"})
+                inp_rows.append({"label": _mpin[0].base, "letters": "dft门(force)",
+                                 "ro": True, "addr": None, "width": 1,
+                                 "base": _mpin[0].base, "wire": _mpin[0].wire,
+                                 "reg_lsb": None, "reg_msb": None,
+                                 "slice_msb": None, "slice_lsb": None})
                 continue
             key = ent[1]
             b = exp["bindings"][key]
             label = b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
             # 角色判断统一走 mux_gen.key_role（多控制 c1:/c2:、上游配方 m<N>.* 都认）
             tag = {"ctrl": "ctrl", "data": "data", "upstream": "上游mux"}[mux_gen.key_role(key)]
-            inp_rows.append({"label": label, "letters": "%s(%s)" % (key, tag)})
+            # for_test 回填(块B 陷阱③,2026-06-23)：补输入元数据，让 fortest_writer 像 logic 表一样
+            # 渲染 mux 输入行(RW→地址/写值、RO/线控→force 网名)。额外键，HTML 报告不读、逐字节不变。
+            inp_rows.append({"label": label, "letters": "%s(%s)" % (key, tag),
+                             "ro": (b.kind == "RO"), "addr": b.address,
+                             "width": b.width, "base": b.base, "wire": b.wire,
+                             "reg_lsb": b.reg_lsb, "reg_msb": b.reg_msb,
+                             "slice_msb": b.slice_msb, "slice_lsb": b.slice_lsb})
         table = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
                  "type": "mux", "expr": expr_text, "kind": "mux",
                  "inputs": inp_rows, "tests": []}
@@ -1939,6 +1949,12 @@ def _report_core(wb, opts):
                 "designer_filled": vec.designer_filled,
                 "correct": _fmt_cell(vec.exp_value, vec.exp_width),
                 "auto_num": vec.exp_value, "width": vec.exp_width,
+                # for_test 回填(块B 陷阱③)：与 logic 表同键——raw(逐输入整数)/exp_num(期望整数)/
+                # writes(compute_drives 权威 RF_WRITE)。让 fortest_writer include_mux=True 渲染 mux 表。
+                "raw": [(vec.assignments.get(e[1], 0) if e[0] == "key" else (_gv or 0))
+                        for e in _mentries],
+                "exp_num": vec.asserted_value,
+                "writes": writes,
                 # DFT 拍 iddq 门 force 在 extra_forces（同 logic 路），报告 force 列带上以与 .sv 一致
                 "force": "; ".join(
                     ["%s=%s" % (f["wire"], f["hex"]) for f in forces]

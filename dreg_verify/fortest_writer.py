@@ -58,16 +58,25 @@ def _reg_bits(inp):
     return msb, lsb
 
 
-def _logic_tables(rep):
-    return [t for t in rep.get("tables", []) if t.get("is_logic") and t.get("tests")]
+def _logic_tables(rep, include_mux=False):
+    """回填用真值表：默认只 is_logic(逐字节不变)。include_mux=True(Topout 块B 陷阱③)→ 也含 mux 表，
+    前提是 mux 表已带回填键(generator.report 给 mux 表补了 raw/exp_num/writes + 输入元数据)。"""
+    out = []
+    for t in rep.get("tables", []):
+        if not t.get("tests"):
+            continue
+        if t.get("is_logic") or (include_mux and t.get("kind") == "mux"):
+            out.append(t)
+    return out
 
 
-def build_fortest_rows(rep):
-    """把 report 的 logic 真值表 → for_test 行模型(list[group])，便于单测/复用。
+def build_fortest_rows(rep, include_mux=False):
+    """把 report 的真值表 → for_test 行模型(list[group])，便于单测/复用。
     每个 group = {"name": colA, "rows": [rowdict...]}，rowdict 是 {列字母小写: 值}(只放非空格)。
-    列字母用 a..n + t(列表,O 起的逐拍值)。row["kind"] ∈ {input,output,tname}。"""
+    列字母用 a..n + t(列表,O 起的逐拍值)。row["kind"] ∈ {input,output,tname}。
+    include_mux(Topout 块B,2026-06-23)：默认 False=只回填 logic(旧行为)；True=mux 表也回填。"""
     groups = []
-    for gi, t in enumerate(_logic_tables(rep), start=1):
+    for gi, t in enumerate(_logic_tables(rep, include_mux=include_mux), start=1):
         inputs = t["inputs"]
         tests = t["tests"]
         ntest = len(tests)

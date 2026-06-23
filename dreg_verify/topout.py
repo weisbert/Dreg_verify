@@ -311,3 +311,94 @@ def _topo_for(blk):
     """金标准块 → 临时 TopoutSignal（仅 validate 内部用，名/宽足够建 cone）。"""
     from .excel_model import TopoutSignal
     return TopoutSignal(row=0, name=blk["out"], width=blk.get("out_width", 1), owner="")
+
+
+# ───────────────────────────── 块B：Topout 报告/账目路径（只新增） ─────────────────────────────
+def compose_topout_account(wb, resolver, mode="min", max_tests=256, exhaustive=False):
+    """以 **Topout B 列为外层循环** 的报告/账目路径（块B，2026-06-23，只新增，不碰旧 generator.report）。
+
+    owner 直接取 Topout A 列（免 join 回 logic/mux）。返回 {'rows':[…], 'summary':{…}}。
+
+    堵 3 个静默陷阱（新路径【按构造】避开，对照 refactor_notes 影响面普查）：
+      ① 默认不空：直接枚举 wb.topout，**不套** top_output_only 过滤（真表 N/I 全 0 → 旧过滤会选 0 个）；
+      ② 不刷 top_out=0 假警告：只列 analyze 的【真 issues】(冲突/未解析)，**不发** bare-probe/
+         needs-prefix 噪声（旧 generator 按 top_out=0 触发→新模型每信号都中、淹没报告）；
+      ③ for_test 回填含 mux：见 topout_fortest_rows(include_mux=True)。
+    """
+    results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests,
+                          exhaustive=exhaustive)
+    rows = []
+    for r in results:
+        rows.append({
+            "name": r.topo.name, "owner": r.topo.owner, "width": r.out_width,
+            "kind": r.root.kind, "status": r.status,
+            "provenance": G.NAMING_MODEL_TOPOUT if r.status != "unresolved" else "unresolved",
+            "n_leaves": r.n_leaves, "n_vectors": len(r.vectors),
+            "issues": list(r.issues), "note": r.note,
+        })
+    by_status = {}
+    by_owner = {}
+    for x in rows:
+        by_status[x["status"]] = by_status.get(x["status"], 0) + 1
+        by_owner.setdefault(x["owner"], []).append(x["name"])
+    summary = {
+        "n_total": len(rows),
+        "n_ok": by_status.get("ok", 0),
+        "n_skip": by_status.get("skip", 0),
+        "n_unresolved": by_status.get("unresolved", 0),
+        "n_error": by_status.get("error", 0),
+        "by_status": by_status,
+        "by_owner": {o: len(v) for o, v in by_owner.items()},
+        # 真警告 = 有 issues 的信号（不含『top_out=0』这种新模型噪声）
+        "n_with_issues": sum(1 for x in rows if x["issues"]),
+    }
+    return {"rows": rows, "summary": summary}
+
+
+def topout_fortest_rows(wb, resolver, mode="min", max_tests=256, exhaustive=False):
+    """Topout for_test 回填行（块B 陷阱③，2026-06-23）：以 Topout 名为外层，**含 mux 根**。
+
+    复用 generator.report 产出报告表(logic+mux 都带 for_test 回填键)，再交 fortest_writer
+    以 include_mux=True 渲染——堵『_logic_tables 只留 is_logic、悄悄丢所有 mux 表』那个陷阱。
+    返回 fortest_writer.build_fortest_rows 的 group 列表（每个对应一个 Topout 真值表）。"""
+    from . import fortest_writer
+    rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests,
+                            exhaustive=exhaustive)
+    return fortest_writer.build_fortest_rows(rep, include_mux=True)
+
+
+def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False):
+    """生成【限定到 Topout 清单】的报告(复用 generator.report，再按 Topout B 列名过滤 tables/detail)。
+
+    新模型『要验什么』只在 Topout——旧 report 枚举全 logic/mux，这里只保留 Topout 命中的表，
+    且 owner 用 Topout A 列覆盖（块B 不 join）。旧 generator.report 一字不动。"""
+    from . import generator as G
+    rep = G.report(wb, G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                    include_risky=True))
+    want = {t.name.lower() for t in wb.topout}
+    owner_of = {t.name.lower(): t.owner for t in wb.topout}
+    logic_idx, mux_idx = build_index(wb)
+
+    def _topout_name_of(signal):
+        from .excel_model import _strip_width
+        base = _strip_width(signal)[0].lower()
+        if base in want:
+            return base
+        # 经 _ls / rtl_base 命中（d_en_refbuf → d_en_refbuf_ls 等）
+        s = logic_idx.get(base) or mux_idx.get(base)
+        if s is not None:
+            for cand in (getattr(s, "_ls_name", "") or "", s.rtl_base):
+                if cand and cand.lower() in want:
+                    return cand.lower()
+        return None
+
+    kept_tables = []
+    for t in rep.get("tables", []):
+        nm = _topout_name_of(t.get("signal", ""))
+        if nm is not None:
+            t = dict(t)
+            t["owner"] = owner_of.get(nm, t.get("owner", ""))
+            kept_tables.append(t)
+    rep = dict(rep)
+    rep["tables"] = kept_tables
+    return rep
