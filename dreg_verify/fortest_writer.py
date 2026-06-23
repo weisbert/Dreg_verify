@@ -165,8 +165,10 @@ _COL = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8,
 _T_START = 15
 
 
-def write_fortest(src_path, out_path, rep, sheet_name="for_test"):
-    """复制源 Excel 全部 sheet → 新文件，只把 for_test 页替换为回填内容。返回写出的组数。"""
+def write_fortest(src_path, out_path, rep, sheet_name="for_test", include_mux=False):
+    """复制源 Excel 全部 sheet → 新文件，只把 for_test 页替换为回填内容。返回写出的组数。
+    include_mux（Topout 块B,2026-06-23）：默认 False=只回填 logic(旧行为逐字节不变)；
+    True=mux 真值表也回填（堵『_logic_tables 悄悄丢所有 mux 表』陷阱）。"""
     import openpyxl
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -189,7 +191,7 @@ def write_fortest(src_path, out_path, rep, sheet_name="for_test"):
     ws.cell(1, 2, "for_test 回填  列: A=case名 B/C=regaddr/val D=输出 E=期望 F=输入 "
                   "G/H=scratch I=地址/wire J=RO K/L/M=bits N=组号 O起=T1..Tn 向量").font = HEAD
 
-    groups = build_fortest_rows(rep)
+    groups = build_fortest_rows(rep, include_mux=include_mux)
     r = 3                                      # 组从第 3 行起(inspect build_groups 从 row idx2 扫)
     for grp in groups:
         for row in grp["rows"]:

@@ -203,6 +203,16 @@ def _skipped_detail_text(skipped):
 (COL_SEL, COL_NEG, COL_R, COL_K, COL_OWNER, COL_TYPE, COL_TOP, COL_STATUS,
  COL_PREFIX, COL_EXPR) = range(10)
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
+
+# ── Topout 主视图（2026-06-23 重构）清单表列 ──
+(TOPO_SEL, TOPO_NAME, TOPO_OWNER, TOPO_KIND, TOPO_STATUS, TOPO_NTEST) = range(6)
+TOPO_HEADERS = ["选", "Topout信号(B列)", "owner", "分类", "状态", "用例"]
+TOPO_KIND_LABEL = {"logic": "选路/logic", "mux": "mux", "register": "直连寄存器",
+                   "ro-readback": "RO回读(跳过)", "unresolved": "未解析"}
+TOPO_STATUS_LABEL = {"ok": "✅ 可建", "skip": "↷ 跳过(RO)",
+                     "unresolved": "✗ 未解析", "error": "✗ error"}
+TOPO_STATUS_COLOR = {"ok": "#15803d", "skip": "#2a7ab0",
+                     "unresolved": "#c0392b", "error": "#c0392b"}
 NO_OWNER = "（无 owner）"          # owner 下拉的特殊项：Excel owner 列留空(P/L/AE)的信号
 STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "unresolved": "✗未解析", "parse-err": "✗解析错",
@@ -470,6 +480,17 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(browse); top.addWidget(load)
         root.addLayout(top)
 
+        # ⭐外层两标签（2026-06-23 重构）：Topout 视图 = 主视图/默认入口；旧 logic/mux 视图降级成
+        # 『排查(旧)』分页（per-page 排查/隔离测试工具——前缀/后缀/级联那套住这儿，保留不删、退二线）。
+        # 共享路径栏在两视图之上（载一次表两视图通用）。
+        self.main_tabs = QtWidgets.QTabWidget()
+        root.addWidget(self.main_tabs, 1)
+        self.main_tabs.addTab(self._build_topout_tab(), "Topout 视图")
+        legacy = QtWidgets.QWidget()
+        legacy_lay = QtWidgets.QVBoxLayout(legacy)
+        legacy_lay.setContentsMargins(0, 0, 0, 0)
+        self.main_tabs.addTab(legacy, "排查(旧)")
+
         flt = QtWidgets.QHBoxLayout()
         # owner 多选：QToolButton + 可勾选菜单（_owner_filter 空集=全部；勾多个=OR 任一命中即显示）
         self._owner_filter = set()        # 选中的 owner（含 NO_OWNER 哨兵），空=全部
@@ -497,7 +518,7 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.status_combo, self.name_edit, self.top_only):
             flt.addWidget(w, 1 if w is self.name_edit else 0)
         flt.addStretch(1)
-        root.addLayout(flt)
+        legacy_lay.addLayout(flt)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         # 左：信号表 + 批量操作条 + 明细
@@ -607,7 +628,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([640, 700])
-        root.addWidget(splitter, 1)
+        legacy_lay.addWidget(splitter, 1)
 
         opt = QtWidgets.QHBoxLayout()
         # 覆盖度（第二十二轮起 logic/mux 解耦为两个下拉，互不绑定——用户拍板）：把旧的
@@ -735,7 +756,7 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.append_to_logic_chk, self.append_to_mux_chk, self.include_risky_chk):
             opt.addWidget(w)
         opt.addStretch(1)
-        root.addLayout(opt)
+        legacy_lay.addLayout(opt)
 
         btns = QtWidgets.QHBoxLayout()
         prev = QtWidgets.QPushButton("预览选中"); prev.clicked.connect(self.on_preview)
@@ -753,10 +774,349 @@ class MainWindow(QtWidgets.QMainWindow):
         gen.setToolTip("点开后可选导出范围(全部/仅正向/仅负向)与是否加注释 (Ctrl+G)")
         btns.addStretch(1); btns.addWidget(prev); btns.addWidget(rep)
         btns.addWidget(ft); btns.addWidget(gen)
-        root.addLayout(btns)
+        legacy_lay.addLayout(btns)
 
+        self.main_tabs.setCurrentIndex(0)        # 默认门面 = Topout 视图（旧的退二线）
         self.status = self.statusBar()
         self.status.showMessage("请选择并加载 Excel。")
+
+    # ═══════════════════ Topout 主视图（2026-06-23 重构，新默认门面）═══════════════════
+    def _build_topout_tab(self):
+        """Topout 视图：左=要验信号清单(B列)+分类+勾选；右=展开链/真值表 + .sv 预览。
+        clean cone 默认——不放级联/尾缀/top_output 筛(那些只属『排查(旧)』分页)。"""
+        self._topo_models = []
+        self._topo_cur = None
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page); lay.setContentsMargins(4, 4, 4, 4)
+
+        bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel(
+            "要验信号 = Topout 页 B 列（顶层真名，cone 展到源寄存器，断言贴真名）"))
+        bar.addStretch(1)
+        bar.addWidget(QtWidgets.QLabel("覆盖度:"))
+        self.topo_cov = QtWidgets.QComboBox(); self.topo_cov.addItems(["精简", "全面", "穷举"])
+        self.topo_cov.setCurrentText("全面")
+        self.topo_cov.setToolTip("Topout 真值表覆盖档：精简=每控制组合×1；全面=多数据特征；穷举=全输入组合。")
+        self.topo_cov.currentIndexChanged.connect(self._refresh_topout)
+        bar.addWidget(self.topo_cov)
+        lay.addLayout(bar)
+
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.topo_table = QtWidgets.QTableWidget(0, len(TOPO_HEADERS))
+        self.topo_table.setHorizontalHeaderLabels(TOPO_HEADERS)
+        self.topo_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.topo_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.topo_table.currentCellChanged.connect(self._topo_on_row)
+        self.topo_table.setMinimumWidth(360)
+        split.addWidget(self.topo_table)
+
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0)
+        self.topo_detail = QtWidgets.QLabel(
+            "点左侧任一 Topout 信号，这里显示它的跨页展开链 + 真值表 + 账目状态。")
+        self.topo_detail.setWordWrap(True)
+        self.topo_detail.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        rv.addWidget(self.topo_detail)
+        self.topo_inner = QtWidgets.QTabWidget()
+        tt_page = QtWidgets.QWidget()
+        ttv = QtWidgets.QVBoxLayout(tt_page); ttv.setContentsMargins(2, 2, 2, 2)
+        self.topo_chain_cap = QtWidgets.QLabel("跨页 cone 展开链（缩进=层级，原式 / 字母代入真实信号名）：")
+        ttv.addWidget(self.topo_chain_cap)
+        self.topo_chain = QtWidgets.QPlainTextEdit(); self.topo_chain.setReadOnly(True)
+        self._mono(self.topo_chain); self.topo_chain.setMaximumHeight(150)
+        ttv.addWidget(self.topo_chain)
+        ttv.addWidget(QtWidgets.QLabel("真值表（行=输入/输出，列=测试 T0/T1…）："))
+        self.topo_truth = QtWidgets.QTableWidget(0, 0)
+        self.topo_truth.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        ttv.addWidget(self.topo_truth, 1)
+        self.topo_inner.addTab(tt_page, "展开链 / 真值表")
+        sv_page = QtWidgets.QWidget()
+        svv = QtWidgets.QVBoxLayout(sv_page); svv.setContentsMargins(2, 2, 2, 2)
+        self.topo_sv = QtWidgets.QPlainTextEdit(); self.topo_sv.setReadOnly(True)
+        self.topo_sv.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self._mono(self.topo_sv)
+        svv.addWidget(self.topo_sv)
+        self.topo_inner.addTab(sv_page, ".sv 预览")
+        rv.addWidget(self.topo_inner, 1)
+        split.addWidget(right)
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1)
+        split.setSizes([420, 760])
+        lay.addWidget(split, 1)
+
+        btns = QtWidgets.QHBoxLayout()
+        b_all = QtWidgets.QPushButton("全选"); b_all.clicked.connect(lambda: self._topo_check_all(True))
+        b_none = QtWidgets.QPushButton("清空勾选"); b_none.clicked.connect(lambda: self._topo_check_all(False))
+        b_prev = QtWidgets.QPushButton("预览选中.sv"); b_prev.clicked.connect(self.on_topo_preview)
+        b_prev.setToolTip("生成勾选(未勾任何=全部)Topout 信号的 .sv，显示在『.sv 预览』页")
+        b_sv = QtWidgets.QPushButton("导出 .sv…"); b_sv.clicked.connect(self.on_topo_export_sv)
+        b_rep = QtWidgets.QPushButton("导出报告(HTML/CSV)…"); b_rep.clicked.connect(self.on_topo_export_report)
+        b_ft = QtWidgets.QPushButton("回填 for_test…"); b_ft.clicked.connect(self.on_topo_fortest)
+        b_ft.setToolTip("把 Topout 真值表按 for_test 排版回填 Excel（含 mux 表，堵『只回填 logic』陷阱）")
+        btns.addWidget(b_all); btns.addWidget(b_none); btns.addStretch(1)
+        for b in (b_prev, b_sv, b_rep, b_ft):
+            btns.addWidget(b)
+        self._topo_btns = {"全选": b_all, "清空勾选": b_none, "预览选中.sv": b_prev,
+                           "导出 .sv…": b_sv, "导出报告(HTML/CSV)…": b_rep, "回填 for_test…": b_ft}
+        lay.addLayout(btns)
+        return page
+
+    def _topo_mode(self):
+        """Topout 覆盖度下拉 → (mode, exhaustive)。精简=min / 全面=max / 穷举=max+exhaustive。"""
+        t = self.topo_cov.currentText() if hasattr(self, "topo_cov") else "全面"
+        if t == "穷举":
+            return "max", True
+        if t == "精简":
+            return "min", False
+        return "max", False
+
+    def _topo_maxt(self):
+        try:
+            return int(self.max_tests.value())
+        except Exception:
+            return 256
+
+    def _topo_set(self, r, c, text):
+        it = QtWidgets.QTableWidgetItem(text)
+        self.topo_table.setItem(r, c, it)
+        return it
+
+    def _refresh_topout(self):
+        """重建 Topout 清单表（载表后 / 切覆盖度后调）。无 wb / 无 Topout 页 → 优雅空表 + 提示。"""
+        if not hasattr(self, "topo_table"):
+            return
+        self.topo_table.blockSignals(True)
+        self.topo_table.setRowCount(0)
+        self._topo_models = []
+        self._topo_cur = None
+        if not self.wb:
+            self.topo_table.blockSignals(False)
+            return
+        if not getattr(self.wb, "topout", None):
+            self.topo_detail.setText(
+                "⚠ 当前 Excel 没有 Topout 页（B 列要验信号清单为空）。Topout 视图需要表里有 Topout 页；"
+                "可切到『排查(旧)』用 logic/mux 视图。")
+            self._topo_clear_detail()
+            self.topo_table.blockSignals(False)
+            return
+        from . import topout as T
+        mode, exh = self._topo_mode()
+        try:
+            self._topo_models = T.topout_view_models(
+                self.wb, mode=mode, max_tests=self._topo_maxt(), exhaustive=exh)
+        except Exception as ex:   # noqa: BLE001 —— 护栏3：绝不崩，原因落 detail
+            self.topo_detail.setText("Topout 分析失败（已捕获，未崩）：%s" % ex)
+            self.topo_table.blockSignals(False)
+            return
+        self.topo_table.setRowCount(len(self._topo_models))
+        for r, m in enumerate(self._topo_models):
+            chk = QtWidgets.QTableWidgetItem()
+            chk.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled
+                         | QtCore.Qt.ItemIsSelectable)
+            chk.setCheckState(QtCore.Qt.Checked)
+            self.topo_table.setItem(r, TOPO_SEL, chk)
+            self._topo_set(r, TOPO_NAME, m["name"])
+            self._topo_set(r, TOPO_OWNER, m["owner"] or "")
+            self._topo_set(r, TOPO_KIND, TOPO_KIND_LABEL.get(m["kind"], m["kind"]))
+            stt = self._topo_set(r, TOPO_STATUS, TOPO_STATUS_LABEL.get(m["status"], m["status"]))
+            stt.setForeground(QtGui.QColor(TOPO_STATUS_COLOR.get(m["status"], "#000000")))
+            if m["issues"]:
+                stt.setForeground(QtGui.QColor("#d97706"))   # 有真冲突 issues → 琥珀提示
+                stt.setToolTip("; ".join(m["issues"]))
+            self._topo_set(r, TOPO_NTEST, str(m["n_vectors"]))
+        self.topo_table.blockSignals(False)
+        self.topo_table.resizeColumnsToContents()
+        n_ok = sum(1 for m in self._topo_models if m["status"] == "ok")
+        self.topo_detail.setText("Topout 要验信号 %d 个（可建 %d）。点一行看展开链+真值表；勾选=纳入导出/预览。"
+                                 % (len(self._topo_models), n_ok))
+        if self._topo_models:
+            self.topo_table.setCurrentCell(0, TOPO_NAME)   # 默认选第一个
+
+    def _topo_on_row(self, cur_row, _cur_col, _prev_row, _prev_col):
+        if cur_row is None or cur_row < 0 or cur_row >= len(self._topo_models):
+            return
+        self._topo_show(self._topo_models[cur_row])
+
+    def _topo_show(self, m):
+        import html
+        self._topo_cur = m
+        esc = html.escape
+        head = ("<b>%s</b> &nbsp; owner=%s &nbsp; 分类=%s &nbsp; 状态=%s &nbsp; 叶子=%d &nbsp; 用例=%d"
+                % (esc(m["name"]), esc(m["owner"] or "—"),
+                   TOPO_KIND_LABEL.get(m["kind"], m["kind"]),
+                   TOPO_STATUS_LABEL.get(m["status"], m["status"]), m["n_leaves"], m["n_vectors"]))
+        if m["note"]:
+            head += "<br><span style='color:#666'>%s</span>" % esc(m["note"])
+        if m["issues"]:
+            head += "<br><span style='color:#d97706'>⚠ %s</span>" % esc("; ".join(m["issues"]))
+        self.topo_detail.setText(head)
+        self._topo_render_chain(m)
+        self._topo_render_truth(m)
+
+    def _topo_render_chain(self, m):
+        chain = m.get("chain") or []
+        if len(chain) >= 2:
+            marks = "①②③④⑤⑥⑦⑧⑨"
+            lines = []
+            for i, c in enumerate(chain):
+                mk = marks[i] if i < len(marks) else "(%d)" % (i + 1)
+                head = "%s %s" % (mk, c.get("out", ""))
+                lines.append("%s = %s" % (head, c.get("expr", "")))
+                lines.append("%s = %s" % (" " * len(head), c.get("subst", "")))
+            self.topo_chain.setPlainText("\n".join(lines))
+            self.topo_chain_cap.setText("跨页 cone 展开链（每节：原式 / 字母代入真实信号名）：")
+        elif m["kind"] == "register":
+            self.topo_chain.setPlainText("（直连寄存器：顶层口 == 该寄存器字段写值，无 cone 展开）")
+            self.topo_chain_cap.setText("展开链：")
+        elif m["status"] in ("skip", "unresolved", "error"):
+            self.topo_chain.setPlainText("（%s：%s）"
+                                         % (m["status"], m["note"] or "; ".join(m["issues"]) or ""))
+            self.topo_chain_cap.setText("展开链：")
+        else:
+            self.topo_chain.setPlainText("（输入均为直连寄存器/线控叶子，无跨页上游可展开）")
+            self.topo_chain_cap.setText("展开链：")
+
+    def _topo_render_truth(self, m):
+        tbl = self.topo_truth
+        tbl.clear()
+        inputs = m.get("inputs") or []
+        tests = m.get("tests") or []
+        if not tests:
+            tbl.setRowCount(0); tbl.setColumnCount(0)
+            return
+        tbl.setRowCount(len(inputs) + 2)
+        tbl.setColumnCount(len(tests))
+        vlabels = []
+        for ip in inputs:
+            w = ip.get("width", 1) or 1
+            lbl = ip.get("label") or ip.get("base") or "?"
+            vlabels.append("%s%s" % (lbl, ("[%d:0]" % (w - 1)) if w > 1 else ""))
+        vlabels += [m.get("auto_label") or "auto_out", m.get("exp_label") or "期望"]
+        tbl.setVerticalHeaderLabels(vlabels)
+        tbl.setHorizontalHeaderLabels([t["name"] for t in tests])
+        for j, t in enumerate(tests):
+            vals = t.get("values") or []
+            for i in range(len(inputs)):
+                it = QtWidgets.QTableWidgetItem(vals[i] if i < len(vals) else "")
+                it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                tbl.setItem(i, j, it)
+            a = QtWidgets.QTableWidgetItem(t.get("auto_out", ""))
+            a.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            a.setForeground(QtGui.QColor("#666666"))
+            tbl.setItem(len(inputs), j, a)
+            e = QtWidgets.QTableWidgetItem(t.get("expected", ""))
+            e.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            ef = e.font(); ef.setBold(True); e.setFont(ef)
+            if t.get("neg"):
+                e.setForeground(QtGui.QColor("#d97706"))
+            elif t.get("expected") == t.get("auto_out"):
+                e.setForeground(QtGui.QColor("#15803d"))
+            tbl.setItem(len(inputs) + 1, j, e)
+        tbl.resizeColumnsToContents()
+
+    def _topo_clear_detail(self):
+        if hasattr(self, "topo_chain"):
+            self.topo_chain.setPlainText("")
+        if hasattr(self, "topo_truth"):
+            self.topo_truth.clear(); self.topo_truth.setRowCount(0); self.topo_truth.setColumnCount(0)
+        if hasattr(self, "topo_sv"):
+            self.topo_sv.setPlainText("")
+
+    def _topo_check_all(self, on):
+        st = QtCore.Qt.Checked if on else QtCore.Qt.Unchecked
+        for r in range(self.topo_table.rowCount()):
+            it = self.topo_table.item(r, TOPO_SEL)
+            if it:
+                it.setCheckState(st)
+
+    def _topo_checked_names(self):
+        """勾选的 Topout 名（按行序）。无勾选返回 [] → 调用方按『全部』处理。"""
+        names = []
+        for r in range(self.topo_table.rowCount()):
+            it = self.topo_table.item(r, TOPO_SEL)
+            if it and it.checkState() == QtCore.Qt.Checked and r < len(self._topo_models):
+                names.append(self._topo_models[r]["name"])
+        return names
+
+    def _topo_guard(self):
+        if not self.wb:
+            QtWidgets.QMessageBox.information(self, "未加载", "请先加载 Excel。")
+            return False
+        if not getattr(self.wb, "topout", None):
+            QtWidgets.QMessageBox.information(
+                self, "无 Topout 页", "当前 Excel 没有 Topout 页，无法走 Topout 路径。可切到『排查(旧)』。")
+            return False
+        return True
+
+    def on_topo_preview(self):
+        if not self._topo_guard():
+            return
+        from . import topout as T
+        mode, exh = self._topo_mode()
+        only = self._topo_checked_names() or None
+        text, b = T.render_topout_sv(self.wb, mode=mode, max_tests=self._topo_maxt(),
+                                     exhaustive=exh, comments=True, only=only)
+        self.topo_sv.setPlainText(text)
+        self.topo_inner.setCurrentIndex(1)
+        s = b["summary"]
+        self.status.showMessage("Topout 预览：信号 %d，断言块 %d，向量 %d，记账(不产断言) %d"
+                                % (s["n_total"], s["n_emitted"], s["n_vectors"], s["n_accounted"]))
+
+    def on_topo_export_sv(self):
+        if not self._topo_guard():
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出 Topout .sv", "wr_rf_tc_topout.sv", "SystemVerilog (*.sv)")
+        if not path:
+            return
+        from . import topout as T
+        mode, exh = self._topo_mode()
+        only = self._topo_checked_names() or None
+        text, b = T.render_topout_sv(self.wb, mode=mode, max_tests=self._topo_maxt(),
+                                     exhaustive=exh, comments=True, only=only)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        self.topo_sv.setPlainText(text)
+        self.topo_inner.setCurrentIndex(1)
+        s = b["summary"]
+        QtWidgets.QMessageBox.information(
+            self, "已导出",
+            "Topout .sv 已导出：\n%s\n\n信号 %d；断言块 %d；向量 %d；记账(不产断言) %d%s"
+            % (path, s["n_total"], s["n_emitted"], s["n_vectors"], s["n_accounted"],
+               ("\n（记账：%s）" % "、".join(a["name"] for a in b["accounted"])) if b["accounted"] else ""))
+
+    def on_topo_export_report(self):
+        if not self._topo_guard():
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出 Topout 报告", "topout_report.html",
+            "HTML (*.html);;CSV (*.csv);;Excel (*.xlsx)")
+        if not path:
+            return
+        from . import topout as T
+        from . import cli
+        mode, exh = self._topo_mode()
+        rep = T.topout_report(self.wb, mode=mode, max_tests=self._topo_maxt(), exhaustive=exh)
+        written = cli.write_report(path, rep, self._loaded_excel_path or "")
+        QtWidgets.QMessageBox.information(self, "已导出", "Topout 报告已导出：\n%s" % "\n".join(written))
+
+    def on_topo_fortest(self):
+        if not self._topo_guard():
+            return
+        if not self._loaded_excel_path:
+            QtWidgets.QMessageBox.information(self, "无源表", "回填需要源 Excel 路径，请先加载 Excel。")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "回填 for_test 到新 Excel", "topout_fortest.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        from . import topout as T
+        from . import fortest_writer as F
+        mode, exh = self._topo_mode()
+        rep = T.report_for_topout(self.wb, R.Resolver(self.wb), mode=mode,
+                                  max_tests=self._topo_maxt(), exhaustive=exh)
+        F.write_fortest(self._loaded_excel_path, path, rep, include_mux=True)
+        QtWidgets.QMessageBox.information(
+            self, "已回填", "Topout for_test 已回填（含 mux 表，堵『只回填 logic』陷阱）：\n%s" % path)
 
     def _build_testitems_tab(self):
         """测试项编辑标签页：表头说明 + 工具条 + 可编辑表格。"""
@@ -1422,6 +1782,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if n_restored:
             msg += "；已恢复 %d 个信号的测试项编辑(含手填期望)" % n_restored
         _save_last_excel(path)         # 记住这次的文件，下次启动自动加载
+        # ⭐Topout 主视图：载表后刷新要验信号清单（无 Topout 页时优雅提示，不崩；护栏3）
+        self._refresh_topout()
+        if getattr(self.wb, "topout", None):
+            msg += "；Topout 要验信号 %d 个" % len(self.wb.topout)
         self.status.showMessage(msg)
 
     def _populate_filters(self):

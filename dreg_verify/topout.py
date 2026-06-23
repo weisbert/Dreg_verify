@@ -454,7 +454,7 @@ def _register_passthrough_block(result, owner, aid, comments=False, counters=Fal
 
 
 def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
-                     comments=False, sv_summary=False, owner_in_msg=False):
+                     comments=False, sv_summary=False, owner_in_msg=False, only=None):
     """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
 
     · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
@@ -462,6 +462,7 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     · 直连寄存器(RW)根：渲染平凡 passthrough 块（顶层口 == 写值）。
     · RO 回读 / 未解析 / error / 同源已覆盖：块顶注释记账（护栏3，绝不静默丢）。
 
+    only：限定只产出这些 Topout 名（GUI 导出/预览勾选项用；None=全部）。
     cone 默认级联、include_risky=True（Topout 名 cone 已展到源、前后缀整类问题消失，逃生阀属『排查(旧)』）。
     sv_summary=True 时各块带计数器（counters）——调用方须 render_file(summary=True) 包一次命名块。
 
@@ -469,6 +470,9 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     from . import resolver as R
     resolver = R.Resolver(wb)                       # 干净 cone 默认（与 generator.build 内部一致）
     results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    only_low = {str(n).lower() for n in only} if only is not None else None
+    if only_low is not None:
+        results = [r for r in results if r.topo.name.lower() in only_low]
 
     # logic/mux 根 → 源对象名集合（generator.build 据此选；out_name 与 out_base 都给，匹配两种写法）
     want_names = set()
@@ -529,10 +533,11 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
 
 
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
-                     comments=False, sv_summary=False, owner_in_msg=False):
+                     comments=False, sv_summary=False, owner_in_msg=False, only=None):
     """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。"""
     b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                         comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg)
+                         comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
+                         only=only)
     text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
     return text, b
 

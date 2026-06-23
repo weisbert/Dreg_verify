@@ -752,7 +752,10 @@ def test_gui_cone_chain_panel(tmp_path_factory):
     # ── cone 信号 pll_n：面板可见，链=本行→pll_n2→pll_n1 ──
     sig = next(s for s in w.signals if s.out_base == "pll_n")
     w._load_test_items(sig)
-    assert w.ti_chain.isVisibleTo(w) and w.ti_chain_cap.isVisibleTo(w)
+    # 用 isHidden()（widget 自身 show/hide 状态，由 _populate_chain 显式设）而非 isVisibleTo(w)：
+    # 2026-06-23 重构后旧视图住『排查(旧)』分页（非默认 tab），isVisibleTo 会被外层 tab 连累；
+    # isHidden() 直接验 _populate_chain 的 show/hide 逻辑，与外层 tab 无关（更精准、不弱化）。
+    assert not w.ti_chain.isHidden() and not w.ti_chain_cap.isHidden()
     text = w.ti_chain.toPlainText()
     lines = text.splitlines()
     assert len(lines) == 6                                   # 3 链节 × (原式+代入) 2 行
@@ -766,10 +769,10 @@ def test_gui_cone_chain_panel(tmp_path_factory):
     # ── 非 cone 信号：面板隐藏 ──
     sig2 = next(s for s in w.signals if s.out_base == "d_pfd_en_lnmode")
     w._load_test_items(sig2)
-    assert not w.ti_chain.isVisibleTo(w) and not w.ti_chain_cap.isVisibleTo(w)
+    assert w.ti_chain.isHidden() and w.ti_chain_cap.isHidden()
     # ── 再切回 cone 信号：面板恢复显示(状态切换无残留) ──
     w._load_test_items(sig)
-    assert w.ti_chain.isVisibleTo(w)
+    assert not w.ti_chain.isHidden()
 
 
 def test_gui_probe_prefix_flows_to_sv(tmp_path_factory):
