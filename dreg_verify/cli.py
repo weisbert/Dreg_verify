@@ -69,6 +69,11 @@ def build_argparser():
     p.add_argument("--diagnose", action="store_true",
                    help="覆盖诊断: 实测各输入被解析成 force(RO)/RF_WRITE(RW)/未知, "
                         "类型列有哪些写法, 有无 >16bit 输入(驱动会截断), 不生成")
+    p.add_argument("--topout", action="store_true",
+                   help="【Topout-rooted 路径，2026-06-23 新模型】要验信号 = Topout 页 B 列(顶层真名)，"
+                        "cone 展到源寄存器、断言贴顶层真名(前后缀整类问题消失)。配合 --list(列清单+分类)/"
+                        "--account(账目)/--report(报告)/默认(出 .sv)。clean cone 默认——级联/尾缀/前缀属"
+                        "旧 logic-rooted 路径(排查/隔离用)，此路径不需要。")
 
     g = p.add_argument_group("信号筛选")
     g.add_argument("--owner", help="按 owner 筛选(逗号分隔，匹配 logic P 列)")
@@ -223,6 +228,78 @@ def cmd_account(wb, opts):
     print("-" * 100)
     print("提示：'过滤'=被筛选条件/默认 top_output 滤掉（--include-internal 纳入内部节点）；"
           "'跳过'=解析问题/缺前缀（原因见上，--include-risky 可强制）；'生成(裸名探针)'=已进 .sv。")
+
+
+def cmd_topout(args, wb, opts):
+    """【Topout-rooted 路径】要验信号 = Topout 页 B 列；cone 展到源寄存器、断言贴顶层真名。
+
+    --list 列清单+分类 / --account 账目(默认不空、不刷 top_out=0 假警告) / --report 出报告 /
+    默认出 .sv。clean cone 默认（前后缀/级联/top_output 筛属旧 logic-rooted 路径，此路径不需要）。"""
+    from . import topout as T
+    mode, mt, exh = opts.mode, opts.max_tests, opts.exhaustive
+    if not wb.topout:
+        print("⚠ 该 Excel 无 Topout 页（B 列要验信号清单为空）——无法走 Topout 路径。"
+              "请确认表里有 Topout 页；不带 --topout 则走旧 logic-rooted 默认路径。")
+        return 0
+
+    if args.list:
+        ms = T.topout_view_models(wb, mode=mode, max_tests=mt, exhaustive=exh)
+        by_kind = {}
+        for m in ms:
+            by_kind[m["kind"]] = by_kind.get(m["kind"], 0) + 1
+        print("Topout 要验信号 %d 个（B 列锚点）：%s"
+              % (len(ms), " | ".join("%s %d" % (k, v) for k, v in sorted(by_kind.items()))))
+        print("%-40s %-12s %-12s %-9s %-5s %s"
+              % ("Topout信号(B列)", "owner", "分类", "状态", "用例", "说明"))
+        print("-" * 112)
+        for m in ms:
+            note = (m["note"] or "; ".join(m["issues"]) or "").replace("\n", " ")[:38]
+            print("%-40s %-12s %-12s %-9s %-5d %s"
+                  % (m["name"][:40], (m["owner"] or "")[:12], m["kind"], m["status"],
+                     m["n_vectors"], note))
+        return 0
+
+    if args.account:
+        from . import resolver as R
+        acc = T.compose_topout_account(wb, R.Resolver(wb), mode=mode, max_tests=mt, exhaustive=exh)
+        s = acc["summary"]
+        print("Topout 账目：%d 个要验信号（默认不空，不套 top_output_only）" % s["n_total"])
+        print("  小结：可建 %d | 跳过(RO) %d | 未解析 %d | error %d | 有 issues %d"
+              % (s["n_ok"], s["n_skip"], s["n_unresolved"], s["n_error"], s["n_with_issues"]))
+        print("-" * 112)
+        print("%-40s %-12s %-12s %-9s %-5s %s"
+              % ("信号", "owner", "分类", "状态", "叶子", "原因/说明"))
+        print("-" * 112)
+        for r in acc["rows"]:
+            why = ("; ".join(r["issues"]) or r["note"] or "").replace("\n", " ")[:42]
+            print("%-40s %-12s %-12s %-9s %-5d %s"
+                  % (r["name"][:40], (r["owner"] or "")[:12], r["kind"], r["status"],
+                     r["n_leaves"], why))
+        return 0
+
+    if args.report:
+        rep = T.topout_report(wb, mode=mode, max_tests=mt, exhaustive=exh)
+        written = write_report(args.report, rep, args.excel)
+        print("Topout 报告已写出: %s" % "  ".join(written))
+        print("  Topout 信号 %d 个（真值表 %d 个）" % (len(rep["summary"]), len(rep["tables"])))
+        if args.out is None:
+            return 0
+
+    out = args.out or "wr_rf_tc.sv"
+    text, b = T.render_topout_sv(wb, mode=mode, max_tests=mt, exhaustive=exh,
+                                 comments=opts.comments, sv_summary=opts.sv_summary,
+                                 owner_in_msg=opts.owner_in_msg)
+    _write(out, text)
+    s = b["summary"]
+    print("已写出(Topout 路径): %s" % out)
+    print("  Topout 信号 %d；产出断言块 %d；向量 %d（负向 %d）；记账(不产断言) %d"
+          % (s["n_total"], s["n_emitted"], s["n_vectors"], s["n_negative"], s["n_accounted"]))
+    if b["accounted"]:
+        print("  记账（解析不了/跳过的信号也不静默丢）：")
+        for a in b["accounted"]:
+            print("    - %s [%s/%s]: %s"
+                  % (a["name"], a["kind"], a["status"], (a["reason"] or "").replace("\n", " ")[:60]))
+    return 0
 
 
 def cmd_diagnose(wb, opts):
@@ -1228,6 +1305,11 @@ def _dispatch(args, opts):
     print("装载 Excel: %s ..." % args.excel)
     wb = excel_model.load_workbook(args.excel)
     print("  sheets: %s" % wb.sheet_names)
+
+    # Topout-rooted 路径（2026-06-23 新模型）：要验信号=Topout B 列，cone 展到源、断言贴顶层真名。
+    # 与旧 logic-rooted 路径完全并存：默认仍走旧路径；--topout 才切到新路径（旧 CLI 行为逐字节不变）。
+    if args.topout:
+        return cmd_topout(args, wb, opts)
 
     if args.list:
         cmd_list(wb, opts)

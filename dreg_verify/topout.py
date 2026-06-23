@@ -597,3 +597,67 @@ def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False):
             _fill_register_model(m, r)
         models.append(m)
     return models
+
+
+# ═════════════════════════ 块B（续）：Topout 报告（write_report 兼容，全 Topout 限定） ═════════════════════════
+_VERIF_OF = {"ok": "clean", "unresolved": "unresolved", "error": "parse-err"}
+
+
+def _vm_to_report_table(vm):
+    """register 平凡视图模型 → report 表 dict（HTML/CSV 真值表 tab 消费）。"""
+    return {"R": "", "signal": vm["name"], "owner": vm["owner"], "type": vm["kind"],
+            "expr": "", "is_logic": True, "out_width": vm["width"] or 1,
+            "chain": vm["chain"], "supplement": "", "inputs": vm["inputs"],
+            "tests": vm["tests"], "auto_label": vm["auto_label"], "exp_label": vm["exp_label"],
+            "topout_name": vm["name"]}
+
+
+def _account_error_text(row):
+    """账目行 → 报告 summary 的『错误/原因』列文案（RO 回读/未解析/error 不空，ok 留空）。"""
+    if row["status"] == "ok":
+        return "; ".join(row["issues"]) if row["issues"] else ""
+    if row["status"] == "skip":
+        return "跳过(RO 回读，无 cone)：%s" % (row["note"] or "")
+    if row["status"] == "unresolved":
+        return "未解析：%s" % (row["note"] or "")
+    return "; ".join(row["issues"]) or row["note"] or row["status"]
+
+
+def topout_report(wb, mode="min", max_tests=256, exhaustive=False):
+    """Topout 限定报告（write_report 兼容：summary/detail/tables/verifiability），堵 3 静默陷阱：
+      ① 默认不空：summary 直接来自 compose_topout_account（12 行全分类，不套 top_output_only）；
+      ② 不刷 top_out=0 假警告：error 列只放真原因（RO/未解析/冲突），无 bare-probe/needs-prefix 噪声；
+      ③ for_test 回填含 mux：tables 来自 report_for_topout（已含 mux）+ register 平凡表。
+
+    summary/detail/verifiability 全限定到 Topout 清单（不像 report_for_topout 只过滤 tables）。"""
+    from . import resolver as R
+    resolver = R.Resolver(wb)
+    rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    acc = compose_topout_account(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    vms = topout_view_models(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+
+    # tables：logic/mux 富表（report_for_topout）+ register 平凡表（视图模型）
+    tables = list(rep.get("tables", []))
+    for vm in vms:
+        if vm["kind"] == REGISTER and vm["tests"]:
+            tables.append(_vm_to_report_table(vm))
+    # detail：限定到存活 logic/mux 表的源信号（per-test 行；register/RO 无 per-test）
+    kept_src = {str(t["signal"]).lower() for t in rep.get("tables", [])}
+    detail = [d for d in rep.get("detail", []) if str(d.get("signal", "")).lower() in kept_src]
+
+    # summary + verifiability：以 Topout 账目为准（覆盖全 12，含 RO/未解析）
+    summary, verif_signals, counts = [], [], {}
+    for row in acc["rows"]:
+        summary.append({
+            "R": "", "signal": row["name"], "owner": row["owner"], "type": row["kind"],
+            "top": "", "expr": "", "n_tests": row["n_vectors"], "n_neg": 0,
+            "control": "", "data": "", "unresolved": "; ".join(row["issues"]),
+            "supplement": "", "error": _account_error_text(row)})
+        vst = _VERIF_OF.get(row["status"], row["status"])     # ok→clean / skip 原样(RO 回读)
+        counts[vst] = counts.get(vst, 0) + 1
+        verif_signals.append({
+            "R": "", "signal": row["name"], "owner": row["owner"], "type": row["kind"],
+            "top": "", "status": vst, "detail": row["note"] or "; ".join(row["issues"]),
+            "out_net": "`ENV_RF.%s" % row["name"]})
+    return {"summary": summary, "detail": detail, "tables": tables,
+            "verifiability": {"counts": counts, "signals": verif_signals}}
