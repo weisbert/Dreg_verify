@@ -164,34 +164,53 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
         res.out_width = sig.out_width
         try:
             node, bindings, expanded = G.expand_signal(wb, resolver, sig, chain_out=res.chain)
+            res.node, res.bindings, res.expanded = node, bindings, expanded
+            if want_vectors:
+                res.vectors, res.meta = V.generate_vectors(
+                    node, bindings, sig.out_width, mode=mode, max_tests=max_tests,
+                    exhaustive=exhaustive)
         except (cone.ConeError, E.ExprError) as ex:
             res.status = "error"
             res.issues.append("cone 展开失败: %s" % ex)
-            return res
-        res.node, res.bindings, res.expanded = node, bindings, expanded
-        if want_vectors:
-            res.vectors, res.meta = V.generate_vectors(
-                node, bindings, sig.out_width, mode=mode, max_tests=max_tests,
-                exhaustive=exhaustive)
+        except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛，意外异常记账成 error 不连累整批
+            res.status = "error"
+            res.issues.append("分析异常: %r" % ex)
         return res
 
     if root.kind == REGISTER:
         # 直连寄存器(RW)：顶层输出 = 该寄存器字段（dft 恒等观测）。建平凡节点 Var(BASE)，
         # 叶子 = 该寄存器本身(RW→RF_WRITE)，驱动它并断言 输出==写值，验证寄存器→顶层口的直连。
         base = topo.name
-        info = {"raw": base, "base": base, "width": topo.width,
-                "msb": topo.msb if topo.width > 1 else None,
-                "lsb": topo.lsb if topo.width > 1 else None}
-        b = resolver.resolve(base.upper(), info)
-        key = base.upper()
-        res.node = E.Var(key, info["msb"], info["lsb"])
-        res.bindings = {key: b}
-        if not b.resolved:
-            res.issues.append("直连寄存器 %s 未解析: %s" % (base, b.note or ""))
-        if want_vectors:
-            res.vectors, res.meta = V.generate_vectors(
-                res.node, res.bindings, topo.width, mode=mode, max_tests=max_tests,
-                exhaustive=exhaustive)
+        try:
+            # ⭐位宽以解析到的寄存器字段为准（修『Topout 名无 [msb:lsb] 切片→只验 bit0』假绿）：
+            # 裸名写法 _strip_width 给 width=1，但字段是多 bit 时只 RF_WRITE bit0、高位静默不验。
+            obj = root.obj
+            bm, bl = getattr(obj, "bit_msb", None), getattr(obj, "bit_lsb", None)
+            field_w = (int(bm) - int(bl) + 1) if (bm is not None and bl is not None) else 1
+            eff_w = max(int(topo.width or 1), max(int(field_w), 1))
+            info = {"raw": base, "base": base, "width": eff_w,
+                    "msb": (eff_w - 1) if eff_w > 1 else None,
+                    "lsb": 0 if eff_w > 1 else None}
+            b = resolver.resolve(base.upper(), info)
+            if not b.resolved:
+                # 未解析的直连寄存器（如 RW 字段缺地址）→ error，别发『ok』绿块驱不存在的网（假绿）
+                res.status = "error"
+                res.issues.append("直连寄存器 %s 未解析: %s" % (base, b.note or ""))
+                return res
+            if eff_w > int(topo.width or 1):
+                res.issues.append("Topout 名 %s 无位宽切片但寄存器字段宽 %d——按字段全宽验"
+                                  "(否则只验 bit0、高位假绿)" % (base, eff_w))
+            key = base.upper()
+            res.out_width = eff_w
+            res.node = E.Var(key, info["msb"], info["lsb"])
+            res.bindings = {key: b}
+            if want_vectors:
+                res.vectors, res.meta = V.generate_vectors(
+                    res.node, res.bindings, eff_w, mode=mode, max_tests=max_tests,
+                    exhaustive=exhaustive)
+        except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛
+            res.status = "error"
+            res.issues.append("分析异常: %r" % ex)
         return res
 
     if root.kind == MUX:
@@ -199,16 +218,18 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
         res.out_width = grp.out_width
         try:
             expansion = mux_gen.expand_mux_group(wb, resolver, grp)
+            res.expansion = expansion
+            res.issues.extend(expansion.get("issues", []))
+            if want_vectors:
+                res.vectors = mux_gen.make_mux_vectors(grp, expansion, mode=mode,
+                                                       max_tests=max_tests)
+                res.bindings = expansion.get("bindings", {})
         except cone.ConeError as ex:
             res.status = "error"
             res.issues.append("mux 展开失败: %s" % ex)
-            return res
-        res.expansion = expansion
-        res.issues.extend(expansion.get("issues", []))
-        if want_vectors:
-            res.vectors = mux_gen.make_mux_vectors(grp, expansion, mode=mode,
-                                                   max_tests=max_tests)
-            res.bindings = expansion.get("bindings", {})
+        except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛
+            res.status = "error"
+            res.issues.append("分析异常: %r" % ex)
         return res
 
     res.status = "error"
@@ -241,11 +262,14 @@ def evaluate_at(result, base_values):
     groups = V.input_groups(result.node, result.bindings)
     bv = {}
     for g in groups:
-        # 组键 = 基名+切片(小写)；输入金标准按基名给值，命中基名即填
-        for cand in (g["key"], g["base"].lower()):
-            if cand in base_values:
-                bv[g["key"]] = base_values[cand] & E.mask(g["width"])
-                break
+        # 组键 = 基名+切片(小写)；输入金标准按【组键】给值时直接用，按【基名】给值时是整寄存器值，
+        # 要按该组的 slice_lsb 取出本组那几位（否则同一寄存器的两个切片组会都拿到整值、装错——R27 位拆分坑）。
+        if g["key"] in base_values:
+            bv[g["key"]] = base_values[g["key"]] & E.mask(g["width"])
+        elif g["base"].lower() in base_values:
+            rep_b = result.bindings.get(g.get("rep"))
+            lsb = (getattr(rep_b, "slice_lsb", 0) or 0) if rep_b is not None else 0
+            bv[g["key"]] = (base_values[g["base"].lower()] >> lsb) & E.mask(g["width"])
     vec = V.make_vector_from_base_values(
         result.node, result.bindings, groups, bv, result.out_width)
     return vec.exp_value, vec.exp_width
@@ -289,6 +313,13 @@ def validate_against_golden(wb, resolver, golden_blocks):
             continue
         result = analyze_signal(wb, resolver, _topo_for(blk), root=root,
                                 want_vectors=False)
+        # cone 展开失败/未建出节点 → 标 no-cone 记账，别让 evaluate_at 抛 ValueError 把【整批】对照
+        # 拖崩（护栏3：永不崩；真表有成环/不可解析信号时，单信号失败不连累其余金标准列）。
+        if result.node is None or result.status != "ok":
+            rep["status"] = "no-cone"
+            rep["note"] = "; ".join(result.issues) or result.status
+            reports.append(rep)
+            continue
         labels = blk.get("labels") or []
         for ci in range(blk["ncol"]):
             exp = blk["expected"][ci]
@@ -385,10 +416,13 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False)
         base = _strip_width(signal)[0].lower()
         if base in want:
             return base
-        # 经 _ls / rtl_base 命中（d_en_refbuf → d_en_refbuf_ls 等）
+        # 经 _ls / rtl_base / rtl_base_full / out_base 命中（d_en_refbuf → d_en_refbuf_ls 等）——
+        # 候选集须与 build_index 的 _logic/_mux_candidates 对称(含 rtl_base_full)，否则 build_index 能
+        # 命中、这里反查不到 → 信号被分析了却报告表被丢(空真值表的『ok』信号，违『绝不静默丢』)。
         s = logic_idx.get(base) or mux_idx.get(base)
         if s is not None:
-            for cand in (getattr(s, "_ls_name", "") or "", s.rtl_base):
+            for cand in (getattr(s, "_ls_name", "") or "", s.rtl_base,
+                         getattr(s, "rtl_base_full", "") or "", s.out_base):
                 if cand and cand.lower() in want:
                     return cand.lower()
         return None
@@ -494,11 +528,10 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
         if r.status == "ok" and r.root.kind in (LOGIC, MUX):
             src = r.root.obj.out_name.lower()
             if src in seen_src:                    # 两个 Topout 名映到同一源对象 → 只产出一次（防 dup-label）
-                blk = _account_block(name, r.root.kind, "dup-source",
-                                     "与已产出的同源信号共用一个源对象（避免断言标号重复）", owner)
-                blocks.append(blk)
+                _why = "与已产出的同源信号共用一个源对象（避免断言标号重复）"
+                blocks.append(_account_block(name, r.root.kind, "dup-source", _why, owner))
                 accounted.append({"name": name, "kind": r.root.kind, "status": "dup-source",
-                                  "reason": blk[1]["topout_status"]})
+                                  "reason": _why})
                 continue
             blk = by_src.get(src)
             if blk is None:                        # include_risky=True 仍被 build 跳过（规格冲突/空向量等）

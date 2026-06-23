@@ -250,6 +250,31 @@ def test_topout_graceful_when_no_topout_page(gui_app, tmp_path):
         w.close()
 
 
+# ───────────── 对抗 review GUI 修复回归 ─────────────
+def test_topout_refresh_on_tab_switch_after_maxtests_change(topo_win):
+    """切回 Topout 视图时，若『排查(旧)』改过上限 → 重建清单（『用例』列不再陈旧 vs 实际导出）。"""
+    w = topo_win
+    new = (w._topo_maxt() % 64) + 7                       # 保证与当前不同且合理
+    w.main_tabs.setCurrentIndex(1)                        # 去『排查(旧)』
+    w.max_tests.setValue(new)
+    w.main_tabs.setCurrentIndex(0)                        # 切回 Topout → currentChanged 触发重建
+    assert w._topo_built_key[2] == new
+
+
+def test_topout_refresh_failure_clears_stale_panels(topo_win, monkeypatch):
+    """分析失败时清空旧表的链/真值表/.sv（否则失败仍显示上一张表，误导）；不崩。"""
+    from dreg_verify import topout as T2
+    w = topo_win
+    r = _topo_row(w, "d_logic_bt_lp_rx_en")
+    w.topo_table.setCurrentCell(r, 1)
+    assert w.topo_truth.rowCount() > 0                    # 先有内容
+    monkeypatch.setattr(T2, "topout_view_models",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    w._refresh_topout()                                   # 不应抛
+    assert w.topo_truth.rowCount() == 0                   # 旧表已清
+    assert "失败" in w.topo_detail.text()
+
+
 # ───────────── 截图：Topout 视图版面过目 ─────────────
 def test_topout_view_screenshot(topo_win, gui_app):
     """截一张 Topout 视图 PNG（版面过目；文字方框是 offscreen 缺中文字体所致，文字由上面断言把关）。"""

@@ -777,8 +777,19 @@ class MainWindow(QtWidgets.QMainWindow):
         legacy_lay.addLayout(btns)
 
         self.main_tabs.setCurrentIndex(0)        # 默认门面 = Topout 视图（旧的退二线）
+        # 切回 Topout 视图时，若覆盖度/上限在『排查(旧)』改过 → 重建清单（否则『用例』列显示陈旧、
+        # 与导出的 .sv 向量数不符）。带参数指纹只在真变了才重算，避免每次切页都重跑全表。
+        self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
         self.status = self.statusBar()
         self.status.showMessage("请选择并加载 Excel。")
+
+    def _on_main_tab_changed(self, idx):
+        if idx != 0 or not getattr(self, "wb", None) or not getattr(self.wb, "topout", None):
+            return
+        mode, exh = self._topo_mode()
+        key = (mode, exh, self._topo_maxt())
+        if key != getattr(self, "_topo_built_key", None):
+            self._refresh_topout()
 
     # ═══════════════════ Topout 主视图（2026-06-23 重构，新默认门面）═══════════════════
     def _build_topout_tab(self):
@@ -900,11 +911,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         from . import topout as T
         mode, exh = self._topo_mode()
+        self._topo_built_key = (mode, exh, self._topo_maxt())   # 参数指纹（切页时判要不要重建）
         try:
             self._topo_models = T.topout_view_models(
                 self.wb, mode=mode, max_tests=self._topo_maxt(), exhaustive=exh)
         except Exception as ex:   # noqa: BLE001 —— 护栏3：绝不崩，原因落 detail
             self.topo_detail.setText("Topout 分析失败（已捕获，未崩）：%s" % ex)
+            self._topo_clear_detail()      # 清旧表的链/真值表/.sv（否则失败时仍显示上一张表，误导）
             self.topo_table.blockSignals(False)
             return
         self.topo_table.setRowCount(len(self._topo_models))

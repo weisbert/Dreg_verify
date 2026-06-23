@@ -523,3 +523,76 @@ def test_topout_view_models_wl_surfaces_conflicts(wl_wb):
     assert by["d_wl_rf_lp5g_rxrf_lna_lctune"]["issues"]
     assert by["d_bt_rx_slna_1st_bias_trim_gain_cal_wl"]["issues"]
     assert all(m["kind"] for m in ms)                         # 每个都有分类，无崩溃
+
+
+# ═════════════════════ 对抗 review 修复回归（2026-06-23 块B 续）═════════════════════
+def test_register_passthrough_width_from_resolved_field():
+    """⭐major 修复：直连寄存器根 Topout 名【无位宽切片】(裸名)但字段是多 bit → 按字段全宽验，
+    不是只 RF_WRITE bit0/断言 1 位的假绿（真表~211 顶层真名常无切片）。"""
+    reg = {"d_dcoc": M.RegmapEntry("d_dcoc", "DCOC", "RW", "0", 0, 6, "BT", address=0x2E)}
+    wb = M.DregWorkbook(logic=[], regmap=reg, tmm={}, sheet_names=[])
+    res = R.Resolver(wb)
+    topo = M.TopoutSignal(row=3, name="d_dcoc", width=1, owner="BT")    # 裸名 → _strip_width width=1
+    r = T.analyze_signal(wb, res, topo, mode="max", exhaustive=True)
+    assert r.root.kind == T.REGISTER and r.status == "ok"
+    assert r.out_width == 7                                   # 字段全宽 7（非 1）
+    assert any("字段宽 7" in i for i in r.issues)              # 加宽告警可见（不静默）
+    assert max(v.exp_value for v in r.vectors) > 1            # 高位真被驱动/断言（非只 bit0）
+
+
+def test_register_unresolved_is_error_not_false_green():
+    """⭐minor 修复：直连寄存器(RW)但解析不到(如缺地址) → status='error'，不发『ok』绿块驱不存在的网。"""
+    reg = {"d_noaddr": M.RegmapEntry("d_noaddr", "NA", "RW", "0", 0, 0, "BT")}   # address=None
+    wb = M.DregWorkbook(logic=[], regmap=reg, tmm={}, sheet_names=[])
+    res = R.Resolver(wb)
+    r = T.analyze_signal(wb, res, M.TopoutSignal(3, "d_noaddr", 1, "BT"))
+    assert r.root.kind == T.REGISTER
+    assert r.status == "error" and r.vectors == []           # 未解析 → error（非假绿 ok）
+
+
+def test_validate_against_golden_survives_cone_failure(wb, res, mirror_path, monkeypatch):
+    """⭐major 修复：金标准对照里某 logic 根 cone 展开失败(node=None) → 标 no-cone 记账，
+    不让 evaluate_at 抛 ValueError 把【整批】对照拖崩（真表有成环/不可解析信号时尤甚）。"""
+    golden = T.load_fortest_golden(mirror_path)
+    orig = T.analyze_signal
+
+    def patched(wb_, res_, topo_, **kw):
+        r = orig(wb_, res_, topo_, **kw)
+        if topo_.name == "d_logic_bt_lp_rx_en":              # 强制这块 cone 失败
+            r.node = None; r.status = "error"; r.issues = ["forced cone fail"]
+        return r
+    monkeypatch.setattr(T, "analyze_signal", patched)
+    reps = T.validate_against_golden(wb, res, golden)        # 不应抛
+    assert len(reps) == len(golden)                          # 所有块都有报告（没崩）
+    bad = next(r for r in reps if r["out"] == "d_logic_bt_lp_rx_en")
+    assert bad["status"] == "no-cone"
+    assert sum(1 for r in reps if r["status"] == "checked") == len(golden) - 1   # 其余仍 checked
+
+
+def test_analyze_signal_never_throws_on_unexpected(wb, res):
+    """⭐minor 修复(护栏3)：analyze_signal 遇意外异常也不抛，记账成 error（一个坏信号不连累整批/不崩 GUI）。"""
+    from dreg_verify import vectors as V2
+    topo = next(t for t in wb.topout if t.name == "d_logic_bt_lp_rx_en")
+    orig = V2.generate_vectors
+    try:
+        V2.generate_vectors = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaboom"))
+        r = T.analyze_signal(wb, res, topo)                  # 不应抛
+        assert r.status == "error" and any("kaboom" in i for i in r.issues)
+    finally:
+        V2.generate_vectors = orig
+
+
+def test_dup_source_reason_is_human_readable():
+    """⭐nit 修复：两个 Topout 名映到同一源对象 → 记账 reason 是人读说明，不是状态字符串回声。"""
+    sig = M.LogicSignal(row=3, out_name="top_x", out_width=1, expr="A", suffix="to_dft",
+                        top_output="0", notes="", owner="BT", assert_id="1",
+                        inputs={"A": {"raw": "d_a", "base": "d_a", "width": 1,
+                                      "msb": None, "lsb": None}})
+    sig._ls_name = "top_x_ls"                                # top_x 也可被 'top_x_ls' 命中
+    reg = {"d_a": M.RegmapEntry("d_a", "A", "RW", "0", 0, 0, "BT", address=1)}
+    wb = M.DregWorkbook(logic=[sig], regmap=reg, tmm={}, sheet_names=[])
+    wb.topout = [M.TopoutSignal(3, "top_x", 1, "BT"), M.TopoutSignal(4, "top_x_ls", 1, "BT")]
+    b = T.build_for_topout(wb, mode="min")
+    dup = [a for a in b["accounted"] if a["status"] == "dup-source"]
+    assert dup and dup[0]["reason"] != "dup-source"          # 人读说明，非状态回声
+    assert "同源" in dup[0]["reason"]
