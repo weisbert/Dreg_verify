@@ -1290,18 +1290,34 @@ def _dispatch(args, opts):
     return 0
 
 
-def _export_claims(res, path, excel):
-    """把 build 结果里的 claim 清单写成 JSON——红区 scan_rtl 校验器的输入契约。path 为空则不导。"""
+def _export_claims(res, path, excel, naming_model=None):
+    """把 build 结果里的 claim 清单写成 JSON——红区 scan_rtl 校验器的输入契约。path 为空则不导。
+
+    naming_model(C2,2026-06-23)：探针网名的命名模型，随 claims 进红区让 binder 知道名字怎么来的——
+      'logic-rooted'(默认,旧路径,探针名按命名约定猜) / 'topout'(新路径,Topout 顶层真名,近零前缀)。
+    """
     if not path:
         return
     import json
     claims = res.get("claims", [])
+    nm = naming_model or generator.NAMING_MODEL_LOGIC
+    note_by_model = {
+        generator.NAMING_MODEL_LOGIC: (
+            "命名模型=logic-rooted：探针名按命名约定+尾缀【猜】出(_to_logic/_to_mux/_ls/前缀)，可能假绿——"
+            "红区 binder 须逐探针核对真名(R41/R42)。校验器契约：probe 须为真·RTL 输出网(不是某 assign 的"
+            " RHS 输入网)、force 网须真实存在；self_ref_suffixes 非空且 == 探针后缀 = 自引用假绿(应为空)。"),
+        generator.NAMING_MODEL_TOPOUT: (
+            "命名模型=topout：探针名是 Topout 顶层真名(无路由后缀)，cone 已展到源寄存器→近零前缀——"
+            "红区 binder 顶层口直接核存在性即可。校验器契约同 logic-rooted(probe 须真·输出网、force 须存在、"
+            "self_ref_suffixes 应空)，但顶层真名理应直接命中、需前缀的属意外埋件。"),
+    }
     payload = {
         "source_excel": os.path.basename(excel),
+        "schema_version": generator.CLAIM_SCHEMA_VERSION,
+        "naming_model": nm,
         "n_claims": len(claims),
         "schema": list(generator._CLAIM_KEYS),
-        "note": ("红区 scan_rtl 校验器输入契约：probe 须为真·RTL 输出网(不是某 assign 的 RHS 输入网)、"
-                 "force 网须真实存在；self_ref_suffixes 非空且 == 探针后缀 = 自引用假绿(应为空)"),
+        "note": note_by_model.get(nm, note_by_model[generator.NAMING_MODEL_LOGIC]),
         "claims": claims,
     }
     with open(path, "w", encoding="utf-8") as f:

@@ -415,6 +415,16 @@ _CLAIM_KEYS = ("signal", "aid", "kind", "identity", "net_base", "slice", "prefix
                "full", "found_in", "addr", "self_ref_suffixes", "is_mux", "top_output",
                "on_missing", "input_nets")
 
+# claims.json 契约版本号（2026-06-23 C2，跨空气墙防静默不兼容）。红区 binder/diag 据它判能否消费：
+#   schema_version 升一档 = 字段/语义有不向后兼容变化(旧红区工具应拒绝或降级，而非自信给错裁决)。
+#   naming_model = 探针网名的【命名模型】：
+#     'logic-rooted' = 旧路径，探针名按命名约定+尾缀【猜】出(_to_logic/_to_mux/_ls/前缀)，可能假绿；
+#     'topout'       = 新路径，探针名是 Topout 顶层真名(无路由后缀)，cone 展到底→近零前缀。
+#   binder 拿到后：logic-rooted → 仍需逐探针核对真名(R41/R42 那套)；topout → 顶层口直接核存在性即可。
+CLAIM_SCHEMA_VERSION = 2
+NAMING_MODEL_LOGIC = "logic-rooted"
+NAMING_MODEL_TOPOUT = "topout"
+
 
 def _probe_provenance(obj):
     if getattr(obj, "_ls_name", None):

@@ -251,6 +251,25 @@ def test_export_claims_writes_json(tmp_path):
     assert data["n_claims"] == len(res["claims"])
     assert data["schema"] == list(G._CLAIM_KEYS)
     assert any(c["kind"] == "probe" for c in data["claims"])
+    # C2(2026-06-23)：契约版本号 + 命名模型，跨空气墙防静默不兼容
+    assert data["schema_version"] == G.CLAIM_SCHEMA_VERSION
+    assert data["naming_model"] == G.NAMING_MODEL_LOGIC      # 默认旧路径
+    assert "logic-rooted" in data["note"]
+
+
+def test_export_claims_naming_model_topout(tmp_path):
+    """显式 naming_model='topout' → JSON 标 topout + note 改写成顶层真名口径。"""
+    from dreg_verify import cli
+    import json
+    sig = _logic("d_sel[3:0]", "A", {"A": {"raw": "a_in[3:0]", "base": "a_in", "width": 4,
+                                           "msb": 3, "lsb": 0}}, out_width=4, top_output=1)
+    wb = DregWorkbook(logic=[sig], regmap={}, tmm={}, sheet_names=[])
+    res = G.build(wb, G.GenOptions(include_risky=True))
+    p = tmp_path / "claims.json"
+    cli._export_claims(res, str(p), "fake.xlsx", naming_model=G.NAMING_MODEL_TOPOUT)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["naming_model"] == "topout"
+    assert "topout" in data["note"]
 
 
 # ── M0(goal-redzone-binder)：claims 补 input_nets + on_missing 两字段 ──
