@@ -481,6 +481,11 @@ class _TopoutProvider:
     def wb(self):
         return self.main.wb
 
+    def _pp(self):
+        """当前探针前缀映射（与『排查(旧)』/全局编辑器共用同一份 self._probe_prefixes）。
+        Topout 顶层探针展到底后多无需前缀，但 cone 叶子的 RO readback / iddq 门若埋子模块仍要前缀。"""
+        return getattr(self.main, "_probe_prefixes", None) or None
+
     def title(self):
         return "要验信号 = Topout 页 B 列（顶层真名，cone 展到源寄存器，断言贴真名）"
 
@@ -493,32 +498,36 @@ class _TopoutProvider:
 
     def view_models(self, mode, max_tests, exhaustive):
         from . import topout as T
-        return T.topout_view_models(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+        return T.topout_view_models(self.wb, mode=mode, max_tests=max_tests,
+                                    exhaustive=exhaustive, probe_prefixes=self._pp())
 
     def analyze(self, name, mode, max_tests, exhaustive):
         from . import topout as T
         topo = next((t for t in (self.wb.topout or []) if t.name == name), None)
         if topo is None:
             return None
-        res = T.analyze_signal(self.wb, R.Resolver(self.wb), topo, mode=mode,
-                               max_tests=max_tests, exhaustive=exhaustive)
+        res = T.analyze_signal(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()), topo,
+                               mode=mode, max_tests=max_tests, exhaustive=exhaustive)
         return _norm_topout_result(res)
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True):
         from . import topout as T
         eo = _topout_edit_overrides(edited)
         return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                  comments=comments, only=only, edit_overrides=eo)
+                                  comments=comments, only=only, edit_overrides=eo,
+                                  probe_prefixes=self._pp())
 
     def render_report(self, mode, max_tests, exhaustive):
         from . import topout as T
-        return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+        return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                               probe_prefixes=self._pp())
 
     def fortest(self, src, out, mode, max_tests, exhaustive):
         from . import topout as T
         from . import fortest_writer as F
-        rep = T.report_for_topout(self.wb, R.Resolver(self.wb), mode=mode,
-                                  max_tests=max_tests, exhaustive=exhaustive)
+        rep = T.report_for_topout(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()),
+                                  mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                  probe_prefixes=self._pp())
         F.write_fortest(src, out, rep, include_mux=True)
 
 
@@ -603,17 +612,21 @@ class _PageProvider:
         from . import pageviews as P
         return P.page_available(self.wb, self.page)
 
+    def _pp(self):
+        """探针前缀映射（与 Topout/排查(旧)/全局编辑器共用同一份 self._probe_prefixes）。"""
+        return getattr(self.main, "_probe_prefixes", None) or None
+
     def view_models(self, mode, max_tests, exhaustive):
         from . import pageviews as P
         return P.page_view_models(self.wb, self.page, mode=mode, max_tests=max_tests,
-                                  exhaustive=exhaustive)
+                                  exhaustive=exhaustive, probe_prefixes=self._pp())
 
     def analyze(self, name, mode, max_tests, exhaustive):
         from . import pageviews as P
         sig = next((s for s in P.page_signals(self.wb, self.page) if s.out_name == name), None)
         if sig is None:
             return None
-        res = P.analyze_page_signal(self.wb, P._page_resolver(self.wb), sig, self.page,
+        res = P.analyze_page_signal(self.wb, P._page_resolver(self.wb, self._pp()), sig, self.page,
                                     mode=mode, max_tests=max_tests, exhaustive=exhaustive)
         return _norm_page_result(res)
 
@@ -621,17 +634,17 @@ class _PageProvider:
         from . import pageviews as P
         return P.build_page_sv(self.wb, self.page, mode=mode, max_tests=max_tests,
                                exhaustive=exhaustive, edit_overrides=_page_edit_overrides(edited),
-                               only=only, comments=comments)
+                               only=only, comments=comments, probe_prefixes=self._pp())
 
     def render_report(self, mode, max_tests, exhaustive):
         from . import pageviews as P
         return P.page_report(self.wb, self.page, mode=mode, max_tests=max_tests,
-                             exhaustive=exhaustive)
+                             exhaustive=exhaustive, probe_prefixes=self._pp())
 
     def fortest(self, src, out, mode, max_tests, exhaustive):
         from . import pageviews as P
         P.page_fortest(self.wb, self.page, src, out, mode=mode, max_tests=max_tests,
-                       exhaustive=exhaustive)
+                       exhaustive=exhaustive, probe_prefixes=self._pp())
 
 
 class SignalView(QtWidgets.QWidget):
@@ -820,12 +833,18 @@ class SignalView(QtWidgets.QWidget):
         lay.addWidget(split, 1)
 
         btns = QtWidgets.QHBoxLayout()
+        b_pfx = QtWidgets.QPushButton("设置探针前缀…"); b_pfx.clicked.connect(self.on_set_prefix)
+        b_pfx.setToolTip("配置层级前缀：force 叶子(RO readback / iddq 门)或顶层探针埋在子模块里时\n"
+                         "（如 fll_active 在 U_BT_LP_PLL_DIG 内部）→ force/assert 写 `ENV_RF.<前缀>.<网名>，\n"
+                         "否则裸名 CUVUNF。按【网名/信号名】逐个配(可全局批量导入 scan_rtl 的 probe_prefixes.txt)。\n"
+                         "与『排查(旧)』共用同一份映射；改完本视图自动重算。")
         b_prev = QtWidgets.QPushButton("预览选中.sv"); b_prev.clicked.connect(self.on_preview)
         b_prev.setToolTip("生成勾选(未勾任何=全部)信号的 .sv，显示在『.sv 预览』页（含真值表编辑）")
         b_sv = QtWidgets.QPushButton("导出 .sv…"); b_sv.clicked.connect(self.on_export_sv)
         b_rep = QtWidgets.QPushButton("导出报告(HTML/CSV)…"); b_rep.clicked.connect(self.on_export_report)
         b_ft = QtWidgets.QPushButton("回填 for_test…"); b_ft.clicked.connect(self.on_fortest)
         b_ft.setToolTip("把真值表按 for_test 排版回填 Excel（含 mux 表）")
+        btns.addWidget(b_pfx)
         btns.addStretch(1)
         for b in (b_prev, b_sv, b_rep, b_ft):
             btns.addWidget(b)
@@ -1497,6 +1516,14 @@ class SignalView(QtWidgets.QWidget):
             self._ti_loading = False
         self.sv.setPlainText("")
         self.cur_an = None; self.cur_cols = None
+
+    def on_set_prefix(self):
+        """打开全局探针前缀编辑器（与『排查(旧)』共用同一份映射），改完重算本视图——
+        前缀对 cone 叶子(RO readback / iddq 门)的 force 路径与顶层探针生效。"""
+        if not self.main.wb:
+            return
+        self.main.on_set_probe_prefix()
+        self.refresh()
 
     def on_preview(self):
         if not self._guard():

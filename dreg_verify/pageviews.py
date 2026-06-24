@@ -49,13 +49,14 @@ def page_available(wb, page):
     return bool(page_signals(wb, page))
 
 
-def _page_resolver(wb):
+def _page_resolver(wb, probe_prefixes=None):
     """页本地用的干净 resolver：级联=force(绝不 cone 上游)。
     尾缀沿用全局默认(append_to_logic=True / append_to_mux=False)=RTL 真名——与 Topout/排查(旧)
     同口径，且【不擅自改 wb.logic 各信号的 _append_to_logic 共享态】(Resolver.__init__ 会回写它，
     若这里强行设 False 会污染别的视图的 rtl_name，2026-06-24 实测撞了 append_to_logic 开关测试)。
-    页本地的『不跨页』靠 cascade_mode=force 实现，与输出尾缀无关。"""
-    return R.Resolver(wb, cascade_mode="force")
+    页本地的『不跨页』靠 cascade_mode=force 实现，与输出尾缀无关。
+    probe_prefixes：force 衔接网/输出探针埋子模块时的层级前缀（与 Topout/排查(旧) 共用同一份）。"""
+    return R.Resolver(wb, cascade_mode="force", wire_prefixes=probe_prefixes)
 
 
 # ───────────────────────────── 单行分析结果 ─────────────────────────────
@@ -145,9 +146,10 @@ def analyze_page_signal(wb, resolver, sig, page, mode="min", max_tests=256,
                              exhaustive=exhaustive, want_vectors=want_vectors, page=page)
 
 
-def analyze_all(wb, page, mode="min", max_tests=256, exhaustive=False, want_vectors=True):
+def analyze_all(wb, page, mode="min", max_tests=256, exhaustive=False, want_vectors=True,
+                probe_prefixes=None):
     """对某一页全清单逐行分析。返回 list[PageResult]。"""
-    resolver = _page_resolver(wb)
+    resolver = _page_resolver(wb, probe_prefixes)
     return [analyze_page_signal(wb, resolver, s, page, mode=mode, max_tests=max_tests,
                                 exhaustive=exhaustive, want_vectors=want_vectors)
             for s in page_signals(wb, page)]
@@ -217,22 +219,22 @@ def result_to_model(res):
     return m
 
 
-def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False):
+def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
     """某一页的【视图模型清单】（GUI 子视图 / 无头测试消费），按页行序。"""
     return [result_to_model(r)
             for r in analyze_all(wb, page, mode=mode, max_tests=max_tests,
-                                 exhaustive=exhaustive)]
+                                 exhaustive=exhaustive, probe_prefixes=probe_prefixes)]
 
 
 # ═══════════════ 页本地 .sv / 报告 / for_test 产出（复用 generator.build/report，force 级联=不跨页 cone）═══
 def _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides=None,
-                   signals=None, comments=False):
+                   signals=None, comments=False, probe_prefixes=None):
     """构造页本地 GenOptions：force 级联(不跨页 cone) + include_risky + 编辑回流。"""
     eo = edit_overrides or {}
     return G.GenOptions(
         mode=mode, max_tests=max_tests, exhaustive=exhaustive, include_risky=True,
         comments=comments, gen_mux=(page == "mux"), signals=signals,
-        logic_cascade="force", mux_cascade="force",
+        logic_cascade="force", mux_cascade="force", probe_prefixes=probe_prefixes,
         vector_overrides=eo.get("vector_overrides") or None,
         mux_user_vecs=eo.get("mux_user_vecs"), mux_expected=eo.get("mux_expected"),
         mux_data=eo.get("mux_data"), mux_dropped=eo.get("mux_dropped"),
@@ -258,12 +260,13 @@ def _page_signals_filter(wb, page, only):
 
 
 def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
-                  edit_overrides=None, only=None, comments=False):
+                  edit_overrides=None, only=None, comments=False, probe_prefixes=None):
     """页本地 .sv：复用 generator.build（force 级联=不跨页 cone）。返回 (text, summary)。"""
     saved = _with_page_logic(wb, page)
     try:
         opts = _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides,
-                              signals=_page_signals_filter(wb, page, only), comments=comments)
+                              signals=_page_signals_filter(wb, page, only), comments=comments,
+                              probe_prefixes=probe_prefixes)
         built = G.build(wb, opts)
     finally:
         if saved is not None:
@@ -276,20 +279,23 @@ def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
     return text, {"summary": summary, "accounted": []}
 
 
-def page_report(wb, page, mode="min", max_tests=256, exhaustive=False):
+def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
     """页本地报告（write_report 兼容：summary/detail/tables/verifiability）。"""
     saved = _with_page_logic(wb, page)
     try:
         opts = _page_gen_opts(page, mode, max_tests, exhaustive,
-                              signals=_page_signals_filter(wb, page, None))
+                              signals=_page_signals_filter(wb, page, None),
+                              probe_prefixes=probe_prefixes)
         return G.report(wb, opts)
     finally:
         if saved is not None:
             wb.logic = saved
 
 
-def page_fortest(wb, page, src_path, out_path, mode="min", max_tests=256, exhaustive=False):
+def page_fortest(wb, page, src_path, out_path, mode="min", max_tests=256, exhaustive=False,
+                 probe_prefixes=None):
     """页本地 for_test 回填（含 mux 表）。"""
     from . import fortest_writer
-    rep = page_report(wb, page, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    rep = page_report(wb, page, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                      probe_prefixes=probe_prefixes)
     fortest_writer.write_fortest(src_path, out_path, rep, include_mux=True)

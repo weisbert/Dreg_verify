@@ -126,3 +126,13 @@ def test_page_view_models_never_raises_for_all_pages(wb):
     for page in P.PAGES:
         models = P.page_view_models(wb, page, mode="max", max_tests=64)
         assert isinstance(models, list)
+
+
+def test_page_sv_applies_probe_prefix_to_force_leaf(wb):
+    """⭐页视图(logic/mux/dft)接入探针前缀(2026-06-24)：force 衔接网/叶子埋子模块时按 probe_prefixes
+    加层级前缀，否则 force `ENV_RF.<裸名> CUVUNF。之前 pageviews 全程没传 probe_prefixes=缺这功能。"""
+    pp = {"d_bt_lp_linectrl_rx_en": "U_SUB"}
+    text, _ = P.build_page_sv(wb, "logic", mode="max", max_tests=8, probe_prefixes=pp)
+    assert "`ENV_RF.U_SUB.d_bt_lp_linectrl_rx_en" in text     # RO force 叶子加前缀
+    bare, _ = P.build_page_sv(wb, "logic", mode="max", max_tests=8)
+    assert "d_bt_lp_linectrl_rx_en" in bare and "U_SUB" not in bare   # 默认无前缀=裸名(逐字节旧行为)
