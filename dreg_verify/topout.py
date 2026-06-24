@@ -411,16 +411,27 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
     return res
 
 
+def _cov_for(sig_cov, name, mode, exhaustive):
+    """单点覆盖度(R25)：sig_cov[name_low]∈{min,max,exhaustive} 命中则压全局，返回 (mode, exhaustive)；
+    不命中=跟随全局。Topout 单点档按【Topout 名】键，会话内临时档（GUI 不存盘，见 R25 教训）。"""
+    c = (sig_cov or {}).get(str(name).lower())
+    if c in ("min", "max", "exhaustive"):
+        return G._decompose_cov(c)
+    return mode, exhaustive
+
+
 def analyze_all(wb, resolver, mode="min", max_tests=256, exhaustive=False,
-                want_vectors=True):
-    """对 wb.topout 全清单逐信号分析。返回 list[TopoutResult]（外层枚举源=Topout B 列）。"""
+                want_vectors=True, sig_cov=None):
+    """对 wb.topout 全清单逐信号分析。返回 list[TopoutResult]（外层枚举源=Topout B 列）。
+    sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，命中则该信号压全局档（N3）。"""
     logic_idx, mux_idx = build_index(wb)
     rename = _rename_map(wb)            # 合并改名表(dft+level_shift)，一次建好，逐信号复用
     out = []
     for topo in wb.topout:
+        m, ex = _cov_for(sig_cov, topo.name, mode, exhaustive)
         root = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
-        out.append(analyze_signal(wb, resolver, topo, root=root, mode=mode,
-                                  max_tests=max_tests, exhaustive=exhaustive,
+        out.append(analyze_signal(wb, resolver, topo, root=root, mode=m,
+                                  max_tests=max_tests, exhaustive=ex,
                                   want_vectors=want_vectors))
     return out
 
@@ -576,25 +587,35 @@ def topout_fortest_rows(wb, resolver, mode="min", max_tests=256, exhaustive=Fals
 
 
 def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
-                      probe_prefixes=None, only=None):
+                      probe_prefixes=None, only=None, sig_cov=None):
     """生成【限定到 Topout 清单】的报告(复用 generator.report，再按 Topout B 列名过滤 tables/detail)。
 
     新模型『要验什么』只在 Topout——旧 report 枚举全 logic/mux，这里只保留 Topout 命中的表，
     且 owner 用 Topout A 列覆盖（块B 不 join）。旧 generator.report 一字不动。
     probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径，让 GUI 富表/for_test 回填也带前缀）。
-    only：限定只保留这些 Topout 名（GUI 勾选项过滤；None=全部，与 .sv 导出 only 同口径，N6）。"""
+    only：限定只保留这些 Topout 名（GUI 勾选项过滤；None=全部，与 .sv 导出 only 同口径，N6）。
+    sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，映成源名键喂 generator.report（N3）。"""
     from . import generator as G
+    logic_idx, mux_idx = build_index(wb)
+    rename = _rename_map(wb)
+    # 单点覆盖度：Topout 名 → 源对象 out_name（generator.report 按源名键 sig_cov），改名根用 resolve_root 求源。
+    gen_sig_cov = {}
+    for t in wb.topout:
+        c = (sig_cov or {}).get(t.name.lower())
+        if c in ("min", "max", "exhaustive"):
+            rt = resolve_root(wb, t.name, logic_idx, mux_idx, rename=rename)
+            if rt.kind in (LOGIC, MUX) and getattr(rt, "obj", None) is not None:
+                gen_sig_cov[rt.obj.out_name.lower()] = c
     rep = G.report(wb, G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                    include_risky=True, probe_prefixes=probe_prefixes))
+                                    include_risky=True, probe_prefixes=probe_prefixes,
+                                    sig_cov=gen_sig_cov or None))
     only_low = {str(n).lower() for n in only} if only is not None else None
     want = {t.name.lower() for t in wb.topout
             if only_low is None or t.name.lower() in only_low}
     owner_of = {t.name.lower(): t.owner for t in wb.topout}
-    logic_idx, mux_idx = build_index(wb)
     # 改名反查：最终源名 → 顶层 Topout 名（report 的表按源名产出，这里桥回顶层名，否则改名信号的
     # 真值表会被当『不属 Topout』丢掉 → GUI/报告空表，违『绝不静默丢』）。链式改名(ls→dft→logic)用
     # resolve_root 求最终源名，覆盖多跳。
-    rename = _rename_map(wb)
     src_to_top = {}
     for t in wb.topout:
         rt = resolve_root(wb, t.name, logic_idx, mux_idx, rename=rename)
@@ -722,7 +743,7 @@ def _probe_prefix_for_name(probe_prefixes, name):
 
 def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                     edit_overrides=None, probe_prefixes=None, scope="all"):
+                     edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None):
     """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
 
     · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
@@ -748,7 +769,8 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     # 干净 cone 默认 + force 叶子(RO 输入/iddq 门)层级前缀(wire_prefixes)——顶层探针展到底后无前缀问题，
     # 但 cone 叶子的 RO readback / iddq 门若埋子模块仍需前缀，否则 force `ENV_RF.<裸名> CUVUNF。
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
-    results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                          sig_cov=sig_cov)
     only_low = {str(n).lower() for n in only} if only is not None else None
     if only_low is not None:
         results = [r for r in results if r.topo.name.lower() in only_low]
@@ -757,10 +779,14 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     # dft 改名根【不】走 generator.build（它会按源名 A_sm 探针、且占标号）——改名根走下面 _topout_probe_block
     # 自定义块（探针贴顶层名 A），故这里排除，避免 build 白产一个探 A_sm 的多余块。
     want_names = set()
+    gen_sig_cov = {}            # 单点覆盖度：Topout 名键 → 映成 generator.build 要的【源 out_name】键（N3）
     for r in results:
         if r.status == "ok" and r.root.kind in (LOGIC, MUX) and not r.root.renamed:
             want_names.add(r.root.obj.out_name.lower())
             want_names.add(r.root.obj.out_base.lower())
+            c = (sig_cov or {}).get(r.topo.name.lower())
+            if c in ("min", "max", "exhaustive"):
+                gen_sig_cov[r.root.obj.out_name.lower()] = c
     if scope == "neg":
         # 仅负向：只 build【有负向的源】(neg_src=源 out_name)，其余正向自动信号不出现（仅记账）。
         want_names &= (neg_src or set())
@@ -768,7 +794,7 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     opts = G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                         include_risky=True, comments=comments, sv_summary=sv_summary,
                         owner_in_msg=owner_in_msg, signals=want_names,
-                        probe_prefixes=probe_prefixes,
+                        probe_prefixes=probe_prefixes, sig_cov=gen_sig_cov or None,
                         vector_overrides=eo.get("vector_overrides") or None,
                         mux_user_vecs=eo.get("mux_user_vecs"),
                         mux_expected=eo.get("mux_expected"),
@@ -884,12 +910,12 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
 
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                     edit_overrides=None, probe_prefixes=None, scope="all"):
+                     edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None):
     """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。"""
     b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                          comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
                          only=only, edit_overrides=edit_overrides, probe_prefixes=probe_prefixes,
-                         scope=scope)
+                         scope=scope, sig_cov=sig_cov)
     text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
     return text, b
 
@@ -922,7 +948,8 @@ def _topout_disp_name(topo, out_width):
     return "%s%s" % (topo.name, _topout_slice_suffix(topo, out_width))
 
 
-def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
+def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
+                       sig_cov=None):
     """每个 Topout 信号一个【视图模型】（GUI / 无头测试消费），按 Topout B 列序。
 
     干净 cone 默认（Topout 视图不放级联/尾缀/top_output——那些属『排查(旧)』）。
@@ -930,13 +957,15 @@ def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_pr
       · 直连寄存器根 → 从 TopoutResult 建平凡表；
       · RO 回读 / 未解析 / error → 只记账（无真值表，note/issues 说明原因，绝不崩）。
     probe_prefixes：force 叶子(RO/iddq) + 探针层级前缀（与 .sv 同口径）。
+    sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，命中则清单『用例』数与编辑/导出同档（N3）。
     每个模型：{name, owner, width, kind, status, note, issues, matched_name, n_leaves,
               chain:[{out,expr,subst}], inputs:[…], tests:[…], auto_label, exp_label, n_vectors}。"""
     from . import resolver as R
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
-    results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                          sig_cov=sig_cov)
     rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                            probe_prefixes=probe_prefixes)
+                            probe_prefixes=probe_prefixes, sig_cov=sig_cov)
     tbl_by_topout = {}
     for t in rep.get("tables", []):
         nm = t.get("topout_name")
@@ -989,7 +1018,8 @@ def _account_error_text(row):
     return "; ".join(row["issues"]) or row["note"] or row["status"]
 
 
-def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None, only=None):
+def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
+                  only=None, sig_cov=None):
     """Topout 限定报告（write_report 兼容：summary/detail/tables/verifiability），堵 3 静默陷阱：
       ① 默认不空：summary 直接来自 compose_topout_account（12 行全分类，不套 top_output_only）；
       ② 不刷 top_out=0 假警告：error 列只放真原因（RO/未解析/冲突），无 bare-probe/needs-prefix 噪声；
@@ -1002,12 +1032,12 @@ def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixe
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
     only_low = {str(n).lower() for n in only} if only is not None else None
     rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                            probe_prefixes=probe_prefixes, only=only)
+                            probe_prefixes=probe_prefixes, only=only, sig_cov=sig_cov)
     acc = compose_topout_account(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
     if only_low is not None:                # 账目/汇总/可验证性同样限定到勾选信号
         acc = dict(acc); acc["rows"] = [r for r in acc["rows"] if r["name"].lower() in only_low]
     vms = topout_view_models(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                             probe_prefixes=probe_prefixes)
+                             probe_prefixes=probe_prefixes, sig_cov=sig_cov)
     if only_low is not None:
         vms = [m for m in vms if m["name"].lower() in only_low]
 

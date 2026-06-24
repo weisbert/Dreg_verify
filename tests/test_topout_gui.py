@@ -201,6 +201,30 @@ def test_topout_export_sv_options_comments_and_summary(topo_win, tmp_path, monke
     v._e_regen()
 
 
+def test_topout_per_signal_coverage_dropdown(topo_win):
+    """⭐N3：『本信号覆盖度』下拉压全局——全局精简下给 rx_en 设穷举 → 记会话临时档+用例数≥精简；
+    切到别的信号下拉回『跟随全局』；单点档不进序列化(会话内、不存盘/不导出)。"""
+    w = topo_win
+    v = w.topout_view
+    assert v.sig_cov_combo is not None              # Topout 视图有此下拉
+    v.cov.setCurrentText("精简")
+    v2 = _sel(w, "d_logic_bt_lp_rx_en")
+    n_min = len(v2.cur_cols)
+    v2.sig_cov_combo.setCurrentIndex(v2.sig_cov_combo.findData("exhaustive"))
+    assert v2._sig_cov.get("d_logic_bt_lp_rx_en") == "exhaustive"
+    assert len(v2.cur_cols) >= n_min
+    _sel(w, "d_logic_bt_lp_lna_agc")               # 切信号 → 下拉回显跟随全局
+    assert v2.sig_cov_combo.currentData() == ""
+    assert "d_logic_bt_lp_lna_agc" not in v2._sig_cov
+    assert "_sig_cov" not in str(v2._serialize_view_edits())   # 单点档不进持久化
+    v2.cov.setCurrentText("全面")
+
+
+def test_topout_subview_has_no_sig_cov(topo_win):
+    """⭐N3：子视图(logic/mux/dft/iddq)不放单点覆盖度下拉（重构方向：只 Topout 放）。"""
+    assert topo_win.page_views["logic"].sig_cov_combo is None
+
+
 def test_topout_export_single_signal_csv(topo_win, tmp_path, monkeypatch):
     """⭐N7：单信号真值表 CSV(转置：每列一条测试)，含 auto_out/期望/期望来源/负向 行。"""
     from PySide6 import QtWidgets

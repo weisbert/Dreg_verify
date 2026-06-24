@@ -564,6 +564,29 @@ def test_register_passthrough_assert_carries_width_slice():
     assert "`ENV_RF.d_sel==" not in txt2
 
 
+def test_topout_view_models_per_signal_coverage(wb):
+    """⭐N3：单点覆盖度——全局 min 时给【一个】信号设 exhaustive → 只它用例数变成穷举档，其余仍 min。"""
+    base = {m["name"]: m["n_vectors"] for m in T.topout_view_models(wb, mode="min")}
+    exh = {m["name"]: m["n_vectors"] for m in T.topout_view_models(wb, mode="max", exhaustive=True)}
+    target = next((n for n in base if exh.get(n, 0) > base[n]), None)   # 找 min<穷举 的信号
+    assert target is not None, "夹具里没有 min≠exhaustive 的信号，无法验单点档"
+    one = {m["name"]: m["n_vectors"]
+           for m in T.topout_view_models(wb, mode="min", sig_cov={target.lower(): "exhaustive"})}
+    assert one[target] == exh[target]                       # 该信号=穷举档
+    assert all(one[n] == base[n] for n in base if n != target)   # 其它信号仍跟随全局 min
+
+
+def test_topout_sv_per_signal_coverage_matches_view(wb):
+    """⭐N3：.sv 导出与清单同档——单点 exhaustive 的信号在 build_for_topout 也按穷举出向量。"""
+    base = {m["name"]: m["n_vectors"] for m in T.topout_view_models(wb, mode="min")}
+    exh = {m["name"]: m["n_vectors"] for m in T.topout_view_models(wb, mode="max", exhaustive=True)}
+    target = next((n for n in base if exh.get(n, 0) > base[n]), None)
+    assert target is not None
+    b = T.build_for_topout(wb, mode="min", sig_cov={target.lower(): "exhaustive"})
+    blk = next((st for _ln, st in b["blocks"] if st.get("topout_name") == target), None)
+    assert blk is not None and blk["n_vectors"] == exh[target]
+
+
 def test_build_for_topout_exposes_dup_labels(wb):
     """⭐N9：build_for_topout 透出 generator.build 算好的 dup_labels（旧 Topout 路径丢弃→静默导出非法 SV）。"""
     b = T.build_for_topout(wb, mode="min")

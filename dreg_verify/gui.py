@@ -473,6 +473,7 @@ class _TopoutProvider:
     has_chain = True
     view_id = "topout"
     kind_label = TOPO_KIND_LABEL
+    supports_sig_cov = True            # N3：Topout 视图支持单点覆盖度（子视图暂不放）
 
     def __init__(self, main):
         self.main = main
@@ -496,10 +497,11 @@ class _TopoutProvider:
     def has_page(self):
         return bool(getattr(self.wb, "topout", None))
 
-    def view_models(self, mode, max_tests, exhaustive):
+    def view_models(self, mode, max_tests, exhaustive, sig_cov=None):
         from . import topout as T
         return T.topout_view_models(self.wb, mode=mode, max_tests=max_tests,
-                                    exhaustive=exhaustive, probe_prefixes=self._pp())
+                                    exhaustive=exhaustive, probe_prefixes=self._pp(),
+                                    sig_cov=sig_cov)
 
     def analyze(self, name, mode, max_tests, exhaustive):
         from . import topout as T
@@ -511,18 +513,18 @@ class _TopoutProvider:
         return _norm_topout_result(res)
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
-                  sv_summary=False, owner_in_msg=False, scope="all"):
+                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None):
         from . import topout as T
         eo = _topout_edit_overrides(edited)
         return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                   comments=comments, sv_summary=sv_summary,
                                   owner_in_msg=owner_in_msg, only=only, edit_overrides=eo,
-                                  probe_prefixes=self._pp(), scope=scope)
+                                  probe_prefixes=self._pp(), scope=scope, sig_cov=sig_cov)
 
-    def render_report(self, mode, max_tests, exhaustive, only=None):
+    def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None):
         from . import topout as T
         return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                               probe_prefixes=self._pp(), only=only)
+                               probe_prefixes=self._pp(), only=only, sig_cov=sig_cov)
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         from . import topout as T
@@ -618,7 +620,9 @@ class _PageProvider:
         """探针前缀映射（与 Topout/排查(旧)/全局编辑器共用同一份 self._probe_prefixes）。"""
         return getattr(self.main, "_probe_prefixes", None) or None
 
-    def view_models(self, mode, max_tests, exhaustive):
+    supports_sig_cov = False           # 子视图(logic/mux/dft/iddq)暂不放单点覆盖度（N3 仅 Topout）
+
+    def view_models(self, mode, max_tests, exhaustive, sig_cov=None):
         from . import pageviews as P
         return P.page_view_models(self.wb, self.page, mode=mode, max_tests=max_tests,
                                   exhaustive=exhaustive, probe_prefixes=self._pp())
@@ -633,14 +637,14 @@ class _PageProvider:
         return _norm_page_result(res)
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
-                  sv_summary=False, owner_in_msg=False, scope="all"):
+                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None):
         from . import pageviews as P
         return P.build_page_sv(self.wb, self.page, mode=mode, max_tests=max_tests,
                                exhaustive=exhaustive, edit_overrides=_page_edit_overrides(edited),
                                only=only, comments=comments, sv_summary=sv_summary,
                                owner_in_msg=owner_in_msg, probe_prefixes=self._pp(), scope=scope)
 
-    def render_report(self, mode, max_tests, exhaustive, only=None):
+    def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None):
         from . import pageviews as P
         return P.page_report(self.wb, self.page, mode=mode, max_tests=max_tests,
                              exhaustive=exhaustive, probe_prefixes=self._pp(), only=only)
@@ -674,6 +678,9 @@ class SignalView(QtWidgets.QWidget):
         self.e_inputs = []             # 当前真值表输入行 [{key,label,width,editable}]
         # 逐信号编辑：name_low -> {'kind','src_out_name','name','cols'} ；不在=自动(未编辑)
         self.edits = {}
+        # 单点覆盖度(N3，R25)：name_low -> 'min'/'max'/'exhaustive'；不在=跟随全局。
+        # ⚠ 仅【会话内】临时档：不存盘、不导出（否则上次留的单点档静默盖全局下拉，R25 实测 bug）。
+        self._sig_cov = {}
         self._build()
 
     # ───────────── 覆盖度（每视图一个，从右上角迁出到工具条；含 ? 解释 logic/mux 算法）─────────────
@@ -690,6 +697,17 @@ class SignalView(QtWidgets.QWidget):
             return int(self.main.max_tests.value())
         except Exception:  # noqa: BLE001
             return 256
+
+    def _mode_for(self, name):
+        """本信号有效覆盖度(N3)：单点档(self._sig_cov)命中则压全局，否则跟随全局。返回 (mode, exhaustive)。"""
+        c = self._sig_cov.get(str(name).lower())
+        if c == "min":
+            return "min", False
+        if c == "max":
+            return "max", False
+        if c == "exhaustive":
+            return "max", True
+        return self._mode()
 
     # ───────────── UI ─────────────
     def _build(self):
@@ -813,6 +831,17 @@ class SignalView(QtWidgets.QWidget):
                          "区别于工具条『导出报告』(全量多信号扁平明细)。")
         b_csv.clicked.connect(self.on_export_csv)
         eb.addWidget(b_csv)
+        # N3：本信号单点覆盖度（压过全局；会话内临时档，不存盘）——仅 Topout 视图放（子视图不放）
+        self.sig_cov_combo = None
+        if getattr(self.provider, "supports_sig_cov", False):
+            eb.addWidget(QtWidgets.QLabel("本信号覆盖度:"))
+            self.sig_cov_combo = QtWidgets.QComboBox()
+            for label, data in [("跟随全局", ""), ("精简", "min"), ("全面", "max"), ("穷举", "exhaustive")]:
+                self.sig_cov_combo.addItem(label, data)
+            self.sig_cov_combo.setToolTip("给【当前这一个信号】单设覆盖档，压过工具栏的全局覆盖度下拉。\n"
+                                          "『跟随全局』=不单设。会话内临时档：关 GUI 即忘、不存盘/不导出(R25 教训)。")
+            self.sig_cov_combo.currentIndexChanged.connect(self._on_sig_cov_changed)
+            eb.addWidget(self.sig_cov_combo)
         ttv.addWidget(eb_box)
         self.truth = QtWidgets.QTableWidget(0, 0)
         self.main._mono(self.truth)
@@ -898,7 +927,7 @@ class SignalView(QtWidgets.QWidget):
         mode, exh = self._mode()
         self.built_key = (mode, exh, self._maxt())
         try:
-            self.models = self.provider.view_models(mode, self._maxt(), exh)
+            self.models = self.provider.view_models(mode, self._maxt(), exh, sig_cov=self._sig_cov)
         except Exception as ex:   # noqa: BLE001 —— 护栏3：绝不崩
             self.detail.setText("分析失败（已捕获，未崩）：%s" % ex)
             self._clear_detail()
@@ -1051,13 +1080,14 @@ class SignalView(QtWidgets.QWidget):
         self._load_signal(self.models[cur_row]["name"])
 
     def _load_signal(self, name):
-        mode, exh = self._mode()
+        mode, exh = self._mode_for(name)          # N3：本信号单点覆盖度压全局（不命中=跟随全局）
         an = self.provider.analyze(name, mode, self._maxt(), exh)
         if an is None:
             self._clear_detail()
             return
         self.cur_name = name.lower()
         self.cur_an = an
+        self._sync_sig_cov_combo()
         # 输入行
         self.e_inputs = []
         if an["editable"] == "logic":
@@ -1082,6 +1112,33 @@ class SignalView(QtWidgets.QWidget):
         self._render_chain(an)
         self._populate_truth()
         self._set_edit_buttons(an)
+        self._update_cov_hint()
+
+    def _sync_sig_cov_combo(self):
+        """切信号时把『本信号覆盖度』下拉回显到该信号的单点档（无则=跟随全局），不触发重算。"""
+        if self.sig_cov_combo is None:
+            return
+        data = self._sig_cov.get(self.cur_name, "")
+        idx = self.sig_cov_combo.findData(data)
+        self.sig_cov_combo.blockSignals(True)
+        self.sig_cov_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.sig_cov_combo.blockSignals(False)
+
+    def _on_sig_cov_changed(self, *_):
+        """改『本信号覆盖度』→ 更新会话临时档，按新档重析当前信号 + 刷新它在清单的用例数（N3）。
+        已自定义编辑的信号：单点档对编辑器无效(编辑冻结)，但仍影响该信号导出/清单——故仍记档。"""
+        if self.cur_name is None or self.sig_cov_combo is None:
+            return
+        val = self.sig_cov_combo.currentData() or ""
+        if val:
+            self._sig_cov[self.cur_name] = val
+        else:
+            self._sig_cov.pop(self.cur_name, None)
+        real = next((m["name"] for m in self.models if m["name"].lower() == self.cur_name),
+                    self.cur_name)
+        if self.cur_name not in self.edits:      # 未编辑→按新档重生成真值表；已编辑→保留编辑(冻结)
+            self._load_signal(real)
+        self._refresh_row_counts()
         self._update_cov_hint()
 
     def _cols_from_vectors(self, an):
@@ -1438,7 +1495,7 @@ class SignalView(QtWidgets.QWidget):
                                      item.checkState() == QtCore.Qt.Checked)
 
     def _toggle_signal_negative(self, name, want):
-        mode, exh = self._mode()
+        mode, exh = self._mode_for(name)          # N3：单点覆盖度也对负向重算生效
         an = self.provider.analyze(name, mode, self._maxt(), exh)
         if an is None or not an["editable"]:
             return
@@ -1767,7 +1824,8 @@ class SignalView(QtWidgets.QWidget):
             return
         mode, exh = self._mode()
         only = self._checked_names() or None
-        text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited())
+        text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
+                                          sig_cov=self._sig_cov)
         self.sv.setPlainText(text)
         self.inner.setCurrentIndex(1)
         s = b.get("summary", {})
@@ -1790,7 +1848,8 @@ class SignalView(QtWidgets.QWidget):
         only = self._checked_names() or None
         text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
                                           comments=eo["comments"], sv_summary=eo["sv_summary"],
-                                          owner_in_msg=eo["owner_in_msg"], scope=eo.get("scope", "all"))
+                                          owner_in_msg=eo["owner_in_msg"], scope=eo.get("scope", "all"),
+                                          sig_cov=self._sig_cov)
         if not self.main._confirm_dup_labels(b):     # 重复 assert 标号(非法 SV) → 弹确认，别静默导出(N9)
             return
         with open(path, "w", encoding="utf-8") as f:
@@ -1810,7 +1869,7 @@ class SignalView(QtWidgets.QWidget):
         from . import cli
         mode, exh = self._mode()
         only = self._checked_names() or None          # 勾选项过滤（与 .sv 导出 only 同口径，N6）
-        rep = self.provider.render_report(mode, self._maxt(), exh, only=only)
+        rep = self.provider.render_report(mode, self._maxt(), exh, only=only, sig_cov=self._sig_cov)
         written = cli.write_report(path, rep, self.main._loaded_excel_path or "")
         QtWidgets.QMessageBox.information(self, "已导出", "报告已导出：\n%s" % "\n".join(written))
 
