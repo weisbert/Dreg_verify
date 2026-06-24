@@ -254,6 +254,26 @@ def test_topout_logic_overrides_supplements_cone(topo_win):
     w._logic_overrides = {}
 
 
+def test_topout_mux_data_manual_value(topo_win):
+    """⭐N8：mux 数据行可手填——给一个数据源设值 → 记进会话 _mux_data、_compute_edited 携带、
+    .sv 经 make_mux_vectors data_overrides 反映；换表清空不泄漏。"""
+    w = topo_win
+    v = _sel(w, "d_bt_lp_lna_itrim")
+    assert v.cur_an["editable"] == "mux"
+    drow = next((i for i, e in enumerate(v.e_inputs) if e.get("mux_data_base")), None)
+    assert drow is not None                                   # mux 有可手填数据行(N8)
+    base = v.e_inputs[drow]["mux_data_base"]
+    sv0, _ = v.provider.render_sv(["d_bt_lp_lna_itrim"], "min", 256, False, v._compute_edited())
+    v._set_mux_data(base, v.e_inputs[drow]["width"], "5")     # 手填数据值
+    assert w.topout_view._mux_data["d_bt_lp_lna_itrim"]["data"][base] == 5
+    rec = v._compute_edited().get("d_bt_lp_lna_itrim")
+    assert rec and rec["mux"]["data"][base] == 5             # 回流携带 mux_data
+    sv1, _ = v.provider.render_sv(["d_bt_lp_lna_itrim"], "min", 256, False, v._compute_edited())
+    assert sv1 != sv0                                         # data_overrides 改了产物
+    w.on_load()
+    assert w.topout_view._mux_data == {}                     # 换表清空，不跨表泄漏
+
+
 def test_topout_export_single_signal_csv(topo_win, tmp_path, monkeypatch):
     """⭐N7：单信号真值表 CSV(转置：每列一条测试)，含 auto_out/期望/期望来源/负向 行。"""
     from PySide6 import QtWidgets

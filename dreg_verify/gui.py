@@ -523,14 +523,15 @@ class _TopoutProvider:
                                         exhaustive=exhaustive, probe_prefixes=self._pp(),
                                         sig_cov=sig_cov)
 
-    def analyze(self, name, mode, max_tests, exhaustive):
+    def analyze(self, name, mode, max_tests, exhaustive, mux_data=None):
         from . import topout as T
         with self._supplemented():
             topo = next((t for t in (self.wb.topout or []) if t.name == name), None)
             if topo is None:
                 return None
             res = T.analyze_signal(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()), topo,
-                                   mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+                                   mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                   mux_data=mux_data)
             return _norm_topout_result(res)
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
@@ -563,7 +564,7 @@ def _topout_edit_overrides(edited):
     """SignalView 收集的逐信号编辑 → topout.build_for_topout 的 edit_overrides。
     edited[name_low] = {'kind','src_out_name','cleared','vectors'(logic/reg),'mux':{...}}。"""
     vov, reg_ov = {}, {}
-    mux_user, mux_exp, mux_drop, mux_cleared = {}, {}, {}, []
+    mux_user, mux_exp, mux_drop, mux_cleared, mux_data = {}, {}, {}, [], {}
     for ed in (edited or {}).values():
         kind = ed["kind"]
         # dft 改名信号：build_for_topout 走 _topout_probe_block(reg 路)、按顶层名键 reg_overrides——
@@ -585,9 +586,12 @@ def _topout_edit_overrides(edited):
                 mux_exp[src] = dict(mx["expected"])
             if mx.get("user_vecs"):
                 mux_user[src] = list(mx["user_vecs"])
+            if mx.get("data"):                    # B2/N8：mux 数据值手填 {物理基名: int}
+                mux_data[src] = dict(mx["data"])
     return {"vector_overrides": vov or None, "reg_overrides": reg_ov or None,
             "mux_user_vecs": mux_user or None, "mux_expected": mux_exp or None,
-            "mux_dropped": mux_drop or None, "mux_cleared": mux_cleared or None}
+            "mux_dropped": mux_drop or None, "mux_cleared": mux_cleared or None,
+            "mux_data": mux_data or None}
 
 
 def _page_edit_overrides(edited):
@@ -651,7 +655,7 @@ class _PageProvider:
         return P.page_view_models(self.wb, self.page, mode=mode, max_tests=max_tests,
                                   exhaustive=exhaustive, probe_prefixes=self._pp())
 
-    def analyze(self, name, mode, max_tests, exhaustive):
+    def analyze(self, name, mode, max_tests, exhaustive, mux_data=None):
         from . import pageviews as P
         sig = next((s for s in P.page_signals(self.wb, self.page) if s.out_name == name), None)
         if sig is None:
@@ -705,6 +709,9 @@ class SignalView(QtWidgets.QWidget):
         # 单点覆盖度(N3，R25)：name_low -> 'min'/'max'/'exhaustive'；不在=跟随全局。
         # ⚠ 仅【会话内】临时档：不存盘、不导出（否则上次留的单点档静默盖全局下拉，R25 实测 bug）。
         self._sig_cov = {}
+        # mux 数据值手填(N8/B2)：cur_name_low -> {"src":mux源名低,"name":顶层名,"data":{物理基名低:int}}。
+        # 会话内（改后即在编辑器/预览/导出生效）；data_overrides 经 make_mux_vectors 整表同步。
+        self._mux_data = {}
         self._build()
 
     # ───────────── 覆盖度（每视图一个，从右上角迁出到工具条；含 ? 解释 logic/mux 算法）─────────────
@@ -1117,9 +1124,15 @@ class SignalView(QtWidgets.QWidget):
             return
         self._load_signal(self.models[cur_row]["name"])
 
+    def _mux_data_for(self, name):
+        """本 mux 信号的数据值手填 {物理基名: int}（N8），喂 provider.analyze 的 data_overrides。"""
+        ent = self._mux_data.get(str(name).lower())
+        return dict(ent["data"]) if ent and ent.get("data") else None
+
     def _load_signal(self, name):
         mode, exh = self._mode_for(name)          # N3：本信号单点覆盖度压全局（不命中=跟随全局）
-        an = self.provider.analyze(name, mode, self._maxt(), exh)
+        an = self.provider.analyze(name, mode, self._maxt(), exh,
+                                   mux_data=self._mux_data_for(name))   # N8：mux 数据值手填进编辑器
         if an is None:
             self._clear_detail()
             return
@@ -1138,9 +1151,11 @@ class SignalView(QtWidgets.QWidget):
             for k in exp["used_vars"]:
                 b = exp["bindings"][k]
                 lbl = b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
+                role = mux_gen.key_role(k)
+                # N8：数据角色行可手填（控制位决定路由、不可凭空设）→ 记物理基名供 _on_truth_item 写回
                 self.e_inputs.append({"key": k, "label": lbl, "width": b.width,
-                                      "editable": False,
-                                      "control": mux_gen.key_role(k) == "ctrl"})
+                                      "editable": False, "control": role == "ctrl",
+                                      "mux_data_base": (b.base.lower() if role == "data" else None)})
         # 列模型
         if self.cur_name in self.edits:
             self.cur_cols = self.edits[self.cur_name]["cols"]
@@ -1270,15 +1285,20 @@ class SignalView(QtWidgets.QWidget):
         tbl.setVerticalHeaderLabels(vlabels)
         tbl.setHorizontalHeaderLabels([c["name"] for c in cols])
         editable_inputs = (self.cur_an["editable"] == "logic")
+        is_mux = (self.cur_an["editable"] == "mux")
         for j, c in enumerate(cols):
             for i, e in enumerate(self.e_inputs):
                 it = QtWidgets.QTableWidgetItem(generator._fmt_cell(c["vals"].get(e["key"], 0), e["width"]))
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if e.get("control"):
                     f = it.font(); f.setBold(True); it.setFont(f)
-                if not (editable_inputs and e["editable"]):
+                # logic 输入行可编辑；mux 数据角色行可手填(N8，控制位/选择位仍只读)
+                row_editable = (editable_inputs and e["editable"]) or (is_mux and e.get("mux_data_base"))
+                if not row_editable:
                     it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
                     it.setForeground(QtGui.QColor("#555555"))
+                elif is_mux and e.get("mux_data_base"):
+                    it.setForeground(QtGui.QColor("#1558d6"))   # 蓝=mux 数据行可手填
                 tbl.setItem(i, j, it)
             a = QtWidgets.QTableWidgetItem(generator._fmt_cell(c["auto"], c["auto_w"]))
             a.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -1320,17 +1340,19 @@ class SignalView(QtWidgets.QWidget):
             return
         col = self.cur_cols[j]
         ni = len(self.e_inputs)
-        if r < ni:                                   # 输入值编辑（仅 logic）
-            if self.cur_an["editable"] != "logic":
-                return
+        if r < ni:                                   # 输入值编辑：logic 输入 / mux 数据行(N8)
             e = self.e_inputs[r]
-            val = _parse_cell_int(item.text())
-            if val is None:
-                val = 0
-            col["vals"][e["key"]] = val & E.mask(e["width"])
-            self._recompute_col(col)
-            self._commit()
-            self._populate_truth()
+            if self.cur_an["editable"] == "logic" and e["editable"]:
+                val = _parse_cell_int(item.text())
+                if val is None:
+                    val = 0
+                col["vals"][e["key"]] = val & E.mask(e["width"])
+                self._recompute_col(col)
+                self._commit()
+                self._populate_truth()
+            elif self.cur_an["editable"] == "mux" and e.get("mux_data_base"):
+                self._set_mux_data(e["mux_data_base"], e["width"], item.text())
+            return
         elif r == ni + 1:                            # 期望编辑
             txt = item.text().strip()
             if txt == "":
@@ -1341,6 +1363,29 @@ class SignalView(QtWidgets.QWidget):
                 col["exp"] = None if val is None else (val & E.mask(col["auto_w"]))
             self._commit()
             self._populate_truth()
+
+    def _set_mux_data(self, base_low, width, text):
+        """mux 数据行手填(N8/B2)：按物理基名存进会话 _mux_data（清空=恢复自动），改后重析当前信号
+        （data_overrides 经 make_mux_vectors 整表同步 auto_out/选路）+重渲。会话内有效（不存盘）。"""
+        if self.cur_name is None or self.cur_an is None:
+            return
+        ent = self._mux_data.setdefault(self.cur_name, {
+            "src": self.cur_an["src_out_name"].lower(), "name": self.cur_an["name"], "data": {}})
+        txt = (text or "").strip()
+        if txt == "":
+            ent["data"].pop(base_low, None)
+        else:
+            val = _parse_cell_int(txt)
+            if val is None:
+                self.main.status.showMessage("mux 数据值解析失败（已忽略）")
+                self._populate_truth()
+                return
+            ent["data"][base_low] = val & E.mask(width)
+        if not ent["data"]:
+            self._mux_data.pop(self.cur_name, None)
+        real = next((m["name"] for m in self.models if m["name"].lower() == self.cur_name), None)
+        if real is not None:
+            self._load_signal(real)        # 带 data_overrides 重析 → 真值表整表同步
 
     def _recompute_col(self, col):
         self._recompute_col_an(self.cur_an, col)
@@ -1534,7 +1579,8 @@ class SignalView(QtWidgets.QWidget):
 
     def _toggle_signal_negative(self, name, want):
         mode, exh = self._mode_for(name)          # N3：单点覆盖度也对负向重算生效
-        an = self.provider.analyze(name, mode, self._maxt(), exh)
+        an = self.provider.analyze(name, mode, self._maxt(), exh,
+                                   mux_data=self._mux_data_for(name))
         if an is None or not an["editable"]:
             return
         name_low = name.lower()
@@ -1606,6 +1652,18 @@ class SignalView(QtWidgets.QWidget):
             elif ed["kind"] == "mux":
                 rec["mux"] = self._mux_derive(an, cols)
             out[name_low] = rec
+        # N8：mux 数据值手填——注入对应 mux 信号的 rec；没在 edits 里(纯手填数据)的补一个 data-only rec
+        for name_low, ent in self._mux_data.items():
+            data = ent.get("data") or {}
+            if not data:
+                continue
+            if name_low in out and out[name_low].get("mux") is not None:
+                out[name_low]["mux"]["data"] = dict(data)
+            elif ent.get("src"):
+                out[name_low] = {"kind": "mux", "src_out_name": ent["src"], "name": ent["name"],
+                                 "renamed": False,
+                                 "mux": {"cleared": False, "dropped": [], "expected": {},
+                                         "user_vecs": [], "data": dict(data)}}
         return out
 
     def _cols_to_vectors(self, an, cols):
@@ -4869,8 +4927,12 @@ class MainWindow(QtWidgets.QMainWindow):
         vc = (bucket or {}).get("view_checks") or {}
         if getattr(self, "topout_view", None) is not None:
             self.topout_view.edits.clear()
+            self.topout_view._mux_data.clear()       # 会话档(N8/N3)随换表清，不跨表泄漏
+            self.topout_view._sig_cov.clear()
         for v in getattr(self, "page_views", {}).values():
             v.edits.clear()
+            v._mux_data.clear()
+            v._sig_cov.clear()
         self._refresh_topout()
         if getattr(self, "topout_view", None) is not None:
             vid = self.topout_view.view_id

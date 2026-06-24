@@ -295,8 +295,9 @@ class TopoutResult:
 
 
 def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
-                   exhaustive=False, want_vectors=True):
-    """分析一个 Topout 信号：解析根 → 建 cone/真值表。返回 TopoutResult（永不抛，问题进 .issues/.status）。"""
+                   exhaustive=False, want_vectors=True, mux_data=None):
+    """分析一个 Topout 信号：解析根 → 建 cone/真值表。返回 TopoutResult（永不抛，问题进 .issues/.status）。
+    mux_data：mux 根的【数据值手填】{物理基名(小写): int}（B2/N8），喂 make_mux_vectors data_overrides。"""
     if root is None:
         root = resolve_root(wb, topo.name)
     res = TopoutResult(topo, root)
@@ -396,7 +397,7 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                 # 用 coverage_mode 归一档位，让『穷举』mux 也真扫另一条控制路径（旧 mode=max 退化成全面）。
                 res.vectors, res.meta = mux_gen.make_mux_vectors(
                     grp, expansion, mode=mux_gen.coverage_mode(mode, exhaustive),
-                    max_tests=max_tests)
+                    max_tests=max_tests, data_overrides=(mux_data or None))
                 res.bindings = expansion.get("bindings", {})
         except cone.ConeError as ex:
             res.status = "error"
