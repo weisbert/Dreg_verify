@@ -862,6 +862,16 @@ def _fill_register_model(m, result):
     m["n_vectors"] = len(tests)
 
 
+def _topout_disp_name(topo, out_width):
+    """信号清单【显示名】：带位宽切片(aac_ctf_bit_sel[2:0])。name(key)仍是剥位宽的基名，仅显示用。
+    B 列写了显式切片 → 用它(忠于真表，含 [14:12] 这种非零起始)；裸名但有效位宽>1(寄存器字段宽推断
+    出的多 bit，如 d_vco_en_faston) → 补 [w-1:0] 让用户看见是多位；1 bit 裸名不加。"""
+    if topo.msb is not None and topo.lsb is not None:
+        return "%s[%d:%d]" % (topo.name, topo.msb, topo.lsb)
+    w = int(out_width or topo.width or 1)
+    return "%s[%d:0]" % (topo.name, w - 1) if w > 1 else topo.name
+
+
 def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
     """每个 Topout 信号一个【视图模型】（GUI / 无头测试消费），按 Topout B 列序。
 
@@ -885,7 +895,8 @@ def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_pr
 
     models = []
     for r in results:
-        m = {"name": r.topo.name, "owner": r.topo.owner, "width": r.out_width,
+        m = {"name": r.topo.name, "disp": _topout_disp_name(r.topo, r.out_width),
+             "owner": r.topo.owner, "width": r.out_width,
              "kind": r.root.kind, "status": r.status, "note": r.note,
              "issues": list(r.issues), "matched_name": r.root.matched_name,
              "n_leaves": r.n_leaves, "n_vectors": len(r.vectors),

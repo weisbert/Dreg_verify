@@ -58,7 +58,8 @@ def topo_win(gui_app, mirror_path):
 def _topo_row(w, name):
     from dreg_verify import gui as G
     for r in range(w.topo_table.rowCount()):
-        if w.topo_table.item(r, G.TOPO_NAME).text() == name:
+        # 显示名带位宽切片(d_x[2:0])，按【基名】(剥切片)匹配，与内部 key 一致
+        if w.topo_table.item(r, G.TOPO_NAME).text().split("[", 1)[0] == name:
             return r
     raise AssertionError("Topout 行未找到: %s" % name)
 
@@ -78,8 +79,13 @@ def test_topout_lists_twelve_signals_with_classification(topo_win):
     from dreg_verify import gui as G
     w = topo_win
     assert w.topo_table.rowCount() == 12
-    kind_of = {w.topo_table.item(r, G.TOPO_NAME).text():
-               w.topo_table.item(r, G.TOPO_KIND).text() for r in range(12)}
+    cell_names = [w.topo_table.item(r, G.TOPO_NAME).text() for r in range(12)]
+    # 显示名带位宽切片(2026-06-24)：多 bit 信号清单里要看得见 [w-1:0]
+    assert "d_bt_lp_lna_itrim[3:0]" in cell_names
+    assert "d_logic_bt_lp_lna_agc[2:0]" in cell_names
+    assert "clk_force_on" in cell_names                  # 1 bit → 不加切片
+    kind_of = {n.split("[", 1)[0]: w.topo_table.item(r, G.TOPO_KIND).text()
+               for r, n in enumerate(cell_names)}
     assert kind_of["d_logic_bt_lp_rx_en"] == G.TOPO_KIND_LABEL["logic"]
     assert kind_of["d_bt_lp_lna_itrim"] == G.TOPO_KIND_LABEL["mux"]
     assert kind_of["clk_force_on"] == G.TOPO_KIND_LABEL["register"]

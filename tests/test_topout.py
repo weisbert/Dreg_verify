@@ -596,3 +596,16 @@ def test_dup_source_reason_is_human_readable():
     dup = [a for a in b["accounted"] if a["status"] == "dup-source"]
     assert dup and dup[0]["reason"] != "dup-source"          # 人读说明，非状态回声
     assert "同源" in dup[0]["reason"]
+
+
+def test_view_model_disp_name_carries_width_slice(wb):
+    """⭐信号清单显示名带位宽切片(aac_ctf_bit_sel[2:0] 那类，2026-06-24)：多 bit 信号 disp 带 [w-1:0]，
+    1 bit 不带；name(查找 key)仍是剥位宽的基名(不变，否则选中/编辑/解析全断)。"""
+    ms = {m["name"]: m for m in T.topout_view_models(wb, mode="min", max_tests=8)}
+    agc = ms["d_logic_bt_lp_lna_agc"]
+    assert agc["width"] == 3 and agc["disp"] == "d_logic_bt_lp_lna_agc[2:0]"
+    assert agc["name"] == "d_logic_bt_lp_lna_agc"            # key 不带切片(不变)
+    itrim = ms["d_bt_lp_lna_itrim"]                          # mux 根、B 列写了 [3:0]
+    assert itrim["disp"] == "d_bt_lp_lna_itrim[3:0]"
+    one = ms["clk_force_on"]                                 # 1 bit → 不加切片
+    assert one["width"] == 1 and one["disp"] == "clk_force_on"

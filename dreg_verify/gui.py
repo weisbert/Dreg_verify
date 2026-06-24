@@ -898,7 +898,7 @@ class SignalView(QtWidgets.QWidget):
                          | QtCore.Qt.ItemIsSelectable)
             chk.setCheckState(QtCore.Qt.Checked)
             self.sig_table.setItem(r, TOPO_SEL, chk)
-            self._set(r, TOPO_NAME, m["name"])
+            self._set(r, TOPO_NAME, m.get("disp") or m["name"])   # 显示带位宽切片(name 仍是查找 key)
             self._set(r, TOPO_OWNER, m["owner"] or "")
             self._set(r, TOPO_KIND, SV_KIND_LABEL.get(m["kind"], m["kind"]))
             stt = self._set(r, TOPO_STATUS, TOPO_STATUS_LABEL.get(m["status"], m["status"]))

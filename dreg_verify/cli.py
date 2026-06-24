@@ -259,8 +259,8 @@ def cmd_topout(args, wb, opts):
         for m in ms:
             note = (m["note"] or "; ".join(m["issues"]) or "").replace("\n", " ")[:38]
             print("%-40s %-12s %-12s %-9s %-5d %s"
-                  % (m["name"][:40], (m["owner"] or "")[:12], m["kind"], m["status"],
-                     m["n_vectors"], note))
+                  % ((m.get("disp") or m["name"])[:40], (m["owner"] or "")[:12], m["kind"],
+                     m["status"], m["n_vectors"], note))
         return 0
 
     if args.account:
