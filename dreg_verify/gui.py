@@ -510,11 +510,13 @@ class _TopoutProvider:
                                mode=mode, max_tests=max_tests, exhaustive=exhaustive)
         return _norm_topout_result(res)
 
-    def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True):
+    def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
+                  sv_summary=False, owner_in_msg=False):
         from . import topout as T
         eo = _topout_edit_overrides(edited)
         return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                  comments=comments, only=only, edit_overrides=eo,
+                                  comments=comments, sv_summary=sv_summary,
+                                  owner_in_msg=owner_in_msg, only=only, edit_overrides=eo,
                                   probe_prefixes=self._pp())
 
     def render_report(self, mode, max_tests, exhaustive):
@@ -630,11 +632,13 @@ class _PageProvider:
                                     mode=mode, max_tests=max_tests, exhaustive=exhaustive)
         return _norm_page_result(res)
 
-    def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True):
+    def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
+                  sv_summary=False, owner_in_msg=False):
         from . import pageviews as P
         return P.build_page_sv(self.wb, self.page, mode=mode, max_tests=max_tests,
                                exhaustive=exhaustive, edit_overrides=_page_edit_overrides(edited),
-                               only=only, comments=comments, probe_prefixes=self._pp())
+                               only=only, comments=comments, sv_summary=sv_summary,
+                               owner_in_msg=owner_in_msg, probe_prefixes=self._pp())
 
     def render_report(self, mode, max_tests, exhaustive):
         from . import pageviews as P
@@ -1683,6 +1687,44 @@ class SignalView(QtWidgets.QWidget):
         self.main.on_set_probe_prefix()
         self.refresh()
 
+    def _ask_export_options(self):
+        """导出 .sv 选项对话框：注释 / 末尾测试汇总(计数器) / owner 入断言消息。记忆上次选择。
+        返回 {"comments","sv_summary","owner_in_msg"} 或 None(取消)。与『排查(旧)』共用 settings 记忆键。"""
+        st = _load_settings()
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("导出 .sv 选项")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.addWidget(QtWidgets.QLabel("选择导出内容（记住本次选择，下次预选）："))
+        cm = QtWidgets.QCheckBox("加注释（每信号一行 // 名 + 文件头；默认关=纯语句体便于 diff）")
+        cm.setChecked(bool(st.get("export_comments", False)))
+        sm = QtWidgets.QCheckBox("末尾测试汇总 + 计数器（命名块统计真 FAIL / NEG-broken 数）")
+        sm.setChecked(bool(st.get("export_sv_summary", False)))
+        ow = QtWidgets.QCheckBox("断言消息尾部追加 owner")
+        ow.setChecked(bool(st.get("export_owner_in_msg", False)))
+        for c in (cm, sm, ow):
+            lay.addWidget(c)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return None
+        opt = {"comments": cm.isChecked(), "sv_summary": sm.isChecked(),
+               "owner_in_msg": ow.isChecked()}
+        st.update({"export_comments": opt["comments"], "export_sv_summary": opt["sv_summary"],
+                   "export_owner_in_msg": opt["owner_in_msg"]})
+        _save_settings(st)
+        return opt
+
+    def _export_summary_text(self, path, b):
+        """导出/预览后的人读摘要：信号/断言块/测试用例(含负向、designer 手填期望拆分)/记账。"""
+        s = b.get("summary", {})
+        acc = b.get("accounted", [])
+        return ("%s\n\n信号 %d；断言块 %d；测试用例 %d（其中负向 %d、designer 手填期望 %d）；"
+                "记账(不产断言) %d%s"
+                % (path, s.get("n_total", 0), s.get("n_emitted", 0), s.get("n_vectors", 0),
+                   s.get("n_negative", 0), s.get("n_designer", 0), s.get("n_accounted", 0),
+                   ("\n（记账：%s）" % "、".join(a["name"] for a in acc)) if acc else ""))
+
     def on_preview(self):
         if not self._guard():
             return
@@ -1692,12 +1734,16 @@ class SignalView(QtWidgets.QWidget):
         self.sv.setPlainText(text)
         self.inner.setCurrentIndex(1)
         s = b.get("summary", {})
-        self.main.status.showMessage("预览：信号 %d，断言块 %d，向量 %d，记账(不产断言) %d"
-                                     % (s.get("n_total", 0), s.get("n_emitted", 0),
-                                        s.get("n_vectors", 0), s.get("n_accounted", 0)))
+        self.main.status.showMessage(
+            "预览：信号 %d，断言块 %d，测试用例 %d（负向 %d、手填期望 %d），记账(不产断言) %d"
+            % (s.get("n_total", 0), s.get("n_emitted", 0), s.get("n_vectors", 0),
+               s.get("n_negative", 0), s.get("n_designer", 0), s.get("n_accounted", 0)))
 
     def on_export_sv(self):
         if not self._guard():
+            return
+        eo = self._ask_export_options()
+        if eo is None:                       # 取消导出选项 → 不导出
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "导出 .sv", "wr_rf_tc_%s.sv" % self.view_id, "SystemVerilog (*.sv)")
@@ -1705,18 +1751,14 @@ class SignalView(QtWidgets.QWidget):
             return
         mode, exh = self._mode()
         only = self._checked_names() or None
-        text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited())
+        text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
+                                          comments=eo["comments"], sv_summary=eo["sv_summary"],
+                                          owner_in_msg=eo["owner_in_msg"])
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         self.sv.setPlainText(text)
         self.inner.setCurrentIndex(1)
-        s = b.get("summary", {})
-        acc = b.get("accounted", [])
-        QtWidgets.QMessageBox.information(
-            self, "已导出", "%s\n\n信号 %d；断言块 %d；向量 %d；记账(不产断言) %d%s"
-            % (path, s.get("n_total", 0), s.get("n_emitted", 0), s.get("n_vectors", 0),
-               s.get("n_accounted", 0),
-               ("\n（记账：%s）" % "、".join(a["name"] for a in acc)) if acc else ""))
+        QtWidgets.QMessageBox.information(self, "已导出", self._export_summary_text(path, b))
 
     def on_export_report(self):
         if not self._guard():

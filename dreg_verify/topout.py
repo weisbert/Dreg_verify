@@ -841,6 +841,7 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
         "n_accounted": len(accounted),
         "n_vectors": sum(s.get("n_vectors", 0) for _l, s in blocks),
         "n_negative": sum(s.get("n_negative", 0) for _l, s in blocks),
+        "n_designer": sum(s.get("n_designer", 0) for _l, s in blocks),
     }
     return {"blocks": blocks, "results": results, "accounted": accounted, "summary": summary}
 

@@ -165,6 +165,8 @@ def test_topout_export_sv_file(topo_win, tmp_path, monkeypatch):
     from PySide6 import QtWidgets
     w = topo_win
     out = tmp_path / "topout_out.sv"
+    monkeypatch.setattr(w.topout_view, "_ask_export_options",
+                        lambda: {"comments": False, "sv_summary": False, "owner_in_msg": False})
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: (str(out), "")))
     monkeypatch.setattr(QtWidgets.QMessageBox, "information",
@@ -176,6 +178,29 @@ def test_topout_export_sv_file(topo_win, tmp_path, monkeypatch):
     assert "`ENV_RF.clk_force_on==" in text              # register passthrough 也在
 
 
+def test_topout_export_sv_options_comments_and_summary(topo_win, tmp_path, monkeypatch):
+    """⭐#3：导出 .sv 选项(注释/末尾汇总计数)真的改产物——勾上 → 文件头注释 + 命名汇总块出现；
+    且导出摘要含负向/designer 拆分(后端 n_negative/n_designer 聚合)。"""
+    from PySide6 import QtWidgets
+    w = topo_win
+    v = _sel(w, "d_logic_bt_lp_rx_en")
+    v._e_regen(); v.truth.setCurrentCell(0, 0); v._e_addneg()      # 造一条负向 → 摘要应显示负向≥1
+    out = tmp_path / "opt.sv"
+    seen = {}
+    monkeypatch.setattr(w.topout_view, "_ask_export_options",
+                        lambda: {"comments": True, "sv_summary": True, "owner_in_msg": False})
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: seen.update(msg=a[2] if len(a) > 2 else "")))
+    w.on_topo_export_sv()
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith("// auto-generated")            # comments=True → 文件头注释
+    assert "dreg_n_real_fail" in text                      # sv_summary=True → 计数器命名块
+    assert "负向 1" in seen.get("msg", "")                  # 导出摘要含负向数
+    v._e_regen()
+
+
 def test_topout_export_sv_only_checked(topo_win, tmp_path, monkeypatch):
     """勾选过滤：只勾 rx_en → 导出仅含它（其余 Topout 信号块不出现）。"""
     from PySide6 import QtCore, QtWidgets
@@ -185,6 +210,8 @@ def test_topout_export_sv_only_checked(topo_win, tmp_path, monkeypatch):
     r = _topo_row(w, "d_logic_bt_lp_rx_en")
     w.topo_table.item(r, G.TOPO_SEL).setCheckState(QtCore.Qt.Checked)
     out = tmp_path / "one.sv"
+    monkeypatch.setattr(w.topout_view, "_ask_export_options",
+                        lambda: {"comments": False, "sv_summary": False, "owner_in_msg": False})
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: (str(out), "")))
     monkeypatch.setattr(QtWidgets.QMessageBox, "information",

@@ -228,12 +228,14 @@ def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False, prob
 
 # ═══════════════ 页本地 .sv / 报告 / for_test 产出（复用 generator.build/report，force 级联=不跨页 cone）═══
 def _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides=None,
-                   signals=None, comments=False, probe_prefixes=None):
+                   signals=None, comments=False, probe_prefixes=None,
+                   sv_summary=False, owner_in_msg=False):
     """构造页本地 GenOptions：force 级联(不跨页 cone) + include_risky + 编辑回流。"""
     eo = edit_overrides or {}
     return G.GenOptions(
         mode=mode, max_tests=max_tests, exhaustive=exhaustive, include_risky=True,
-        comments=comments, gen_mux=(page == "mux"), signals=signals,
+        comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
+        gen_mux=(page == "mux"), signals=signals,
         logic_cascade="force", mux_cascade="force", probe_prefixes=probe_prefixes,
         vector_overrides=eo.get("vector_overrides") or None,
         mux_user_vecs=eo.get("mux_user_vecs"), mux_expected=eo.get("mux_expected"),
@@ -260,21 +262,25 @@ def _page_signals_filter(wb, page, only):
 
 
 def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
-                  edit_overrides=None, only=None, comments=False, probe_prefixes=None):
+                  edit_overrides=None, only=None, comments=False, probe_prefixes=None,
+                  sv_summary=False, owner_in_msg=False):
     """页本地 .sv：复用 generator.build（force 级联=不跨页 cone）。返回 (text, summary)。"""
     saved = _with_page_logic(wb, page)
     try:
         opts = _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides,
                               signals=_page_signals_filter(wb, page, only), comments=comments,
-                              probe_prefixes=probe_prefixes)
+                              probe_prefixes=probe_prefixes, sv_summary=sv_summary,
+                              owner_in_msg=owner_in_msg)
         built = G.build(wb, opts)
     finally:
         if saved is not None:
             wb.logic = saved
-    text = W.render_file(built["blocks"], comments=comments)
+    text = W.render_file(built["blocks"], comments=comments, summary=sv_summary)
     n_emit = sum(1 for _l, s in built["blocks"] if s.get("n_vectors", 0) > 0)
     summary = {"n_total": len(built["blocks"]), "n_emitted": n_emit,
                "n_vectors": sum(s.get("n_vectors", 0) for _l, s in built["blocks"]),
+               "n_negative": sum(s.get("n_negative", 0) for _l, s in built["blocks"]),
+               "n_designer": sum(s.get("n_designer", 0) for _l, s in built["blocks"]),
                "n_accounted": len(built.get("skipped", [])) + len(built.get("errors", []))}
     return text, {"summary": summary, "accounted": []}
 
