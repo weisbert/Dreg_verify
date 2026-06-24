@@ -20,7 +20,7 @@ inspect_dft.py — 摸清真表里 iddq/DFT 门控的真实写法（2026-06-10�
 中文会变 ?），跑完把 .txt 全文贴回来即可。
 
 用法（装了 openpyxl 的 python 环境）：
-    python inspect_dft.py 真表.xlsx
+    python tools/inspect_dft.py 真表.xlsx
         [--rows 60]        每个 dft 页最多 dump 多少行（默认 60）
         [--cols 10]        dump 到第几列（默认 10 = A..J）
         [--sig mixer2g_trim]  对照的输出名子串（默认 mixer2g_trim）
@@ -76,7 +76,7 @@ def main():
     L = []
 
     # ── ① 工具版本（确认跑的是新代码）+ 页名清单 ──
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         import subprocess
         head = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],

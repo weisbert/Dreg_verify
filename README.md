@@ -4,7 +4,7 @@
 自动生成 Dreg 信号验证文件 `wr_rf_tc.sv`（UVM / SystemVerilog）的工具。
 自带 Excel 结构导出与表达式形态覆盖自检。
 
-> CLI + GUI（PySide6）均可用。mux 页验证见 `mux验证说明.md`；级联驱动见 `级联模式说明.md`。
+> CLI + GUI（PySide6）均可用。mux 页验证见 `docs/mux验证说明.md`；级联驱动见 `docs/级联模式说明.md`。
 
 ## 工作原理
 
@@ -22,7 +22,7 @@
 6. **mux 页**（2026-06 新增）：`G = case(B){F:A;…}` N 选 1——数据寄存器写互异值 +
    `assert_mux<N>_T<n>` 验证选路。支持**两种表形态**：LPBT（单控制、控制来自 logic 行、输出在顶层）
    与 WL_RFTRX（多控制拼接 `case={B,C,D,E}` + 控制可寄存器直出/级联上游 mux + 输出非顶层需 scan_rtl 前缀），
-   工具自动适配。CLI `--no-mux` / `--mux-only` 控制范围；细节见 `mux验证说明.md`（含 WL 形态专章）
+   工具自动适配。CLI `--no-mux` / `--mux-only` 控制范围；细节见 `docs/mux验证说明.md`（含 WL 形态专章）
 
 ## 环境
 
@@ -77,7 +77,7 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 | `--neg-which first\|all` | 每信号造 1 个还是每向量都造 |
 | `--neg-file inline\|separate` | 负向放同文件还是单独 `*_neg.sv` |
 | `--force-signals` / `--rfwrite-signals` | 手动指定 RO/RW（修正名称/类型判定） |
-| `--cascade-mode cone\|force` | **级联驱动模式**（输入引用上游 logic 计算网时）：cone(默认)=展开上游表达式驱动其源头寄存器（纯 Excel）；force=直接 force 字面 `_to_logic` 网（隔离验证，需 scan_rtl 前缀）。**图解见 [级联模式说明.md](级联模式说明.md)** |
+| `--cascade-mode cone\|force` | **级联驱动模式**（输入引用上游 logic 计算网时）：cone(默认)=展开上游表达式驱动其源头寄存器（纯 Excel）；force=直接 force 字面 `_to_logic` 网（隔离验证，需 scan_rtl 前缀）。**图解见 [级联模式说明.md](docs/级联模式说明.md)** |
 | `--no-wire-fallback` | 关闭 wire 兜底：非 RW 寄存器且查不到的输入不再默认 force，而是标 UNKNOWN |
 | `--include-risky` | 强制生成含'不可驱动输入'(wire兜底/未解析)的信号。**默认跳过**这类信号（force 不存在的 net 会让 elaboration 失败；与 VBA 一致跳过） |
 | `--diagnose` | 覆盖诊断：类型列原文分布 + 输入归类(RF_WRITE/force-RO/force-级联/force-wire/UNKNOWN)覆盖率 |
@@ -90,7 +90,7 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 其中"wire 兜底"是你需要重点确认"是否真是 wire、还是命名没匹配上的寄存器"的部分。
 
 **级联（输入引用另一个 logic 行的输出）** 按上游行结构自动分流（背后的 RTL 知识与图解见
-[级联模式说明.md](级联模式说明.md)）：上游**自引用** → `_to_logic` 是 regfile 前级 → force 基名；
+[级联模式说明.md](docs/级联模式说明.md)）：上游**自引用** → `_to_logic` 是 regfile 前级 → force 基名；
 上游**不自引用** → `_to_logic` 是上游表达式算的 → 按 `--cascade-mode` 选择展开上游（默认）或 force 该网。
 
 **cone 展开后的溯源**（GUI 测试项页 / HTML 报告，2026-06 新增）：被展开过的信号（输入引用内部信号/上游计算网）
@@ -132,7 +132,7 @@ python redzone_tools/scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
 ::      GUI「设置探针前缀 → 导入…」 或 CLI --probe-prefix-file probe_prefixes.txt
 ```
 
-什么时候要跑 / 输出三段怎么看 / 全部参数 / 单机用法：见 **[scan_rtl使用说明.md](scan_rtl使用说明.md)**。
+什么时候要跑 / 输出三段怎么看 / 全部参数 / 单机用法：见 **[scan_rtl使用说明.md](docs/scan_rtl使用说明.md)**。
 
 ## auto_out 与「期望」分离（防自证验证）
 
@@ -159,39 +159,39 @@ Dreg 验证的对象是 **designer 写的逻辑表达式本身**。工具按表�
 由于生成器完全从 `logic.L` 表达式重推，先确认求值器能解析真表里**所有**表达式形态：
 
 ```powershell
-python inspect_excel.py 核心文件.xlsx --expr-forms
+python tools/inspect_excel.py 核心文件.xlsx --expr-forms
 ```
 
 会导出 `<名字>_exprforms.txt`：枚举所有不同表达式、按结构形态归并、并用求值器逐条试解析
 （`[OK]` / `[解析失败]`）。若有 `[解析失败]`，把那几条发给维护者扩展 `dreg_verify/expr.py` 即可。
 
-## 抽取 VBA 宏源码（`inspect_vba.py`）
+## 抽取 VBA 宏源码（`tools/inspect_vba.py`）
 
 原始核心文件是带宏的 `.xlsm`，旧的 `.sv` 由其中 VBA 宏生成。要 1:1 复刻生成逻辑（地址算法、cone 展开、消息格式等），直接读 VBA 源码最准。
 
 ```powershell
 pip install oletools                       # 推荐(更稳)；缺失时脚本用内置纯 Python 兜底
-python inspect_vba.py 核心文件.xlsm --list   # 列出模块，标出疑似生成 .sv 的模块
-python inspect_vba.py 核心文件.xlsm          # 导出全部 VBA 源码到 <名字>_vba.txt
-python inspect_vba.py 核心文件.xlsm --find "Print #,RF_WRITE,pll_n,top_output"   # 定位相关过程
+python tools/inspect_vba.py 核心文件.xlsm --list   # 列出模块，标出疑似生成 .sv 的模块
+python tools/inspect_vba.py 核心文件.xlsm          # 导出全部 VBA 源码到 <名字>_vba.txt
+python tools/inspect_vba.py 核心文件.xlsm --find "Print #,RF_WRITE,pll_n,top_output"   # 定位相关过程
 ```
 
-## Excel 结构导出（`inspect_excel.py`）
+## Excel 结构导出（`tools/inspect_excel.py`）
 
 把各 sheet 的列结构 / 表头 / 样本 / 取值枚举导出成文本，便于审阅。
 
 ```powershell
-python inspect_excel.py 核心文件.xlsx --compact --mask-owners --rows 10 `
+python tools/inspect_excel.py 核心文件.xlsx --compact --mask-owners --rows 10 `
     --sheets logic,regmap,total_memory_map
 ```
 
-## mux 页排版探查（`inspect_mux.py`）
+## mux 页排版探查（`tools/inspect_mux.py`）
 
 新设计 / 新表第一次做 mux 验证前，先探查 mux 页的真实排版（列结构 / case 值形态 / 与 logic·regmap
 页的衔接关系），确认与工具的解析假设一致：
 
 ```powershell
-python inspect_mux.py 核心文件.xlsx --mask-owners
+python tools/inspect_mux.py 核心文件.xlsx --mask-owners
 ```
 
 导出 `<名字>_mux_inspect.txt`。LPBT 真表已探查过（结果固化进 `excel_model.read_mux`）；
@@ -234,18 +234,30 @@ dreg_verify/            生成器后端（CLI 与 GUI 共用）
 redzone_tools/          要传红区/仿真服务器的单文件零依赖脚本（见该夹 README.md）
   scan_rtl.py             RTL 层级扫描 → 探针前缀映射
   diag_rtl_binding.py     红区只读诊断：探针是真输出还是探到了自己输入(假绿)
-inspect_excel.py        Excel 结构导出 + 表达式形态覆盖报告(--expr-forms)
-inspect_mux.py          mux 页排版探查（新设计首次做 mux 验证前跑）
-inspect_vba.py          .xlsm 的 VBA 宏源码抽取
+tools/                  本机用的探查/诊断/审计脚本（都 python tools/<名>.py 跑；只读真表，不改产品代码）
+  inspect_excel.py        Excel 结构导出 + 表达式形态覆盖报告(--expr-forms)
+  inspect_mux.py          mux 页排版探查（新设计首次做 mux 验证前跑）
+  inspect_vba.py          .xlsm 的 VBA 宏源码抽取
+  inspect_dft.py          dft 页门控/观测排查      inspect_fortest.py  for_test 页排版探查
+  diag_one_topout.py      单个 Topout 信号深挖(解析链/真值表/.sv/for_test 金标准/门控溯源)
+  diag_name_collisions.py 全表撞名(同名输入寄存器 vs 计算输出)系统性审计
+  diag_topout_rename.py / diag_signal_expand.py / diag_to_logic_suffix.py   其它单点诊断
+  audit_*.py              历史一次性审计脚本(cross_boundary / mode_branches / self_ref_suffix / unresolved)
+make_mirror_btlp.py     生成 Topout-rooted 测试镜像 Excel（测试夹具，留根目录被 tests import）
+make_mirror_excel.py    生成 WL_RFTRX logic-rooted 测试镜像 Excel（测试夹具）
 make_sample_excel.py    生成演示用示例 Excel
 tests/                  单元 + 端到端 + GUI 离屏冒烟测试（含合成 Excel 夹具）
+docs/                   说明文档（下列 .md 均在此）
+  scan_rtl使用说明.md      RTL 扫描与探针前缀：何时跑/两段式工作流/输出怎么看
+  级联模式说明.md          级联驱动两种模式（展开上游 vs force级联网）图解
+  mux验证说明.md           mux 页验证：语义/测试配方/覆盖度三档/log 解读
+  mux环境验证.md           mux 网名 RTL 环境核查步骤（scan_rtl 实例）
+  mux功能影响面分析.md      mux 功能实现蓝本（开发参考）
+  HANDOFF_topout.md        Topout-rooted 重构交接文档
 
 README.md               本文档（核心用法）
-scan_rtl使用说明.md      RTL 扫描与探针前缀：何时跑/两段式工作流/输出怎么看
-级联模式说明.md          级联驱动两种模式（展开上游 vs force级联网）图解
-mux验证说明.md           mux 页验证：语义/测试配方/覆盖度三档/log 解读
-mux环境验证.md           mux 网名 RTL 环境核查步骤（scan_rtl 实例）
-mux功能影响面分析.md      mux 功能实现蓝本（开发参考）
+topout_goal_prompt.md   Topout-rooted 重构目标（北极星）
+requirements.txt        依赖
 ```
 
 ## 注意

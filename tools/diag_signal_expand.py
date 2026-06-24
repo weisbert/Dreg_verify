@@ -9,8 +9,8 @@ diag_signal_expand.py — 单信号「为什么真值表是 N 个输入」诊断
 纯 Excel 解析，不需要探针前缀（cone 展开 mux 靠源寄存器，本就不需要前缀）。
 
 用法：
-    python diag_signal_expand.py 真表.xlsx d_wl_rf_lo2g5g_bias_en
-    python diag_signal_expand.py 真表.xlsx d_wl_rf_lo2g5g_bias_en --out diag.txt
+    python tools/diag_signal_expand.py 真表.xlsx d_wl_rf_lo2g5g_bias_en
+    python tools/diag_signal_expand.py 真表.xlsx d_wl_rf_lo2g5g_bias_en --out diag.txt
 """
 import argparse
 import sys
@@ -21,6 +21,8 @@ for _s in (sys.stdout, sys.stderr):          # Windows 控制台常是 GBK，中
     except Exception:  # noqa: BLE001
         pass
 
+import os, sys  # noqa: E402,F811 —— path bootstrap：tools/ 下脚本上溯仓库根、找到 dreg_verify 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model, expr as E, generator, mux_gen, resolver as R
 
 

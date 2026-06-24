@@ -6,7 +6,7 @@ inspect_vba.py — 从 .xlsm/.xlsb/.xls 抽取 VBA 宏源码，导出供分析�
 读 VBA 源码最直接。本脚本在公司机上跑，把 VBA 模块源码 dump 成文本，按需关键词定位相关过程。
 
 用法:
-    python inspect_vba.py 核心文件.xlsm
+    python tools/inspect_vba.py 核心文件.xlsm
         [--out vba.txt]            输出文件(默认 <名字>_vba.txt)
         [--find kw1,kw2]           只打印含关键词的行(带模块名/行号/上下文)，用于快速定位
         [--context N]              --find 时每个匹配前后各带 N 行(默认 3)

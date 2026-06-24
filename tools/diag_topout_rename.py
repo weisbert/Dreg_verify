@@ -7,8 +7,8 @@ diag_topout_rename.py — 探查【Topout 未解析信号到底在哪一页被�
 要补桥接，先得知道【改名发生在哪一页、源名是谁】——本脚本就是来回答这个的，不改任何文件。
 
 用法（在能打开真表的机器上跑，把整段输出贴回给 Claude）：
-    python diag_topout_rename.py 真表.xlsx
-    # 或限定只看前 N 个未解析名： python diag_topout_rename.py 真表.xlsx 30
+    python tools/diag_topout_rename.py 真表.xlsx
+    # 或限定只看前 N 个未解析名： python tools/diag_topout_rename.py 真表.xlsx 30
 
 输出三段：
   ① Topout 分类汇总（logic/mux/直连寄存器/RO/未解析 各多少）
@@ -19,6 +19,8 @@ diag_topout_rename.py — 探查【Topout 未解析信号到底在哪一页被�
 """
 import sys
 
+import os, sys  # noqa: E402,F811 —— path bootstrap：tools/ 下脚本上溯仓库根、找到 dreg_verify 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model as M
 from dreg_verify import topout as T
 
@@ -128,6 +130,6 @@ def main(path, limit=None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python diag_topout_rename.py 真表.xlsx [只看前N个未解析]")
+        print("用法: python tools/diag_topout_rename.py 真表.xlsx [只看前N个未解析]")
         sys.exit(1)
     main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else None)

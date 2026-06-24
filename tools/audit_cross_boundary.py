@@ -15,8 +15,8 @@ VBA 源头数据把这两类都【端到端展开】（驱真寄存器，不 for
 每类边界各影响多少信号、各属哪个 owner，给"对齐 VBA"的改动定规模。
 
 纯 Excel 解析，不需要探针前缀。用法：
-    python audit_cross_boundary.py 真表.xlsx
-    python audit_cross_boundary.py 真表.xlsx --out cross.txt
+    python tools/audit_cross_boundary.py 真表.xlsx
+    python tools/audit_cross_boundary.py 真表.xlsx --out cross.txt
 """
 import argparse
 import sys
@@ -29,6 +29,8 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
+import os, sys  # noqa: E402,F811 —— path bootstrap：tools/ 下脚本上溯仓库根、找到 dreg_verify 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model, generator, resolver as R
 
 

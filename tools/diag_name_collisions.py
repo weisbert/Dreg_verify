@@ -17,7 +17,7 @@ resolve_root 桥接时撞上寄存器即停 → 误判直连寄存器(假绿)。
 dft/logic/mux 输出 = 刚修 bug 的签名；修后应已桥到 logic，仍是 register 的要人工看)。
 
 用法（在能打开真表的机器上跑，把整段输出贴回给 Claude）：
-    .venv\\Scripts\\python.exe diag_name_collisions.py 真表.xlsx
+    .venv\\Scripts\\python.exe tools/diag_name_collisions.py 真表.xlsx
 """
 import sys
 
@@ -26,6 +26,8 @@ try:
 except Exception:   # noqa: BLE001
     pass
 
+import os, sys  # noqa: E402,F811 —— path bootstrap：tools/ 下脚本上溯仓库根、找到 dreg_verify 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model as M
 from dreg_verify import topout as T
 
@@ -162,6 +164,6 @@ def main(path):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python diag_name_collisions.py 真表.xlsx")
+        print("用法: python tools/diag_name_collisions.py 真表.xlsx")
         sys.exit(1)
     main(sys.argv[1])

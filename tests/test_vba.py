@@ -6,7 +6,9 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+sys.path.insert(0, os.path.join(_ROOT, "tools"))   # inspect_vba 已挪进 tools/（2026-06-24 整理）
 
 import inspect_vba as V  # noqa: E402
 

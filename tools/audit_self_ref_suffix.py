@@ -13,8 +13,8 @@ audit_self_ref_suffix.py — 全 logic 页审计「自引用信号被错补 _to_
   否则会把『本就因 mux 跨页回填带 _to_mux』的信号误报成『本次改的』(早期版本的坑)。
 
 纯只读，不需要探针前缀。用法：
-    python audit_self_ref_suffix.py 真表.xlsx
-    python audit_self_ref_suffix.py 真表.xlsx --out audit.txt
+    python tools/audit_self_ref_suffix.py 真表.xlsx
+    python tools/audit_self_ref_suffix.py 真表.xlsx --out audit.txt
 """
 import argparse
 import os
@@ -26,7 +26,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model as M  # noqa: E402
 
 

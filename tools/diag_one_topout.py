@@ -10,9 +10,9 @@ diag_one_topout.py — 探查【单个 Topout 信号在真表里到底长什么�
   · 为这一个信号生成的 .sv 断言片段(看探针贴的到底是哪个名)。
 
 用法（在能打开真表的机器上跑，把整段输出贴回给 Claude）：
-    .venv\\Scripts\\python.exe diag_one_topout.py 真表.xlsx d_vco_en_faston_ls
+    .venv\\Scripts\\python.exe tools/diag_one_topout.py 真表.xlsx d_vco_en_faston_ls
     # 可再补额外名字一起溯源(查门控信号定义在哪页)：
-    .venv\\Scripts\\python.exe diag_one_topout.py 真表.xlsx d_vco_en_faston_ls fll_active d_bt_lp_pll_dig_dft_iddq_mode
+    .venv\\Scripts\\python.exe tools/diag_one_topout.py 真表.xlsx d_vco_en_faston_ls fll_active d_bt_lp_pll_dig_dft_iddq_mode
 """
 import sys
 
@@ -22,6 +22,8 @@ try:
 except Exception:   # noqa: BLE001
     pass
 
+import os, sys  # noqa: E402,F811 —— path bootstrap：tools/ 下脚本上溯仓库根、找到 dreg_verify 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model as M
 from dreg_verify import topout as T
 from dreg_verify import resolver as R
@@ -267,7 +269,7 @@ def main(path, signal, extras=None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("用法: python diag_one_topout.py 真表.xlsx 信号名 [额外名1 额外名2 …]")
-        print("例:   python diag_one_topout.py Hi1108_Pilot_BT_LP_DREG_95P_20260623.xlsx d_vco_en_faston_ls")
+        print("用法: python tools/diag_one_topout.py 真表.xlsx 信号名 [额外名1 额外名2 …]")
+        print("例:   python tools/diag_one_topout.py Hi1108_Pilot_BT_LP_DREG_95P_20260623.xlsx d_vco_en_faston_ls")
         sys.exit(1)
     main(sys.argv[1], sys.argv[2], sys.argv[3:])

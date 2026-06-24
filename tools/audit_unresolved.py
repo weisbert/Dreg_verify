@@ -11,12 +11,14 @@ audit_unresolved.py — 一把抓出 Excel 里全部"未解析 / 跳过 / 错误
 不需要探针前缀；纯 Excel 解析。
 
 用法：
-    python audit_unresolved.py 真表.xlsx
-    python audit_unresolved.py 真表.xlsx --out audit.txt      # 完整报告写文件(UTF-8 BOM，防乱码)
+    python tools/audit_unresolved.py 真表.xlsx
+    python tools/audit_unresolved.py 真表.xlsx --out audit.txt      # 完整报告写文件(UTF-8 BOM，防乱码)
 """
 import argparse
 from collections import OrderedDict, defaultdict
 
+import os, sys  # noqa: E402,F811 —— path bootstrap：tools/ 下脚本上溯仓库根、找到 dreg_verify 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model, generator
 
 

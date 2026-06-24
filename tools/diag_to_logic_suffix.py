@@ -7,8 +7,8 @@ diag_to_logic_suffix.py — 诊断「某 logic 信号被错误加上 _to_logic �
 read_logic + Resolver 把尾缀判定、各输入解析、以及【输出探针是否与某输入网撞名】全打印出来。
 
 用法：
-    python diag_to_logic_suffix.py 真表.xlsx d_wl_rf_5g_tx_lodiv_en
-    python diag_to_logic_suffix.py 真表.xlsx d_wl_rf_5g_tx_lodiv_en --prefixes probe_prefixes.txt
+    python tools/diag_to_logic_suffix.py 真表.xlsx d_wl_rf_5g_tx_lodiv_en
+    python tools/diag_to_logic_suffix.py 真表.xlsx d_wl_rf_5g_tx_lodiv_en --prefixes probe_prefixes.txt
 
 把输出整段贴回来即可。纯只读，不改任何文件。
 """
@@ -22,7 +22,7 @@ for _s in (sys.stdout, sys.stderr):          # Windows 控制台常 GBK，中文
     except Exception:  # noqa: BLE001
         pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model, generator, resolver as R  # noqa: E402
 
 

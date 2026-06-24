@@ -16,13 +16,15 @@
   ② regmap/tmm F+描述 → 每个源是 RW 还是 RO/线控（mode 寄存器描述常含 "0: line control"）
   ③ logic 页 K+M=to_mux → 哪些源是 logic→mux 网（needs-prefix）
 
-用法:  python audit_mode_branches.py <excel.xlsx> [--prefix-config a=ENV_RF.x,b=ENV_RF.y]
+用法:  python tools/audit_mode_branches.py <excel.xlsx> [--prefix-config a=ENV_RF.x,b=ENV_RF.y]
        (--prefix-config 把已知探针前缀喂进来，验证配上后是否就能生成 mode=0)
 """
 
 import argparse
 import sys
 
+import os, sys  # noqa: E402,F811 —— path bootstrap：tools/ 下脚本上溯仓库根、找到 dreg_verify 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dreg_verify import excel_model as M, resolver as R
 from dreg_verify.mux_gen import MUX_CASCADE_MAX_DEPTH
 

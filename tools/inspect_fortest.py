@@ -17,7 +17,7 @@ inspect_fortest.py — 摸清 for_test(测试用例)页的真实排版。
 直接 print 中文会变成 ?，所以一律写 .txt，跑完把文件全文贴回来即可。
 
 用法(在装了 openpyxl 的那个 python 环境里跑)：
-    python inspect_fortest.py 真表.xlsx
+    python tools/inspect_fortest.py 真表.xlsx
         [--sheet for_test]    目标页(默认 for_test；找不到就列出可选页名退出)
         [--at 4,76,419]       额外锚点行号：在这些行竖排 dump 整行(看真实用例)
         [--span 5]            每个锚点往下连带 dump 多少行(默认 5)
@@ -29,7 +29,7 @@ inspect_fortest.py — 摸清 for_test(测试用例)页的真实排版。
                               补 curate 视图漏掉的 colA(case名)/输出行/期望列/空档列/尾部 test 名字行
         [--out 文件]          默认 <excel名>_fortest.txt
   锁 for_test 完整列排版的推荐命令(回填功能要用)：
-    python inspect_fortest.py 真表.xlsx --groups --out-sig <某输出名> --raw
+    python tools/inspect_fortest.py 真表.xlsx --groups --out-sig <某输出名> --raw
 
 依赖：openpyxl。仅支持 .xlsx。
 """

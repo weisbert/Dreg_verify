@@ -3,7 +3,7 @@
 inspect_excel.py — 读取 Dreg 核心 Excel，导出结构化文本，方便粘贴给 Claude 分析。
 
 用法:
-    python inspect_excel.py <excel路径>
+    python tools/inspect_excel.py <excel路径>
         [--rows N]            每个 sheet 导出的样本行数 (默认 20)
         [--out 输出.txt]      输出文件 (默认在 Excel 同目录下 <名字>_inspect.txt)
         [--sheets a,b,c]      只导出这些 sheet (默认全部, 关键页自动排前面)
@@ -14,7 +14,7 @@ inspect_excel.py — 读取 Dreg 核心 Excel，导出结构化文本，方便�
         [--maxlen N]          单元格内容最大显示长度 (默认 80; logic 的 L/M 列始终不截断)
 
 想让输出最短就用:
-    python inspect_excel.py "核心文件.xlsx" --compact --mask-owners --rows 10 \
+    python tools/inspect_excel.py "核心文件.xlsx" --compact --mask-owners --rows 10 \
         --sheets logic,regmap,NamingRule,for_test
 还嫌长就再加 --split, 然后一页一页发我。
 
@@ -48,7 +48,7 @@ except ImportError:
     sys.exit("缺少 openpyxl，请先运行:  pip install openpyxl")
 
 # 让 --expr-forms 能用生成器自带的表达式求值器做"解析覆盖"自检
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from dreg_verify import expr as _expr
 except Exception:   # noqa: BLE001  （缺包时 --expr-forms 退化为仅做形态归并，不做解析校验）

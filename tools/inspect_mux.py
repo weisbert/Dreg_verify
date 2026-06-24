@@ -6,7 +6,7 @@ inspect_mux.py — 探查 Dreg Excel『mux 页』的排版结构，导出文本�
 先把 mux 页的真实排版摸清楚: 列结构 / 表达式 / 序号 / 与 logic·regmap 页的关系。
 
 用法 (在真表所在机器上跑):
-    python inspect_mux.py "Hi1108_Pilot_BT_LP_DREG_95P_28May.xlsx"
+    python tools/inspect_mux.py "Hi1108_Pilot_BT_LP_DREG_95P_28May.xlsx"
         [--out 输出.txt]      输出文件 (默认 <excel名>_mux_inspect.txt)
         [--sheet NAME]        指定 mux 页名 (默认自动找名字含 mux 的页)
         [--rows N]            竖排样本行数 (默认 15)
@@ -51,7 +51,7 @@ except ImportError:
     sys.exit("缺少 openpyxl，请先运行:  pip install openpyxl")
 
 # expr 求值器可选: 有就对 mux 页疑似表达式列做"能否解析"自检
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from dreg_verify import expr as _expr
 except Exception:  # noqa: BLE001
