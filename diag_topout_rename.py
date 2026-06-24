@@ -52,7 +52,7 @@ def main(path, limit=None):
 
     # ── ① 分类汇总 ──
     logic_idx, mux_idx = T.build_index(wb)
-    rename = T._dft_rename_map(wb)          # 当前工具能自动认出的 dft 改名（看它命中几个）
+    rename = T._rename_map(wb)              # 当前工具能自动认出的改名(dft + level_shift，链式)
     by_kind, unresolved = {}, []
     for topo in wb.topout:
         root = T.resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
@@ -62,7 +62,7 @@ def main(path, limit=None):
     print("=== ① Topout 分类汇总（%d 个）===" % len(wb.topout))
     for k in ("logic", "mux", "register", "ro-readback", "unresolved"):
         print("   %-14s %d" % (k, by_kind.get(k, 0)))
-    print("   （当前 dft 改名表自动认出 %d 个改名：%s）"
+    print("   （当前工具自动认出 %d 条改名[dft+level_shift,链式]：%s）"
           % (len(rename), ", ".join("%s←%s" % (k, v) for k, v in list(rename.items())[:8])
              + (" …" if len(rename) > 8 else "")))
 

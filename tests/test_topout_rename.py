@@ -76,6 +76,50 @@ def test_no_rename_table_has_zero_renames(renamed_path, tmp_path_factory):
     assert T._dft_rename_map(M.load_workbook(renamed_path)).get("a_top") == "a_sm"
 
 
+@pytest.fixture(scope="module")
+def chain_path(tmp_path_factory):
+    """真表实况：链式改名 level_shift → dft → logic（211 信号里唯一未解析的那个）。
+    logic d_vco_en_faston_fsm → dft 观测改名 d_vco_en_faston → level_shift 顶层口 d_vco_en_faston_ls。"""
+    p = str(tmp_path_factory.mktemp("ch") / "chain.xlsx")
+    make_mirror_btlp.build(p)
+    wb = openpyxl.load_workbook(p)
+    lg, dft, ls, top = wb["logic"], wb["dft"], wb["level_shift"], wb["Topout"]
+    r = lg.max_row + 1
+    for c, v in [(1, "d_bt_lp_linelocal_mode_ctrl_to_logic"), (2, "d_bt_lp_linectrl_rx_en_to_logic"),
+                 (3, "d_bt_lp_rx_en_local_to_logic"), (4, "d_bt_lp_pll_dig_dft_iddq_mode_to_logic"),
+                 (11, "d_vco_en_faston_fsm"), (12, "(A?C:B)&(~D)"), (16, "Yao Wang")]:
+        lg.cell(r, c, v)
+    r = dft.max_row + 1
+    for c, v in [(1, "d_vco_en_faston_fsm_to_dft"), (4, "d_vco_en_faston"), (5, "A"), (6, "16"),
+                 (8, "Yao Wang")]:
+        dft.cell(r, c, v)
+    r = ls.max_row + 1
+    for c, v in [(1, "d_vco_en_faston_to_ls"), (2, "STD_SR_L2H"), (3, "d_vco_en_faston_ls"),
+                 (5, "1"), (6, "Yao Wang")]:
+        ls.cell(r, c, v)
+    r = top.max_row + 1
+    top.cell(r, 1, "Yao Wang"); top.cell(r, 2, "d_vco_en_faston_ls")
+    wb.save(p)
+    return p
+
+
+def test_chained_rename_level_shift_then_dft_to_logic(chain_path):
+    """链式回溯：Topout d_vco_en_faston_ls ←(level_shift) d_vco_en_faston ←(dft) logic _fsm。"""
+    wb = M.load_workbook(chain_path)
+    root = T.resolve_root(wb, "d_vco_en_faston_ls")
+    assert root.kind == T.LOGIC and root.renamed
+    assert root.probe_name == "d_vco_en_faston_ls"       # 探针贴顶层 _ls 真名
+    assert root.source_name == "d_vco_en_faston_fsm"     # 链尾的 logic 源
+    # 真值表建出来 + .sv 探顶层名(非源名、非中间名)
+    m = next(x for x in T.topout_view_models(wb, mode="max", max_tests=32)
+             if x["name"] == "d_vco_en_faston_ls")
+    assert m["kind"] == "logic" and m["status"] == "ok" and m["n_vectors"] > 0
+    text, _ = T.render_topout_sv(wb, mode="max", max_tests=32, only=["d_vco_en_faston_ls"])
+    assert "`ENV_RF.d_vco_en_faston_ls==" in text
+    assert "`ENV_RF.d_vco_en_faston_fsm==" not in text
+    assert "`ENV_RF.d_vco_en_faston==" not in text       # 中间名也不探
+
+
 def test_renamed_signal_gui_edit_threads_to_export(renamed_path):
     """GUI 编辑改名信号 → 走 reg 路按顶层名键回流（否则编辑落源名键被改名路忽略=静默不生效）。"""
     import os

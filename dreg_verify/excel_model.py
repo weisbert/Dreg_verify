@@ -868,7 +868,7 @@ def _normalize_type(v):
 class DregWorkbook:
     def __init__(self, logic, regmap, tmm, sheet_names, mux=None, dft=None,
                  fortest_order=None, regmap_dups=None, topout=None,
-                 dft_rows=None, iddq_rows=None):
+                 dft_rows=None, iddq_rows=None, level_shift=None):
         self.logic = logic              # list[LogicSignal]
         self.regmap = regmap            # dict
         self.tmm = tmm                  # dict
@@ -879,6 +879,10 @@ class DregWorkbook:
         # 其表达式(D=输出, E=表达式, A/B/C=输入)。注意 self.dft(上面那个 dict)是【门控信息】、用途不同。
         self.dft_rows = dft_rows if dft_rows is not None else []     # list[LogicSignal]（dft 页全行）
         self.iddq_rows = iddq_rows if iddq_rows is not None else []  # list[LogicSignal]（iddq 页全行）
+        # level_shift 页原始映射 {输入基名low: {"out": 顶层口真名, "is_top": bool}}（read_level_shift）。
+        # _apply_level_shift 已消费它给 logic/mux 设 _ls_name；这里【再存一份】供 topout 改名桥接用
+        # （顶层口源是再上一层改名时，_apply_level_shift 对不上 → 桥接据此链式回溯，2026-06-24）。
+        self.level_shift = level_shift if level_shift is not None else {}
         # {signal_low: [RegmapEntry,…]} regmap 同名重复定义(已按首个采纳)，供 generator 告警。
         # 空 = 无重复(绝大多数表)。来自 read_regmap；手构 wb 不传=空。
         self.regmap_dups = regmap_dups if regmap_dups is not None else {}
@@ -1276,7 +1280,8 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     _apply_mux_ref_suffix(logic, mux)        # 跨页：mux 以 _to_mux 引用的 logic 输出 → 回填 _to_mux 尾缀
     _apply_mux_output_ref_suffix(logic, mux) # 跨页：被 logic/mux 引用的 top_out=0 mux 输出 → 回填去向尾缀
     # 跨页：level_shift 页声明的顶层电平移位口 → 把 logic/mux 输出探针定到 _ls 顶层口(_ls_name 最优先)
-    _apply_level_shift(logic, mux, read_level_shift(ws_ls) if ws_ls is not None else {})
+    ls_map = read_level_shift(ws_ls) if ws_ls is not None else {}
+    _apply_level_shift(logic, mux, ls_map)   # 给能对上的 logic/mux 设 _ls_name；存一份 ls_map 供改名桥接
     dft = read_dft(ws_dft) if ws_dft is not None else {}
     # dft / iddq 页【按行】读成 LogicSignal（子视图模型用，additive；旧路径不读 → 逐字节不变）。
     # dft/iddq 列位：D=输出名 E=表达式 A/B/C=输入 H=owner（mirror/真表 inspect 实证）。
@@ -1290,4 +1295,5 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     wb.close()
     return DregWorkbook(logic, regmap, tmm, names, mux=mux, dft=dft,
                         fortest_order=fortest_order, regmap_dups=regmap_dups,
-                        topout=topout, dft_rows=dft_rows, iddq_rows=iddq_rows)
+                        topout=topout, dft_rows=dft_rows, iddq_rows=iddq_rows,
+                        level_shift=ls_map)

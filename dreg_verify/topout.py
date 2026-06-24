@@ -82,6 +82,29 @@ def _dft_rename_map(wb):
     return out
 
 
+def _ls_rename_map(wb):
+    """level_shift 页改名表 {顶层口名low → 输入源基名low}（read_level_shift 的逆）。
+
+    level_shift 通常由 excel_model._apply_level_shift 给【能对上的 logic/mux 输出】设 _ls_name 处理掉；
+    但顶层口的输入源【本身又是上一层改名】(如 d_vco_en_faston 是 dft 改名、非直接 logic 输出)时
+    _apply_level_shift 对不上 → 桥接据此把顶层 _ls 名映回输入源名，再链式接 dft 改名/直接解析。"""
+    out = {}
+    for in_base, info in (getattr(wb, "level_shift", None) or {}).items():
+        ob = str((info or {}).get("out", "")).strip().lower()
+        if ob and ob != str(in_base).lower():
+            out.setdefault(ob, str(in_base).lower())
+    return out
+
+
+def _rename_map(wb):
+    """合并改名表 {输出名low → 源名low}：dft 观测改名 + level_shift 电平移位改名。
+    resolve_root 据它【链式回溯】(level_shift → dft → logic)。dft 优先(同名时不被 ls 覆盖)。"""
+    m = dict(_dft_rename_map(wb))
+    for o, s in _ls_rename_map(wb).items():
+        m.setdefault(o, s)
+    return m
+
+
 def _logic_candidates(s):
     """一个 logic 信号能被 Topout 名命中的所有候选名（小写）：基名 / _ls 顶层口 / 探针真名。"""
     names = {s.out_base.lower()}
@@ -148,8 +171,10 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
     logic/mux 命中靠 out_base / _ls_name / rtl_base 三套候选（Topout 名是剥后缀的顶层真名，
     而 _ls 顶层口/被引用内部信号的真名带后缀，故都要试）。
 
-    dft 改名桥接（2026-06-24）：若顶层名直接找不到、但它是某 dft 行【观测改名】出来的
-    （Topout A = dft 观测 logic A_sm），就桥到源 A_sm 拿逻辑/驱动，但把断言探针贴顶层名 A。"""
+    改名桥接（2026-06-24）：若顶层名直接找不到、但它是中间页【观测/电平移位改名】出来的，
+    就【链式回溯】到真正的 logic/mux/寄存器源（level_shift → dft → logic 可多跳），拿逻辑/驱动，
+    但断言探针贴顶层真名（不是源名）。例：d_vco_en_faston_ls ←(level_shift) d_vco_en_faston
+    ←(dft) d_vco_en_faston_fsm(logic)。"""
     if logic_idx is None or mux_idx is None:
         logic_idx, mux_idx = build_index(wb)
     low = str(name).strip().lower()
@@ -161,27 +186,31 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
             direct.note = "RO 回读(%s)——模拟/FSM 状态、非寄存器组合函数，无 cone，跳过+记账" % direct.note
         return direct
 
-    # ── dft 改名桥接：低优先级（直接命中不到才尝试）──
+    # ── 改名桥接：低优先级（直接命中不到才尝试）；链式跟随 + 环/深度护栏 ──
     if rename is None:
-        rename = _dft_rename_map(wb)
-    src_low = rename.get(low)
-    if src_low is not None and src_low != low:
-        sub = _resolve_direct(wb, src_low, logic_idx, mux_idx)   # 只解析一层源，不再桥接（防环）
+        rename = _rename_map(wb)
+    seen, cur, hops = {low}, low, 0
+    while hops < 8:
+        nxt = rename.get(cur)
+        if nxt is None or nxt in seen:
+            break
+        seen.add(nxt); hops += 1
+        sub = _resolve_direct(wb, nxt, logic_idx, mux_idx)
         if sub is not None and sub.kind in (LOGIC, MUX, REGISTER):
             sub.probe_name = name            # 顶层真名（断言探针贴它，原大小写）
-            sub.source_name = src_low        # 源名（寄存器根用它定字段）
+            sub.source_name = nxt            # 最终源名（寄存器根用它定字段）
             sub.matched_name = low
-            sub.note = ("dft 改名：Topout 名 %s ← dft 观测源 %s（%s 根）；逻辑/驱动来自源，"
-                        "断言探针贴顶层真名 %s" % (name, src_low, sub.kind, name))
+            sub.note = ("改名桥接：Topout 名 %s ← 源 %s（%s 根，经 %d 跳改名）；逻辑/驱动来自源，"
+                        "断言探针贴顶层真名 %s" % (name, nxt, sub.kind, hops, name))
             return sub
-        # 源也解析不了（埋件/RO）→ 落未解析，但把桥接线索写进 note（不静默丢）
+        cur = nxt                            # 源仍是改名（如 ls→dft）→ 继续回溯
+    if hops > 0:                             # 跟过改名但终点仍解析不了（埋件/RO）
         return TopoutRoot(UNRESOLVED, None, matched_name=low,
-                          note="dft 改名指向源 %r，但源在 logic/mux/regmap 仍找不到（或为 RO）——需人工核对"
-                               % src_low)
-
+                          note="改名链 %s→…→%s 的终点在 logic/mux/regmap 仍找不到源（或为 RO）——需人工核对"
+                               % (name, cur))
     return TopoutRoot(UNRESOLVED, None, matched_name=low,
-                      note="Topout 名 %r 在 logic/mux/regmap/tmm/dft改名 都找不到源对象（需人工核对：可能埋件/真表⊋DUT）"
-                           % name)
+                      note="Topout 名 %r 在 logic/mux/regmap/tmm/改名(dft+level_shift) 都找不到源对象"
+                           "（需人工核对：可能埋件/真表⊋DUT）" % name)
 
 
 # ───────────────────────────── 单信号分析（建 cone + 真值表） ─────────────────────────────
@@ -314,7 +343,7 @@ def analyze_all(wb, resolver, mode="min", max_tests=256, exhaustive=False,
                 want_vectors=True):
     """对 wb.topout 全清单逐信号分析。返回 list[TopoutResult]（外层枚举源=Topout B 列）。"""
     logic_idx, mux_idx = build_index(wb)
-    rename = _dft_rename_map(wb)        # dft 改名表（一次建好，逐信号复用）
+    rename = _rename_map(wb)            # 合并改名表(dft+level_shift)，一次建好，逐信号复用
     out = []
     for topo in wb.topout:
         root = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
@@ -484,9 +513,15 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False)
     want = {t.name.lower() for t in wb.topout}
     owner_of = {t.name.lower(): t.owner for t in wb.topout}
     logic_idx, mux_idx = build_index(wb)
-    # dft 改名反查：源名 A_sm → 顶层 Topout 名 A（report 的表按源名 A_sm 产出，这里桥回 A，否则
-    # 改名信号的真值表会被当『不属 Topout』丢掉 → GUI/报告空表，违『绝不静默丢』）。
-    src_to_top = {src: top for top, src in _dft_rename_map(wb).items() if top in want}
+    # 改名反查：最终源名 → 顶层 Topout 名（report 的表按源名产出，这里桥回顶层名，否则改名信号的
+    # 真值表会被当『不属 Topout』丢掉 → GUI/报告空表，违『绝不静默丢』）。链式改名(ls→dft→logic)用
+    # resolve_root 求最终源名，覆盖多跳。
+    rename = _rename_map(wb)
+    src_to_top = {}
+    for t in wb.topout:
+        rt = resolve_root(wb, t.name, logic_idx, mux_idx, rename=rename)
+        if rt.renamed and rt.source_name:
+            src_to_top.setdefault(rt.source_name, t.name.lower())
 
     def _topout_name_of(signal):
         from .excel_model import _strip_width
