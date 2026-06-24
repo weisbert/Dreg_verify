@@ -182,10 +182,17 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
     if logic_idx is None or mux_idx is None:
         logic_idx, mux_idx = build_index(wb)
     low = str(name).strip().lower()
+    _gates = getattr(wb, "dft", None) or {}      # {dft 观测输出名: 门控}（带 iddq 门=非恒等观测）
     direct = _resolve_direct(wb, low, logic_idx, mux_idx)
     if direct is not None:
         if direct.kind == REGISTER:
-            direct.note = "直连寄存器(RW，%s)——dft 恒等观测把寄存器字段直接当顶层输出" % direct.note
+            # 同名【带门】dft 观测撞同名寄存器(d_bt_lp_pmu_test_en 类)：顶层=iddq?0:寄存器，不是裸寄存器透传。
+            # 记下门观测名(=本名)，analyze_signal 给寄存器透传也叠 iddq 门(否则漏 iddq=假绿，同 d_vco_en_faston)。
+            if low in _gates:
+                direct.dft_obs_name = low
+                direct.note = "直连寄存器(RW，%s)——dft 带 iddq 门观测(顶层=iddq?0:寄存器)" % direct.note
+            else:
+                direct.note = "直连寄存器(RW，%s)——dft 恒等观测把寄存器字段直接当顶层输出" % direct.note
         elif direct.kind == RO_READBACK:
             direct.note = "RO 回读(%s)——模拟/FSM 状态、非寄存器组合函数，无 cone，跳过+记账" % direct.note
         return direct
@@ -229,8 +236,11 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
             sub.probe_name = name
             sub.source_name = nxt
             sub.matched_name = low
-            sub.note = ("改名桥接：Topout 名 %s ← 源 %s（register 根，经 %d 跳改名）；逻辑/驱动来自源，"
-                        "断言探针贴顶层真名 %s" % (name, nxt, hops, name))
+            sub.dft_obs_name = dft_obs or (cur if gated_here else (nxt if nxt in dft_gates else None))
+            sub.note = ("改名桥接：Topout 名 %s ← 源 %s（register 根，经 %d 跳改名%s）；逻辑/驱动来自源，"
+                        "断言探针贴顶层真名 %s"
+                        % (name, nxt, hops,
+                           ("，含 dft 门 %s 作输入" % sub.dft_obs_name) if sub.dft_obs_name else "", name))
             return sub
         if gated_here:                   # 此跳解析不到但途经带门观测层 → 记下门，继续回溯
             dft_obs = cur
@@ -240,8 +250,11 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
         sub.probe_name = name
         sub.source_name = nxt
         sub.matched_name = low
-        sub.note = ("改名桥接：Topout 名 %s ← 源 %s（register 根，改名链上无 logic/mux 源）；"
-                    "逻辑/驱动来自源，断言探针贴顶层真名 %s" % (name, nxt, name))
+        sub.dft_obs_name = dft_obs or (nxt if nxt in dft_gates else None)
+        sub.note = ("改名桥接：Topout 名 %s ← 源 %s（register 根，改名链上无 logic/mux 源%s）；"
+                    "逻辑/驱动来自源，断言探针贴顶层真名 %s"
+                    % (name, nxt, ("，含 dft 门 %s 作输入" % sub.dft_obs_name) if sub.dft_obs_name else "",
+                       name))
         return sub
     if hops > 0:                             # 跟过改名但终点仍解析不了（埋件/RO）
         return TopoutRoot(UNRESOLVED, None, matched_name=low,
@@ -356,6 +369,15 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                 res.vectors, res.meta = V.generate_vectors(
                     res.node, res.bindings, eff_w, mode=mode, max_tests=max_tests,
                     exhaustive=exhaustive)
+                # 同名【带门】dft 观测撞同名寄存器(d_bt_lp_pmu_test_en 类)：顶层=iddq?0:寄存器，
+                # 给寄存器透传也叠 iddq 门(force 透传值)+DFT 拍——否则漏 iddq=假绿(同 d_vco_en_faston)。
+                obs = getattr(root, "dft_obs_name", None)
+                if obs:
+                    _ib = {b.base.lower()} if getattr(b, "base", None) else set()
+                    _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
+                    if _skip:
+                        res.meta["iddq_skipped"] = _skip
+                    G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
         except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛
             res.status = "error"
             res.issues.append("分析异常: %r" % ex)

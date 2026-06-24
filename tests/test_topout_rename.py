@@ -204,6 +204,50 @@ def test_collision_sv_asserts_top_name_one_bit_and_forces_iddq(collision_path):
     assert "iddq" in text.lower()                        # iddq 门被 force（与 for_test 金标准同口径）
 
 
+@pytest.fixture(scope="module")
+def gated_reg_path(tmp_path_factory):
+    """真表 d_bt_lp_pmu_test_en 实况(2026-06-24)：寄存器被 dft【同名带门】观测（无改名链节点）——
+    寄存器 d_pmu_test → dft 观测 d_pmu_test = iddq?0:d_pmu_test（同名、gated）→ 顶层。
+    resolve_root 直连命中寄存器即停，旧版漏掉 iddq 门（顶层实为 iddq?0:寄存器，非裸寄存器透传）。"""
+    from openpyxl.utils import column_index_from_string as ci
+    p = str(tmp_path_factory.mktemp("gr") / "gated_reg.xlsx")
+    make_mirror_btlp.build(p)
+    wb = openpyxl.load_workbook(p)
+    dft, rm, top = wb["dft"], wb["regmap"], wb["Topout"]
+    # regmap: RW 寄存器 d_pmu_test@0x32 bit12
+    r = rm.max_row + 1
+    for col, v in {"D": "PMU", "F": "RW", "G": "d_pmu_test", "H": "d50",
+                   "Z": "to_dft", "AB": 0, "AE": "Yao Wang"}.items():
+        rm.cell(r, ci(col), v)
+    rm.cell(r, ci("Y") - 12, 1)
+    # dft: 同名带门观测 d_pmu_test = B?0:A（A=自己 _to_dft、B=iddq）—— 同名故非改名、只 gated
+    r = dft.max_row + 1
+    for c, v in [(1, "d_pmu_test_to_dft"), (2, "d_bt_lp_pll_dig_dft_iddq_mode_to_dft"),
+                 (4, "d_pmu_test"), (5, "B?0:A"), (6, "16"), (8, "Yao Wang")]:
+        dft.cell(r, c, v)
+    r = top.max_row + 1
+    top.cell(r, 1, "Yao Wang"); top.cell(r, 2, "d_pmu_test")
+    wb.save(p)
+    return p
+
+
+def test_same_name_gated_register_applies_iddq(gated_reg_path):
+    """⭐同名带门寄存器(d_bt_lp_pmu_test_en 类)：判直连寄存器但叠 iddq 门(force 透传)，不漏门(假绿)。"""
+    from dreg_verify import resolver as R
+    wb = M.load_workbook(gated_reg_path)
+    root = T.resolve_root(wb, "d_pmu_test")
+    assert root.kind == T.REGISTER
+    assert root.dft_obs_name == "d_pmu_test"            # 寄存器根带上 dft 门观测名
+    topo = next(t for t in wb.topout if t.name == "d_pmu_test")
+    res = T.analyze_signal(wb, R.Resolver(wb), topo, mode="max", max_tests=16)
+    assert res.status == "ok"
+    forced = {wl.lower() for v in res.vectors
+              for (wl, _x, _w) in (getattr(v, "extra_forces", None) or [])}
+    assert any("iddq" in f for f in forced)             # iddq 门叠成 force（修前=漏）
+    text, _ = T.render_topout_sv(wb, mode="max", max_tests=16, only=["d_pmu_test"])
+    assert "`ENV_RF.d_pmu_test==" in text and "iddq" in text.lower()
+
+
 def test_topout_force_leaves_and_probe_take_prefix(collision_path):
     """⭐Topout 路径接前缀(2026-06-24)：force 叶子(RO fll_active + iddq 门)与顶层探针按 probe_prefixes
     加层级前缀，否则子模块里的网 force/assert `ENV_RF.<裸名> 会 CUVUNF。"""

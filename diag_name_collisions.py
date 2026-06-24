@@ -70,8 +70,10 @@ def main(path):
     dft_gated = set(getattr(wb, "dft", None) or {})   # 有 iddq 门(B?0:A)
     dft_computed = dft_renamed | dft_gated
     dft_identity = set(dft_outs) - dft_computed       # 恒等观测=合法直连寄存器
-    # 「计算输出」= 真正代表一个被算出来的值的名字（不是裸寄存器）：logic/mux/改名或带门 dft/level_shift
-    computed_out = set(logic_outs) | set(mux_outs) | dft_computed | set(ls_outs)
+    # 「计算输出」= 真正代表一个被【算出来】的值的名字：logic/mux/改名或带门 dft。
+    # ⚠ level_shift 是【透明缓冲】(STD_SR_L2H)、不算计算——故 ls_outs 不进 computed_out
+    # (否则 寄存器→dft恒等→level_shift 的合法直连寄存器被误报；2026-06-24 真表实证 15 个误报)。
+    computed_out = set(logic_outs) | set(mux_outs) | dft_computed
 
     def _where_out(b):
         return ", ".join("%s%s" % (pg, locs.get(b)) for pg, locs in out_pages.items() if b in locs)
@@ -97,18 +99,15 @@ def main(path):
     b_hits = [b for b in sorted(computed_out) if reg_type.get(b, ("", ""))[0] == "RO"]
     print("   " + (", ".join(b_hits) if b_hits else "（无）"))
 
-    # ── C：多页【计算输出】撞名（排除 dft 恒等观测——它本就是 logic/mux 输出的合法观测，非歧义）──
-    print("\n=== C. 多页计算输出撞名（≥2 页都当【计算】输出 → 根对象真歧义；已排除 dft 恒等观测）===")
-    comp_pages = {"logic": logic_outs, "mux": mux_outs,
-                  "dft(计算)": {b: dft_outs[b] for b in dft_computed if b in dft_outs},
-                  "level_shift": ls_outs}
-    multi = [b for b in sorted(all_out)
-             if sum(b in locs for locs in comp_pages.values()) >= 2]
-    if not multi:
-        print("   （无真歧义）")
-    for b in multi:
-        print("   %-44s %s" % (b, ", ".join("%s%s" % (pg, locs.get(b))
-                                             for pg, locs in comp_pages.items() if b in locs)))
+    # ── C：根对象真歧义 = 同名【既是 logic 行又是 mux 组】(两个互斥的真正根类型，必须二选一)。
+    # logic+dft / logic+level_shift 等是【同一信号的流水线层】(register→logic 算→dft 观测→ls 缓冲，同名贯穿)
+    # = 正常，不是歧义 → 不报（否则本表几乎每个信号都中、淹没真问题）。
+    print("\n=== C. 根对象真歧义（同名【既是 logic 行又是 mux 组】=两个互斥真根，必须二选一）===")
+    ambig = [b for b in sorted(set(logic_outs) & set(mux_outs))]
+    if not ambig:
+        print("   （无：没有同名同时当 logic 行和 mux 组）")
+    for b in ambig:
+        print("   %-44s logic%s + mux%s" % (b, logic_outs[b], mux_outs[b]))
 
     # ── D：build_index 影子（同候选名多个 logic/mux 源，setdefault 保首个）──
     print("\n=== D. build_index 影子（≥2 个 logic/mux 信号产生同候选名，后者被悄悄盖）===")
@@ -126,26 +125,31 @@ def main(path):
         print("   候选名 %-40s ← %s" % (nm, "; ".join("%s/%s(%s)" % (t, r, o) for t, r, o in v)))
 
     # ── 逐个 Topout 信号：解析结果 + 是否踩撞名（真问题检测）──
-    print("\n=== Topout 逐信号解析（⚠=判 register 但同名是【计算输出】=可能漏门/选路；★=判 logic/mux 但同名也撞，已正确）===")
+    # ⚠=判 register 但同名是计算输出【且没叠 iddq 门】=真漏门/选路；✓=判 register 同名带门 dft 但已叠
+    # iddq 门(dft_obs_name 已设=修后正确)；★=判 logic/mux 但同名也撞寄存器(已桥到计算源,正确)。
+    print("\n=== Topout 逐信号解析（⚠=真问题 / ✓=带门寄存器已叠 iddq / ★=已桥到计算源）===")
     logic_idx, mux_idx = T.build_index(wb)
     rename = T._rename_map(wb)
-    n_warn = n_star = 0
+    n_warn = n_ok = n_star = 0
     for topo in wb.topout:
         root = T.resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
         src = (root.source_name or root.matched_name or "").lower()
+        obs = getattr(root, "dft_obs_name", None)
         if root.kind == T.REGISTER and src in computed_out:
-            # 真问题：判直连寄存器，但同名是计算输出（带门 dft→漏 iddq / logic·mux→漏选路）
-            n_warn += 1
-            why = "带门 dft(漏 iddq!)" if src in dft_gated else (
-                  "改名 dft" if src in dft_renamed else "logic/mux 输出")
-            print("   ⚠ %-38s kind=register src=%-30s 同名是%s: %s"
-                  % (topo.name, src, why, _where_out(src)))
+            if obs:                          # 带门寄存器但已叠 iddq 门(修后) → 正确
+                n_ok += 1
+                print("   ✓ %-38s kind=register（同名带门 dft，已叠 iddq 门=%s，正确）" % (topo.name, obs))
+            else:                            # 真问题：判直连寄存器、同名是计算输出却没叠门/没桥
+                n_warn += 1
+                why = "带门 dft(漏 iddq!)" if src in dft_gated else (
+                      "改名 dft(应桥 logic)" if src in dft_renamed else "logic/mux 输出(应桥)")
+                print("   ⚠ %-38s kind=register src=%-30s 同名是%s: %s"
+                      % (topo.name, src, why, _where_out(src)))
         elif root.kind in (T.LOGIC, T.MUX) and src in reg_type:
             n_star += 1
-            print("   ★ %-38s kind=%-5s src=%-30s 同名也是 %s 寄存器(已正确桥到计算源)"
-                  % (topo.name, root.kind, src, reg_type[src][0]))
+    print("   小结：✓已叠门带门寄存器 %d | ★已桥计算源 %d | ⚠真残留问题 %d" % (n_ok, n_star, n_warn))
     if n_warn == 0:
-        print("   ✅ 没有『判 register 但同名是计算输出』的 Topout 信号 —— 撞名解析无残留真问题。")
+        print("   ✅ 无残留：所有撞名信号要么桥到计算源、要么带门寄存器已叠 iddq 门。")
     else:
         print("   （上面 %d 个 ⚠ 需逐个 diag_one_topout.py 核对，可能还有同类 bug）" % n_warn)
 
