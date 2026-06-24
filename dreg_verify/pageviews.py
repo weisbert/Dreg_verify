@@ -50,8 +50,12 @@ def page_available(wb, page):
 
 
 def _page_resolver(wb):
-    """页本地用的干净 resolver：级联=force(绝不 cone 上游)、不补尾缀(探页声明的网名)。"""
-    return R.Resolver(wb, cascade_mode="force", append_to_logic=False, append_to_mux=False)
+    """页本地用的干净 resolver：级联=force(绝不 cone 上游)。
+    尾缀沿用全局默认(append_to_logic=True / append_to_mux=False)=RTL 真名——与 Topout/排查(旧)
+    同口径，且【不擅自改 wb.logic 各信号的 _append_to_logic 共享态】(Resolver.__init__ 会回写它，
+    若这里强行设 False 会污染别的视图的 rtl_name，2026-06-24 实测撞了 append_to_logic 开关测试)。
+    页本地的『不跨页』靠 cascade_mode=force 实现，与输出尾缀无关。"""
+    return R.Resolver(wb, cascade_mode="force")
 
 
 # ───────────────────────────── 单行分析结果 ─────────────────────────────
@@ -215,3 +219,74 @@ def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False):
     return [result_to_model(r)
             for r in analyze_all(wb, page, mode=mode, max_tests=max_tests,
                                  exhaustive=exhaustive)]
+
+
+# ═══════════════ 页本地 .sv / 报告 / for_test 产出（复用 generator.build/report，force 级联=不跨页 cone）═══
+def _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides=None,
+                   signals=None, comments=False):
+    """构造页本地 GenOptions：force 级联(不跨页 cone) + include_risky + 编辑回流。"""
+    eo = edit_overrides or {}
+    return G.GenOptions(
+        mode=mode, max_tests=max_tests, exhaustive=exhaustive, include_risky=True,
+        comments=comments, gen_mux=(page == "mux"), signals=signals,
+        logic_cascade="force", mux_cascade="force",
+        vector_overrides=eo.get("vector_overrides") or None,
+        mux_user_vecs=eo.get("mux_user_vecs"), mux_expected=eo.get("mux_expected"),
+        mux_data=eo.get("mux_data"), mux_dropped=eo.get("mux_dropped"),
+        mux_cleared=eo.get("mux_cleared"))
+
+
+def _with_page_logic(wb, page):
+    """dft/iddq 页把合成行临时塞 wb.logic，让 build/report 当 logic 行扫；返回 (saved_logic, 还原函数)。"""
+    if page in ("dft", "iddq"):
+        saved = wb.logic
+        wb.logic = page_signals(wb, page)
+        return saved
+    return None
+
+
+def _page_signals_filter(wb, page, only):
+    """build/report 的 signals 过滤集（mux 页限定到 mux 名；only 勾选项再缩）。None=全选本页。"""
+    if only is not None:
+        return {str(n).lower() for n in only}
+    if page == "mux":
+        return {g.out_name.lower() for g in (wb.mux or [])}
+    return None        # logic/dft/iddq：本页全选（dft/iddq 已 swap 进 wb.logic）
+
+
+def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
+                  edit_overrides=None, only=None, comments=False):
+    """页本地 .sv：复用 generator.build（force 级联=不跨页 cone）。返回 (text, summary)。"""
+    saved = _with_page_logic(wb, page)
+    try:
+        opts = _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides,
+                              signals=_page_signals_filter(wb, page, only), comments=comments)
+        built = G.build(wb, opts)
+    finally:
+        if saved is not None:
+            wb.logic = saved
+    text = W.render_file(built["blocks"], comments=comments)
+    n_emit = sum(1 for _l, s in built["blocks"] if s.get("n_vectors", 0) > 0)
+    summary = {"n_total": len(built["blocks"]), "n_emitted": n_emit,
+               "n_vectors": sum(s.get("n_vectors", 0) for _l, s in built["blocks"]),
+               "n_accounted": len(built.get("skipped", [])) + len(built.get("errors", []))}
+    return text, {"summary": summary, "accounted": []}
+
+
+def page_report(wb, page, mode="min", max_tests=256, exhaustive=False):
+    """页本地报告（write_report 兼容：summary/detail/tables/verifiability）。"""
+    saved = _with_page_logic(wb, page)
+    try:
+        opts = _page_gen_opts(page, mode, max_tests, exhaustive,
+                              signals=_page_signals_filter(wb, page, None))
+        return G.report(wb, opts)
+    finally:
+        if saved is not None:
+            wb.logic = saved
+
+
+def page_fortest(wb, page, src_path, out_path, mode="min", max_tests=256, exhaustive=False):
+    """页本地 for_test 回填（含 mux 表）。"""
+    from . import fortest_writer
+    rep = page_report(wb, page, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    fortest_writer.write_fortest(src_path, out_path, rep, include_mux=True)

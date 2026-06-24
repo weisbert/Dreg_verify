@@ -65,12 +65,12 @@ def _topo_row(w, name):
 
 # ───────────── DoD 1：Topout 视图 = 默认门面 + 列出信号 + 分类 ─────────────
 def test_topout_is_default_main_tab(topo_win):
-    """外层两标签：tab0=Topout 视图(默认), tab1=排查(旧)；打开即停在 Topout。"""
+    """外层标签：Topout(默认) + logic/mux/dft/iddq 子视图 + 排查(旧)；打开即停在 Topout。"""
     w = topo_win
-    assert w.main_tabs.count() == 2
-    assert w.main_tabs.tabText(0) == "Topout 视图"
-    assert w.main_tabs.tabText(1) == "排查(旧)"
-    assert w.main_tabs.currentIndex() == 0
+    names = [w.main_tabs.tabText(i) for i in range(w.main_tabs.count())]
+    assert names == ["Topout 视图", "logic 视图", "mux 视图", "dft 视图", "iddq 视图", "排查(旧)"]
+    assert w.main_tabs.currentIndex() == 0           # 默认门面 = Topout
+    assert isinstance(w.page_views["logic"], type(w.topout_view))   # 子视图复用同一 SignalView
 
 
 def test_topout_lists_twelve_signals_with_classification(topo_win):

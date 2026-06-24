@@ -204,9 +204,9 @@ def _skipped_detail_text(skipped):
  COL_PREFIX, COL_EXPR) = range(10)
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 
-# ── Topout 主视图（2026-06-23 重构）清单表列 ──
-(TOPO_SEL, TOPO_NAME, TOPO_OWNER, TOPO_KIND, TOPO_STATUS, TOPO_NTEST) = range(6)
-TOPO_HEADERS = ["选", "Topout信号(B列)", "owner", "分类", "状态", "用例"]
+# ── 信号清单表列（Topout + 子视图共用，2026-06-24 把『负向』放到『选』旁边，醒目易点）──
+(TOPO_SEL, TOPO_NEG, TOPO_NAME, TOPO_OWNER, TOPO_KIND, TOPO_STATUS, TOPO_NTEST) = range(7)
+TOPO_HEADERS = ["选", "负向", "信号", "owner", "分类", "状态", "用例"]
 TOPO_KIND_LABEL = {"logic": "选路/logic", "mux": "mux", "register": "直连寄存器",
                    "ro-readback": "RO回读(跳过)", "unresolved": "未解析"}
 TOPO_STATUS_LABEL = {"ok": "✅ 可建", "skip": "↷ 跳过(RO)",
@@ -384,8 +384,7 @@ class _CheckableMenu(QtWidgets.QMenu):
 # provider 决定『要验什么信号、怎么分析(cone vs 页本地)、怎么出 .sv/报告』；视图层(交互/编辑)全共用。
 import re as _re
 
-TOPO_NEG = 6                                  # 清单表新增『负向』列(0-5 与旧 TOPO_* 一致，测试不破)
-SV_HEADERS = TOPO_HEADERS + ["负向"]
+SV_HEADERS = TOPO_HEADERS                      # 7 列：选/负向/信号/owner/分类/状态/用例
 SV_KIND_LABEL = dict(TOPO_KIND_LABEL)         # Topout 5 分类；子视图补 logic/mux 直观标签
 SV_KIND_LABEL.setdefault("logic", "logic")    # 子视图里 kind=logic/mux 直接显原词（Topout 用『选路/logic』）
 
@@ -465,6 +464,7 @@ class _TopoutProvider:
     """Topout 视图数据源：cone 展到源寄存器、断言贴顶层真名。"""
     has_chain = True
     view_id = "topout"
+    kind_label = TOPO_KIND_LABEL
 
     def __init__(self, main):
         self.main = main
@@ -541,6 +541,87 @@ def _topout_edit_overrides(edited):
             "mux_dropped": mux_drop or None, "mux_cleared": mux_cleared or None}
 
 
+def _page_edit_overrides(edited):
+    """SignalView 收集的逐信号编辑 → pageviews build/report 的 edit_overrides（页本地无 register 根）。"""
+    vov, mux_user, mux_exp, mux_drop, mux_cleared = {}, {}, {}, {}, []
+    for ed in (edited or {}).values():
+        if ed["kind"] == "logic":
+            vov[ed["src_out_name"].lower()] = ed["vectors"]
+        elif ed["kind"] == "mux":
+            src = ed["src_out_name"].lower()
+            mx = ed.get("mux") or {}
+            if mx.get("cleared"):
+                mux_cleared.append(src)
+            if mx.get("dropped"):
+                mux_drop[src] = list(mx["dropped"])
+            if mx.get("expected"):
+                mux_exp[src] = dict(mx["expected"])
+            if mx.get("user_vecs"):
+                mux_user[src] = list(mx["user_vecs"])
+    return {"vector_overrides": vov or None, "mux_user_vecs": mux_user or None,
+            "mux_expected": mux_exp or None, "mux_dropped": mux_drop or None,
+            "mux_cleared": mux_cleared or None}
+
+
+class _PageProvider:
+    """子视图（logic/mux/dft/iddq）数据源：页本地、不跨页 cone（force 级联），看本模块输入输出。"""
+    has_chain = True              # 单级 logic 仍显示『原式 / 字母代入真名』(非 cone)；mux 显示 case 结构
+    kind_label = {"logic": "logic", "mux": "mux"}
+
+    def __init__(self, main, page):
+        self.main = main
+        self.page = page
+        self.view_id = page
+
+    @property
+    def wb(self):
+        return self.main.wb
+
+    def title(self):
+        from . import pageviews as P
+        return "%s —— %s" % (P.PAGE_LABEL.get(self.page, self.page),
+                             P.PAGE_DESC.get(self.page, ""))
+
+    def empty_hint(self):
+        from . import pageviews as P
+        return ("⚠ 当前 Excel 的 %s 页没有可显示的行（空页/无此页）。"
+                % P.PAGE_LABEL.get(self.page, self.page))
+
+    def has_page(self):
+        from . import pageviews as P
+        return P.page_available(self.wb, self.page)
+
+    def view_models(self, mode, max_tests, exhaustive):
+        from . import pageviews as P
+        return P.page_view_models(self.wb, self.page, mode=mode, max_tests=max_tests,
+                                  exhaustive=exhaustive)
+
+    def analyze(self, name, mode, max_tests, exhaustive):
+        from . import pageviews as P
+        sig = next((s for s in P.page_signals(self.wb, self.page) if s.out_name == name), None)
+        if sig is None:
+            return None
+        res = P.analyze_page_signal(self.wb, P._page_resolver(self.wb), sig, self.page,
+                                    mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+        return _norm_page_result(res)
+
+    def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True):
+        from . import pageviews as P
+        return P.build_page_sv(self.wb, self.page, mode=mode, max_tests=max_tests,
+                               exhaustive=exhaustive, edit_overrides=_page_edit_overrides(edited),
+                               only=only, comments=comments)
+
+    def render_report(self, mode, max_tests, exhaustive):
+        from . import pageviews as P
+        return P.page_report(self.wb, self.page, mode=mode, max_tests=max_tests,
+                             exhaustive=exhaustive)
+
+    def fortest(self, src, out, mode, max_tests, exhaustive):
+        from . import pageviews as P
+        P.page_fortest(self.wb, self.page, src, out, mode=mode, max_tests=max_tests,
+                       exhaustive=exhaustive)
+
+
 class SignalView(QtWidgets.QWidget):
     """一个可复用的『信号清单 + 可编辑真值表 + 展开链 + .sv/报告导出 + 覆盖度』视图。
     Topout 视图与 logic/mux/dft/iddq 子视图都用它，差异全在 provider。"""
@@ -551,6 +632,7 @@ class SignalView(QtWidgets.QWidget):
         self.provider = provider
         self.view_id = provider.view_id
         self.has_chain = provider.has_chain
+        self._kind_label = getattr(provider, "kind_label", SV_KIND_LABEL)
         self.models = []
         self.built_key = None
         self._owner_filter = set()
@@ -952,7 +1034,7 @@ class SignalView(QtWidgets.QWidget):
         m = next((x for x in self.models if x["name"].lower() == self.cur_name), {})
         head = ("<b>%s</b> &nbsp; owner=%s &nbsp; 分类=%s &nbsp; 状态=%s &nbsp; 用例=%d"
                 % (esc(an["name"]), esc((m.get("owner") or "—")),
-                   SV_KIND_LABEL.get(an["kind"], an["kind"]),
+                   self._kind_label.get(an["kind"], an["kind"]),
                    TOPO_STATUS_LABEL.get(an["status"], an["status"]),
                    len(self.cur_cols or [])))
         if self.cur_name in self.edits:
@@ -1559,6 +1641,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.main_tabs = QtWidgets.QTabWidget()
         root.addWidget(self.main_tabs, 1)
         self.main_tabs.addTab(self._build_topout_tab(), "Topout 视图")
+        # 子视图（2026-06-24）：logic/mux/dft/iddq —— 各页本地（不跨页 cone，只看本模块输入输出），
+        # 复用同一 SignalView。Topout 上位、子视图次位、『排查(旧)』退末位（前缀/后缀/级联那套住那）。
+        from . import pageviews as _PV
+        self.page_views = {}
+        for _pg in _PV.PAGES:
+            v = SignalView(self, _PageProvider(self, _pg))
+            self.page_views[_pg] = v
+            self.main_tabs.addTab(v, _PV.PAGE_LABEL.get(_pg, _pg))
         legacy = QtWidgets.QWidget()
         legacy_lay = QtWidgets.QVBoxLayout(legacy)
         legacy_lay.setContentsMargins(0, 0, 0, 0)
@@ -1857,12 +1947,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("请选择并加载 Excel。")
 
     def _on_main_tab_changed(self, idx):
-        if idx != 0 or not getattr(self, "wb", None) or not getattr(self.wb, "topout", None):
+        """切到某个 SignalView 视图（Topout/子视图）时，若覆盖度/上限变过 → 重建清单
+        （否则『用例』列陈旧、与导出向量数不符）。带参数指纹只在真变了才重算。"""
+        if not getattr(self, "wb", None):
             return
-        mode, exh = self._topo_mode()
-        key = (mode, exh, self._topo_maxt())
-        if key != getattr(self, "_topo_built_key", None):
-            self._refresh_topout()
+        w = self.main_tabs.widget(idx)
+        if isinstance(w, SignalView):
+            mode, exh = w._mode()
+            if (mode, exh, w._maxt()) != getattr(w, "built_key", None):
+                w.refresh()
 
     # ═══════════════ Topout 主视图（2026-06-24：改用可复用 SignalView，编辑/筛选/链全到位）═══════════════
     def _build_topout_tab(self):
@@ -2579,8 +2672,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if n_restored:
             msg += "；已恢复 %d 个信号的测试项编辑(含手填期望)" % n_restored
         _save_last_excel(path)         # 记住这次的文件，下次启动自动加载
-        # ⭐Topout 主视图：载表后刷新要验信号清单（无 Topout 页时优雅提示，不崩；护栏3）
+        # ⭐Topout 主视图 + 子视图（logic/mux/dft/iddq）：载表后各自刷新清单
+        # （无对应页时优雅提示，不崩；护栏3）
         self._refresh_topout()
+        for v in getattr(self, "page_views", {}).values():
+            v.refresh()
         if getattr(self.wb, "topout", None):
             msg += "；Topout 要验信号 %d 个" % len(self.wb.topout)
         self.status.showMessage(msg)
