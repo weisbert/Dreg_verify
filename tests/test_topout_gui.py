@@ -415,13 +415,76 @@ def test_select_error_mux_does_not_crash(topo_win, monkeypatch):
     assert not v._edit_btns["加列"].isEnabled()    # 非 ok → 编辑按钮禁用
 
 
-def test_edits_cleared_on_reload(topo_win):
-    """换表（重新 on_load）→ 清空逐信号编辑（否则按同名 key 串进新表导出，写错断言；MAJOR 修复）。"""
-    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
-    v._e_clear()
-    assert v.edits                                # 有编辑
-    topo_win.on_load()                            # 重新载同表
-    assert topo_win.topout_view.edits == {}       # 编辑已清
+def test_view_edits_persist_on_reload_and_keyed_by_table(topo_win, tmp_path):
+    """⭐持久化(2026-06-24, #2)：designer 手填期望/编辑【关 GUI/换表不丢】，且按 Excel 路径分桶——
+    重载【同表】→ 恢复(含手填期望)；载【另一张表】→ 不串进来(anti-contamination 仍成立)。
+    取代旧 test_edits_cleared_on_reload：旧行为=重载即清空；新行为=同表恢复、异表隔离(更强)。"""
+    w = topo_win
+    v = _sel(w, "d_logic_bt_lp_rx_en")
+    v.cur_cols[0]["exp"] = 5                       # designer 手填一个期望值（劳动成果）
+    v._commit()
+    assert w.topout_view.edits.get("d_logic_bt_lp_rx_en")
+    # 重载同表 → 编辑（含手填期望）被恢复
+    w.on_load()
+    ed = w.topout_view.edits.get("d_logic_bt_lp_rx_en")
+    assert ed and ed["cols"][0]["exp"] == 5
+    # 载另一张表（不同路径，内容相同）→ 该表自己的桶为空 → 不继承上一张表的编辑
+    other = tmp_path / "mirror2.xlsx"
+    make_mirror_btlp.build(str(other))
+    w.path_edit.setText(str(other))
+    w.on_load()
+    assert w.topout_view.edits == {}              # 按路径分桶：异表不串编辑
+
+
+def test_topout_designer_expected_survives_config_export_import(topo_win, tmp_path, monkeypatch):
+    """⭐#1a/#2：Topout 视图 designer 手填期望随【完整配置】导出→导入跨会话/机器迁移（旧版只导 legacy 门面，
+    Topout edits 进不了配置）。"""
+    import json
+    from PySide6 import QtWidgets
+    w = topo_win
+    v = _sel(w, "d_logic_bt_lp_rx_en")
+    v.cur_cols[0]["exp"] = 6
+    v._commit()
+    cfg = w._collect_config()
+    assert cfg["view_edits"]["topout"]["d_logic_bt_lp_rx_en"]["cols"][0]["exp"] == 6
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    v._e_regen()                                  # 丢弃当前编辑（模拟新会话/换机器）
+    assert "d_logic_bt_lp_rx_en" not in w.topout_view.edits
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(cfg_path), "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    w.on_import_edits()
+    ed = w.topout_view.edits.get("d_logic_bt_lp_rx_en")
+    assert ed and ed["cols"][0]["exp"] == 6       # 手填期望随配置恢复进 Topout
+
+
+def test_topout_signal_checks_persist_on_reload(topo_win):
+    """⭐N1：Topout 信号勾选(纳入导出集)关 GUI/换表不丢——取消勾选某信号 → 重载同表仍取消。"""
+    from PySide6 import QtCore
+    from dreg_verify import gui as G
+    w = topo_win
+    r = _topo_row(w, "d_logic_bt_lp_rx_en")
+    w.topo_table.item(r, G.TOPO_SEL).setCheckState(QtCore.Qt.Unchecked)
+    assert "d_logic_bt_lp_rx_en" not in [n.lower() for n in w.topout_view._checked_names()]
+    w.on_load()
+    r2 = _topo_row(w, "d_logic_bt_lp_rx_en")
+    assert w.topo_table.item(r2, G.TOPO_SEL).checkState() == QtCore.Qt.Unchecked
+
+
+def test_topout_mux_edit_persists_on_reload(topo_win):
+    """⭐#2 mux 路：mux 根的编辑(加负向列)也按 assignments 重建 vec 持久化、换表恢复（最难的一路）。"""
+    w = topo_win
+    v = _sel(w, "d_bt_lp_lna_itrim")              # mux 根
+    if v.cur_an is None or v.cur_an["editable"] != "mux":
+        pytest.skip("夹具里该信号非 mux 根")
+    n0 = len(v.cur_cols)
+    v.truth.setCurrentCell(0, 0)
+    v._e_addneg()
+    assert len(v.cur_cols) == n0 + 1 and w.topout_view.edits.get("d_bt_lp_lna_itrim")
+    w.on_load()
+    ed = w.topout_view.edits.get("d_bt_lp_lna_itrim")
+    assert ed and len(ed["cols"]) == n0 + 1 and any(c["neg"] for c in ed["cols"])
 
 
 def test_negative_with_expected_eq_auto_stays_negative(topo_win):

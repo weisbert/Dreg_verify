@@ -981,18 +981,32 @@ class SignalView(QtWidgets.QWidget):
     # ───────────── 选择 / 勾选 ─────────────
     def _check_all(self, on):
         st = QtCore.Qt.Checked if on else QtCore.Qt.Unchecked
-        for r in range(self.sig_table.rowCount()):
-            if self.sig_table.isRowHidden(r):
-                continue
-            it = self.sig_table.item(r, TOPO_SEL)
-            if it:
-                it.setCheckState(st)
+        prev = getattr(self.main, "_persist_suspended", False)
+        self.main._persist_suspended = True          # 全选/清空：挂起逐格存盘，末尾统一存一次
+        try:
+            for r in range(self.sig_table.rowCount()):
+                if self.sig_table.isRowHidden(r):
+                    continue
+                it = self.sig_table.item(r, TOPO_SEL)
+                if it:
+                    it.setCheckState(st)
+        finally:
+            self.main._persist_suspended = prev
+        if not prev:
+            self._persist()
 
     def _check_selected(self):
-        for idx in self.sig_table.selectionModel().selectedRows():
-            it = self.sig_table.item(idx.row(), TOPO_SEL)
-            if it:
-                it.setCheckState(QtCore.Qt.Checked)
+        prev = getattr(self.main, "_persist_suspended", False)
+        self.main._persist_suspended = True
+        try:
+            for idx in self.sig_table.selectionModel().selectedRows():
+                it = self.sig_table.item(idx.row(), TOPO_SEL)
+                if it:
+                    it.setCheckState(QtCore.Qt.Checked)
+        finally:
+            self.main._persist_suspended = prev
+        if not prev:
+            self._persist()
 
     def _checked_names(self):
         names = []
@@ -1206,8 +1220,10 @@ class SignalView(QtWidgets.QWidget):
             self._populate_truth()
 
     def _recompute_col(self, col):
-        an = self.cur_an
-        if an["editable"] != "logic":
+        self._recompute_col_an(self.cur_an, col)
+
+    def _recompute_col_an(self, an, col):
+        if an is None or an["editable"] != "logic":
             return
         vec = V.make_vector_from_base_values(an["node"], an["bindings"], an["groups"],
                                              col["vals"], an["out_width"])
@@ -1228,6 +1244,7 @@ class SignalView(QtWidgets.QWidget):
         self._refresh_row_counts()
         self._render_head(self.cur_an)
         self._update_cov_hint()
+        self._persist()                      # 编辑(含手填期望)即时存盘，关 GUI/换表不丢
 
     def _refresh_row_counts(self):
         for r, m in enumerate(self.models):
@@ -1253,6 +1270,7 @@ class SignalView(QtWidgets.QWidget):
         self._render_head(self.cur_an)
         self._update_cov_hint()
         self._populate_truth()
+        self._persist()                      # 丢弃自定义也要落盘（否则下次又恢复旧自定义）
 
     def _new_col_name(self):
         n = 0
@@ -1377,7 +1395,13 @@ class SignalView(QtWidgets.QWidget):
         return bool(ed and any(c["neg"] for c in ed["cols"]))
 
     def _on_sig_item_changed(self, item):
-        if self._loading or item.column() != TOPO_NEG:
+        if self._loading:
+            return
+        col = item.column()
+        if col == TOPO_SEL:                  # 信号勾选(纳入导出集) 也即时存盘 + 启动恢复(N1)
+            self._persist()
+            return
+        if col != TOPO_NEG:
             return
         r = item.row()
         if r >= len(self.models):
@@ -1418,16 +1442,22 @@ class SignalView(QtWidgets.QWidget):
         if name_low == self.cur_name:
             self.cur_cols = cols
             self._populate_truth(); self._render_head(an); self._update_cov_hint()
+        self._persist()                      # 负向勾选是用户选择，必须存盘
 
     def _bulk_neg(self, want):
         targets = self._checked_names()
         if not targets:
             targets = [m["name"] for r, m in enumerate(self.models)
                        if not self.sig_table.isRowHidden(r)]
-        for name in targets:
-            m = next((x for x in self.models if x["name"] == name), None)
-            if m and m["kind"] in ("logic", "register", "mux"):
-                self._toggle_signal_negative(name, want)
+        prev = getattr(self.main, "_persist_suspended", False)
+        self.main._persist_suspended = True          # 批量加/清负向：挂起逐信号存盘，末尾统一存一次
+        try:
+            for name in targets:
+                m = next((x for x in self.models if x["name"] == name), None)
+                if m and m["kind"] in ("logic", "register", "mux"):
+                    self._toggle_signal_negative(name, want)
+        finally:
+            self.main._persist_suspended = prev
         self._loading = True
         for r, m in enumerate(self.models):
             neg = self.sig_table.item(r, TOPO_NEG)
@@ -1435,6 +1465,8 @@ class SignalView(QtWidgets.QWidget):
                 neg.setCheckState(QtCore.Qt.Checked if self._has_negatives(m["name"])
                                  else QtCore.Qt.Unchecked)
         self._loading = False
+        if not prev:
+            self._persist()
 
     # ───────────── 编辑回流 → 导出 ─────────────
     def _compute_edited(self):
@@ -1495,6 +1527,132 @@ class SignalView(QtWidgets.QWidget):
                     expected[key] = c["exp"]
         return {"cleared": len(cols) == 0, "dropped": list(auto_keys - cur_auto_keys),
                 "expected": expected, "user_vecs": user_vecs}
+
+    # ───────────── 逐信号编辑 + 勾选 的持久化（接进 MainWindow 现有 EDITS_PATH/配置框架，2026-06-24）─────────────
+    # SignalView.edits（手填期望/增删改测试列）此前【从不存盘、换表即 clear】=designer 默认进 Topout
+    # 视图的劳动成果关 GUI 即丢。下面按 view_id 存一个子桶：序列化只留可重算/用户意图字段(vals/exp/
+    # neg/name/user，auto 作兜底)；恢复时按当前表/覆盖度重析（logic 重算 auto 防改表后陈旧假绿；mux 据
+    # assignments 重建 vec）。信号找不到/不可编辑 → 优雅跳过，绝不崩（护栏3）。
+    def _serialize_view_edits(self):
+        out = {}
+        for name_low, ed in (self.edits or {}).items():
+            cols = []
+            for c in (ed.get("cols") or []):
+                vec = c.get("vec")
+                cols.append({
+                    "name": c.get("name"), "neg": bool(c.get("neg")),
+                    "vals": {str(k): int(v) for k, v in (c.get("vals") or {}).items()},
+                    "exp": None if c.get("exp") is None else int(c["exp"]),
+                    "auto": int(c.get("auto") or 0), "auto_w": int(c.get("auto_w") or 1),
+                    "user": bool(c.get("user")),
+                    "case_index": (int(vec.case_index) if vec is not None
+                                   and getattr(vec, "case_index", None) is not None else None),
+                })
+            out[name_low] = {"kind": ed["kind"], "src_out_name": ed["src_out_name"],
+                             "name": ed["name"], "renamed": bool(ed.get("renamed")), "cols": cols}
+        return out
+
+    def _restore_cols(self, an, specs):
+        cols, ow = [], (an.get("out_width") or 1)
+        for cs in (specs or []):
+            if not isinstance(cs, dict):
+                continue
+            try:
+                vals = {str(k): int(v) for k, v in (cs.get("vals") or {}).items()}
+            except (ValueError, TypeError):
+                continue
+            exp = cs.get("exp")
+            col = {"name": cs.get("name") or "T", "neg": bool(cs.get("neg")), "vals": vals,
+                   "exp": None if exp is None else int(exp),
+                   "auto": int(cs.get("auto") or 0), "auto_w": int(cs.get("auto_w") or ow),
+                   "user": bool(cs.get("user")), "vec": None}
+            if an["editable"] == "logic":
+                self._recompute_col_an(an, col)              # 权威重算 auto（改表后不陈旧）
+            elif an["editable"] == "mux":
+                ci = cs.get("case_index")
+                col["vec"] = V.TestVector(0, dict(vals), col["auto"], col["auto_w"],
+                                          is_negative=bool(col["neg"]),
+                                          name=(col["name"] if col["user"] else None),
+                                          case_index=None if ci is None else int(ci))
+            cols.append(col)
+        return cols
+
+    def _restore_view_edits(self, view_bucket):
+        """把序列化的本视图编辑还原进 self.edits（须在 refresh() 之后调，self.models 已建）。
+        信号在当前表/覆盖度下找不到或不可编辑 → 跳过（不崩）。返回恢复个数。"""
+        self.edits = {}
+        if not isinstance(view_bucket, dict) or not self.models:
+            return 0
+        mode, exh = self._mode()
+        maxt = self._maxt()
+        real_of = {m["name"].lower(): m["name"] for m in self.models}
+        n = 0
+        for name_low, ev in view_bucket.items():
+            real = real_of.get(str(name_low).lower())
+            if real is None or not isinstance(ev, dict):
+                continue
+            try:
+                an = self.provider.analyze(real, mode, maxt, exh)
+            except Exception:   # noqa: BLE001 —— 护栏3
+                an = None
+            if an is None or not an.get("editable"):
+                continue
+            self.edits[real.lower()] = {
+                "kind": an["kind"], "src_out_name": an["src_out_name"], "name": an["name"],
+                "cols": self._restore_cols(an, ev.get("cols")), "an": an,
+                "renamed": an.get("renamed", False)}
+            n += 1
+        if n:
+            self._after_restore_render()
+        return n
+
+    def _after_restore_render(self):
+        """恢复 self.edits 后：刷新清单『用例/负向』列 + 重载当前信号的真值表。"""
+        self._loading = True
+        for r, m in enumerate(self.models):
+            ed = self.edits.get(m["name"].lower())
+            nt = self.sig_table.item(r, TOPO_NTEST)
+            if ed is not None and nt is not None:
+                nt.setText(str(len(ed["cols"])))
+            neg = self.sig_table.item(r, TOPO_NEG)
+            if neg is not None and (neg.flags() & QtCore.Qt.ItemIsUserCheckable):
+                neg.setCheckState(QtCore.Qt.Checked if self._has_negatives(m["name"])
+                                  else QtCore.Qt.Unchecked)
+        self._loading = False
+        if self.cur_name:
+            real = next((m["name"] for m in self.models
+                         if m["name"].lower() == self.cur_name), None)
+            if real is not None:
+                self._load_signal(real)
+
+    def _collect_view_checks(self):
+        """本视图勾选名（仅当用户取消过部分勾选才返回，全勾=默认=返回 None，保持默认不写桶）。"""
+        names = self._checked_names()
+        if not self.models or len(names) >= len(self.models):
+            return None
+        return names
+
+    def _apply_view_checks(self, names):
+        """按名恢复勾选（列出的勾、其余清）；None=不动（默认全勾，向后兼容旧桶）。"""
+        if names is None:
+            return
+        want = {str(n).lower() for n in names}
+        self._loading = True
+        try:
+            for r, m in enumerate(self.models):
+                it = self.sig_table.item(r, TOPO_SEL)
+                if it is not None:
+                    it.setCheckState(QtCore.Qt.Checked if m["name"].lower() in want
+                                     else QtCore.Qt.Unchecked)
+        finally:
+            self._loading = False
+
+    def _persist(self):
+        """编辑/勾选即时存盘——委托 MainWindow 现有持久化（含 _persist_suspended 批量挂起）。"""
+        try:
+            self.main._persist_edits()
+        except Exception:   # noqa: BLE001
+            pass
 
     # ───────────── 导出按钮 ─────────────
     def _guard(self):
@@ -2728,16 +2886,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if n_restored:
             msg += "；已恢复 %d 个信号的测试项编辑(含手填期望)" % n_restored
         _save_last_excel(path)         # 记住这次的文件，下次启动自动加载
-        # ⭐换表先清空各 SignalView 的逐信号编辑（否则上一张表的编辑会按同名 key 串进新表导出，
-        #   静默写错断言——MainWindow._edited 早已在上面清过，这两个桶也必须清，2026-06-24 对抗 review）。
-        self.topout_view.edits.clear()
-        for v in getattr(self, "page_views", {}).values():
-            v.edits.clear()
-        # ⭐Topout 主视图 + 子视图（logic/mux/dft/iddq）：载表后各自刷新清单
-        # （无对应页时优雅提示，不崩；护栏3）
-        self._refresh_topout()
-        for v in getattr(self, "page_views", {}).values():
-            v.refresh()
+        # ⭐换表：先清空各 SignalView 编辑（否则上一张表的编辑会按同名 key 串进新表导出，静默写错断言），
+        #   刷新清单，再按本表上次存盘的 view_edits/view_checks 还原（designer 手填期望/勾选关 GUI/换表不丢）。
+        #   无对应页时优雅提示、找不到的信号跳过，不崩（护栏3）。
+        self._restore_views_from_bucket(_load_edits_file().get(path))
         if getattr(self.wb, "topout", None):
             msg += "；Topout 要验信号 %d 个" % len(self.wb.topout)
         self.status.showMessage(msg)
@@ -4317,11 +4469,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         allbuckets = _load_edits_file()
         checked = self._collect_checked()    # 信号勾选(哪些输出参与生成)——第二十六轮起也存盘+启动恢复
+        # SignalView（Topout + 子视图）的逐信号编辑/勾选——按 view_id 子桶，仅非空时写（旧桶逐字节不变）。
+        view_edits = self._collect_view_edits()
+        view_checks = self._collect_view_checks()
         # 单点覆盖度【不进桶】——它是会话内临时档，存盘会被静默恢复、暗中盖过全局下拉(用户实测 bug)。
         has_edits = bool(self._edited or self._mux_expected or self._mux_neg or self._mux_data
-                         or self._mux_dropped or self._mux_cleared or self._mux_user_vecs)
+                         or self._mux_dropped or self._mux_cleared or self._mux_user_vecs
+                         or view_edits or view_checks)
         if has_edits or checked:
-            allbuckets[path] = {
+            bucket = {
                 "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
                 "neg_only": dict(self._neg_only),
                 # mux 手填期望：{信号名: {输入取值键: int}}（mux 不走 rows 编辑模型，单独一段）
@@ -4339,6 +4495,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 # 信号勾选：原样信号名(保留大小写，恢复时按小写匹配)
                 "signals_checked": checked,
             }
+            # SignalView 子桶：仅非空时挂上去（无 Topout 编辑/勾选 → 旧桶逐字节不变）
+            if view_edits:
+                bucket["view_edits"] = view_edits
+            if view_checks:
+                bucket["view_checks"] = view_checks
+            allbuckets[path] = bucket
         else:
             allbuckets.pop(path, None)        # 啥都没有 → 桶也删掉
         _save_edits_file(allbuckets)
@@ -4463,6 +4625,53 @@ class MainWindow(QtWidgets.QMainWindow):
         # 单点覆盖度【不恢复】——会话内临时档，旧桶里残留的 sig_cov 一律忽略(见 _persist_edits 注释)。
         return n_restored, missing
 
+    # ───────────── SignalView（Topout + 子视图）编辑/勾选 的跨视图聚合 + 还原（2026-06-24）─────────────
+    def _all_signal_views(self):
+        """所有 SignalView：{view_id: view}（Topout 主视图 + logic/mux/dft/iddq 子视图）。"""
+        out = {}
+        if getattr(self, "topout_view", None) is not None:
+            out[self.topout_view.view_id] = self.topout_view
+        for v in getattr(self, "page_views", {}).values():
+            out[v.view_id] = v
+        return out
+
+    def _collect_view_edits(self):
+        """各 SignalView 的逐信号编辑（手填期望/增删改列）→ {view_id: 序列化}（仅非空视图）。"""
+        out = {}
+        for vid, v in self._all_signal_views().items():
+            ser = v._serialize_view_edits()
+            if ser:
+                out[vid] = ser
+        return out
+
+    def _collect_view_checks(self):
+        """各 SignalView 的信号勾选 → {view_id: [名]}（仅取消过部分勾选的视图；全勾=默认=不写）。"""
+        out = {}
+        for vid, v in self._all_signal_views().items():
+            ch = v._collect_view_checks()
+            if ch is not None:
+                out[vid] = ch
+        return out
+
+    def _restore_views_from_bucket(self, bucket):
+        """换表/导入后：清空各 SignalView 编辑 → 刷新清单 → 按 view_id 子桶还原本视图编辑+勾选。
+        bucket 缺 view_edits/view_checks（旧桶）→ 视图保持默认（全勾、无自定义），向后兼容。"""
+        ve = (bucket or {}).get("view_edits") or {}
+        vc = (bucket or {}).get("view_checks") or {}
+        if getattr(self, "topout_view", None) is not None:
+            self.topout_view.edits.clear()
+        for v in getattr(self, "page_views", {}).values():
+            v.edits.clear()
+        self._refresh_topout()
+        if getattr(self, "topout_view", None) is not None:
+            vid = self.topout_view.view_id
+            self.topout_view._restore_view_edits(ve.get(vid))
+            self.topout_view._apply_view_checks(vc.get(vid))
+        for v in getattr(self, "page_views", {}).values():
+            v.refresh()
+            v._restore_view_edits(ve.get(v.view_id))
+            v._apply_view_checks(vc.get(v.view_id))
+
     def _collect_config(self):
         """收集【完整配置】(第二十六轮，用户拍板「不只mux，logic/勾选/全局/测试编辑等所有配置一键带走」)：
         信号勾选 + 全局工具栏设置 + 探针前缀 + 强制force + 全部 per-signal 测试编辑(含 mux 删除/清空)。
@@ -4497,6 +4706,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "mux_cleared": sorted(self._mux_cleared),
             "mux_user_vecs": {name: _serialize_mux_vecs(vv)
                               for name, vv in self._mux_user_vecs.items() if vv},
+            # SignalView（Topout + 子视图）逐信号编辑/勾选——让 Topout 视图的手填期望随配置跨机器迁移
+            "view_edits": self._collect_view_edits(),
+            "view_checks": self._collect_view_checks(),
         }
 
     def _apply_global_settings(self, g):
@@ -4654,6 +4866,9 @@ class MainWindow(QtWidgets.QMainWindow):
         n_restored, missing = self._apply_edits_bucket(payload)
         self._sync_neg_checks_from_edits()
         if is_full:
+            # 先刷 Topout/子视图(它们的 provider 用默认 resolver，会把 sig._append_to_logic 等共享标志
+            # 盖回默认)；再 _reanalyze_all 用 legacy 全局设置【最后】权威重析全表 → legacy 名不被盖。
+            self._restore_views_from_bucket(payload)    # SignalView(Topout+子视图)编辑/勾选随配置一并恢复
             self._reanalyze_all()                  # 重析全表(用新探针/force/级联) + 重建左表 + 刷新 logic 编辑器
             if getattr(self, "_ti_mux_sig", None) is not None:   # mux 编辑器也刷新(自审 Finding 3，_reanalyze_all 只管 logic)
                 self._load_mux_test_items(self._ti_mux_sig)
