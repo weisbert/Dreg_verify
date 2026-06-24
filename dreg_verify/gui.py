@@ -22,6 +22,7 @@ gui.py — Dreg_verify 的 PySide6 图形界面（含 debug 辅助 + 测试项�
 运行: python -m dreg_verify.gui
 """
 
+import contextlib
 import json
 import os
 import sys
@@ -474,6 +475,7 @@ class _TopoutProvider:
     view_id = "topout"
     kind_label = TOPO_KIND_LABEL
     supports_sig_cov = True            # N3：Topout 视图支持单点覆盖度（子视图暂不放）
+    supports_logic_overrides = True    # N4：Topout 视图支持 RTL 补充逻辑（cone 看得到补充信号）
 
     def __init__(self, main):
         self.main = main
@@ -487,6 +489,23 @@ class _TopoutProvider:
         Topout 顶层探针展到底后多无需前缀，但 cone 叶子的 RO readback / iddq 门若埋子模块仍要前缀。"""
         return getattr(self.main, "_probe_prefixes", None) or None
 
+    @contextlib.contextmanager
+    def _supplemented(self):
+        """N4：临时把 wb.logic 换成应用了 RTL 补充逻辑(main._logic_overrides)的版本——让 Topout 的
+        cone(resolve_root/build_index) 与 generator.build 都看到补充信号(如 d_en_vco_fc 的 ECO 级)，
+        退出 swap-and-restore(不污染共享 wb)。无补充=不动(逐字节不变)。在 provider 层包，免逐函数加形参。"""
+        lo = getattr(self.main, "_logic_overrides", None) or None
+        if not lo:
+            yield
+            return
+        saved = self.wb.logic
+        self.wb.logic = generator._logic_with_overrides(
+            self.wb, generator.GenOptions(logic_overrides=lo))
+        try:
+            yield
+        finally:
+            self.wb.logic = saved
+
     def title(self):
         return "要验信号 = Topout 页 B 列（顶层真名，cone 展到源寄存器，断言贴真名）"
 
@@ -499,39 +518,44 @@ class _TopoutProvider:
 
     def view_models(self, mode, max_tests, exhaustive, sig_cov=None):
         from . import topout as T
-        return T.topout_view_models(self.wb, mode=mode, max_tests=max_tests,
-                                    exhaustive=exhaustive, probe_prefixes=self._pp(),
-                                    sig_cov=sig_cov)
+        with self._supplemented():
+            return T.topout_view_models(self.wb, mode=mode, max_tests=max_tests,
+                                        exhaustive=exhaustive, probe_prefixes=self._pp(),
+                                        sig_cov=sig_cov)
 
     def analyze(self, name, mode, max_tests, exhaustive):
         from . import topout as T
-        topo = next((t for t in (self.wb.topout or []) if t.name == name), None)
-        if topo is None:
-            return None
-        res = T.analyze_signal(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()), topo,
-                               mode=mode, max_tests=max_tests, exhaustive=exhaustive)
-        return _norm_topout_result(res)
+        with self._supplemented():
+            topo = next((t for t in (self.wb.topout or []) if t.name == name), None)
+            if topo is None:
+                return None
+            res = T.analyze_signal(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()), topo,
+                                   mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+            return _norm_topout_result(res)
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
                   sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None):
         from . import topout as T
         eo = _topout_edit_overrides(edited)
-        return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                  comments=comments, sv_summary=sv_summary,
-                                  owner_in_msg=owner_in_msg, only=only, edit_overrides=eo,
-                                  probe_prefixes=self._pp(), scope=scope, sig_cov=sig_cov)
+        with self._supplemented():
+            return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                      comments=comments, sv_summary=sv_summary,
+                                      owner_in_msg=owner_in_msg, only=only, edit_overrides=eo,
+                                      probe_prefixes=self._pp(), scope=scope, sig_cov=sig_cov)
 
     def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None):
         from . import topout as T
-        return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                               probe_prefixes=self._pp(), only=only, sig_cov=sig_cov)
+        with self._supplemented():
+            return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                   probe_prefixes=self._pp(), only=only, sig_cov=sig_cov)
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         from . import topout as T
         from . import fortest_writer as F
-        rep = T.report_for_topout(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()),
-                                  mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                  probe_prefixes=self._pp(), only=only)
+        with self._supplemented():
+            rep = T.report_for_topout(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()),
+                                      mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                      probe_prefixes=self._pp(), only=only)
         F.write_fortest(src, out, rep, include_mux=True)
 
 
@@ -889,6 +913,11 @@ class SignalView(QtWidgets.QWidget):
                           "跨机器两段式工作流第①步，与具体视图无关、从默认 Topout 视图直接够得着）。")
         btns.addWidget(b_pfx)
         btns.addWidget(b_nets)
+        if getattr(self.provider, "supports_logic_overrides", False):   # N4：仅 Topout 视图放
+            b_lo = QtWidgets.QPushButton("RTL 补充逻辑…"); b_lo.clicked.connect(self.on_logic_overrides)
+            b_lo.setToolTip("Excel 真表缺某信号顶层口后的 ECO 级(如 d_en_vco_fc)时，手工补一条等价 logic 式\n"
+                            "扫真值表——补充信号的 cone 会被展开(ECO 新输入成真值表新维度)。改完本视图重算。")
+            btns.addWidget(b_lo)
         btns.addStretch(1)
         for b in (b_prev, b_sv, b_rep, b_ft):
             btns.addWidget(b)
@@ -906,6 +935,15 @@ class SignalView(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "未加载", "请先加载 Excel。")
             return
         self.main.on_export_nets()
+
+    def on_logic_overrides(self):
+        """RTL 补充逻辑编辑器（委托 MainWindow 现成 on_logic_overrides），改完重算本视图——
+        Topout 的 cone 会经 provider._supplemented 看到补充信号（N4）。"""
+        if not self.main.wb:
+            QtWidgets.QMessageBox.information(self, "未加载", "请先加载 Excel。")
+            return
+        self.main.on_logic_overrides()
+        self.refresh()
 
     # ───────────── 刷新清单 ─────────────
     def refresh(self, *_):

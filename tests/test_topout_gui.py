@@ -225,6 +225,35 @@ def test_topout_subview_has_no_sig_cov(topo_win):
     assert topo_win.page_views["logic"].sig_cov_combo is None
 
 
+_N4_SUPP = {"d_logic_bt_lp_lna_agc": {
+    "enabled": True, "note": "SE: ECO 顶层口加了一级旁路，真表只到 DREG",
+    "expr": "EXTRA ? 3'b0 : (LINE ? LOCAL : AGCLINE)",
+    "inputs": [
+        {"var": "EXTRA", "raw": "d_bt_lp_iddq"},
+        {"var": "LINE", "raw": "d_bt_lp_lna_line_sel"},
+        {"var": "LOCAL", "raw": "d_bt_lp_lna_agc_local[2:0]"},
+        {"var": "AGCLINE", "raw": "d_bt_lp_lna_agc_line[2:0]"},
+    ]}}
+
+
+def test_topout_logic_overrides_supplements_cone(topo_win):
+    """⭐N4：RTL 补充逻辑接进 Topout——给 d_logic_bt_lp_lna_agc 补一级 ECO 输入(EXTRA=d_bt_lp_iddq)，
+    Topout 视图该信号的 cone/真值表多出该输入(provider._supplemented 让 cone 看到补充)；退出后 wb.logic 还原。"""
+    w = topo_win
+    assert w.topout_view.provider.supports_logic_overrides
+    n_logic0 = len(w.wb.logic)
+    vm0 = {m["name"]: m for m in w.topout_view.provider.view_models("min", 256, False)}
+    n0 = len(vm0["d_logic_bt_lp_lna_agc"]["inputs"])
+    w._logic_overrides = {k: dict(v) for k, v in _N4_SUPP.items()}
+    vm1 = {m["name"]: m for m in w.topout_view.provider.view_models("min", 256, False)}
+    labels = [i["label"] for i in vm1["d_logic_bt_lp_lna_agc"]["inputs"]]
+    assert "d_bt_lp_iddq" in labels and len(labels) > n0      # ECO 新输入成真值表维度
+    text, _ = w.topout_view.provider.render_sv(["d_logic_bt_lp_lna_agc"], "min", 256, False, {})
+    assert "d_logic_bt_lp_lna_agc" in text                    # .sv 仍产出该信号
+    assert len(w.wb.logic) == n_logic0                        # swap-and-restore：wb.logic 已还原
+    w._logic_overrides = {}
+
+
 def test_topout_export_single_signal_csv(topo_win, tmp_path, monkeypatch):
     """⭐N7：单信号真值表 CSV(转置：每列一条测试)，含 auto_out/期望/期望来源/负向 行。"""
     from PySide6 import QtWidgets
