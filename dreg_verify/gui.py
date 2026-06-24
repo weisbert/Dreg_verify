@@ -449,6 +449,7 @@ def _norm_topout_result(res):
     #   点选该行 _load_signal 会对 None 取 ['used_vars'] 崩（违『绝不崩』）。统一非可建=非可编辑。
     an["editable"] = "" if res.status != "ok" else (
         "logic" if kind in ("logic", "register") else ("mux" if kind == "mux" else ""))
+    an["renamed"] = bool(getattr(res.root, "renamed", False))   # dft 改名根：编辑走 reg 路按顶层名键
     return an
 
 
@@ -463,6 +464,7 @@ def _norm_page_result(res):
     an["src_out_name"] = res.sig.out_name
     an["editable"] = "" if res.status != "ok" else (
         "logic" if res.kind == "logic" else ("mux" if res.kind == "mux" else ""))
+    an["renamed"] = False               # 页本地子视图无 dft 改名根（每行就是本页声明名）
     return an
 
 
@@ -527,7 +529,11 @@ def _topout_edit_overrides(edited):
     mux_user, mux_exp, mux_drop, mux_cleared = {}, {}, {}, []
     for ed in (edited or {}).values():
         kind = ed["kind"]
-        if kind == "logic":
+        # dft 改名信号：build_for_topout 走 _topout_probe_block(reg 路)、按顶层名键 reg_overrides——
+        # 编辑也必须走 reg 路按顶层名键，否则编辑落 vov[源名] 被改名路忽略=改了不生效(静默)。
+        if ed.get("renamed"):
+            reg_ov[ed["name"].lower()] = ed["vectors"]
+        elif kind == "logic":
             vov[ed["src_out_name"].lower()] = ed["vectors"]
         elif kind == "register":
             reg_ov[ed["name"].lower()] = ed["vectors"]
@@ -1198,7 +1204,8 @@ class SignalView(QtWidgets.QWidget):
             return
         self.edits[self.cur_name] = {
             "kind": self.cur_an["kind"], "src_out_name": self.cur_an["src_out_name"],
-            "name": self.cur_an["name"], "cols": self.cur_cols, "an": self.cur_an}
+            "name": self.cur_an["name"], "cols": self.cur_cols, "an": self.cur_an,
+            "renamed": self.cur_an.get("renamed", False)}
         self._refresh_row_counts()
         self._render_head(self.cur_an)
         self._update_cov_hint()
@@ -1379,7 +1386,8 @@ class SignalView(QtWidgets.QWidget):
         elif not want:
             cols = [c for c in cols if not c["neg"]]
         self.edits[name_low] = {"kind": an["kind"], "src_out_name": an["src_out_name"],
-                                "name": an["name"], "cols": cols, "an": an}
+                                "name": an["name"], "cols": cols, "an": an,
+                                "renamed": an.get("renamed", False)}
         self._loading = True
         for r, m in enumerate(self.models):
             if m["name"].lower() == name_low:
@@ -1415,8 +1423,10 @@ class SignalView(QtWidgets.QWidget):
         for name_low, ed in self.edits.items():
             an = ed["an"]
             cols = ed["cols"]
-            rec = {"kind": ed["kind"], "src_out_name": ed["src_out_name"], "name": ed["name"]}
-            if ed["kind"] in ("logic", "register"):
+            rec = {"kind": ed["kind"], "src_out_name": ed["src_out_name"], "name": ed["name"],
+                   "renamed": ed.get("renamed", False)}
+            # dft 改名根 = 节点路（与 register 同：节点+向量），无论底层 kind 是 logic 还是 register
+            if rec["renamed"] or ed["kind"] in ("logic", "register"):
                 rec["cleared"] = (len(cols) == 0)
                 rec["vectors"] = self._cols_to_vectors(an, cols)
             elif ed["kind"] == "mux":

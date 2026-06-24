@@ -35,15 +35,51 @@ UNRESOLVED = "unresolved"      # Topout 名在 logic/mux/寄存器各页都找�
 class TopoutRoot:
     """一个 Topout 信号解析到的【源对象】及其分类。"""
 
-    def __init__(self, kind, obj=None, matched_name=None, reg_kind=None, note=""):
+    def __init__(self, kind, obj=None, matched_name=None, reg_kind=None, note="",
+                 probe_name=None, source_name=None):
         self.kind = kind                 # LOGIC / MUX / REGISTER / RO_READBACK / UNRESOLVED
         self.obj = obj                   # LogicSignal / MuxGroup / RegmapEntry|TmmField / None
         self.matched_name = matched_name # 实际命中的候选名（out_base / _ls_name / 字段名）
         self.reg_kind = reg_kind         # 直连寄存器时 'RW'/'RO'
         self.note = note
+        # dft 改名桥接（2026-06-24）：dft 页把 logic/寄存器源 <source_name>(如 A_sm) 观测后改名成顶层
+        # <probe_name>(如 A)，Topout B 列写的是 probe_name。非空 = 这是改名信号：逻辑/驱动来自 source，
+        # 但断言探针必须贴顶层真名 probe_name(=A，不是 A_sm)。两者都 None = 普通信号(名字没变)。
+        self.probe_name = probe_name     # 断言探针贴的顶层真名（None=用源对象自身名）
+        self.source_name = source_name   # 实际提供逻辑/驱动的源名（寄存器根用它定字段；None=用 topo 名）
+
+    @property
+    def renamed(self):
+        return self.probe_name is not None
 
     def __repr__(self):
-        return "TopoutRoot(%s, %s)" % (self.kind, self.matched_name)
+        return "TopoutRoot(%s, %s%s)" % (
+            self.kind, self.matched_name,
+            (" →probe %s" % self.probe_name) if self.probe_name else "")
+
+
+def _dft_rename_map(wb):
+    """从 dft 页（read 成 wb.dft_rows）建【改名表】{顶层输出名low → 功能源名low}。
+
+    dft 行 = 一个被观测输出 D + 表达式 E（透传 A / 门控 B?0:A）+ 输入 A/B/C。
+    『改名』判据：该行**唯一的功能输入**（剥 _to_dft + 去掉门控位后）基名 ≠ 输出基名
+    （如 D=A、输入=A_sm_to_dft → A_sm ≠ A ⟹ 改名 A_sm→A）。
+    透传到同名（mirror 的 clk_force_on=clk_force_on_to_dft）= 恒等、非改名 → 不入表（旧表零影响）。"""
+    from .excel_model import _strip_width, _dft_strip
+    out = {}
+    gates = wb.dft or {}
+    for d in (getattr(wb, "dft_rows", None) or []):
+        ob = _strip_width(d.out_name)[0].lower()
+        gate_base = (gates.get(ob) or {}).get("gate_base")
+        funcs = []
+        for info in d.inputs.values():
+            b = _dft_strip(info.get("raw", "")).lower()    # 剥位宽 + _to_dft
+            if not b or b == ob or (gate_base and b == gate_base):
+                continue                                   # 恒等 / 门控位 → 不是功能源
+            funcs.append(b)
+        if len(funcs) == 1:                                # 唯一功能源且与输出异名 = 改名
+            out.setdefault(ob, funcs[0])
+    return out
 
 
 def _logic_candidates(s):
@@ -91,28 +127,60 @@ def _register_kind(wb, low):
     return None, None, None
 
 
-def resolve_root(wb, name, logic_idx=None, mux_idx=None):
-    """把一个 Topout 信号名解析到它的源对象+分类。
-
-    优先级：logic 行 > mux 组 > 直连寄存器(RW=可验 / RO=回读跳过) > 未解析。
-    logic/mux 命中靠 out_base / _ls_name / rtl_base 三套候选（Topout 名是剥后缀的顶层真名，
-    而 _ls 顶层口/被引用内部信号的真名带后缀，故都要试）。"""
-    if logic_idx is None or mux_idx is None:
-        logic_idx, mux_idx = build_index(wb)
-    low = str(name).strip().lower()
+def _resolve_direct(wb, low, logic_idx, mux_idx):
+    """直接解析（不走 dft 改名桥接）→ TopoutRoot；找不到返回 None（供桥接复用，防递归）。"""
     if low in logic_idx:
         return TopoutRoot(LOGIC, logic_idx[low], matched_name=low)
     if low in mux_idx:
         return TopoutRoot(MUX, mux_idx[low], matched_name=low)
     rk, ent, found = _register_kind(wb, low)
     if rk == "RW":
-        return TopoutRoot(REGISTER, ent, matched_name=low, reg_kind="RW",
-                          note="直连寄存器(RW，%s)——dft 恒等观测把寄存器字段直接当顶层输出" % found)
+        return TopoutRoot(REGISTER, ent, matched_name=low, reg_kind="RW", note=found)
     if rk == "RO":
-        return TopoutRoot(RO_READBACK, ent, matched_name=low, reg_kind="RO",
-                          note="RO 回读(%s)——模拟/FSM 状态、非寄存器组合函数，无 cone，跳过+记账" % found)
+        return TopoutRoot(RO_READBACK, ent, matched_name=low, reg_kind="RO", note=found)
+    return None
+
+
+def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
+    """把一个 Topout 信号名解析到它的源对象+分类。
+
+    优先级：logic 行 > mux 组 > 直连寄存器(RW=可验 / RO=回读跳过) > **dft 改名桥接** > 未解析。
+    logic/mux 命中靠 out_base / _ls_name / rtl_base 三套候选（Topout 名是剥后缀的顶层真名，
+    而 _ls 顶层口/被引用内部信号的真名带后缀，故都要试）。
+
+    dft 改名桥接（2026-06-24）：若顶层名直接找不到、但它是某 dft 行【观测改名】出来的
+    （Topout A = dft 观测 logic A_sm），就桥到源 A_sm 拿逻辑/驱动，但把断言探针贴顶层名 A。"""
+    if logic_idx is None or mux_idx is None:
+        logic_idx, mux_idx = build_index(wb)
+    low = str(name).strip().lower()
+    direct = _resolve_direct(wb, low, logic_idx, mux_idx)
+    if direct is not None:
+        if direct.kind == REGISTER:
+            direct.note = "直连寄存器(RW，%s)——dft 恒等观测把寄存器字段直接当顶层输出" % direct.note
+        elif direct.kind == RO_READBACK:
+            direct.note = "RO 回读(%s)——模拟/FSM 状态、非寄存器组合函数，无 cone，跳过+记账" % direct.note
+        return direct
+
+    # ── dft 改名桥接：低优先级（直接命中不到才尝试）──
+    if rename is None:
+        rename = _dft_rename_map(wb)
+    src_low = rename.get(low)
+    if src_low is not None and src_low != low:
+        sub = _resolve_direct(wb, src_low, logic_idx, mux_idx)   # 只解析一层源，不再桥接（防环）
+        if sub is not None and sub.kind in (LOGIC, MUX, REGISTER):
+            sub.probe_name = name            # 顶层真名（断言探针贴它，原大小写）
+            sub.source_name = src_low        # 源名（寄存器根用它定字段）
+            sub.matched_name = low
+            sub.note = ("dft 改名：Topout 名 %s ← dft 观测源 %s（%s 根）；逻辑/驱动来自源，"
+                        "断言探针贴顶层真名 %s" % (name, src_low, sub.kind, name))
+            return sub
+        # 源也解析不了（埋件/RO）→ 落未解析，但把桥接线索写进 note（不静默丢）
+        return TopoutRoot(UNRESOLVED, None, matched_name=low,
+                          note="dft 改名指向源 %r，但源在 logic/mux/regmap 仍找不到（或为 RO）——需人工核对"
+                               % src_low)
+
     return TopoutRoot(UNRESOLVED, None, matched_name=low,
-                      note="Topout 名 %r 在 logic/mux/regmap/tmm 都找不到源对象（需人工核对：可能埋件/真表⊋DUT）"
+                      note="Topout 名 %r 在 logic/mux/regmap/tmm/dft改名 都找不到源对象（需人工核对：可能埋件/真表⊋DUT）"
                            % name)
 
 
@@ -180,7 +248,8 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
     if root.kind == REGISTER:
         # 直连寄存器(RW)：顶层输出 = 该寄存器字段（dft 恒等观测）。建平凡节点 Var(BASE)，
         # 叶子 = 该寄存器本身(RW→RF_WRITE)，驱动它并断言 输出==写值，验证寄存器→顶层口的直连。
-        base = topo.name
+        # dft 改名时 source_name(源寄存器名,如 A_sm)≠ topo.name(顶层名 A)——解析驱动用源名，探针贴顶层名。
+        base = root.source_name or topo.name
         try:
             # ⭐位宽以解析到的寄存器字段为准（修『Topout 名无 [msb:lsb] 切片→只验 bit0』假绿）：
             # 裸名写法 _strip_width 给 width=1，但字段是多 bit 时只 RF_WRITE bit0、高位静默不验。
@@ -245,9 +314,10 @@ def analyze_all(wb, resolver, mode="min", max_tests=256, exhaustive=False,
                 want_vectors=True):
     """对 wb.topout 全清单逐信号分析。返回 list[TopoutResult]（外层枚举源=Topout B 列）。"""
     logic_idx, mux_idx = build_index(wb)
+    rename = _dft_rename_map(wb)        # dft 改名表（一次建好，逐信号复用）
     out = []
     for topo in wb.topout:
-        root = resolve_root(wb, topo.name, logic_idx, mux_idx)
+        root = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
         out.append(analyze_signal(wb, resolver, topo, root=root, mode=mode,
                                   max_tests=max_tests, exhaustive=exhaustive,
                                   want_vectors=want_vectors))
@@ -414,6 +484,9 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False)
     want = {t.name.lower() for t in wb.topout}
     owner_of = {t.name.lower(): t.owner for t in wb.topout}
     logic_idx, mux_idx = build_index(wb)
+    # dft 改名反查：源名 A_sm → 顶层 Topout 名 A（report 的表按源名 A_sm 产出，这里桥回 A，否则
+    # 改名信号的真值表会被当『不属 Topout』丢掉 → GUI/报告空表，违『绝不静默丢』）。
+    src_to_top = {src: top for top, src in _dft_rename_map(wb).items() if top in want}
 
     def _topout_name_of(signal):
         from .excel_model import _strip_width
@@ -429,6 +502,8 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False)
                          getattr(s, "rtl_base_full", "") or "", s.out_base):
                 if cand and cand.lower() in want:
                     return cand.lower()
+        if base in src_to_top:        # dft 改名：源表桥回顶层名
+            return src_to_top[base]
         return None
 
     kept_tables = []
@@ -446,15 +521,14 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False)
 
 # ═════════════════════════ 块B（续）：Topout .sv 产出路径（report_for_topout 的 .sv 孪生） ═════════════════════════
 class _PassthroughSig:
-    """直连寄存器(RW)根的 .sv 渲染占位（dft 恒等观测：顶层口 == 寄存器字段）。
+    """自定义 .sv 渲染占位：断言探针贴 Topout 顶层真名（直连寄存器 dft 恒等观测 / dft 改名信号共用）。
 
     render_signal_block 只读 out_name/out_base/rtl_name/assert_id/owner/out_width；node 已传入
     故不读 expr。assert_id 用 'TOP<i>'（不与 logic 数字 R / mux 'mux<N>' 标号撞，保证全局唯一）。"""
 
-    suffix = "topout-reg"
     _self_ref_suffixes = ()
 
-    def __init__(self, name, width, owner, aid):
+    def __init__(self, name, width, owner, aid, suffix="topout-reg"):
         self.out_name = name
         self.out_base = name
         self.rtl_name = name            # Topout 顶层真名（无前后缀，断言直接贴它）
@@ -462,6 +536,7 @@ class _PassthroughSig:
         self.owner = owner
         self.out_width = width or 1
         self.expr = "A"
+        self.suffix = suffix
 
 
 def _account_block(name, kind, status, reason, owner):
@@ -476,19 +551,26 @@ def _account_block(name, kind, status, reason, owner):
     return (lines, stats)
 
 
-def _register_passthrough_block(result, owner, aid, comments=False, counters=False):
-    """直连寄存器根 → 平凡 passthrough .sv 块：RF_WRITE 该寄存器 + 断言 顶层口 == 写值。"""
-    sig = _PassthroughSig(result.topo.name, result.out_width, owner, aid)
+def _topout_probe_block(result, probe_name, owner, aid, kind, comments=False, counters=False):
+    """自定义 .sv 块：驱动来自源(result.node/bindings/vectors)，断言探针贴顶层真名 probe_name。
+    用于直连寄存器根(probe=topo 名) 与 dft 改名根(probe=顶层名 A，驱动来自源 A_sm)。"""
+    sig = _PassthroughSig(probe_name, result.out_width, owner, aid)
     meta = dict(result.meta or {})
     meta.setdefault("truncated", False)
     lines, stats = W.render_signal_block(sig, result.bindings, result.vectors, meta,
                                          comments=comments, node=result.node,
                                          counters=counters)
     stats["topout_name"] = result.topo.name
-    stats["topout_kind"] = REGISTER
+    stats["topout_kind"] = kind
     stats["topout_status"] = result.status
-    stats["cone_expanded"] = False
+    stats["cone_expanded"] = bool(result.expanded)
     return (lines, stats)
+
+
+def _register_passthrough_block(result, owner, aid, comments=False, counters=False):
+    """直连寄存器根 → 平凡 passthrough .sv 块：RF_WRITE 该寄存器 + 断言 顶层口 == 写值。"""
+    return _topout_probe_block(result, result.topo.name, owner, aid, REGISTER,
+                               comments=comments, counters=counters)
 
 
 def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
@@ -518,10 +600,12 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     if only_low is not None:
         results = [r for r in results if r.topo.name.lower() in only_low]
 
-    # logic/mux 根 → 源对象名集合（generator.build 据此选；out_name 与 out_base 都给，匹配两种写法）
+    # logic/mux 根 → 源对象名集合（generator.build 据此选；out_name 与 out_base 都给，匹配两种写法）。
+    # dft 改名根【不】走 generator.build（它会按源名 A_sm 探针、且占标号）——改名根走下面 _topout_probe_block
+    # 自定义块（探针贴顶层名 A），故这里排除，避免 build 白产一个探 A_sm 的多余块。
     want_names = set()
     for r in results:
-        if r.status == "ok" and r.root.kind in (LOGIC, MUX):
+        if r.status == "ok" and r.root.kind in (LOGIC, MUX) and not r.root.renamed:
             want_names.add(r.root.obj.out_name.lower())
             want_names.add(r.root.obj.out_base.lower())
 
@@ -542,6 +626,26 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     reg_i = 0
     for r in results:
         name, owner = r.topo.name, r.topo.owner
+        if r.status == "ok" and r.root.renamed:
+            # dft 改名信号：逻辑/驱动来自源(node/bindings/vectors 已是源的)，断言探针贴顶层名 probe_name。
+            ov = reg_ov.get(name.lower())
+            if r.node is not None and r.bindings is not None:
+                if ov is not None and len(ov) == 0:        # GUI 清零 → 记账
+                    _why = "用户已清空(零用例，本信号不产出测试)"
+                    blocks.append(_account_block(name, r.root.kind, "cleared", _why, owner))
+                    accounted.append({"name": name, "kind": r.root.kind, "status": "cleared", "reason": _why})
+                    continue
+                if ov is not None:
+                    r.vectors = list(ov)
+                blk = _topout_probe_block(r, r.root.probe_name, owner, "TOP%d" % reg_i,
+                                          r.root.kind, comments=comments, counters=sv_summary)
+                reg_i += 1
+                blocks.append(blk)
+            else:                                          # 改名指向 mux 源(无单一 node)→ 暂记账（少见）
+                _why = "dft 改名指向 mux 源——探针名覆盖暂未支持改名 mux（记账，不静默丢）"
+                blocks.append(_account_block(name, r.root.kind, "renamed-mux", _why, owner))
+                accounted.append({"name": name, "kind": r.root.kind, "status": "renamed-mux", "reason": _why})
+            continue
         if r.status == "ok" and r.root.kind in (LOGIC, MUX):
             src = r.root.obj.out_name.lower()
             if src in seen_src:                    # 两个 Topout 名映到同一源对象 → 只产出一次（防 dup-label）
