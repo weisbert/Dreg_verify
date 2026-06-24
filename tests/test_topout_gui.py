@@ -201,6 +201,45 @@ def test_topout_export_sv_options_comments_and_summary(topo_win, tmp_path, monke
     v._e_regen()
 
 
+def test_topout_export_aborts_on_dup_labels(topo_win, tmp_path, monkeypatch):
+    """⭐N9：导出前检测到重复 assert 标号(非法 SV) → 弹确认；用户取消 → 不写文件(不静默导出)。"""
+    from PySide6 import QtWidgets
+    w = topo_win
+    out = tmp_path / "dup.sv"
+    monkeypatch.setattr(w.topout_view, "_ask_export_options",
+                        lambda: {"scope": "all", "comments": False,
+                                 "sv_summary": False, "owner_in_msg": False})
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "")))
+    monkeypatch.setattr(w, "_confirm_dup_labels", lambda b: False)   # 模拟用户在重复标号警告里选「取消」
+    w.on_topo_export_sv()
+    assert not out.exists()                            # 取消 → 不写非法 SV
+
+
+def test_topout_report_only_checked_signal(topo_win, tmp_path, monkeypatch):
+    """⭐N6：导出报告按勾选过滤——只勾 rx_en → provider 收到 only=[rx_en]，报告只含它。"""
+    from PySide6 import QtCore, QtWidgets
+    from dreg_verify import gui as G
+    w = topo_win
+    w._topo_check_all(False)
+    r = _topo_row(w, "d_logic_bt_lp_rx_en")
+    w.topo_table.item(r, G.TOPO_SEL).setCheckState(QtCore.Qt.Checked)
+    seen = {}
+    orig = w.topout_view.provider.render_report
+
+    def _cap(*a, **k):
+        seen["only"] = k.get("only")
+        return orig(*a, **k)
+    monkeypatch.setattr(w.topout_view.provider, "render_report", _cap)
+    out = tmp_path / "rep.csv"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    w.on_topo_export_report()
+    assert seen.get("only") == ["d_logic_bt_lp_rx_en"]
+    w._topo_check_all(True)
+
+
 def test_topout_export_scope_pos_neg(topo_win, tmp_path, monkeypatch):
     """⭐#3 2b：导出范围——仅正向剔除负向断言；仅负向只留负向、且无负向的信号不出现(记账，不静默丢)。"""
     from PySide6 import QtWidgets

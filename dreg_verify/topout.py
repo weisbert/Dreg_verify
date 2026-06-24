@@ -576,16 +576,19 @@ def topout_fortest_rows(wb, resolver, mode="min", max_tests=256, exhaustive=Fals
 
 
 def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
-                      probe_prefixes=None):
+                      probe_prefixes=None, only=None):
     """生成【限定到 Topout 清单】的报告(复用 generator.report，再按 Topout B 列名过滤 tables/detail)。
 
     新模型『要验什么』只在 Topout——旧 report 枚举全 logic/mux，这里只保留 Topout 命中的表，
     且 owner 用 Topout A 列覆盖（块B 不 join）。旧 generator.report 一字不动。
-    probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径，让 GUI 富表/for_test 回填也带前缀）。"""
+    probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径，让 GUI 富表/for_test 回填也带前缀）。
+    only：限定只保留这些 Topout 名（GUI 勾选项过滤；None=全部，与 .sv 导出 only 同口径，N6）。"""
     from . import generator as G
     rep = G.report(wb, G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                     include_risky=True, probe_prefixes=probe_prefixes))
-    want = {t.name.lower() for t in wb.topout}
+    only_low = {str(n).lower() for n in only} if only is not None else None
+    want = {t.name.lower() for t in wb.topout
+            if only_low is None or t.name.lower() in only_low}
     owner_of = {t.name.lower(): t.owner for t in wb.topout}
     logic_idx, mux_idx = build_index(wb)
     # 改名反查：最终源名 → 顶层 Topout 名（report 的表按源名产出，这里桥回顶层名，否则改名信号的
@@ -873,7 +876,10 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
         "n_negative": sum(s.get("n_negative", 0) for _l, s in blocks),
         "n_designer": sum(s.get("n_designer", 0) for _l, s in blocks),
     }
-    return {"blocks": blocks, "results": results, "accounted": accounted, "summary": summary}
+    # 重复 assert 标号(非法 SV)：generator.build 已算好(logic/mux 共用同一 R 时)，原样透出供导出前确认，
+    # 别像旧 Topout 路径那样丢弃 → 静默导出会 elaboration 失败的 .sv（N9）。
+    return {"blocks": blocks, "results": results, "accounted": accounted, "summary": summary,
+            "dup_labels": built.get("dup_labels") or []}
 
 
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
@@ -983,21 +989,27 @@ def _account_error_text(row):
     return "; ".join(row["issues"]) or row["note"] or row["status"]
 
 
-def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
+def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None, only=None):
     """Topout 限定报告（write_report 兼容：summary/detail/tables/verifiability），堵 3 静默陷阱：
       ① 默认不空：summary 直接来自 compose_topout_account（12 行全分类，不套 top_output_only）；
       ② 不刷 top_out=0 假警告：error 列只放真原因（RO/未解析/冲突），无 bare-probe/needs-prefix 噪声；
       ③ for_test 回填含 mux：tables 来自 report_for_topout（已含 mux）+ register 平凡表。
 
     summary/detail/verifiability 全限定到 Topout 清单（不像 report_for_topout 只过滤 tables）。
-    probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径）。"""
+    probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径）。
+    only：限定只报这些 Topout 名（GUI 勾选项过滤；None=全部，与 .sv 导出 only 同口径，N6）。"""
     from . import resolver as R
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
+    only_low = {str(n).lower() for n in only} if only is not None else None
     rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                            probe_prefixes=probe_prefixes)
+                            probe_prefixes=probe_prefixes, only=only)
     acc = compose_topout_account(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    if only_low is not None:                # 账目/汇总/可验证性同样限定到勾选信号
+        acc = dict(acc); acc["rows"] = [r for r in acc["rows"] if r["name"].lower() in only_low]
     vms = topout_view_models(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                              probe_prefixes=probe_prefixes)
+    if only_low is not None:
+        vms = [m for m in vms if m["name"].lower() in only_low]
 
     # tables：logic/mux 富表（report_for_topout）+ register 平凡表（视图模型）
     tables = list(rep.get("tables", []))

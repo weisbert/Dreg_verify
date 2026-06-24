@@ -564,6 +564,22 @@ def test_register_passthrough_assert_carries_width_slice():
     assert "`ENV_RF.d_sel==" not in txt2
 
 
+def test_build_for_topout_exposes_dup_labels(wb):
+    """⭐N9：build_for_topout 透出 generator.build 算好的 dup_labels（旧 Topout 路径丢弃→静默导出非法 SV）。"""
+    b = T.build_for_topout(wb, mode="min")
+    assert "dup_labels" in b and isinstance(b["dup_labels"], list)
+
+
+def test_topout_report_only_filters_to_checked(wb):
+    """⭐N6：topout_report(only=...) 把 summary/tables/verifiability 限定到勾选信号（与 .sv 导出同口径）。"""
+    rep = T.topout_report(wb, only=["d_logic_bt_lp_rx_en"])
+    assert {s["signal"].lower() for s in rep["summary"]} == {"d_logic_bt_lp_rx_en"}
+    assert all(t.get("topout_name", "").lower() == "d_logic_bt_lp_rx_en" for t in rep["tables"])
+    assert {v["signal"].lower() for v in rep["verifiability"]["signals"]} == {"d_logic_bt_lp_rx_en"}
+    # None=全部（不过滤）：信号数 = Topout 清单全量
+    assert len(T.topout_report(wb)["summary"]) == len(wb.topout)
+
+
 def test_register_unresolved_is_error_not_false_green():
     """⭐minor 修复：直连寄存器(RW)但解析不到(如缺地址) → status='error'，不发『ok』绿块驱不存在的网。"""
     reg = {"d_noaddr": M.RegmapEntry("d_noaddr", "NA", "RW", "0", 0, 0, "BT")}   # address=None

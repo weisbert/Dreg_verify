@@ -290,15 +290,18 @@ def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
                "n_negative": sum(s.get("n_negative", 0) for _l, s in built["blocks"]),
                "n_designer": sum(s.get("n_designer", 0) for _l, s in built["blocks"]),
                "n_accounted": len(built.get("skipped", [])) + len(built.get("errors", []))}
-    return text, {"summary": summary, "accounted": []}
+    return text, {"summary": summary, "accounted": [],
+                  "dup_labels": built.get("dup_labels") or []}
 
 
-def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
-    """页本地报告（write_report 兼容：summary/detail/tables/verifiability）。"""
+def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
+                only=None):
+    """页本地报告（write_report 兼容：summary/detail/tables/verifiability）。
+    only：限定只报这些信号（GUI 勾选项过滤；None=全部，N6）。"""
     saved = _with_page_logic(wb, page)
     try:
         opts = _page_gen_opts(page, mode, max_tests, exhaustive,
-                              signals=_page_signals_filter(wb, page, None),
+                              signals=_page_signals_filter(wb, page, only),
                               probe_prefixes=probe_prefixes)
         return G.report(wb, opts)
     finally:
@@ -307,9 +310,9 @@ def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_pre
 
 
 def page_fortest(wb, page, src_path, out_path, mode="min", max_tests=256, exhaustive=False,
-                 probe_prefixes=None):
+                 probe_prefixes=None, only=None):
     """页本地 for_test 回填（含 mux 表）。"""
     from . import fortest_writer
     rep = page_report(wb, page, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                      probe_prefixes=probe_prefixes)
+                      probe_prefixes=probe_prefixes, only=only)
     fortest_writer.write_fortest(src_path, out_path, rep, include_mux=True)

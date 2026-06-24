@@ -519,17 +519,17 @@ class _TopoutProvider:
                                   owner_in_msg=owner_in_msg, only=only, edit_overrides=eo,
                                   probe_prefixes=self._pp(), scope=scope)
 
-    def render_report(self, mode, max_tests, exhaustive):
+    def render_report(self, mode, max_tests, exhaustive, only=None):
         from . import topout as T
         return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                               probe_prefixes=self._pp())
+                               probe_prefixes=self._pp(), only=only)
 
-    def fortest(self, src, out, mode, max_tests, exhaustive):
+    def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         from . import topout as T
         from . import fortest_writer as F
         rep = T.report_for_topout(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()),
                                   mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                  probe_prefixes=self._pp())
+                                  probe_prefixes=self._pp(), only=only)
         F.write_fortest(src, out, rep, include_mux=True)
 
 
@@ -640,15 +640,15 @@ class _PageProvider:
                                only=only, comments=comments, sv_summary=sv_summary,
                                owner_in_msg=owner_in_msg, probe_prefixes=self._pp(), scope=scope)
 
-    def render_report(self, mode, max_tests, exhaustive):
+    def render_report(self, mode, max_tests, exhaustive, only=None):
         from . import pageviews as P
         return P.page_report(self.wb, self.page, mode=mode, max_tests=max_tests,
-                             exhaustive=exhaustive, probe_prefixes=self._pp())
+                             exhaustive=exhaustive, probe_prefixes=self._pp(), only=only)
 
-    def fortest(self, src, out, mode, max_tests, exhaustive):
+    def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         from . import pageviews as P
         P.page_fortest(self.wb, self.page, src, out, mode=mode, max_tests=max_tests,
-                       exhaustive=exhaustive, probe_prefixes=self._pp())
+                       exhaustive=exhaustive, probe_prefixes=self._pp(), only=only)
 
 
 class SignalView(QtWidgets.QWidget):
@@ -1767,6 +1767,8 @@ class SignalView(QtWidgets.QWidget):
         text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
                                           comments=eo["comments"], sv_summary=eo["sv_summary"],
                                           owner_in_msg=eo["owner_in_msg"], scope=eo.get("scope", "all"))
+        if not self.main._confirm_dup_labels(b):     # 重复 assert 标号(非法 SV) → 弹确认，别静默导出(N9)
+            return
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         self.sv.setPlainText(text)
@@ -1783,7 +1785,8 @@ class SignalView(QtWidgets.QWidget):
             return
         from . import cli
         mode, exh = self._mode()
-        rep = self.provider.render_report(mode, self._maxt(), exh)
+        only = self._checked_names() or None          # 勾选项过滤（与 .sv 导出 only 同口径，N6）
+        rep = self.provider.render_report(mode, self._maxt(), exh, only=only)
         written = cli.write_report(path, rep, self.main._loaded_excel_path or "")
         QtWidgets.QMessageBox.information(self, "已导出", "报告已导出：\n%s" % "\n".join(written))
 
@@ -1798,7 +1801,8 @@ class SignalView(QtWidgets.QWidget):
         if not path:
             return
         mode, exh = self._mode()
-        self.provider.fortest(self.main._loaded_excel_path, path, mode, self._maxt(), exh)
+        only = self._checked_names() or None          # 勾选项过滤（与 .sv 导出 only 同口径，N6）
+        self.provider.fortest(self.main._loaded_excel_path, path, mode, self._maxt(), exh, only=only)
         QtWidgets.QMessageBox.information(self, "已回填", "for_test 已回填（含 mux 表）：\n%s" % path)
 
 
