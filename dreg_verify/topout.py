@@ -36,12 +36,16 @@ class TopoutRoot:
     """一个 Topout 信号解析到的【源对象】及其分类。"""
 
     def __init__(self, kind, obj=None, matched_name=None, reg_kind=None, note="",
-                 probe_name=None, source_name=None):
+                 probe_name=None, source_name=None, dft_obs_name=None):
         self.kind = kind                 # LOGIC / MUX / REGISTER / RO_READBACK / UNRESOLVED
         self.obj = obj                   # LogicSignal / MuxGroup / RegmapEntry|TmmField / None
         self.matched_name = matched_name # 实际命中的候选名（out_base / _ls_name / 字段名）
         self.reg_kind = reg_kind         # 直连寄存器时 'RW'/'RO'
         self.note = note
+        # 改名链途经的【带门(iddq) dft 观测输出名】(keys wb.dft)：桥到 logic 源后，门控(B?0:A)那层
+        # 不在 logic 表达式里、而在 dft 观测层——analyze_signal 据它 pin_dft_gate 把 iddq 叠成显式输入
+        # （否则只验 logic 选路、漏掉 iddq 门 = 与 for_test 金标准的输入集不符）。None=无门。
+        self.dft_obs_name = dft_obs_name
         # dft 改名桥接（2026-06-24）：dft 页把 logic/寄存器源 <source_name>(如 A_sm) 观测后改名成顶层
         # <probe_name>(如 A)，Topout B 列写的是 probe_name。非空 = 这是改名信号：逻辑/驱动来自 source，
         # 但断言探针必须贴顶层真名 probe_name(=A，不是 A_sm)。两者都 None = 普通信号(名字没变)。
@@ -189,21 +193,56 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
     # ── 改名桥接：低优先级（直接命中不到才尝试）；链式跟随 + 环/深度护栏 ──
     if rename is None:
         rename = _rename_map(wb)
+    dft_gates = getattr(wb, "dft", None) or {}   # {dft 观测输出名: 门控} —— 途经它=带 iddq 门的观测层
     seen, cur, hops = {low}, low, 0
+    reg_fallback = None                  # 链上撞到的同名寄存器（链尾够不到 logic/mux 才退回它，绝不静默丢）
+    dft_obs = None                       # 途经的带门 dft 观测名（供 pin_dft_gate 叠 iddq）
     while hops < 8:
         nxt = rename.get(cur)
         if nxt is None or nxt in seen:
             break
+        gated_here = cur in dft_gates    # cur 是被 iddq 门控的 dft 观测输出（门控那层在此跳）
         seen.add(nxt); hops += 1
         sub = _resolve_direct(wb, nxt, logic_idx, mux_idx)
-        if sub is not None and sub.kind in (LOGIC, MUX, REGISTER):
-            sub.probe_name = name            # 顶层真名（断言探针贴它，原大小写）
-            sub.source_name = nxt            # 最终源名（寄存器根用它定字段）
+        if sub is not None and sub.kind in (LOGIC, MUX):
+            sub.probe_name = name        # 顶层真名（断言探针贴它，原大小写）
+            sub.source_name = nxt        # 最终 logic/mux 源名
             sub.matched_name = low
-            sub.note = ("改名桥接：Topout 名 %s ← 源 %s（%s 根，经 %d 跳改名）；逻辑/驱动来自源，"
-                        "断言探针贴顶层真名 %s" % (name, nxt, sub.kind, hops, name))
+            sub.dft_obs_name = dft_obs or (cur if gated_here else None)
+            sub.note = ("改名桥接：Topout 名 %s ← 源 %s（%s 根，经 %d 跳改名%s）；逻辑/驱动来自源，"
+                        "断言探针贴顶层真名 %s"
+                        % (name, nxt, sub.kind, hops,
+                           ("，含 dft 门 %s 作输入" % sub.dft_obs_name) if sub.dft_obs_name else "", name))
             return sub
-        cur = nxt                            # 源仍是改名（如 ls→dft）→ 继续回溯
+        if sub is not None and sub.kind == REGISTER:
+            # 撞到同名寄存器：若它【还能被继续改名】(=它其实是上一层观测输出，同名寄存器只是撞名的
+            # 输入)→ 优先顺着 dft 链找真正的 logic/mux 源；够不到再退回这个寄存器（兜底）。修：
+            # d_vco_en_faston_ls ←ls← d_vco_en_faston(=dft 观测输出 iddq?0:fsm，又恰有同名 RW 输入寄存器)
+            # ←dft← d_vco_en_faston_fsm(logic 选路)，旧版在此撞寄存器即停 → 漏掉 logic+iddq+fll_active。
+            if rename.get(nxt) and rename.get(nxt) not in seen:
+                if reg_fallback is None:
+                    reg_fallback = (sub, nxt)
+                if gated_here:
+                    dft_obs = cur
+                cur = nxt
+                continue
+            sub.probe_name = name
+            sub.source_name = nxt
+            sub.matched_name = low
+            sub.note = ("改名桥接：Topout 名 %s ← 源 %s（register 根，经 %d 跳改名）；逻辑/驱动来自源，"
+                        "断言探针贴顶层真名 %s" % (name, nxt, hops, name))
+            return sub
+        if gated_here:                   # 此跳解析不到但途经带门观测层 → 记下门，继续回溯
+            dft_obs = cur
+        cur = nxt                        # 源仍是改名（如 ls→dft）→ 继续回溯
+    if reg_fallback is not None:         # 链上有同名寄存器、但终点无 logic/mux 源 → 退回寄存器（不静默丢）
+        sub, nxt = reg_fallback
+        sub.probe_name = name
+        sub.source_name = nxt
+        sub.matched_name = low
+        sub.note = ("改名桥接：Topout 名 %s ← 源 %s（register 根，改名链上无 logic/mux 源）；"
+                    "逻辑/驱动来自源，断言探针贴顶层真名 %s" % (name, nxt, name))
+        return sub
     if hops > 0:                             # 跟过改名但终点仍解析不了（埋件/RO）
         return TopoutRoot(UNRESOLVED, None, matched_name=low,
                           note="改名链 %s→…→%s 的终点在 logic/mux/regmap 仍找不到源（或为 RO）——需人工核对"
@@ -266,6 +305,17 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                 res.vectors, res.meta = V.generate_vectors(
                     node, bindings, sig.out_width, mode=mode, max_tests=max_tests,
                     exhaustive=exhaustive)
+                # dft 改名根途经带门(iddq)观测层：门控(B?0:A)不在 logic 表达式里、在 dft 观测层，
+                # 按 dft 观测名(非 logic out_base)把 iddq 叠成显式输入(每条向量 force 透传值)+补 DFT 拍，
+                # 与 generator.build 对 logic 同口径（key 改用 dft_obs_name）。无门时此段是 no-op。
+                obs = getattr(root, "dft_obs_name", None)
+                if obs:
+                    _ib = {b.base.lower() for b in bindings.values()
+                           if b is not None and getattr(b, "base", None)}
+                    _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
+                    if _skip:
+                        res.meta["iddq_skipped"] = _skip
+                    G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
         except (cone.ConeError, E.ExprError) as ex:
             res.status = "error"
             res.issues.append("cone 展开失败: %s" % ex)
