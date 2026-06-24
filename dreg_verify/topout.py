@@ -540,7 +540,8 @@ def compose_topout_account(wb, resolver, mode="min", max_tests=256, exhaustive=F
     return {"rows": rows, "summary": summary}
 
 
-def topout_fortest_rows(wb, resolver, mode="min", max_tests=256, exhaustive=False):
+def topout_fortest_rows(wb, resolver, mode="min", max_tests=256, exhaustive=False,
+                        probe_prefixes=None):
     """Topout for_test 回填行（块B 陷阱③，2026-06-23）：以 Topout 名为外层，**含 mux 根**。
 
     复用 generator.report 产出报告表(logic+mux 都带 for_test 回填键)，再交 fortest_writer
@@ -548,18 +549,20 @@ def topout_fortest_rows(wb, resolver, mode="min", max_tests=256, exhaustive=Fals
     返回 fortest_writer.build_fortest_rows 的 group 列表（每个对应一个 Topout 真值表）。"""
     from . import fortest_writer
     rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests,
-                            exhaustive=exhaustive)
+                            exhaustive=exhaustive, probe_prefixes=probe_prefixes)
     return fortest_writer.build_fortest_rows(rep, include_mux=True)
 
 
-def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False):
+def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
+                      probe_prefixes=None):
     """生成【限定到 Topout 清单】的报告(复用 generator.report，再按 Topout B 列名过滤 tables/detail)。
 
     新模型『要验什么』只在 Topout——旧 report 枚举全 logic/mux，这里只保留 Topout 命中的表，
-    且 owner 用 Topout A 列覆盖（块B 不 join）。旧 generator.report 一字不动。"""
+    且 owner 用 Topout A 列覆盖（块B 不 join）。旧 generator.report 一字不动。
+    probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径，让 GUI 富表/for_test 回填也带前缀）。"""
     from . import generator as G
     rep = G.report(wb, G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                    include_risky=True))
+                                    include_risky=True, probe_prefixes=probe_prefixes))
     want = {t.name.lower() for t in wb.topout}
     owner_of = {t.name.lower(): t.owner for t in wb.topout}
     logic_idx, mux_idx = build_index(wb)
@@ -636,15 +639,17 @@ def _account_block(name, kind, status, reason, owner):
     return (lines, stats)
 
 
-def _topout_probe_block(result, probe_name, owner, aid, kind, comments=False, counters=False):
+def _topout_probe_block(result, probe_name, owner, aid, kind, comments=False, counters=False,
+                        probe_prefix=""):
     """自定义 .sv 块：驱动来自源(result.node/bindings/vectors)，断言探针贴顶层真名 probe_name。
-    用于直连寄存器根(probe=topo 名) 与 dft 改名根(probe=顶层名 A，驱动来自源 A_sm)。"""
+    用于直连寄存器根(probe=topo 名) 与 dft 改名根(probe=顶层名 A，驱动来自源 A_sm)。
+    probe_prefix：顶层探针网若埋在子模块(罕见，顶层口一般在 ENV_RF 顶层)时的层级前缀。"""
     sig = _PassthroughSig(probe_name, result.out_width, owner, aid)
     meta = dict(result.meta or {})
     meta.setdefault("truncated", False)
     lines, stats = W.render_signal_block(sig, result.bindings, result.vectors, meta,
                                          comments=comments, node=result.node,
-                                         counters=counters)
+                                         counters=counters, probe_prefix=probe_prefix)
     stats["topout_name"] = result.topo.name
     stats["topout_kind"] = kind
     stats["topout_status"] = result.status
@@ -652,15 +657,25 @@ def _topout_probe_block(result, probe_name, owner, aid, kind, comments=False, co
     return (lines, stats)
 
 
-def _register_passthrough_block(result, owner, aid, comments=False, counters=False):
+def _register_passthrough_block(result, owner, aid, comments=False, counters=False,
+                                probe_prefix=""):
     """直连寄存器根 → 平凡 passthrough .sv 块：RF_WRITE 该寄存器 + 断言 顶层口 == 写值。"""
     return _topout_probe_block(result, result.topo.name, owner, aid, REGISTER,
-                               comments=comments, counters=counters)
+                               comments=comments, counters=counters, probe_prefix=probe_prefix)
+
+
+def _probe_prefix_for_name(probe_prefixes, name):
+    """顶层探针名的层级前缀（probe_prefixes dict 按名小写键，命中返回前缀、否则空串）。
+    顶层口通常在 ENV_RF 顶层(无需前缀)；个别埋子模块的才配，与 force 叶子共用同一 probe_prefixes。"""
+    if not probe_prefixes or not name:
+        return ""
+    pp = {k.strip().lower(): v.strip() for k, v in probe_prefixes.items() if v and str(v).strip()}
+    return pp.get(str(name).strip().lower(), "")
 
 
 def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                     edit_overrides=None):
+                     edit_overrides=None, probe_prefixes=None):
     """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
 
     · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
@@ -679,7 +694,9 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     返回 {'blocks':[(lines,stats)], 'results':[TopoutResult], 'accounted':[…], 'summary':{…}}。"""
     from . import resolver as R
     eo = edit_overrides or {}
-    resolver = R.Resolver(wb)                       # 干净 cone 默认（与 generator.build 内部一致）
+    # 干净 cone 默认 + force 叶子(RO 输入/iddq 门)层级前缀(wire_prefixes)——顶层探针展到底后无前缀问题，
+    # 但 cone 叶子的 RO readback / iddq 门若埋子模块仍需前缀，否则 force `ENV_RF.<裸名> CUVUNF。
+    resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
     results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
     only_low = {str(n).lower() for n in only} if only is not None else None
     if only_low is not None:
@@ -697,6 +714,7 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     opts = G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                         include_risky=True, comments=comments, sv_summary=sv_summary,
                         owner_in_msg=owner_in_msg, signals=want_names,
+                        probe_prefixes=probe_prefixes,
                         vector_overrides=eo.get("vector_overrides") or None,
                         mux_user_vecs=eo.get("mux_user_vecs"),
                         mux_expected=eo.get("mux_expected"),
@@ -723,7 +741,9 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                 if ov is not None:
                     r.vectors = list(ov)
                 blk = _topout_probe_block(r, r.root.probe_name, owner, "TOP%d" % reg_i,
-                                          r.root.kind, comments=comments, counters=sv_summary)
+                                          r.root.kind, comments=comments, counters=sv_summary,
+                                          probe_prefix=_probe_prefix_for_name(probe_prefixes,
+                                                                              r.root.probe_name))
                 reg_i += 1
                 blocks.append(blk)
             else:                                          # 改名指向 mux 源(无单一 node)→ 暂记账（少见）
@@ -766,7 +786,9 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
             if ov is not None:                     # 用户编辑过该直连寄存器的真值表 → 用编辑后的向量
                 r.vectors = list(ov)
             blk = _register_passthrough_block(r, owner, "TOP%d" % reg_i,
-                                              comments=comments, counters=sv_summary)
+                                              comments=comments, counters=sv_summary,
+                                              probe_prefix=_probe_prefix_for_name(probe_prefixes,
+                                                                                  r.topo.name))
             reg_i += 1
             blocks.append(blk)
         else:                                       # skip(RO) / unresolved / error
@@ -787,11 +809,11 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
 
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                     edit_overrides=None):
+                     edit_overrides=None, probe_prefixes=None):
     """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。"""
     b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                          comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
-                         only=only, edit_overrides=edit_overrides)
+                         only=only, edit_overrides=edit_overrides, probe_prefixes=probe_prefixes)
     text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
     return text, b
 
@@ -818,19 +840,21 @@ def _fill_register_model(m, result):
     m["n_vectors"] = len(tests)
 
 
-def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False):
+def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
     """每个 Topout 信号一个【视图模型】（GUI / 无头测试消费），按 Topout B 列序。
 
     干净 cone 默认（Topout 视图不放级联/尾缀/top_output——那些属『排查(旧)』）。
       · logic/mux 根 → 复用 report_for_topout 富格式表（chain/inputs/tests，值已格式化）；
       · 直连寄存器根 → 从 TopoutResult 建平凡表；
       · RO 回读 / 未解析 / error → 只记账（无真值表，note/issues 说明原因，绝不崩）。
+    probe_prefixes：force 叶子(RO/iddq) + 探针层级前缀（与 .sv 同口径）。
     每个模型：{name, owner, width, kind, status, note, issues, matched_name, n_leaves,
               chain:[{out,expr,subst}], inputs:[…], tests:[…], auto_label, exp_label, n_vectors}。"""
     from . import resolver as R
-    resolver = R.Resolver(wb)
+    resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
     results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
-    rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                            probe_prefixes=probe_prefixes)
     tbl_by_topout = {}
     for t in rep.get("tables", []):
         nm = t.get("topout_name")
@@ -882,18 +906,21 @@ def _account_error_text(row):
     return "; ".join(row["issues"]) or row["note"] or row["status"]
 
 
-def topout_report(wb, mode="min", max_tests=256, exhaustive=False):
+def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
     """Topout 限定报告（write_report 兼容：summary/detail/tables/verifiability），堵 3 静默陷阱：
       ① 默认不空：summary 直接来自 compose_topout_account（12 行全分类，不套 top_output_only）；
       ② 不刷 top_out=0 假警告：error 列只放真原因（RO/未解析/冲突），无 bare-probe/needs-prefix 噪声；
       ③ for_test 回填含 mux：tables 来自 report_for_topout（已含 mux）+ register 平凡表。
 
-    summary/detail/verifiability 全限定到 Topout 清单（不像 report_for_topout 只过滤 tables）。"""
+    summary/detail/verifiability 全限定到 Topout 清单（不像 report_for_topout 只过滤 tables）。
+    probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径）。"""
     from . import resolver as R
-    resolver = R.Resolver(wb)
-    rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
+    rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                            probe_prefixes=probe_prefixes)
     acc = compose_topout_account(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
-    vms = topout_view_models(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+    vms = topout_view_models(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                             probe_prefixes=probe_prefixes)
 
     # tables：logic/mux 富表（report_for_topout）+ register 平凡表（视图模型）
     tables = list(rep.get("tables", []))

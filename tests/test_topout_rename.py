@@ -204,6 +204,22 @@ def test_collision_sv_asserts_top_name_one_bit_and_forces_iddq(collision_path):
     assert "iddq" in text.lower()                        # iddq 门被 force（与 for_test 金标准同口径）
 
 
+def test_topout_force_leaves_and_probe_take_prefix(collision_path):
+    """⭐Topout 路径接前缀(2026-06-24)：force 叶子(RO fll_active + iddq 门)与顶层探针按 probe_prefixes
+    加层级前缀，否则子模块里的网 force/assert `ENV_RF.<裸名> 会 CUVUNF。"""
+    wb = M.load_workbook(collision_path)
+    pp = {"fll_active": "U_BT_LP_PLL_DIG", "d_bt_lp_pll_dig_dft_iddq_mode": "U_BT_LP_PLL_DIG",
+          "d_vco_en_faston_ls": "U_TOP"}
+    text, _ = T.render_topout_sv(wb, mode="max", max_tests=8, only=["d_vco_en_faston_ls"],
+                                 probe_prefixes=pp)
+    assert "`ENV_RF.U_BT_LP_PLL_DIG.fll_active" in text                       # RO cone 叶子加前缀
+    assert "`ENV_RF.U_BT_LP_PLL_DIG.d_bt_lp_pll_dig_dft_iddq_mode" in text    # iddq 门叶子加前缀
+    assert "`ENV_RF.U_TOP.d_vco_en_faston_ls==" in text                      # 顶层探针加前缀
+    # 无前缀(默认)→裸名（对照，逐字节旧行为）
+    bare, _ = T.render_topout_sv(wb, mode="max", max_tests=8, only=["d_vco_en_faston_ls"])
+    assert "`ENV_RF.fll_active" in bare and "U_BT_LP_PLL_DIG" not in bare
+
+
 def test_renamed_signal_gui_edit_threads_to_export(renamed_path):
     """GUI 编辑改名信号 → 走 reg 路按顶层名键回流（否则编辑落源名键被改名路忽略=静默不生效）。"""
     import os

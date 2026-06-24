@@ -245,8 +245,9 @@ def cmd_topout(args, wb, opts):
               "请确认表里有 Topout 页；不带 --topout 则走旧 logic-rooted 默认路径。")
         return 0
 
+    pp = opts.probe_prefixes or None
     if args.list:
-        ms = T.topout_view_models(wb, mode=mode, max_tests=mt, exhaustive=exh)
+        ms = T.topout_view_models(wb, mode=mode, max_tests=mt, exhaustive=exh, probe_prefixes=pp)
         by_kind = {}
         for m in ms:
             by_kind[m["kind"]] = by_kind.get(m["kind"], 0) + 1
@@ -264,7 +265,8 @@ def cmd_topout(args, wb, opts):
 
     if args.account:
         from . import resolver as R
-        acc = T.compose_topout_account(wb, R.Resolver(wb), mode=mode, max_tests=mt, exhaustive=exh)
+        acc = T.compose_topout_account(wb, R.Resolver(wb, wire_prefixes=pp),
+                                       mode=mode, max_tests=mt, exhaustive=exh)
         s = acc["summary"]
         print("Topout 账目：%d 个要验信号（默认不空，不套 top_output_only）" % s["n_total"])
         print("  小结：可建 %d | 跳过(RO) %d | 未解析 %d | error %d | 有 issues %d"
@@ -281,7 +283,7 @@ def cmd_topout(args, wb, opts):
         return 0
 
     if args.report:
-        rep = T.topout_report(wb, mode=mode, max_tests=mt, exhaustive=exh)
+        rep = T.topout_report(wb, mode=mode, max_tests=mt, exhaustive=exh, probe_prefixes=pp)
         written = write_report(args.report, rep, args.excel)
         print("Topout 报告已写出: %s" % "  ".join(written))
         print("  Topout 信号 %d 个（真值表 %d 个）" % (len(rep["summary"]), len(rep["tables"])))
@@ -291,7 +293,7 @@ def cmd_topout(args, wb, opts):
     out = args.out or "wr_rf_tc.sv"
     text, b = T.render_topout_sv(wb, mode=mode, max_tests=mt, exhaustive=exh,
                                  comments=opts.comments, sv_summary=opts.sv_summary,
-                                 owner_in_msg=opts.owner_in_msg)
+                                 owner_in_msg=opts.owner_in_msg, probe_prefixes=pp)
     _write(out, text)
     s = b["summary"]
     print("已写出(Topout 路径): %s" % out)
