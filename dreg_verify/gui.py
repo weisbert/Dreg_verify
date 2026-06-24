@@ -511,13 +511,13 @@ class _TopoutProvider:
         return _norm_topout_result(res)
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
-                  sv_summary=False, owner_in_msg=False):
+                  sv_summary=False, owner_in_msg=False, scope="all"):
         from . import topout as T
         eo = _topout_edit_overrides(edited)
         return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                   comments=comments, sv_summary=sv_summary,
                                   owner_in_msg=owner_in_msg, only=only, edit_overrides=eo,
-                                  probe_prefixes=self._pp())
+                                  probe_prefixes=self._pp(), scope=scope)
 
     def render_report(self, mode, max_tests, exhaustive):
         from . import topout as T
@@ -633,12 +633,12 @@ class _PageProvider:
         return _norm_page_result(res)
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
-                  sv_summary=False, owner_in_msg=False):
+                  sv_summary=False, owner_in_msg=False, scope="all"):
         from . import pageviews as P
         return P.build_page_sv(self.wb, self.page, mode=mode, max_tests=max_tests,
                                exhaustive=exhaustive, edit_overrides=_page_edit_overrides(edited),
                                only=only, comments=comments, sv_summary=sv_summary,
-                               owner_in_msg=owner_in_msg, probe_prefixes=self._pp())
+                               owner_in_msg=owner_in_msg, probe_prefixes=self._pp(), scope=scope)
 
     def render_report(self, mode, max_tests, exhaustive):
         from . import pageviews as P
@@ -1688,13 +1688,26 @@ class SignalView(QtWidgets.QWidget):
         self.refresh()
 
     def _ask_export_options(self):
-        """导出 .sv 选项对话框：注释 / 末尾测试汇总(计数器) / owner 入断言消息。记忆上次选择。
-        返回 {"comments","sv_summary","owner_in_msg"} 或 None(取消)。与『排查(旧)』共用 settings 记忆键。"""
+        """导出 .sv 选项对话框：范围(全部/仅正向/仅负向) + 注释 + 末尾汇总计数器 + owner 入消息。
+        记忆上次选择。返回 {"scope","comments","sv_summary","owner_in_msg"} 或 None(取消)。
+        与『排查(旧)』共用 settings 记忆键。"""
         st = _load_settings()
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("导出 .sv 选项")
         lay = QtWidgets.QVBoxLayout(dlg)
         lay.addWidget(QtWidgets.QLabel("选择导出内容（记住本次选择，下次预选）："))
+        scope_row = QtWidgets.QHBoxLayout()
+        scope_row.addWidget(QtWidgets.QLabel("范围:"))
+        scope_combo = QtWidgets.QComboBox()
+        scope_combo.addItem("全部（正向 + 负向）", "all")
+        scope_combo.addItem("仅正向（正确用例，给仿真）", "pos")
+        scope_combo.addItem("仅负向（故意填错，自检 checker 报错链路）", "neg")
+        scope_combo.setToolTip("仅正向：剔除你标的负向用例。\n仅负向：只导出标了负向的故意填错用例；"
+                               "无负向的信号在本次导出里不出现(记账，不静默丢)。")
+        si = scope_combo.findData(st.get("export_scope", "all"))
+        scope_combo.setCurrentIndex(si if si >= 0 else 0)
+        scope_row.addWidget(scope_combo, 1)
+        lay.addLayout(scope_row)
         cm = QtWidgets.QCheckBox("加注释（每信号一行 // 名 + 文件头；默认关=纯语句体便于 diff）")
         cm.setChecked(bool(st.get("export_comments", False)))
         sm = QtWidgets.QCheckBox("末尾测试汇总 + 计数器（命名块统计真 FAIL / NEG-broken 数）")
@@ -1708,10 +1721,10 @@ class SignalView(QtWidgets.QWidget):
         lay.addWidget(bb)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return None
-        opt = {"comments": cm.isChecked(), "sv_summary": sm.isChecked(),
-               "owner_in_msg": ow.isChecked()}
-        st.update({"export_comments": opt["comments"], "export_sv_summary": opt["sv_summary"],
-                   "export_owner_in_msg": opt["owner_in_msg"]})
+        opt = {"scope": scope_combo.currentData() or "all", "comments": cm.isChecked(),
+               "sv_summary": sm.isChecked(), "owner_in_msg": ow.isChecked()}
+        st.update({"export_scope": opt["scope"], "export_comments": opt["comments"],
+                   "export_sv_summary": opt["sv_summary"], "export_owner_in_msg": opt["owner_in_msg"]})
         _save_settings(st)
         return opt
 
@@ -1753,7 +1766,7 @@ class SignalView(QtWidgets.QWidget):
         only = self._checked_names() or None
         text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
                                           comments=eo["comments"], sv_summary=eo["sv_summary"],
-                                          owner_in_msg=eo["owner_in_msg"])
+                                          owner_in_msg=eo["owner_in_msg"], scope=eo.get("scope", "all"))
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         self.sv.setPlainText(text)

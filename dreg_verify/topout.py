@@ -702,6 +702,12 @@ def _register_passthrough_block(result, owner, aid, comments=False, counters=Fal
                                comments=comments, counters=counters, probe_prefix=probe_prefix)
 
 
+def _scope_empty_reason(scope):
+    """导出范围过滤后该信号无用例 → 记账文案（neg=无负向 / pos=无正向，绝不静默丢，护栏3）。"""
+    return ("仅负向导出：本信号无负向用例(不产断言)" if scope == "neg"
+            else "仅正向导出：本信号无正向用例(不产断言)")
+
+
 def _probe_prefix_for_name(probe_prefixes, name):
     """顶层探针名的层级前缀（probe_prefixes dict 按名小写键，命中返回前缀、否则空串）。
     顶层口通常在 ENV_RF 顶层(无需前缀)；个别埋子模块的才配，与 force 叶子共用同一 probe_prefixes。"""
@@ -713,7 +719,7 @@ def _probe_prefix_for_name(probe_prefixes, name):
 
 def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                     edit_overrides=None, probe_prefixes=None):
+                     edit_overrides=None, probe_prefixes=None, scope="all"):
     """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
 
     · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
@@ -732,6 +738,10 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     返回 {'blocks':[(lines,stats)], 'results':[TopoutResult], 'accounted':[…], 'summary':{…}}。"""
     from . import resolver as R
     eo = edit_overrides or {}
+    # 导出范围 scope(all/pos/neg)：Topout 负向全来自 eo、自动向量恒正向 → 过滤 eo 即覆盖正/负；
+    # neg 时 neg_src=有负向的源名集合，下面把 generator.build 信号集限到它们(否则冒出正向自动信号)。
+    scope = scope if scope in ("pos", "neg") else "all"
+    eo, neg_src = G.scope_filter_overrides(eo, scope)
     # 干净 cone 默认 + force 叶子(RO 输入/iddq 门)层级前缀(wire_prefixes)——顶层探针展到底后无前缀问题，
     # 但 cone 叶子的 RO readback / iddq 门若埋子模块仍需前缀，否则 force `ENV_RF.<裸名> CUVUNF。
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
@@ -748,6 +758,9 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
         if r.status == "ok" and r.root.kind in (LOGIC, MUX) and not r.root.renamed:
             want_names.add(r.root.obj.out_name.lower())
             want_names.add(r.root.obj.out_base.lower())
+    if scope == "neg":
+        # 仅负向：只 build【有负向的源】(neg_src=源 out_name)，其余正向自动信号不出现（仅记账）。
+        want_names &= (neg_src or set())
 
     opts = G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                         include_risky=True, comments=comments, sv_summary=sv_summary,
@@ -778,6 +791,12 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                     continue
                 if ov is not None:
                     r.vectors = list(ov)
+                r.vectors = G.scope_filter_vectors(r.vectors, scope)
+                if not r.vectors:                          # 仅正向/仅负向过滤后无用例 → 记账
+                    _why = _scope_empty_reason(scope)
+                    blocks.append(_account_block(name, r.root.kind, "scope-empty", _why, owner))
+                    accounted.append({"name": name, "kind": r.root.kind, "status": "scope-empty", "reason": _why})
+                    continue
                 blk = _topout_probe_block(r, r.root.probe_name, owner, "TOP%d" % reg_i,
                                           r.root.kind, comments=comments, counters=sv_summary,
                                           probe_prefix=_probe_prefix_for_name(probe_prefixes,
@@ -791,6 +810,11 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
             continue
         if r.status == "ok" and r.root.kind in (LOGIC, MUX):
             src = r.root.obj.out_name.lower()
+            if scope == "neg" and src not in (neg_src or set()):  # 仅负向：该源无负向 → 记账，不产出
+                _why = _scope_empty_reason(scope)
+                blocks.append(_account_block(name, r.root.kind, "scope-empty", _why, owner))
+                accounted.append({"name": name, "kind": r.root.kind, "status": "scope-empty", "reason": _why})
+                continue
             if src in seen_src:                    # 两个 Topout 名映到同一源对象 → 只产出一次（防 dup-label）
                 _why = "与已产出的同源信号共用一个源对象（避免断言标号重复）"
                 blocks.append(_account_block(name, r.root.kind, "dup-source", _why, owner))
@@ -823,6 +847,12 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                 continue
             if ov is not None:                     # 用户编辑过该直连寄存器的真值表 → 用编辑后的向量
                 r.vectors = list(ov)
+            r.vectors = G.scope_filter_vectors(r.vectors, scope)
+            if not r.vectors:                      # 仅正向/仅负向过滤后无用例 → 记账
+                _why = _scope_empty_reason(scope)
+                blocks.append(_account_block(name, REGISTER, "scope-empty", _why, owner))
+                accounted.append({"name": name, "kind": REGISTER, "status": "scope-empty", "reason": _why})
+                continue
             blk = _register_passthrough_block(r, owner, "TOP%d" % reg_i,
                                               comments=comments, counters=sv_summary,
                                               probe_prefix=_probe_prefix_for_name(probe_prefixes,
@@ -848,11 +878,12 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
 
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                     edit_overrides=None, probe_prefixes=None):
+                     edit_overrides=None, probe_prefixes=None, scope="all"):
     """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。"""
     b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                          comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
-                         only=only, edit_overrides=edit_overrides, probe_prefixes=probe_prefixes)
+                         only=only, edit_overrides=edit_overrides, probe_prefixes=probe_prefixes,
+                         scope=scope)
     text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
     return text, b
 

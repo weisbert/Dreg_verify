@@ -524,6 +524,53 @@ def _name_matches(sig, names):
     return bool(cand & names)
 
 
+def scope_filter_vectors(vecs, scope):
+    """按导出范围过滤向量：'pos'=剔负向(给仿真)；'neg'=只留负向(自检)；'all'/其它=原样。"""
+    if scope == "pos":
+        return [v for v in vecs if not v.is_negative]
+    if scope == "neg":
+        return [v for v in vecs if v.is_negative]
+    return list(vecs)
+
+
+def scope_filter_overrides(eo, scope):
+    """按导出范围(pos/neg)过滤 edit_overrides 的每条向量列表。返回 (新eo, neg_src:set|None)。
+
+    Topout/页本地视图的负向【全部来自编辑(eo)】、自动向量恒正向，故按 scope 过滤 eo 即可：
+      · 'pos' → 各列表剔负向（空列表保留=尊重清零=零用例）；
+      · 'neg' → 各列表只留负向，并收集【有负向的源名集合】neg_src(logic/register/dft 源 out_name +
+                mux 源名)，供调用方把 generator.build 的信号集限到这些源(否则冒出一堆正向自动信号)。
+    'all'/其它 → 原样返回 (eo, None)。"""
+    if scope not in ("pos", "neg"):
+        return eo, None
+    eo = eo or {}
+    out = dict(eo)
+    neg_src = set() if scope == "neg" else None
+    keep = (lambda v: v.is_negative) if scope == "neg" else (lambda v: not v.is_negative)
+
+    def _filt_map(key):
+        m = {}
+        for k, vl in (eo.get(key) or {}).items():
+            fv = [v for v in (vl or []) if keep(v)]
+            if scope == "neg":
+                if fv:
+                    m[k] = fv
+                    neg_src.add(str(k).lower())
+            else:
+                m[k] = fv                       # pos: 空列表也留(清零=零用例，不回退自动)
+        return m or None
+
+    out["vector_overrides"] = _filt_map("vector_overrides")
+    out["reg_overrides"] = _filt_map("reg_overrides")
+    out["mux_user_vecs"] = _filt_map("mux_user_vecs")
+    if scope == "neg":
+        # 正向侧的 mux 编辑(期望/删列/清空)在仅负向导出里无意义 → 清掉
+        out["mux_expected"] = None
+        out["mux_dropped"] = None
+        out["mux_cleared"] = None
+    return out, neg_src
+
+
 def is_top_output(val):
     """logic N 列 top_output：=1 才是 RTL 可见、要验证的输出；=0 是内部信号(探不到)。"""
     return str(val).strip() in ("1", "1.0", "True", "true")

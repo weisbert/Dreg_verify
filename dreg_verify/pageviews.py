@@ -263,12 +263,20 @@ def _page_signals_filter(wb, page, only):
 
 def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
                   edit_overrides=None, only=None, comments=False, probe_prefixes=None,
-                  sv_summary=False, owner_in_msg=False):
+                  sv_summary=False, owner_in_msg=False, scope="all"):
     """页本地 .sv：复用 generator.build（force 级联=不跨页 cone）。返回 (text, summary)。"""
     saved = _with_page_logic(wb, page)
     try:
-        opts = _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides,
-                              signals=_page_signals_filter(wb, page, only), comments=comments,
+        # 导出范围 scope(all/pos/neg)：页本地负向同样全来自编辑(eo)、自动向量恒正向 → 过滤 eo；
+        # neg 时把信号集限到有负向的源(否则冒出正向自动信号)。
+        scope = scope if scope in ("pos", "neg") else "all"
+        eo, neg_src = G.scope_filter_overrides(edit_overrides or {}, scope)
+        sigs = _page_signals_filter(wb, page, only)
+        if scope == "neg":
+            ns = {str(s).lower() for s in (neg_src or set())}
+            sigs = (sigs & ns) if sigs is not None else ns
+        opts = _page_gen_opts(page, mode, max_tests, exhaustive, eo,
+                              signals=sigs, comments=comments,
                               probe_prefixes=probe_prefixes, sv_summary=sv_summary,
                               owner_in_msg=owner_in_msg)
         built = G.build(wb, opts)

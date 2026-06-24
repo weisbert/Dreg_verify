@@ -201,6 +201,34 @@ def test_topout_export_sv_options_comments_and_summary(topo_win, tmp_path, monke
     v._e_regen()
 
 
+def test_topout_export_scope_pos_neg(topo_win, tmp_path, monkeypatch):
+    """⭐#3 2b：导出范围——仅正向剔除负向断言；仅负向只留负向、且无负向的信号不出现(记账，不静默丢)。"""
+    from PySide6 import QtWidgets
+    w = topo_win
+    w._topo_check_all(True)
+    v = _sel(w, "d_logic_bt_lp_rx_en")
+    v._e_regen(); v.truth.setCurrentCell(0, 0); v._e_addneg()      # 给 rx_en 加一条负向
+
+    def export(scope):
+        out = tmp_path / ("scope_%s.sv" % scope)
+        monkeypatch.setattr(w.topout_view, "_ask_export_options",
+                            lambda: {"scope": scope, "comments": False,
+                                     "sv_summary": False, "owner_in_msg": False})
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                            staticmethod(lambda *a, **k: (str(out), "")))
+        monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+        w.on_topo_export_sv()
+        return out.read_text(encoding="utf-8")
+
+    pos = export("pos")
+    assert "d_logic_bt_lp_rx_en==" in pos and "_NEG:" not in pos    # 仍有该信号、无负向断言
+    neg = export("neg")
+    assert "_NEG:" in neg                                            # 仅负向：含负向断言
+    assert "d_logic_bt_lp_rx_en==" in neg
+    assert "clk_force_on==" not in neg                              # 无负向的寄存器信号不出现
+    v._e_regen()
+
+
 def test_topout_export_sv_only_checked(topo_win, tmp_path, monkeypatch):
     """勾选过滤：只勾 rx_en → 导出仅含它（其余 Topout 信号块不出现）。"""
     from PySide6 import QtCore, QtWidgets
