@@ -1,8 +1,21 @@
 # 交接：Topout-rooted 验证（GUI/CLI 端到端）
 
-> 状态：**端到端可用，已 push**。HEAD `92da327`（= origin/main），`740 passed + 1 xfailed`。
-> 旧 logic-rooted CLI/generator 输出**逐字节不变**（已显式 diff `59a146d` pre vs post 验过）。
+> 状态：**端到端可用 + 全功能化，已 push**。HEAD `5e4c573`（= origin/main），`775 passed + 1 xfailed`。
+> 旧 logic-rooted CLI/generator 输出**逐字节不变**（已显式 worktree diff `92da327` pre vs post 验过 mirror btlp+wl 的 .sv+report）。
 > 日期：2026-06-24。验证夹具：`mirror_btlp_dreg.xlsx`（7 真族金标准）。真表：`Hi1108_Pilot_BT_LP_DREG_95P_20260623.xlsx`（公司机 `D:\Onebox\Code\Dreg_verify\excel\`）。
+
+---
+
+## ⭐ 第二轮（2026-06-24）：从『可用』到『全功能』——6 缺口全补
+
+上一轮交付『端到端可用』后判定是半成品，本轮全部补齐（架构=可复用 `SignalView` 控件，Topout 与子视图共用）：
+
+1. **Topout 真值表可编辑**：清零 / 加列 / 复制列 / 删列 / 改输入值(auto_out 即时重算) / 改期望 / 加删负向 / 重命名列 / 重新生成；编辑经 `vector_overrides`+`reg_overrides`+`mux_*` 回流到预览/导出的 `.sv`。
+2. **信号选择面板补齐**：owner 多选筛 / 分类筛 / 状态筛 / 搜索(名·式·输入名,正则) / 全选 / 清空勾选 / 勾选选中行 / 逐信号『负向』勾选列（在『选』旁边）。
+3. **新增 4 个子视图**：外层 6 标签 = `Topout 视图`(默认) + `logic 视图` + `mux 视图` + `dft 视图` + `iddq 视图` + `排查(旧)`。子视图 = **页本地·不跨页 cone**（force 级联=只看本模块的输入输出，不递归代入上游），各自有可编辑真值表 + 导出。
+4. **覆盖度迁出右上角** → 每个视图的筛选工具条里，旁边 `?` 讲清 logic vs mux 各自怎么展开。
+5. **展开链总显示**：单级 logic 信号也显示『原式 / 字母代入真实信号名』（不再是『无上游可展开』占位）。
+6. **CLI `--page`**：`--page logic|mux|dft|iddq` headless 跑子视图（`--list`/`--report`/默认出 `.sv`），与 GUI 子视图同口径。
 
 ---
 
