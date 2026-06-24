@@ -275,6 +275,125 @@ def test_topout_refresh_failure_clears_stale_panels(topo_win, monkeypatch):
     assert "失败" in w.topo_detail.text()
 
 
+# ═══════════════ 2026-06-24 SignalView 重构：编辑 / 筛选 / 展开链 / 覆盖度迁移 ═══════════════
+def _sel(w, name):
+    from dreg_verify import gui as G
+    w.topo_table.setCurrentCell(_topo_row(w, name), G.TOPO_NAME)
+    return w.topout_view
+
+
+# ── 点1：真值表清零/加列/删列/改预填 ──
+def test_topout_truth_add_delete_column(topo_win):
+    """加列→列数+1；删列→回到原数；清零→零列（可逆：重新生成恢复）。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    n0 = len(v.cur_cols)
+    v._e_add()
+    assert len(v.cur_cols) == n0 + 1
+    v.truth.setCurrentCell(0, n0)                 # 选中刚加的列
+    v._e_del()
+    assert len(v.cur_cols) == n0
+    v._e_clear()
+    assert v.cur_cols == [] and v.truth.columnCount() == 0
+    v._e_regen()
+    assert len(v.cur_cols) == n0                  # 重新生成可逆
+
+
+def test_topout_truth_edit_expected_and_input_recompute(topo_win):
+    """改输入值→auto_out 即时重算；改期望→记进 edits、导出向量带 designer_expected。"""
+    from dreg_verify import vectors as V
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    v._e_regen()
+    col = v.cur_cols[0]
+    for e in v.e_inputs:                          # A=linelocal=1, C=rx_en_local=1, 其余 0
+        col["vals"][e["key"]] = 1 if ("linelocal_mode" in e["label"]
+                                      or "rx_en_local" in e["label"]) else 0
+    v._recompute_col(col)
+    assert col["auto"] == 1                       # (1?1:0)&~0 = 1
+    col["exp"] = 1
+    v._commit()
+    ed = v._compute_edited()
+    assert "d_logic_bt_lp_rx_en" in ed
+    assert ed["d_logic_bt_lp_rx_en"]["vectors"][0].designer_expected == 1
+
+
+def test_topout_edit_reflected_in_exported_sv(topo_win):
+    """清零某 Topout 信号→导出 .sv 不再含它的断言，但记账『用户已清空』(不静默丢)。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    base, _ = v.provider.render_sv(None, "max", v._maxt(), False, {})
+    assert "`ENV_RF.d_logic_bt_lp_rx_en==" in base
+    v._e_clear()
+    text, _ = v.provider.render_sv(None, "max", v._maxt(), False, v._compute_edited())
+    assert "`ENV_RF.d_logic_bt_lp_rx_en==" not in text
+    assert "用户已清空" in text and "d_logic_bt_lp_rx_en" in text
+
+
+def test_topout_negative_checkbox_adds_neg(topo_win):
+    """信号清单『负向』勾选 → 该信号加一条负向；导出 .sv 含 _NEG 断言。"""
+    from dreg_verify import gui as G
+    from PySide6 import QtCore
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    r = _topo_row(topo_win, "d_logic_bt_lp_rx_en")
+    v.sig_table.item(r, G.TOPO_NEG).setCheckState(QtCore.Qt.Checked)
+    assert v._has_negatives("d_logic_bt_lp_rx_en")
+    text, _ = v.provider.render_sv(None, "max", v._maxt(), False, v._compute_edited())
+    assert "_NEG" in text
+
+
+# ── 点2：信号选择面板 owner 筛/搜索/全选清空 ──
+def test_topout_owner_filter(topo_win):
+    """勾一个 owner → 只显示该 owner 的信号行。"""
+    v = topo_win.topout_view
+    owners = {m["owner"] for m in v.models if m["owner"]}
+    assert owners
+    target = sorted(owners)[0]
+    v._owner_acts[target].setChecked(True)
+    visible = [m["name"] for r, m in enumerate(v.models) if not v.sig_table.isRowHidden(r)]
+    assert visible and all(
+        next(m for m in v.models if m["name"] == nm)["owner"] == target for nm in visible)
+    v._owner_acts[target].setChecked(False)       # 复位
+
+
+def test_topout_search_filter(topo_win):
+    """搜索框输入 → 只显示名字/表达式/输入名匹配的行。"""
+    v = topo_win.topout_view
+    v.search.setText("rx_en")
+    vis = [m["name"] for r, m in enumerate(v.models) if not v.sig_table.isRowHidden(r)]
+    assert vis and all("rx_en" in nm or "rx_en" in (
+        m_["expr"] or "") for nm in vis for m_ in [next(x for x in v.models if x["name"] == nm)])
+    v.search.setText("")
+
+
+def test_topout_select_all_clear(topo_win):
+    """全选→全部勾选；清空勾选→全不勾。"""
+    v = topo_win.topout_view
+    v._check_all(True)
+    assert len(v._checked_names()) == sum(1 for r in range(v.sig_table.rowCount())
+                                          if not v.sig_table.isRowHidden(r))
+    v._check_all(False)
+    assert v._checked_names() == []
+    v._check_all(True)
+
+
+# ── 点6：展开链总显示（字母代入真名）──
+def test_topout_chain_shows_substitution(topo_win):
+    """单级 logic 信号也显示展开链『原式 / 字母代入真名』(不再是『无上游可展开』占位)。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    txt = v.chain.toPlainText()
+    assert "(A?C:B)" in txt                         # 原式
+    assert "d_bt_lp_linelocal_mode_ctrl" in txt     # 字母代入真名
+    assert "d_bt_lp_rx_en_local" in txt
+
+
+# ── 点5：覆盖度在工具条（非右上角）、带 ? 帮助 ──
+def test_topout_coverage_in_toolbar(topo_win):
+    """覆盖度下拉 = SignalView 自有 cov（在筛选工具条），有三档 + 切档即重建。"""
+    v = topo_win.topout_view
+    assert [v.cov.itemText(i) for i in range(v.cov.count())] == ["精简", "全面", "穷举"]
+    v.cov.setCurrentText("精简")
+    assert v.built_key[0] == "min"
+    v.cov.setCurrentText("全面")
+
+
 # ───────────── 截图：Topout 视图版面过目 ─────────────
 def test_topout_view_screenshot(topo_win, gui_app):
     """截一张 Topout 视图 PNG（版面过目；文字方框是 offscreen 缺中文字体所致，文字由上面断言把关）。"""

@@ -221,8 +221,12 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
             res.expansion = expansion
             res.issues.extend(expansion.get("issues", []))
             if want_vectors:
-                res.vectors = mux_gen.make_mux_vectors(grp, expansion, mode=mode,
-                                                       max_tests=max_tests)
+                # make_mux_vectors 返回 (vecs, meta)——必须解包（旧代码误把整个元组塞 res.vectors，
+                # build/report 不读 res.vectors 故没暴露；GUI 编辑器直接读它才发现，2026-06-24 修）。
+                # 用 coverage_mode 归一档位，让『穷举』mux 也真扫另一条控制路径（旧 mode=max 退化成全面）。
+                res.vectors, res.meta = mux_gen.make_mux_vectors(
+                    grp, expansion, mode=mux_gen.coverage_mode(mode, exhaustive),
+                    max_tests=max_tests)
                 res.bindings = expansion.get("bindings", {})
         except cone.ConeError as ex:
             res.status = "error"
@@ -488,7 +492,8 @@ def _register_passthrough_block(result, owner, aid, comments=False, counters=Fal
 
 
 def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
-                     comments=False, sv_summary=False, owner_in_msg=False, only=None):
+                     comments=False, sv_summary=False, owner_in_msg=False, only=None,
+                     edit_overrides=None):
     """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
 
     · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
@@ -497,11 +502,16 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
     · RO 回读 / 未解析 / error / 同源已覆盖：块顶注释记账（护栏3，绝不静默丢）。
 
     only：限定只产出这些 Topout 名（GUI 导出/预览勾选项用；None=全部）。
+    edit_overrides：GUI 真值表编辑回流（2026-06-24，additive；None=无编辑、逐字节同旧）。dict：
+        {"vector_overrides": {源out_name低: [TestVector]}（logic 源；空列表=清零）,
+         "reg_overrides":    {Topout名低: [TestVector]}（直连寄存器根；空列表=清零）,
+         "mux_user_vecs"/"mux_expected"/"mux_dropped"/"mux_cleared"/"mux_data": 透传 GenOptions（mux 源）}
     cone 默认级联、include_risky=True（Topout 名 cone 已展到源、前后缀整类问题消失，逃生阀属『排查(旧)』）。
     sv_summary=True 时各块带计数器（counters）——调用方须 render_file(summary=True) 包一次命名块。
 
     返回 {'blocks':[(lines,stats)], 'results':[TopoutResult], 'accounted':[…], 'summary':{…}}。"""
     from . import resolver as R
+    eo = edit_overrides or {}
     resolver = R.Resolver(wb)                       # 干净 cone 默认（与 generator.build 内部一致）
     results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
     only_low = {str(n).lower() for n in only} if only is not None else None
@@ -517,9 +527,16 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
 
     opts = G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                         include_risky=True, comments=comments, sv_summary=sv_summary,
-                        owner_in_msg=owner_in_msg, signals=want_names)
+                        owner_in_msg=owner_in_msg, signals=want_names,
+                        vector_overrides=eo.get("vector_overrides") or None,
+                        mux_user_vecs=eo.get("mux_user_vecs"),
+                        mux_expected=eo.get("mux_expected"),
+                        mux_data=eo.get("mux_data"),
+                        mux_dropped=eo.get("mux_dropped"),
+                        mux_cleared=eo.get("mux_cleared"))
     built = G.build(wb, opts)
     by_src = {st["out_name"].lower(): (ln, st) for ln, st in built["blocks"]}
+    reg_ov = {str(k).lower(): v for k, v in (eo.get("reg_overrides") or {}).items()}
 
     blocks, accounted, seen_src = [], [], set()
     reg_i = 0
@@ -535,6 +552,12 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                 continue
             blk = by_src.get(src)
             if blk is None:                        # include_risky=True 仍被 build 跳过（规格冲突/空向量等）
+                _vov = (eo.get("vector_overrides") or {})
+                if src in _vov and len(_vov[src]) == 0:   # 用户在 GUI 清零了该 logic 信号 → 明确记账
+                    _why = "用户已清空(零用例，本信号不产出测试)"
+                    blocks.append(_account_block(name, r.root.kind, "cleared", _why, owner))
+                    accounted.append({"name": name, "kind": r.root.kind, "status": "cleared", "reason": _why})
+                    continue
                 reason = "; ".join(r.issues) or "generator.build 未产出该块（规格冲突/空向量/被跳过，见账目）"
                 blocks.append(_account_block(name, r.root.kind, "skipped", reason, owner))
                 accounted.append({"name": name, "kind": r.root.kind, "status": "skipped", "reason": reason})
@@ -545,6 +568,14 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
             st["topout_kind"] = r.root.kind; st["topout_status"] = "ok"
             blocks.append((list(ln), st))
         elif r.status == "ok" and r.root.kind == REGISTER:
+            ov = reg_ov.get(name.lower())
+            if ov is not None and len(ov) == 0:    # 用户清零该直连寄存器 → 记账（零用例，不静默丢）
+                _why = "用户已清空(零用例，本信号不产出测试)"
+                blocks.append(_account_block(name, REGISTER, "cleared", _why, owner))
+                accounted.append({"name": name, "kind": REGISTER, "status": "cleared", "reason": _why})
+                continue
+            if ov is not None:                     # 用户编辑过该直连寄存器的真值表 → 用编辑后的向量
+                r.vectors = list(ov)
             blk = _register_passthrough_block(r, owner, "TOP%d" % reg_i,
                                               comments=comments, counters=sv_summary)
             reg_i += 1
@@ -566,11 +597,12 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
 
 
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
-                     comments=False, sv_summary=False, owner_in_msg=False, only=None):
+                     comments=False, sv_summary=False, owner_in_msg=False, only=None,
+                     edit_overrides=None):
     """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。"""
     b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                          comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
-                         only=only)
+                         only=only, edit_overrides=edit_overrides)
     text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
     return text, b
 

@@ -378,6 +378,1079 @@ class _CheckableMenu(QtWidgets.QMenu):
         super().mouseReleaseEvent(e)
 
 
+# ════════════════════════ 可复用信号视图（Topout + 子视图共用，2026-06-24 重构）════════════════════════
+# 一个 SignalView = 左『被验证信号清单』(owner 多选筛/搜索/状态筛/全选清空/负向勾) + 右『可编辑真值表』
+# (清零/加列/删列/复制列/改输入即重算/改期望/加删负向/重命名/重生成) + 展开链 + .sv 预览 + 导出按钮 + 覆盖度。
+# provider 决定『要验什么信号、怎么分析(cone vs 页本地)、怎么出 .sv/报告』；视图层(交互/编辑)全共用。
+import re as _re
+
+TOPO_NEG = 6                                  # 清单表新增『负向』列(0-5 与旧 TOPO_* 一致，测试不破)
+SV_HEADERS = TOPO_HEADERS + ["负向"]
+SV_KIND_LABEL = dict(TOPO_KIND_LABEL)         # Topout 5 分类；子视图补 logic/mux 直观标签
+SV_KIND_LABEL.setdefault("logic", "logic")    # 子视图里 kind=logic/mux 直接显原词（Topout 用『选路/logic』）
+
+_SV_VAR_RE = _re.compile(r"(?<![A-Za-z0-9_])([A-J])(?![A-Za-z0-9_])")
+_COVERAGE_HELP = (
+    "覆盖度三档 = 测试用例的强度，对 logic 与 mux 两类信号【自动按各自算法】展开：\n\n"
+    "【logic / 直连寄存器 / dft / iddq 表达式信号】\n"
+    "  精简 = 每种『控制位组合』各取 1 组代表数据(最少用例)\n"
+    "  全面 = 每种控制位组合再扫多组数据(全0/全1/反码/走步/区分坏位)\n"
+    "  穷举 = 所有输入位的全部组合(仅当总输入位≤10，否则自动退化为『全面』)\n\n"
+    "【mux 选路信号】\n"
+    "  精简 = 每个 case 1 条(don't-care 位取 0)\n"
+    "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据(抓数据通路坏位)\n"
+    "  穷举 = 全面 + 另一条物理控制路径(line/local)全扫每 case\n\n"
+    "选信号后下方会实时显示当前信号的用例条数；改档即时重算。")
+
+
+def _parse_cell_int(text):
+    """真值表单元格输入 → int（接受 0x../'h../0b../十进制；空/非法 → None）。"""
+    t = (text or "").strip()
+    if t == "":
+        return None
+    low = t.lower()
+    try:
+        if low.startswith("'h"):
+            return int(low[2:], 16)
+        if low.startswith("0x"):
+            return int(low, 16)
+        if low.startswith("0b"):
+            return int(low, 2)
+        return int(t, 10)
+    except ValueError:
+        try:
+            return int(t, 16)
+        except ValueError:
+            return None
+
+
+def _subst_expr(expr, name_of):
+    """把单字母变量(A-J)替换成真实信号名，给展开链『字母代入』一行用（cone 多级链由分析结果直接给）。"""
+    return _SV_VAR_RE.sub(lambda m: name_of.get(m.group(1), m.group(1)), expr or "")
+
+
+def _norm_topout_result(res):
+    """topout.TopoutResult → SignalView 统一分析 dict（编辑/导出消费）。"""
+    kind = res.root.kind
+    sig = res.root.obj
+    an = {"kind": kind, "status": res.status, "issues": list(res.issues),
+          "note": res.note, "node": res.node, "bindings": res.bindings,
+          "expansion": res.expansion, "vectors": list(res.vectors),
+          "out_width": res.out_width, "chain": list(res.chain),
+          "name": res.topo.name, "sig": sig}
+    an["groups"] = (V.input_groups(res.node, res.bindings)
+                    if (kind in ("logic", "register") and res.node is not None
+                        and res.bindings is not None) else [])
+    # 编辑回流键：logic/mux → 源对象 out_name（generator.build 据此选）；register → Topout 名（reg_overrides）
+    an["src_out_name"] = (sig.out_name if (kind in ("logic", "mux") and sig is not None)
+                          else res.topo.name)
+    an["editable"] = "logic" if kind in ("logic", "register") else ("mux" if kind == "mux" else "")
+    return an
+
+
+def _norm_page_result(res):
+    """pageviews.PageResult → SignalView 统一分析 dict。"""
+    an = {"kind": res.kind, "status": res.status, "issues": list(res.issues),
+          "note": res.note, "node": res.node, "bindings": res.bindings,
+          "expansion": res.expansion, "vectors": list(res.vectors),
+          "out_width": res.out_width, "chain": list(res.chain),
+          "name": res.name, "sig": res.sig}
+    an["groups"] = (res.groups or []) if res.kind == "logic" else []
+    an["src_out_name"] = res.sig.out_name
+    an["editable"] = "logic" if res.kind == "logic" else ("mux" if res.kind == "mux" else "")
+    return an
+
+
+class _TopoutProvider:
+    """Topout 视图数据源：cone 展到源寄存器、断言贴顶层真名。"""
+    has_chain = True
+    view_id = "topout"
+
+    def __init__(self, main):
+        self.main = main
+
+    @property
+    def wb(self):
+        return self.main.wb
+
+    def title(self):
+        return "要验信号 = Topout 页 B 列（顶层真名，cone 展到源寄存器，断言贴真名）"
+
+    def empty_hint(self):
+        return ("⚠ 当前 Excel 没有 Topout 页（B 列要验信号清单为空）。可切到其它视图(logic/mux/dft)"
+                "或『排查(旧)』。")
+
+    def has_page(self):
+        return bool(getattr(self.wb, "topout", None))
+
+    def view_models(self, mode, max_tests, exhaustive):
+        from . import topout as T
+        return T.topout_view_models(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+
+    def analyze(self, name, mode, max_tests, exhaustive):
+        from . import topout as T
+        topo = next((t for t in (self.wb.topout or []) if t.name == name), None)
+        if topo is None:
+            return None
+        res = T.analyze_signal(self.wb, R.Resolver(self.wb), topo, mode=mode,
+                               max_tests=max_tests, exhaustive=exhaustive)
+        return _norm_topout_result(res)
+
+    def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True):
+        from . import topout as T
+        eo = _topout_edit_overrides(edited)
+        return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                  comments=comments, only=only, edit_overrides=eo)
+
+    def render_report(self, mode, max_tests, exhaustive):
+        from . import topout as T
+        return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+
+    def fortest(self, src, out, mode, max_tests, exhaustive):
+        from . import topout as T
+        from . import fortest_writer as F
+        rep = T.report_for_topout(self.wb, R.Resolver(self.wb), mode=mode,
+                                  max_tests=max_tests, exhaustive=exhaustive)
+        F.write_fortest(src, out, rep, include_mux=True)
+
+
+def _topout_edit_overrides(edited):
+    """SignalView 收集的逐信号编辑 → topout.build_for_topout 的 edit_overrides。
+    edited[name_low] = {'kind','src_out_name','cleared','vectors'(logic/reg),'mux':{...}}。"""
+    vov, reg_ov = {}, {}
+    mux_user, mux_exp, mux_drop, mux_cleared = {}, {}, {}, []
+    for ed in (edited or {}).values():
+        kind = ed["kind"]
+        if kind == "logic":
+            vov[ed["src_out_name"].lower()] = ed["vectors"]
+        elif kind == "register":
+            reg_ov[ed["name"].lower()] = ed["vectors"]
+        elif kind == "mux":
+            src = ed["src_out_name"].lower()
+            mx = ed.get("mux") or {}
+            if mx.get("cleared"):
+                mux_cleared.append(src)
+            if mx.get("dropped"):
+                mux_drop[src] = list(mx["dropped"])
+            if mx.get("expected"):
+                mux_exp[src] = dict(mx["expected"])
+            if mx.get("user_vecs"):
+                mux_user[src] = list(mx["user_vecs"])
+    return {"vector_overrides": vov or None, "reg_overrides": reg_ov or None,
+            "mux_user_vecs": mux_user or None, "mux_expected": mux_exp or None,
+            "mux_dropped": mux_drop or None, "mux_cleared": mux_cleared or None}
+
+
+class SignalView(QtWidgets.QWidget):
+    """一个可复用的『信号清单 + 可编辑真值表 + 展开链 + .sv/报告导出 + 覆盖度』视图。
+    Topout 视图与 logic/mux/dft/iddq 子视图都用它，差异全在 provider。"""
+
+    def __init__(self, main, provider):
+        super().__init__()
+        self.main = main
+        self.provider = provider
+        self.view_id = provider.view_id
+        self.has_chain = provider.has_chain
+        self.models = []
+        self.built_key = None
+        self._owner_filter = set()
+        self._owner_acts = {}
+        self._loading = False          # 程序化填清单表时屏蔽 itemChanged
+        self._ti_loading = False       # 程序化填真值表时屏蔽 itemChanged
+        self.cur_name = None           # 当前选中信号名
+        self.cur_an = None             # 当前分析(统一 dict)
+        self.cur_cols = None           # 当前真值表列(编辑模型)
+        self.e_inputs = []             # 当前真值表输入行 [{key,label,width,editable}]
+        # 逐信号编辑：name_low -> {'kind','src_out_name','name','cols'} ；不在=自动(未编辑)
+        self.edits = {}
+        self._build()
+
+    # ───────────── 覆盖度（每视图一个，从右上角迁出到工具条；含 ? 解释 logic/mux 算法）─────────────
+    def _mode(self):
+        t = self.cov.currentText()
+        if t == "穷举":
+            return "max", True
+        if t == "精简":
+            return "min", False
+        return "max", False
+
+    def _maxt(self):
+        try:
+            return int(self.main.max_tests.value())
+        except Exception:  # noqa: BLE001
+            return 256
+
+    # ───────────── UI ─────────────
+    def _build(self):
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+
+        bar = QtWidgets.QHBoxLayout()
+        self.title_lbl = QtWidgets.QLabel(self.provider.title())
+        self.title_lbl.setStyleSheet("color:#445;")
+        bar.addWidget(self.title_lbl)
+        bar.addSpacing(12)
+        # owner 多选筛（与排查旧同款 _CheckableMenu）
+        self.owner_btn = QtWidgets.QToolButton()
+        self.owner_btn.setText("全部 owner")
+        self.owner_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.owner_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.owner_btn.setToolTip("按 owner 多选筛选：勾多个=任一命中即显示(OR)；不勾=全部。")
+        self.owner_menu = _CheckableMenu(self.owner_btn)
+        self.owner_btn.setMenu(self.owner_menu)
+        bar.addWidget(self.owner_btn)
+        self.kind_combo = QtWidgets.QComboBox()
+        self.kind_combo.addItem("全部分类")
+        self.kind_combo.currentIndexChanged.connect(self._apply_filter)
+        bar.addWidget(self.kind_combo)
+        self.status_combo = QtWidgets.QComboBox()
+        self.status_combo.addItems(["全部状态", "仅可建(ok)", "仅有问题"])
+        self.status_combo.currentIndexChanged.connect(self._apply_filter)
+        bar.addWidget(self.status_combo)
+        self.search = QtWidgets.QLineEdit()
+        self.search.setPlaceholderText("搜索：信号名/表达式/输入信号名…支持正则")
+        self.search.setToolTip("按信号名、表达式、或输入信号名匹配（支持正则）。")
+        self.search.textChanged.connect(self._apply_filter)
+        bar.addWidget(self.search, 1)
+        bar.addWidget(QtWidgets.QLabel("覆盖度:"))
+        self.cov = QtWidgets.QComboBox()
+        self.cov.addItems(["精简", "全面", "穷举"])
+        self.cov.setCurrentText("全面")
+        self.cov.setToolTip(_COVERAGE_HELP)
+        self.cov.currentIndexChanged.connect(self.refresh)
+        bar.addWidget(self.cov)
+        cov_help = QtWidgets.QPushButton("?")
+        cov_help.setFixedWidth(24)
+        cov_help.setToolTip("覆盖度算法说明（logic vs mux 各自怎么展开）")
+        cov_help.clicked.connect(lambda: QtWidgets.QMessageBox.information(
+            self, "覆盖度算法", _COVERAGE_HELP))
+        bar.addWidget(cov_help)
+        self.cov_hint = QtWidgets.QLabel("")
+        self.cov_hint.setStyleSheet("color:#1558d6;")
+        bar.addWidget(self.cov_hint)
+        lay.addLayout(bar)
+
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        # ── 左：信号清单 + 批量条 ──
+        left = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(left); lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(3)
+        self.sig_table = QtWidgets.QTableWidget(0, len(SV_HEADERS))
+        self.sig_table.setHorizontalHeaderLabels(SV_HEADERS)
+        self.sig_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.sig_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.sig_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.sig_table.currentCellChanged.connect(self._on_row)
+        self.sig_table.itemChanged.connect(self._on_sig_item_changed)
+        self.sig_table.setMinimumWidth(360)
+        lv.addWidget(self.sig_table, 1)
+        bulk_box = QtWidgets.QWidget()
+        bulk = FlowLayout(bulk_box)
+        for text, slot, tip in [
+                ("全选", lambda: self._check_all(True), "勾选所有可见信号(纳入导出/预览)"),
+                ("清空勾选", lambda: self._check_all(False), "取消所有勾选"),
+                ("勾选选中行", self._check_selected, "把表里框选/Ctrl 多选的行一次勾上"),
+                ("全部加负向", lambda: self._bulk_neg(True),
+                 "给目标信号各加 1 条负向自检(有勾选→只作用勾选，否则全部可见)"),
+                ("清除负向", lambda: self._bulk_neg(False), "清除目标信号的负向")]:
+            b = QtWidgets.QPushButton(text); b.setToolTip(tip); b.clicked.connect(slot)
+            bulk.addWidget(b)
+        lv.addWidget(bulk_box)
+        split.addWidget(left)
+
+        # ── 右：账目 + 内层标签(展开链/真值表 + .sv 预览) ──
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0)
+        self.detail = QtWidgets.QLabel("点左侧任一信号，这里显示展开链 + 可编辑真值表 + 账目状态。")
+        self.detail.setWordWrap(True)
+        self.detail.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        rv.addWidget(self.detail)
+        self.inner = QtWidgets.QTabWidget()
+        tt_page = QtWidgets.QWidget()
+        ttv = QtWidgets.QVBoxLayout(tt_page); ttv.setContentsMargins(2, 2, 2, 2)
+        if self.has_chain:
+            self.chain_cap = QtWidgets.QLabel("跨页 cone 展开链（缩进=层级；每节：原式 / 字母代入真实信号名）：")
+            self.chain_cap.setStyleSheet("color:#445;font-weight:bold;")
+            ttv.addWidget(self.chain_cap)
+            self.chain = QtWidgets.QPlainTextEdit(); self.chain.setReadOnly(True)
+            self.main._mono(self.chain); self.chain.setMaximumHeight(140)
+            self.chain.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+            ttv.addWidget(self.chain)
+        else:
+            self.chain_cap = None
+            self.chain = None
+        # 真值表编辑工具条
+        eb_box = QtWidgets.QWidget()
+        eb = FlowLayout(eb_box)
+        self._edit_btns = {}
+        for text, slot, tip in [
+                ("重新生成", self._e_regen, "丢弃本信号自定义，按当前覆盖度重新生成真值表"),
+                ("加列", self._e_add, "新增一条测试列(输入全 0，auto_out 自动算，期望留空待填)"),
+                ("复制列", self._e_copy, "复制当前选中的测试列"),
+                ("删列", self._e_del, "删除选中的测试列"),
+                ("清零", self._e_clear, "清空本信号所有测试列=零用例(导出时本信号只记账不产断言)；点『重新生成』可恢复"),
+                ("重命名列", self._e_rename, "给用户新增的列改名(双击列头亦可)"),
+                ("auto→期望", self._e_fill, "把 auto_out 填进未填的期望列(已填的不动)"),
+                ("加负向", self._e_addneg, "给选中列加一条负向(故意填错期望)；未选则取首列"),
+                ("删负向", self._e_delneg, "删除本信号所有负向列")]:
+            b = QtWidgets.QPushButton(text); b.setToolTip(tip); b.clicked.connect(slot)
+            self._edit_btns[text] = b
+            eb.addWidget(b)
+        ttv.addWidget(eb_box)
+        self.truth = QtWidgets.QTableWidget(0, 0)
+        self.main._mono(self.truth)
+        self.truth.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectColumns)
+        self.truth.setAlternatingRowColors(True)
+        self.truth.itemChanged.connect(self._on_truth_item)
+        self.truth.horizontalHeader().sectionDoubleClicked.connect(self._e_rename_col)
+        ttv.addWidget(self.truth, 1)
+        hint = QtWidgets.QLabel(
+            "行=输入信号(粗体=控制/选择位) + auto_out(程序算的, 只读) + 期望(designer 填, 进 .sv 断言)；"
+            "列=测试。改输入值→auto_out 即时重算；期望留空→生成时用 auto_out 兜底；"
+            "绿=期望与 auto 一致, 红=不一致(表达式可能有 bug), 琥珀=负向(故意填错)。编辑即时在预览/导出生效。")
+        hint.setWordWrap(True); hint.setStyleSheet("color:#888;font-size:11px;")
+        ttv.addWidget(hint)
+        self.inner.addTab(tt_page, "展开链 / 真值表")
+        sv_page = QtWidgets.QWidget()
+        svv = QtWidgets.QVBoxLayout(sv_page); svv.setContentsMargins(2, 2, 2, 2)
+        self.sv = QtWidgets.QPlainTextEdit(); self.sv.setReadOnly(True)
+        self.sv.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self.main._mono(self.sv)
+        svv.addWidget(self.sv)
+        self.inner.addTab(sv_page, ".sv 预览")
+        rv.addWidget(self.inner, 1)
+        split.addWidget(right)
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(6)
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1)
+        split.setSizes([440, 760])
+        lay.addWidget(split, 1)
+
+        btns = QtWidgets.QHBoxLayout()
+        b_prev = QtWidgets.QPushButton("预览选中.sv"); b_prev.clicked.connect(self.on_preview)
+        b_prev.setToolTip("生成勾选(未勾任何=全部)信号的 .sv，显示在『.sv 预览』页（含真值表编辑）")
+        b_sv = QtWidgets.QPushButton("导出 .sv…"); b_sv.clicked.connect(self.on_export_sv)
+        b_rep = QtWidgets.QPushButton("导出报告(HTML/CSV)…"); b_rep.clicked.connect(self.on_export_report)
+        b_ft = QtWidgets.QPushButton("回填 for_test…"); b_ft.clicked.connect(self.on_fortest)
+        b_ft.setToolTip("把真值表按 for_test 排版回填 Excel（含 mux 表）")
+        btns.addStretch(1)
+        for b in (b_prev, b_sv, b_rep, b_ft):
+            btns.addWidget(b)
+        lay.addLayout(btns)
+
+    # ───────────── 刷新清单 ─────────────
+    def refresh(self, *_):
+        """重建信号清单（载表/切覆盖度后）。无 wb/无页 → 优雅空表 + 提示，不崩。"""
+        if not hasattr(self, "sig_table"):
+            return
+        self._loading = True
+        self.sig_table.setRowCount(0)
+        self.models = []
+        self.cur_name = None
+        if not self.main.wb:
+            self._loading = False
+            return
+        if not self.provider.has_page():
+            self.detail.setText(self.provider.empty_hint())
+            self._clear_detail()
+            self._loading = False
+            return
+        mode, exh = self._mode()
+        self.built_key = (mode, exh, self._maxt())
+        try:
+            self.models = self.provider.view_models(mode, self._maxt(), exh)
+        except Exception as ex:   # noqa: BLE001 —— 护栏3：绝不崩
+            self.detail.setText("分析失败（已捕获，未崩）：%s" % ex)
+            self._clear_detail()
+            self._loading = False
+            return
+        self._rebuild_owner_menu()
+        self._rebuild_kind_combo()
+        self._populate_table()
+        self._loading = False
+        self._apply_filter()
+        n_ok = sum(1 for m in self.models if m["status"] == "ok")
+        self.detail.setText("要验信号 %d 个（可建 %d）。点一行看展开链+真值表；勾选=纳入导出/预览。"
+                            % (len(self.models), n_ok))
+        # 选第一个可见行
+        for r in range(self.sig_table.rowCount()):
+            if not self.sig_table.isRowHidden(r):
+                self.sig_table.setCurrentCell(r, TOPO_NAME)
+                break
+
+    def _populate_table(self):
+        self.sig_table.setRowCount(len(self.models))
+        for r, m in enumerate(self.models):
+            chk = QtWidgets.QTableWidgetItem()
+            chk.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled
+                         | QtCore.Qt.ItemIsSelectable)
+            chk.setCheckState(QtCore.Qt.Checked)
+            self.sig_table.setItem(r, TOPO_SEL, chk)
+            self._set(r, TOPO_NAME, m["name"])
+            self._set(r, TOPO_OWNER, m["owner"] or "")
+            self._set(r, TOPO_KIND, SV_KIND_LABEL.get(m["kind"], m["kind"]))
+            stt = self._set(r, TOPO_STATUS, TOPO_STATUS_LABEL.get(m["status"], m["status"]))
+            stt.setForeground(QtGui.QColor(TOPO_STATUS_COLOR.get(m["status"], "#000000")))
+            if m["issues"]:
+                stt.setForeground(QtGui.QColor("#d97706"))
+                stt.setToolTip("; ".join(m["issues"]))
+            self._set(r, TOPO_NTEST, str(m["n_vectors"]))
+            neg = QtWidgets.QTableWidgetItem()
+            editable = m["kind"] in ("logic", "register", "mux")
+            flags = QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
+            if editable:
+                flags |= QtCore.Qt.ItemIsUserCheckable
+            neg.setFlags(flags)
+            neg.setCheckState(QtCore.Qt.Checked if self._has_negatives(m["name"])
+                             else QtCore.Qt.Unchecked)
+            self.sig_table.setItem(r, TOPO_NEG, neg)
+        self.sig_table.resizeColumnsToContents()
+
+    def _set(self, r, c, text):
+        it = QtWidgets.QTableWidgetItem(text)
+        self.sig_table.setItem(r, c, it)
+        return it
+
+    def _rebuild_owner_menu(self):
+        self.owner_menu.clear()
+        self._owner_acts = {}
+        owners = sorted({(m["owner"] or NO_OWNER) for m in self.models})
+        for o in owners:
+            act = self.owner_menu.addAction(o)
+            act.setCheckable(True)
+            act.setChecked(o in self._owner_filter)
+            act.toggled.connect(self._on_owner_toggled)
+            self._owner_acts[o] = act
+
+    def _rebuild_kind_combo(self):
+        cur = self.kind_combo.currentText()
+        self.kind_combo.blockSignals(True)
+        self.kind_combo.clear()
+        self.kind_combo.addItem("全部分类")
+        for k in sorted({m["kind"] for m in self.models}):
+            self.kind_combo.addItem(SV_KIND_LABEL.get(k, k), k)
+        idx = self.kind_combo.findText(cur)
+        self.kind_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.kind_combo.blockSignals(False)
+
+    def _on_owner_toggled(self, *_):
+        self._owner_filter = {o for o, a in self._owner_acts.items() if a.isChecked()}
+        self.owner_btn.setText("全部 owner" if not self._owner_filter
+                               else "owner: %d" % len(self._owner_filter))
+        self._apply_filter()
+
+    def _apply_filter(self, *_):
+        pat = self.search.text().strip()
+        rx = None
+        if pat:
+            try:
+                rx = _re.compile(pat, _re.I)
+            except _re.error:
+                rx = None
+        kind_sel = self.kind_combo.currentData()
+        st_sel = self.status_combo.currentIndex()
+        for r, m in enumerate(self.models):
+            show = True
+            if self._owner_filter and (m["owner"] or NO_OWNER) not in self._owner_filter:
+                show = False
+            if kind_sel and m["kind"] != kind_sel:
+                show = False
+            if st_sel == 1 and m["status"] != "ok":
+                show = False
+            elif st_sel == 2 and m["status"] == "ok" and not m["issues"]:
+                show = False
+            if show and pat:
+                hay = "%s %s %s" % (m["name"], m.get("expr", ""),
+                                    " ".join(i.get("base", "") for i in m.get("inputs", [])))
+                show = bool(rx.search(hay)) if rx else (pat.lower() in hay.lower())
+            self.sig_table.setRowHidden(r, not show)
+
+    # ───────────── 选择 / 勾选 ─────────────
+    def _check_all(self, on):
+        st = QtCore.Qt.Checked if on else QtCore.Qt.Unchecked
+        for r in range(self.sig_table.rowCount()):
+            if self.sig_table.isRowHidden(r):
+                continue
+            it = self.sig_table.item(r, TOPO_SEL)
+            if it:
+                it.setCheckState(st)
+
+    def _check_selected(self):
+        for idx in self.sig_table.selectionModel().selectedRows():
+            it = self.sig_table.item(idx.row(), TOPO_SEL)
+            if it:
+                it.setCheckState(QtCore.Qt.Checked)
+
+    def _checked_names(self):
+        names = []
+        for r in range(self.sig_table.rowCount()):
+            it = self.sig_table.item(r, TOPO_SEL)
+            if it and it.checkState() == QtCore.Qt.Checked and r < len(self.models):
+                names.append(self.models[r]["name"])
+        return names
+
+    # ───────────── 行选中 → 加载真值表编辑器 ─────────────
+    def _on_row(self, cur_row, _cc, _pr, _pc):
+        if cur_row is None or cur_row < 0 or cur_row >= len(self.models):
+            return
+        self._load_signal(self.models[cur_row]["name"])
+
+    def _load_signal(self, name):
+        mode, exh = self._mode()
+        an = self.provider.analyze(name, mode, self._maxt(), exh)
+        if an is None:
+            self._clear_detail()
+            return
+        self.cur_name = name.lower()
+        self.cur_an = an
+        # 输入行
+        self.e_inputs = []
+        if an["editable"] == "logic":
+            for g in an["groups"]:
+                self.e_inputs.append({"key": g["key"], "label": g["label"],
+                                      "width": g["width"], "editable": True,
+                                      "control": g.get("is_control", False)})
+        elif an["editable"] == "mux":
+            exp = an["expansion"]
+            for k in exp["used_vars"]:
+                b = exp["bindings"][k]
+                lbl = b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
+                self.e_inputs.append({"key": k, "label": lbl, "width": b.width,
+                                      "editable": False,
+                                      "control": mux_gen.key_role(k) == "ctrl"})
+        # 列模型
+        if self.cur_name in self.edits:
+            self.cur_cols = self.edits[self.cur_name]["cols"]
+        else:
+            self.cur_cols = self._cols_from_vectors(an)
+        self._render_head(an)
+        self._render_chain(an)
+        self._populate_truth()
+        self._set_edit_buttons(an)
+        self._update_cov_hint()
+
+    def _cols_from_vectors(self, an):
+        cols = []
+        groups = an["groups"]
+        keys = [e["key"] for e in self.e_inputs]
+        for vec in an["vectors"]:
+            if an["editable"] == "mux":
+                vals = {k: vec.assignments.get(k, 0) for k in keys}
+            else:
+                bv = V.vector_to_base_values(vec, groups)
+                vals = {g["key"]: bv.get(g["key"], 0) for g in groups}
+            neg = vec.is_negative
+            exp = (vec.asserted_value if neg
+                   else (vec.designer_expected if vec.designer_expected is not None else None))
+            cols.append({"name": W.test_label(vec), "neg": neg, "vals": vals,
+                         "exp": exp, "auto": vec.exp_value, "auto_w": vec.exp_width,
+                         "user": False, "vec": vec})
+        return cols
+
+    def _render_head(self, an):
+        import html
+        esc = html.escape
+        m = next((x for x in self.models if x["name"].lower() == self.cur_name), {})
+        head = ("<b>%s</b> &nbsp; owner=%s &nbsp; 分类=%s &nbsp; 状态=%s &nbsp; 用例=%d"
+                % (esc(an["name"]), esc((m.get("owner") or "—")),
+                   SV_KIND_LABEL.get(an["kind"], an["kind"]),
+                   TOPO_STATUS_LABEL.get(an["status"], an["status"]),
+                   len(self.cur_cols or [])))
+        if self.cur_name in self.edits:
+            head += " &nbsp;<span style='color:#9a5b00'>（已自定义）</span>"
+        if an.get("note"):
+            head += "<br><span style='color:#666'>%s</span>" % esc(an["note"])
+        if an["issues"]:
+            head += "<br><span style='color:#d97706'>⚠ %s</span>" % esc("; ".join(an["issues"]))
+        self.detail.setText(head)
+
+    # ───────────── 展开链（总显示：字母代入真名 + cone 多级链）─────────────
+    def _render_chain(self, an):
+        if self.chain is None:
+            return
+        chain = an.get("chain") or []
+        if len(chain) >= 1:
+            marks = "①②③④⑤⑥⑦⑧⑨"
+            lines = []
+            for i, c in enumerate(chain):
+                mk = marks[i] if i < len(marks) else "(%d)" % (i + 1)
+                head = "%s %s" % (mk, c.get("out", ""))
+                lines.append("%s = %s" % (head, c.get("expr", "")))
+                lines.append("%s = %s" % (" " * len(head), c.get("subst", "")))
+            self.chain.setPlainText("\n".join(lines))
+            self.chain_cap.setText("跨页 cone 展开链（每节：原式 / 字母代入真实信号名）：")
+            return
+        sig = an.get("sig")
+        if an["kind"] == "logic" and sig is not None and getattr(sig, "expr", ""):
+            name_of = {}
+            for ltr, b in (an["bindings"] or {}).items():
+                if b is not None and getattr(b, "base", None):
+                    name_of[ltr] = b.base
+            lines = ["① %s = %s" % (an["name"], sig.expr),
+                     "%s = %s" % (" " * (len(an["name"]) + 2), _subst_expr(sig.expr, name_of))]
+            self.chain.setPlainText("\n".join(lines))
+            self.chain_cap.setText("表达式（原式 / 字母代入真实信号名；本信号输入均为直连叶子，无跨页上游）：")
+        elif an["kind"] == "mux" and sig is not None:
+            self.chain.setPlainText("mux 选路：%s" % getattr(sig, "expr", ""))
+            self.chain_cap.setText("mux case 选路结构（控制值 → 选中的数据源）：")
+        elif an["kind"] == "register":
+            self.chain.setPlainText("（直连寄存器：顶层口 == 该寄存器字段写值，无 cone 展开）")
+            self.chain_cap.setText("展开链：")
+        else:
+            self.chain.setPlainText("（%s：%s）" % (an["status"], an.get("note")
+                                                  or "; ".join(an["issues"]) or ""))
+            self.chain_cap.setText("展开链：")
+
+    # ───────────── 真值表渲染 + 编辑 ─────────────
+    def _populate_truth(self):
+        tbl = self.truth
+        self._ti_loading = True
+        tbl.clear()
+        cols = self.cur_cols or []
+        ni = len(self.e_inputs)
+        if not cols:
+            tbl.setRowCount(0); tbl.setColumnCount(0)
+            self._ti_loading = False
+            return
+        tbl.setRowCount(ni + 2)
+        tbl.setColumnCount(len(cols))
+        out_w = self.cur_an["out_width"] or 1
+        slc = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+        vlabels = [e["label"] for e in self.e_inputs] + ["auto_out%s" % slc, "期望%s" % slc]
+        tbl.setVerticalHeaderLabels(vlabels)
+        tbl.setHorizontalHeaderLabels([c["name"] for c in cols])
+        editable_inputs = (self.cur_an["editable"] == "logic")
+        for j, c in enumerate(cols):
+            for i, e in enumerate(self.e_inputs):
+                it = QtWidgets.QTableWidgetItem(generator._fmt_cell(c["vals"].get(e["key"], 0), e["width"]))
+                it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                if e.get("control"):
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                if not (editable_inputs and e["editable"]):
+                    it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
+                    it.setForeground(QtGui.QColor("#555555"))
+                tbl.setItem(i, j, it)
+            a = QtWidgets.QTableWidgetItem(generator._fmt_cell(c["auto"], c["auto_w"]))
+            a.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            a.setFlags(a.flags() & ~QtCore.Qt.ItemIsEditable)
+            a.setForeground(QtGui.QColor("#666666"))
+            tbl.setItem(ni, j, a)
+            exp_txt = (generator._fmt_cell(c["exp"], c["auto_w"]) if c["exp"] is not None
+                       else generator._fmt_cell(c["auto"], c["auto_w"]))
+            e_it = QtWidgets.QTableWidgetItem(exp_txt)
+            e_it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            ef = e_it.font(); ef.setBold(True); e_it.setFont(ef)
+            if self.cur_an["editable"]:
+                e_it.setFlags(e_it.flags() | QtCore.Qt.ItemIsEditable)
+            else:
+                e_it.setFlags(e_it.flags() & ~QtCore.Qt.ItemIsEditable)
+            if c["neg"]:
+                e_it.setForeground(QtGui.QColor("#d97706"))
+                e_it.setBackground(NEG_BG)
+            elif c["exp"] is None:
+                e_it.setForeground(FB_FG)
+            elif (c["exp"] & E.mask(c["auto_w"])) == (c["auto"] & E.mask(c["auto_w"])):
+                e_it.setBackground(DSGN_BG)
+            else:
+                e_it.setBackground(DIFF_BG)
+            tbl.setItem(ni + 1, j, e_it)
+            if c["user"]:
+                for i in range(ni + 2):
+                    cell = tbl.item(i, j)
+                    if cell is not None and i != ni + 1:
+                        cell.setBackground(USER_BG)
+        tbl.resizeColumnsToContents()
+        self._ti_loading = False
+
+    def _on_truth_item(self, item):
+        if self._ti_loading or self.cur_an is None or not self.cur_cols:
+            return
+        r, j = item.row(), item.column()
+        if j >= len(self.cur_cols):
+            return
+        col = self.cur_cols[j]
+        ni = len(self.e_inputs)
+        if r < ni:                                   # 输入值编辑（仅 logic）
+            if self.cur_an["editable"] != "logic":
+                return
+            e = self.e_inputs[r]
+            val = _parse_cell_int(item.text())
+            if val is None:
+                val = 0
+            col["vals"][e["key"]] = val & E.mask(e["width"])
+            self._recompute_col(col)
+            self._commit()
+            self._populate_truth()
+        elif r == ni + 1:                            # 期望编辑
+            txt = item.text().strip()
+            if txt == "":
+                col["exp"] = None
+                col["neg"] = False
+            else:
+                val = _parse_cell_int(txt)
+                col["exp"] = None if val is None else (val & E.mask(col["auto_w"]))
+            self._commit()
+            self._populate_truth()
+
+    def _recompute_col(self, col):
+        an = self.cur_an
+        if an["editable"] != "logic":
+            return
+        vec = V.make_vector_from_base_values(an["node"], an["bindings"], an["groups"],
+                                             col["vals"], an["out_width"])
+        col["auto"], col["auto_w"] = vec.exp_value, vec.exp_width
+
+    # ───────────── 编辑操作 ─────────────
+    def _sel_cols(self):
+        return sorted({i.column() for i in self.truth.selectedIndexes()})
+
+    def _commit(self):
+        """把当前列模型记进 edits（标为已自定义），刷新清单『用例/负向』列 + 头部。"""
+        if self.cur_an is None:
+            return
+        self.edits[self.cur_name] = {
+            "kind": self.cur_an["kind"], "src_out_name": self.cur_an["src_out_name"],
+            "name": self.cur_an["name"], "cols": self.cur_cols, "an": self.cur_an}
+        self._refresh_row_counts()
+        self._render_head(self.cur_an)
+        self._update_cov_hint()
+
+    def _refresh_row_counts(self):
+        for r, m in enumerate(self.models):
+            if m["name"].lower() == self.cur_name:
+                self._loading = True
+                nt = self.sig_table.item(r, TOPO_NTEST)
+                if nt:
+                    nt.setText(str(len(self.cur_cols or [])))
+                neg = self.sig_table.item(r, TOPO_NEG)
+                if neg and (neg.flags() & QtCore.Qt.ItemIsUserCheckable):
+                    neg.setCheckState(QtCore.Qt.Checked
+                                      if any(c["neg"] for c in (self.cur_cols or []))
+                                      else QtCore.Qt.Unchecked)
+                self._loading = False
+                break
+
+    def _e_regen(self):
+        if self.cur_an is None:
+            return
+        self.edits.pop(self.cur_name, None)
+        self.cur_cols = self._cols_from_vectors(self.cur_an)
+        self._refresh_row_counts()
+        self._render_head(self.cur_an)
+        self._update_cov_hint()
+        self._populate_truth()
+
+    def _new_col_name(self):
+        n = 0
+        existing = {c["name"] for c in self.cur_cols}
+        while ("U%d" % n) in existing:
+            n += 1
+        return "U%d" % n
+
+    def _e_add(self):
+        if self.cur_an is None or not self.cur_an["editable"]:
+            return
+        if self.cur_an["editable"] == "mux":
+            return self._e_copy()
+        col = {"name": self._new_col_name(), "neg": False,
+               "vals": {e["key"]: 0 for e in self.e_inputs}, "exp": None,
+               "auto": 0, "auto_w": self.cur_an["out_width"] or 1, "user": True, "vec": None}
+        self._recompute_col(col)
+        self.cur_cols.append(col)
+        self._commit(); self._populate_truth()
+
+    def _e_copy(self):
+        if self.cur_an is None or not self.cur_cols:
+            return
+        sel = self._sel_cols() or [len(self.cur_cols) - 1]
+        for j in sel:
+            src = self.cur_cols[j]
+            new = {"name": self._new_col_name(), "neg": src["neg"],
+                   "vals": dict(src["vals"]), "exp": src["exp"],
+                   "auto": src["auto"], "auto_w": src["auto_w"], "user": True,
+                   "vec": (V.clone_vector(src["vec"]) if src["vec"] is not None else None)}
+            self.cur_cols.append(new)
+        self._commit(); self._populate_truth()
+
+    def _e_del(self):
+        if self.cur_an is None or not self.cur_cols:
+            return
+        sel = set(self._sel_cols())
+        if not sel:
+            QtWidgets.QMessageBox.information(self, "删列", "请先点选要删除的测试列(点列头/单元格)。")
+            return
+        self.cur_cols = [c for i, c in enumerate(self.cur_cols) if i not in sel]
+        self._commit(); self._populate_truth()
+
+    def _e_clear(self):
+        if self.cur_an is None or not self.cur_an["editable"]:
+            return
+        self.cur_cols = []
+        self._commit(); self._populate_truth()
+
+    def _e_fill(self):
+        if self.cur_an is None or not self.cur_cols:
+            return
+        for c in self.cur_cols:
+            if not c["neg"] and c["exp"] is None:
+                c["exp"] = c["auto"]
+        self._commit(); self._populate_truth()
+
+    def _e_addneg(self):
+        if self.cur_an is None or not self.cur_cols:
+            return
+        sel = self._sel_cols() or [0]
+        for j in sel:
+            if j >= len(self.cur_cols):
+                continue
+            src = self.cur_cols[j]
+            wrong = (~src["auto"]) & E.mask(src["auto_w"])
+            new = {"name": self._new_col_name() + "_NEG", "neg": True,
+                   "vals": dict(src["vals"]), "exp": wrong,
+                   "auto": src["auto"], "auto_w": src["auto_w"], "user": True,
+                   "vec": (V.clone_vector(src["vec"]) if src["vec"] is not None else None)}
+            self.cur_cols.append(new)
+        self._commit(); self._populate_truth()
+
+    def _e_delneg(self):
+        if self.cur_an is None or not self.cur_cols:
+            return
+        self.cur_cols = [c for c in self.cur_cols if not c["neg"]]
+        self._commit(); self._populate_truth()
+
+    def _e_rename(self):
+        sel = self._sel_cols()
+        if not sel:
+            QtWidgets.QMessageBox.information(self, "重命名列", "请先点选要改名的列。")
+            return
+        self._e_rename_col(sel[0])
+
+    def _e_rename_col(self, j):
+        if j < 0 or not self.cur_cols or j >= len(self.cur_cols):
+            return
+        col = self.cur_cols[j]
+        if not col["user"]:
+            QtWidgets.QMessageBox.information(self, "重命名列", "自动生成的 T 列不可改名；只有用户新增列可改名。")
+            return
+        new, ok = QtWidgets.QInputDialog.getText(self, "重命名列", "新列名：", text=col["name"])
+        if ok and new.strip():
+            col["name"] = new.strip()
+            self._commit(); self._populate_truth()
+
+    def _set_edit_buttons(self, an):
+        on = bool(an["editable"])
+        for b in self._edit_btns.values():
+            b.setEnabled(on)
+        self._edit_btns["加列"].setToolTip(
+            "mux：复制当前选中列(mux 选路由 case 决定，不能凭空造输入)" if an["editable"] == "mux"
+            else "新增一条测试列(输入全 0，auto_out 自动算，期望留空待填)")
+
+    def _update_cov_hint(self):
+        if self.cur_an is None or not self.cur_cols:
+            self.cov_hint.setText("")
+            return
+        n = len(self.cur_cols)
+        nn = sum(1 for c in self.cur_cols if c["neg"])
+        tag = "，含 %d 负向" % nn if nn else ""
+        tag += "（已自定义）" if self.cur_name in self.edits else ""
+        self.cov_hint.setText("→ 当前信号 %d 条%s" % (n, tag))
+
+    # ───────────── 信号表『负向』勾选 ─────────────
+    def _has_negatives(self, name):
+        ed = self.edits.get(name.lower())
+        return bool(ed and any(c["neg"] for c in ed["cols"]))
+
+    def _on_sig_item_changed(self, item):
+        if self._loading or item.column() != TOPO_NEG:
+            return
+        r = item.row()
+        if r >= len(self.models):
+            return
+        self._toggle_signal_negative(self.models[r]["name"],
+                                     item.checkState() == QtCore.Qt.Checked)
+
+    def _toggle_signal_negative(self, name, want):
+        mode, exh = self._mode()
+        an = self.provider.analyze(name, mode, self._maxt(), exh)
+        if an is None or not an["editable"]:
+            return
+        name_low = name.lower()
+        ed = self.edits.get(name_low)
+        cols = list(ed["cols"]) if ed else self._cols_from_vectors(an)
+        if want and not any(c["neg"] for c in cols):
+            base = next((c for c in cols if not c["neg"]), None)
+            if base is not None:
+                wrong = (~base["auto"]) & E.mask(base["auto_w"])
+                cols = list(cols) + [{
+                    "name": "T0_NEG", "neg": True, "vals": dict(base["vals"]),
+                    "exp": wrong, "auto": base["auto"], "auto_w": base["auto_w"],
+                    "user": True, "vec": (V.clone_vector(base["vec"])
+                                          if base["vec"] is not None else None)}]
+        elif not want:
+            cols = [c for c in cols if not c["neg"]]
+        self.edits[name_low] = {"kind": an["kind"], "src_out_name": an["src_out_name"],
+                                "name": an["name"], "cols": cols, "an": an}
+        self._loading = True
+        for r, m in enumerate(self.models):
+            if m["name"].lower() == name_low:
+                nt = self.sig_table.item(r, TOPO_NTEST)
+                if nt:
+                    nt.setText(str(len(cols)))
+                break
+        self._loading = False
+        if name_low == self.cur_name:
+            self.cur_cols = cols
+            self._populate_truth(); self._render_head(an); self._update_cov_hint()
+
+    def _bulk_neg(self, want):
+        targets = self._checked_names()
+        if not targets:
+            targets = [m["name"] for r, m in enumerate(self.models)
+                       if not self.sig_table.isRowHidden(r)]
+        for name in targets:
+            m = next((x for x in self.models if x["name"] == name), None)
+            if m and m["kind"] in ("logic", "register", "mux"):
+                self._toggle_signal_negative(name, want)
+        self._loading = True
+        for r, m in enumerate(self.models):
+            neg = self.sig_table.item(r, TOPO_NEG)
+            if neg and (neg.flags() & QtCore.Qt.ItemIsUserCheckable):
+                neg.setCheckState(QtCore.Qt.Checked if self._has_negatives(m["name"])
+                                 else QtCore.Qt.Unchecked)
+        self._loading = False
+
+    # ───────────── 编辑回流 → 导出 ─────────────
+    def _compute_edited(self):
+        out = {}
+        for name_low, ed in self.edits.items():
+            an = ed["an"]
+            cols = ed["cols"]
+            rec = {"kind": ed["kind"], "src_out_name": ed["src_out_name"], "name": ed["name"]}
+            if ed["kind"] in ("logic", "register"):
+                rec["cleared"] = (len(cols) == 0)
+                rec["vectors"] = self._cols_to_vectors(an, cols)
+            elif ed["kind"] == "mux":
+                rec["mux"] = self._mux_derive(an, cols)
+            out[name_low] = rec
+        return out
+
+    def _cols_to_vectors(self, an, cols):
+        vecs = []
+        for i, c in enumerate(cols):
+            nm = c["name"] if c["user"] else None
+            if c["neg"]:
+                v = V.make_vector_from_base_values(
+                    an["node"], an["bindings"], an["groups"], c["vals"], an["out_width"],
+                    index=i, expected_override=c["exp"], name=nm)
+            else:
+                v = V.make_vector_from_base_values(
+                    an["node"], an["bindings"], an["groups"], c["vals"], an["out_width"],
+                    index=i, name=nm, designer_expected=c["exp"])
+            vecs.append(v)
+        return vecs
+
+    def _mux_derive(self, an, cols):
+        auto_keys = {generator.mux_assign_key(v.assignments) for v in an["vectors"]}
+        cur_auto_keys, expected, user_vecs = set(), {}, []
+        for c in cols:
+            vec = c["vec"]
+            if vec is None:
+                continue
+            key = generator.mux_assign_key(vec.assignments)
+            if c["user"]:
+                uv = V.clone_vector(vec)
+                if c["neg"]:
+                    uv.is_negative = True; uv.neg_value = c["exp"]; uv.neg_mode = "value"
+                elif c["exp"] is not None:
+                    uv.designer_expected = c["exp"]
+                user_vecs.append(uv)
+            else:
+                cur_auto_keys.add(key)
+                if c["exp"] is not None and not c["neg"]:
+                    expected[key] = c["exp"]
+        return {"cleared": len(cols) == 0, "dropped": list(auto_keys - cur_auto_keys),
+                "expected": expected, "user_vecs": user_vecs}
+
+    # ───────────── 导出按钮 ─────────────
+    def _guard(self):
+        if not self.main.wb:
+            QtWidgets.QMessageBox.information(self, "未加载", "请先加载 Excel。")
+            return False
+        if not self.provider.has_page():
+            QtWidgets.QMessageBox.information(self, "无此页", self.provider.empty_hint())
+            return False
+        return True
+
+    def _clear_detail(self):
+        if self.chain is not None:
+            self.chain.setPlainText("")
+        self.truth.clear(); self.truth.setRowCount(0); self.truth.setColumnCount(0)
+        self.sv.setPlainText("")
+        self.cur_an = None; self.cur_cols = None
+
+    def on_preview(self):
+        if not self._guard():
+            return
+        mode, exh = self._mode()
+        only = self._checked_names() or None
+        text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited())
+        self.sv.setPlainText(text)
+        self.inner.setCurrentIndex(1)
+        s = b.get("summary", {})
+        self.main.status.showMessage("预览：信号 %d，断言块 %d，向量 %d，记账(不产断言) %d"
+                                     % (s.get("n_total", 0), s.get("n_emitted", 0),
+                                        s.get("n_vectors", 0), s.get("n_accounted", 0)))
+
+    def on_export_sv(self):
+        if not self._guard():
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出 .sv", "wr_rf_tc_%s.sv" % self.view_id, "SystemVerilog (*.sv)")
+        if not path:
+            return
+        mode, exh = self._mode()
+        only = self._checked_names() or None
+        text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited())
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        self.sv.setPlainText(text)
+        self.inner.setCurrentIndex(1)
+        s = b.get("summary", {})
+        acc = b.get("accounted", [])
+        QtWidgets.QMessageBox.information(
+            self, "已导出", "%s\n\n信号 %d；断言块 %d；向量 %d；记账(不产断言) %d%s"
+            % (path, s.get("n_total", 0), s.get("n_emitted", 0), s.get("n_vectors", 0),
+               s.get("n_accounted", 0),
+               ("\n（记账：%s）" % "、".join(a["name"] for a in acc)) if acc else ""))
+
+    def on_export_report(self):
+        if not self._guard():
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出报告", "%s_report.html" % self.view_id,
+            "HTML (*.html);;CSV (*.csv);;Excel (*.xlsx)")
+        if not path:
+            return
+        from . import cli
+        mode, exh = self._mode()
+        rep = self.provider.render_report(mode, self._maxt(), exh)
+        written = cli.write_report(path, rep, self.main._loaded_excel_path or "")
+        QtWidgets.QMessageBox.information(self, "已导出", "报告已导出：\n%s" % "\n".join(written))
+
+    def on_fortest(self):
+        if not self._guard():
+            return
+        if not self.main._loaded_excel_path:
+            QtWidgets.QMessageBox.information(self, "无源表", "回填需要源 Excel 路径，请先加载 Excel。")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "回填 for_test 到新 Excel", "%s_fortest.xlsx" % self.view_id, "Excel (*.xlsx)")
+        if not path:
+            return
+        mode, exh = self._mode()
+        self.provider.fortest(self.main._loaded_excel_path, path, mode, self._maxt(), exh)
+        QtWidgets.QMessageBox.information(self, "已回填", "for_test 已回填（含 mux 表）：\n%s" % path)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -791,345 +1864,56 @@ class MainWindow(QtWidgets.QMainWindow):
         if key != getattr(self, "_topo_built_key", None):
             self._refresh_topout()
 
-    # ═══════════════════ Topout 主视图（2026-06-23 重构，新默认门面）═══════════════════
+    # ═══════════════ Topout 主视图（2026-06-24：改用可复用 SignalView，编辑/筛选/链全到位）═══════════════
     def _build_topout_tab(self):
-        """Topout 视图：左=要验信号清单(B列)+分类+勾选；右=展开链/真值表 + .sv 预览。
-        clean cone 默认——不放级联/尾缀/top_output 筛(那些只属『排查(旧)』分页)。"""
-        self._topo_models = []
-        self._topo_cur = None
-        page = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(page); lay.setContentsMargins(4, 4, 4, 4)
+        """Topout 视图 = SignalView(_TopoutProvider)：cone 展到源寄存器、断言贴顶层真名。
+        旧 topo_* 属性保留为别名（指向视图子控件），旧 Topout 测试/调用方零改动。"""
+        self.topout_view = SignalView(self, _TopoutProvider(self))
+        v = self.topout_view
+        self.topo_table = v.sig_table          # 兼容别名（旧 Topout 测试/代码引用这些名字）
+        self.topo_truth = v.truth
+        self.topo_chain = v.chain
+        self.topo_sv = v.sv
+        self.topo_cov = v.cov
+        self.topo_inner = v.inner
+        self.topo_detail = v.detail
+        return v
 
-        bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel(
-            "要验信号 = Topout 页 B 列（顶层真名，cone 展到源寄存器，断言贴真名）"))
-        bar.addStretch(1)
-        bar.addWidget(QtWidgets.QLabel("覆盖度:"))
-        self.topo_cov = QtWidgets.QComboBox(); self.topo_cov.addItems(["精简", "全面", "穷举"])
-        self.topo_cov.setCurrentText("全面")
-        self.topo_cov.setToolTip("Topout 真值表覆盖档：精简=每控制组合×1；全面=多数据特征；穷举=全输入组合。")
-        self.topo_cov.currentIndexChanged.connect(self._refresh_topout)
-        bar.addWidget(self.topo_cov)
-        lay.addLayout(bar)
+    # 兼容 shim：旧 _topo_*/on_topo_* 委托到 SignalView（旧测试调用这些）
+    @property
+    def _topo_models(self):
+        return self.topout_view.models
 
-        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        self.topo_table = QtWidgets.QTableWidget(0, len(TOPO_HEADERS))
-        self.topo_table.setHorizontalHeaderLabels(TOPO_HEADERS)
-        self.topo_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.topo_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.topo_table.currentCellChanged.connect(self._topo_on_row)
-        self.topo_table.setMinimumWidth(360)
-        split.addWidget(self.topo_table)
-
-        right = QtWidgets.QWidget()
-        rv = QtWidgets.QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0)
-        self.topo_detail = QtWidgets.QLabel(
-            "点左侧任一 Topout 信号，这里显示它的跨页展开链 + 真值表 + 账目状态。")
-        self.topo_detail.setWordWrap(True)
-        self.topo_detail.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        rv.addWidget(self.topo_detail)
-        self.topo_inner = QtWidgets.QTabWidget()
-        tt_page = QtWidgets.QWidget()
-        ttv = QtWidgets.QVBoxLayout(tt_page); ttv.setContentsMargins(2, 2, 2, 2)
-        self.topo_chain_cap = QtWidgets.QLabel("跨页 cone 展开链（缩进=层级，原式 / 字母代入真实信号名）：")
-        ttv.addWidget(self.topo_chain_cap)
-        self.topo_chain = QtWidgets.QPlainTextEdit(); self.topo_chain.setReadOnly(True)
-        self._mono(self.topo_chain); self.topo_chain.setMaximumHeight(150)
-        ttv.addWidget(self.topo_chain)
-        ttv.addWidget(QtWidgets.QLabel("真值表（行=输入/输出，列=测试 T0/T1…）："))
-        self.topo_truth = QtWidgets.QTableWidget(0, 0)
-        self.topo_truth.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        ttv.addWidget(self.topo_truth, 1)
-        self.topo_inner.addTab(tt_page, "展开链 / 真值表")
-        sv_page = QtWidgets.QWidget()
-        svv = QtWidgets.QVBoxLayout(sv_page); svv.setContentsMargins(2, 2, 2, 2)
-        self.topo_sv = QtWidgets.QPlainTextEdit(); self.topo_sv.setReadOnly(True)
-        self.topo_sv.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
-        self._mono(self.topo_sv)
-        svv.addWidget(self.topo_sv)
-        self.topo_inner.addTab(sv_page, ".sv 预览")
-        rv.addWidget(self.topo_inner, 1)
-        split.addWidget(right)
-        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1)
-        split.setSizes([420, 760])
-        lay.addWidget(split, 1)
-
-        btns = QtWidgets.QHBoxLayout()
-        b_all = QtWidgets.QPushButton("全选"); b_all.clicked.connect(lambda: self._topo_check_all(True))
-        b_none = QtWidgets.QPushButton("清空勾选"); b_none.clicked.connect(lambda: self._topo_check_all(False))
-        b_prev = QtWidgets.QPushButton("预览选中.sv"); b_prev.clicked.connect(self.on_topo_preview)
-        b_prev.setToolTip("生成勾选(未勾任何=全部)Topout 信号的 .sv，显示在『.sv 预览』页")
-        b_sv = QtWidgets.QPushButton("导出 .sv…"); b_sv.clicked.connect(self.on_topo_export_sv)
-        b_rep = QtWidgets.QPushButton("导出报告(HTML/CSV)…"); b_rep.clicked.connect(self.on_topo_export_report)
-        b_ft = QtWidgets.QPushButton("回填 for_test…"); b_ft.clicked.connect(self.on_topo_fortest)
-        b_ft.setToolTip("把 Topout 真值表按 for_test 排版回填 Excel（含 mux 表，堵『只回填 logic』陷阱）")
-        btns.addWidget(b_all); btns.addWidget(b_none); btns.addStretch(1)
-        for b in (b_prev, b_sv, b_rep, b_ft):
-            btns.addWidget(b)
-        self._topo_btns = {"全选": b_all, "清空勾选": b_none, "预览选中.sv": b_prev,
-                           "导出 .sv…": b_sv, "导出报告(HTML/CSV)…": b_rep, "回填 for_test…": b_ft}
-        lay.addLayout(btns)
-        return page
+    @property
+    def _topo_built_key(self):
+        return self.topout_view.built_key
 
     def _topo_mode(self):
-        """Topout 覆盖度下拉 → (mode, exhaustive)。精简=min / 全面=max / 穷举=max+exhaustive。"""
-        t = self.topo_cov.currentText() if hasattr(self, "topo_cov") else "全面"
-        if t == "穷举":
-            return "max", True
-        if t == "精简":
-            return "min", False
-        return "max", False
+        return self.topout_view._mode()
 
     def _topo_maxt(self):
-        try:
-            return int(self.max_tests.value())
-        except Exception:
-            return 256
-
-    def _topo_set(self, r, c, text):
-        it = QtWidgets.QTableWidgetItem(text)
-        self.topo_table.setItem(r, c, it)
-        return it
+        return self.topout_view._maxt()
 
     def _refresh_topout(self):
-        """重建 Topout 清单表（载表后 / 切覆盖度后调）。无 wb / 无 Topout 页 → 优雅空表 + 提示。"""
-        if not hasattr(self, "topo_table"):
-            return
-        self.topo_table.blockSignals(True)
-        self.topo_table.setRowCount(0)
-        self._topo_models = []
-        self._topo_cur = None
-        if not self.wb:
-            self.topo_table.blockSignals(False)
-            return
-        if not getattr(self.wb, "topout", None):
-            self.topo_detail.setText(
-                "⚠ 当前 Excel 没有 Topout 页（B 列要验信号清单为空）。Topout 视图需要表里有 Topout 页；"
-                "可切到『排查(旧)』用 logic/mux 视图。")
-            self._topo_clear_detail()
-            self.topo_table.blockSignals(False)
-            return
-        from . import topout as T
-        mode, exh = self._topo_mode()
-        self._topo_built_key = (mode, exh, self._topo_maxt())   # 参数指纹（切页时判要不要重建）
-        try:
-            self._topo_models = T.topout_view_models(
-                self.wb, mode=mode, max_tests=self._topo_maxt(), exhaustive=exh)
-        except Exception as ex:   # noqa: BLE001 —— 护栏3：绝不崩，原因落 detail
-            self.topo_detail.setText("Topout 分析失败（已捕获，未崩）：%s" % ex)
-            self._topo_clear_detail()      # 清旧表的链/真值表/.sv（否则失败时仍显示上一张表，误导）
-            self.topo_table.blockSignals(False)
-            return
-        self.topo_table.setRowCount(len(self._topo_models))
-        for r, m in enumerate(self._topo_models):
-            chk = QtWidgets.QTableWidgetItem()
-            chk.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled
-                         | QtCore.Qt.ItemIsSelectable)
-            chk.setCheckState(QtCore.Qt.Checked)
-            self.topo_table.setItem(r, TOPO_SEL, chk)
-            self._topo_set(r, TOPO_NAME, m["name"])
-            self._topo_set(r, TOPO_OWNER, m["owner"] or "")
-            self._topo_set(r, TOPO_KIND, TOPO_KIND_LABEL.get(m["kind"], m["kind"]))
-            stt = self._topo_set(r, TOPO_STATUS, TOPO_STATUS_LABEL.get(m["status"], m["status"]))
-            stt.setForeground(QtGui.QColor(TOPO_STATUS_COLOR.get(m["status"], "#000000")))
-            if m["issues"]:
-                stt.setForeground(QtGui.QColor("#d97706"))   # 有真冲突 issues → 琥珀提示
-                stt.setToolTip("; ".join(m["issues"]))
-            self._topo_set(r, TOPO_NTEST, str(m["n_vectors"]))
-        self.topo_table.blockSignals(False)
-        self.topo_table.resizeColumnsToContents()
-        n_ok = sum(1 for m in self._topo_models if m["status"] == "ok")
-        self.topo_detail.setText("Topout 要验信号 %d 个（可建 %d）。点一行看展开链+真值表；勾选=纳入导出/预览。"
-                                 % (len(self._topo_models), n_ok))
-        if self._topo_models:
-            self.topo_table.setCurrentCell(0, TOPO_NAME)   # 默认选第一个
-
-    def _topo_on_row(self, cur_row, _cur_col, _prev_row, _prev_col):
-        if cur_row is None or cur_row < 0 or cur_row >= len(self._topo_models):
-            return
-        self._topo_show(self._topo_models[cur_row])
-
-    def _topo_show(self, m):
-        import html
-        self._topo_cur = m
-        esc = html.escape
-        head = ("<b>%s</b> &nbsp; owner=%s &nbsp; 分类=%s &nbsp; 状态=%s &nbsp; 叶子=%d &nbsp; 用例=%d"
-                % (esc(m["name"]), esc(m["owner"] or "—"),
-                   TOPO_KIND_LABEL.get(m["kind"], m["kind"]),
-                   TOPO_STATUS_LABEL.get(m["status"], m["status"]), m["n_leaves"], m["n_vectors"]))
-        if m["note"]:
-            head += "<br><span style='color:#666'>%s</span>" % esc(m["note"])
-        if m["issues"]:
-            head += "<br><span style='color:#d97706'>⚠ %s</span>" % esc("; ".join(m["issues"]))
-        self.topo_detail.setText(head)
-        self._topo_render_chain(m)
-        self._topo_render_truth(m)
-
-    def _topo_render_chain(self, m):
-        chain = m.get("chain") or []
-        if len(chain) >= 2:
-            marks = "①②③④⑤⑥⑦⑧⑨"
-            lines = []
-            for i, c in enumerate(chain):
-                mk = marks[i] if i < len(marks) else "(%d)" % (i + 1)
-                head = "%s %s" % (mk, c.get("out", ""))
-                lines.append("%s = %s" % (head, c.get("expr", "")))
-                lines.append("%s = %s" % (" " * len(head), c.get("subst", "")))
-            self.topo_chain.setPlainText("\n".join(lines))
-            self.topo_chain_cap.setText("跨页 cone 展开链（每节：原式 / 字母代入真实信号名）：")
-        elif m["kind"] == "register":
-            self.topo_chain.setPlainText("（直连寄存器：顶层口 == 该寄存器字段写值，无 cone 展开）")
-            self.topo_chain_cap.setText("展开链：")
-        elif m["status"] in ("skip", "unresolved", "error"):
-            self.topo_chain.setPlainText("（%s：%s）"
-                                         % (m["status"], m["note"] or "; ".join(m["issues"]) or ""))
-            self.topo_chain_cap.setText("展开链：")
-        else:
-            self.topo_chain.setPlainText("（输入均为直连寄存器/线控叶子，无跨页上游可展开）")
-            self.topo_chain_cap.setText("展开链：")
-
-    def _topo_render_truth(self, m):
-        tbl = self.topo_truth
-        tbl.clear()
-        inputs = m.get("inputs") or []
-        tests = m.get("tests") or []
-        if not tests:
-            tbl.setRowCount(0); tbl.setColumnCount(0)
-            return
-        tbl.setRowCount(len(inputs) + 2)
-        tbl.setColumnCount(len(tests))
-        vlabels = []
-        for ip in inputs:
-            w = ip.get("width", 1) or 1
-            lbl = ip.get("label") or ip.get("base") or "?"
-            vlabels.append("%s%s" % (lbl, ("[%d:0]" % (w - 1)) if w > 1 else ""))
-        vlabels += [m.get("auto_label") or "auto_out", m.get("exp_label") or "期望"]
-        tbl.setVerticalHeaderLabels(vlabels)
-        tbl.setHorizontalHeaderLabels([t["name"] for t in tests])
-        for j, t in enumerate(tests):
-            vals = t.get("values") or []
-            for i in range(len(inputs)):
-                it = QtWidgets.QTableWidgetItem(vals[i] if i < len(vals) else "")
-                it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                tbl.setItem(i, j, it)
-            a = QtWidgets.QTableWidgetItem(t.get("auto_out", ""))
-            a.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            a.setForeground(QtGui.QColor("#666666"))
-            tbl.setItem(len(inputs), j, a)
-            e = QtWidgets.QTableWidgetItem(t.get("expected", ""))
-            e.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            ef = e.font(); ef.setBold(True); e.setFont(ef)
-            if t.get("neg"):
-                e.setForeground(QtGui.QColor("#d97706"))
-            elif t.get("expected") == t.get("auto_out"):
-                e.setForeground(QtGui.QColor("#15803d"))
-            tbl.setItem(len(inputs) + 1, j, e)
-        tbl.resizeColumnsToContents()
-
-    def _topo_clear_detail(self):
-        if hasattr(self, "topo_chain"):
-            self.topo_chain.setPlainText("")
-        if hasattr(self, "topo_truth"):
-            self.topo_truth.clear(); self.topo_truth.setRowCount(0); self.topo_truth.setColumnCount(0)
-        if hasattr(self, "topo_sv"):
-            self.topo_sv.setPlainText("")
+        self.topout_view.refresh()
 
     def _topo_check_all(self, on):
-        st = QtCore.Qt.Checked if on else QtCore.Qt.Unchecked
-        for r in range(self.topo_table.rowCount()):
-            it = self.topo_table.item(r, TOPO_SEL)
-            if it:
-                it.setCheckState(st)
+        self.topout_view._check_all(on)
 
     def _topo_checked_names(self):
-        """勾选的 Topout 名（按行序）。无勾选返回 [] → 调用方按『全部』处理。"""
-        names = []
-        for r in range(self.topo_table.rowCount()):
-            it = self.topo_table.item(r, TOPO_SEL)
-            if it and it.checkState() == QtCore.Qt.Checked and r < len(self._topo_models):
-                names.append(self._topo_models[r]["name"])
-        return names
-
-    def _topo_guard(self):
-        if not self.wb:
-            QtWidgets.QMessageBox.information(self, "未加载", "请先加载 Excel。")
-            return False
-        if not getattr(self.wb, "topout", None):
-            QtWidgets.QMessageBox.information(
-                self, "无 Topout 页", "当前 Excel 没有 Topout 页，无法走 Topout 路径。可切到『排查(旧)』。")
-            return False
-        return True
+        return self.topout_view._checked_names()
 
     def on_topo_preview(self):
-        if not self._topo_guard():
-            return
-        from . import topout as T
-        mode, exh = self._topo_mode()
-        only = self._topo_checked_names() or None
-        text, b = T.render_topout_sv(self.wb, mode=mode, max_tests=self._topo_maxt(),
-                                     exhaustive=exh, comments=True, only=only)
-        self.topo_sv.setPlainText(text)
-        self.topo_inner.setCurrentIndex(1)
-        s = b["summary"]
-        self.status.showMessage("Topout 预览：信号 %d，断言块 %d，向量 %d，记账(不产断言) %d"
-                                % (s["n_total"], s["n_emitted"], s["n_vectors"], s["n_accounted"]))
+        self.topout_view.on_preview()
 
     def on_topo_export_sv(self):
-        if not self._topo_guard():
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出 Topout .sv", "wr_rf_tc_topout.sv", "SystemVerilog (*.sv)")
-        if not path:
-            return
-        from . import topout as T
-        mode, exh = self._topo_mode()
-        only = self._topo_checked_names() or None
-        text, b = T.render_topout_sv(self.wb, mode=mode, max_tests=self._topo_maxt(),
-                                     exhaustive=exh, comments=True, only=only)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
-        self.topo_sv.setPlainText(text)
-        self.topo_inner.setCurrentIndex(1)
-        s = b["summary"]
-        QtWidgets.QMessageBox.information(
-            self, "已导出",
-            "Topout .sv 已导出：\n%s\n\n信号 %d；断言块 %d；向量 %d；记账(不产断言) %d%s"
-            % (path, s["n_total"], s["n_emitted"], s["n_vectors"], s["n_accounted"],
-               ("\n（记账：%s）" % "、".join(a["name"] for a in b["accounted"])) if b["accounted"] else ""))
+        self.topout_view.on_export_sv()
 
     def on_topo_export_report(self):
-        if not self._topo_guard():
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出 Topout 报告", "topout_report.html",
-            "HTML (*.html);;CSV (*.csv);;Excel (*.xlsx)")
-        if not path:
-            return
-        from . import topout as T
-        from . import cli
-        mode, exh = self._topo_mode()
-        rep = T.topout_report(self.wb, mode=mode, max_tests=self._topo_maxt(), exhaustive=exh)
-        written = cli.write_report(path, rep, self._loaded_excel_path or "")
-        QtWidgets.QMessageBox.information(self, "已导出", "Topout 报告已导出：\n%s" % "\n".join(written))
+        self.topout_view.on_export_report()
 
     def on_topo_fortest(self):
-        if not self._topo_guard():
-            return
-        if not self._loaded_excel_path:
-            QtWidgets.QMessageBox.information(self, "无源表", "回填需要源 Excel 路径，请先加载 Excel。")
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "回填 for_test 到新 Excel", "topout_fortest.xlsx", "Excel (*.xlsx)")
-        if not path:
-            return
-        from . import topout as T
-        from . import fortest_writer as F
-        mode, exh = self._topo_mode()
-        rep = T.report_for_topout(self.wb, R.Resolver(self.wb), mode=mode,
-                                  max_tests=self._topo_maxt(), exhaustive=exh)
-        F.write_fortest(self._loaded_excel_path, path, rep, include_mux=True)
-        QtWidgets.QMessageBox.information(
-            self, "已回填", "Topout for_test 已回填（含 mux 表，堵『只回填 logic』陷阱）：\n%s" % path)
+        self.topout_view.on_fortest()
 
     def _build_testitems_tab(self):
         """测试项编辑标签页：表头说明 + 工具条 + 可编辑表格。"""

@@ -1071,7 +1071,9 @@ def test_gui_panes_are_resizable(qapp, wb, tmp_path_factory):
     assert sp.widget(0).minimumWidth() <= 260        # 左面板能缩到较窄
     flows = [c.layout() for c in w.findChildren(QtWidgets.QWidget)
              if isinstance(c.layout(), gui.FlowLayout)]
-    assert len(flows) == 2                           # 左批量条 + 右编辑条
+    # 排查(旧)的左批量条 + 右编辑条 + 各 SignalView(Topout/子视图) 的批量条/编辑条都用 FlowLayout；
+    # 至少有这 2 条，且【每一条】都要可缩到单按钮宽、窄屏换行（断言更强=覆盖所有工具条，不只 2 条）。
+    assert len(flows) >= 2
     for fl in flows:
         # 最小宽度≈单个最宽按钮，而不是所有按钮之和（否则 splitter 拖不动）
         assert 0 < fl.minimumSize().width() < 260
