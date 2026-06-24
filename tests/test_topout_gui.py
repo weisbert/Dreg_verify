@@ -201,6 +201,21 @@ def test_topout_export_sv_options_comments_and_summary(topo_win, tmp_path, monke
     v._e_regen()
 
 
+def test_topout_export_single_signal_csv(topo_win, tmp_path, monkeypatch):
+    """⭐N7：单信号真值表 CSV(转置：每列一条测试)，含 auto_out/期望/期望来源/负向 行。"""
+    from PySide6 import QtWidgets
+    w = topo_win
+    v = _sel(w, "d_logic_bt_lp_rx_en")
+    out = tmp_path / "sig.csv"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    v.on_export_csv()
+    text = out.read_text(encoding="utf-8-sig")
+    assert "信号\\测试" in text and "auto_out" in text and "期望来源" in text
+    assert len(text.splitlines()[0].split(",")) == len(v.cur_cols) + 1   # 列=测试数+1(转置)
+
+
 def test_topout_export_nets_from_signalview(topo_win, tmp_path, monkeypatch):
     """⭐N5：默认 Topout 视图工具条可导出 nets.txt（委托 main.on_export_nets，跨视图通用入口）。"""
     from PySide6 import QtWidgets

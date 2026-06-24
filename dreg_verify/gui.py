@@ -808,6 +808,11 @@ class SignalView(QtWidgets.QWidget):
             b = QtWidgets.QPushButton(text); b.setToolTip(tip); b.clicked.connect(slot)
             self._edit_btns[text] = b
             eb.addWidget(b)
+        b_csv = QtWidgets.QPushButton("导出CSV")      # N7：单信号真值表 CSV(转置=用例为列)，非编辑也可导
+        b_csv.setToolTip("把【本信号】真值表导出为 CSV(转置：每列一条测试)，Excel 可开——\n"
+                         "区别于工具条『导出报告』(全量多信号扁平明细)。")
+        b_csv.clicked.connect(self.on_export_csv)
+        eb.addWidget(b_csv)
         ttv.addWidget(eb_box)
         self.truth = QtWidgets.QTableWidget(0, 0)
         self.main._mono(self.truth)
@@ -1808,6 +1813,35 @@ class SignalView(QtWidgets.QWidget):
         rep = self.provider.render_report(mode, self._maxt(), exh, only=only)
         written = cli.write_report(path, rep, self.main._loaded_excel_path or "")
         QtWidgets.QMessageBox.information(self, "已导出", "报告已导出：\n%s" % "\n".join(written))
+
+    def on_export_csv(self):
+        """导出【当前选中信号】真值表为 CSV（转置：第一列=输入/字段名，其后每列一条测试）。N7。
+        用 SignalView 自己的 cur_cols/e_inputs，logic/register/mux 同排版；非可编辑信号(register)也可导。"""
+        if self.cur_an is None or not self.cur_cols:
+            QtWidgets.QMessageBox.information(self, "导出CSV", "请先在左侧选一个有真值表的信号。")
+            return
+        default = "%s_tests.csv" % (self.cur_an.get("name") or "signal")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出本信号真值表 CSV", default, "CSV (*.csv)")
+        if not path:
+            return
+        import csv
+        cols = self.cur_cols
+        out_w = self.cur_an["out_width"] or 1
+        wsuf = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+        fc = generator._fmt_cell
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            wr = csv.writer(f)
+            wr.writerow(["信号\\测试"] + [c["name"] for c in cols])
+            for e in self.e_inputs:                       # 行序与编辑器一致（控制位/输入）
+                wr.writerow([e["label"]] + [fc(c["vals"].get(e["key"], 0), e["width"]) for c in cols])
+            wr.writerow(["auto_out%s" % wsuf] + [fc(c["auto"], c["auto_w"]) for c in cols])
+            wr.writerow(["期望(进.sv)%s" % wsuf]
+                        + [fc(c["exp"] if c["exp"] is not None else c["auto"], c["auto_w"]) for c in cols])
+            wr.writerow(["期望来源"] + [("负向(故意填错)" if c["neg"]
+                                        else ("designer手填" if c["exp"] is not None else "auto_out兜底"))
+                                       for c in cols])
+            wr.writerow(["负向?"] + ["是" if c["neg"] else "" for c in cols])
+        QtWidgets.QMessageBox.information(self, "已导出", "本信号真值表 CSV 已导出：\n%s" % path)
 
     def on_fortest(self):
         if not self._guard():
