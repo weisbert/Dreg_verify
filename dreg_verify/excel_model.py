@@ -915,7 +915,7 @@ def read_logiclike_page(ws, header_row=2, input_letters=("A", "B", "C"),
             if cell == "":
                 continue
             base_with_tl, width, msb, lsb = _strip_width(cell)
-            # 剥接线后缀拿基名（查表/显示用）；force 时仍用原网名（含后缀），见 pageviews._force_binding
+            # 剥接线后缀拿基名（查表/显示用）；force 时仍用原网名（含后缀）——页本地走 resolver wire 兜底
             base = strip_to_logic(base_with_tl)
             inputs[letter] = {"raw": cell, "base": base, "width": width, "msb": msb, "lsb": lsb}
         n += 1

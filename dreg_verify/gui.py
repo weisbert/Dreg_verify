@@ -408,6 +408,8 @@ def _parse_cell_int(text):
     if t == "":
         return None
     low = t.lower()
+    if low in ("0x", "0b", "'h"):          # 只有前缀没数字 → 非法（别让 0x→16 进制兜底把 "0b" 读成 11）
+        return None
     try:
         if low.startswith("'h"):
             return int(low[2:], 16)
@@ -443,7 +445,10 @@ def _norm_topout_result(res):
     # 编辑回流键：logic/mux → 源对象 out_name（generator.build 据此选）；register → Topout 名（reg_overrides）
     an["src_out_name"] = (sig.out_name if (kind in ("logic", "mux") and sig is not None)
                           else res.topo.name)
-    an["editable"] = "logic" if kind in ("logic", "register") else ("mux" if kind == "mux" else "")
+    # ⭐只有 status==ok 才可编辑：error/skip/unresolved 的 mux 没有 expansion(None)，若仍判 editable=='mux'，
+    #   点选该行 _load_signal 会对 None 取 ['used_vars'] 崩（违『绝不崩』）。统一非可建=非可编辑。
+    an["editable"] = "" if res.status != "ok" else (
+        "logic" if kind in ("logic", "register") else ("mux" if kind == "mux" else ""))
     return an
 
 
@@ -456,7 +461,8 @@ def _norm_page_result(res):
           "name": res.name, "sig": res.sig}
     an["groups"] = (res.groups or []) if res.kind == "logic" else []
     an["src_out_name"] = res.sig.out_name
-    an["editable"] = "logic" if res.kind == "logic" else ("mux" if res.kind == "mux" else "")
+    an["editable"] = "" if res.status != "ok" else (
+        "logic" if res.kind == "logic" else ("mux" if res.kind == "mux" else ""))
     return an
 
 
@@ -896,6 +902,7 @@ class SignalView(QtWidgets.QWidget):
         self.owner_menu.clear()
         self._owner_acts = {}
         owners = sorted({(m["owner"] or NO_OWNER) for m in self.models})
+        self._owner_filter &= set(owners)        # 换表后丢弃新表里已不存在的 owner（否则按钮计数虚高、留死项）
         for o in owners:
             act = self.owner_menu.addAction(o)
             act.setCheckable(True)
@@ -1245,6 +1252,8 @@ class SignalView(QtWidgets.QWidget):
             return
         sel = self._sel_cols() or [len(self.cur_cols) - 1]
         for j in sel:
+            if j < 0 or j >= len(self.cur_cols):
+                continue
             src = self.cur_cols[j]
             new = {"name": self._new_col_name(), "neg": src["neg"],
                    "vals": dict(src["vals"]), "exp": src["exp"],
@@ -1423,6 +1432,12 @@ class SignalView(QtWidgets.QWidget):
                 v = V.make_vector_from_base_values(
                     an["node"], an["bindings"], an["groups"], c["vals"], an["out_width"],
                     index=i, expected_override=c["exp"], name=nm)
+                # 用户把负向列期望恰好填成 auto → make_vector 不标负向(会静默退化成『通过』断言)。
+                # 显式保住负向身份(=NEG-BROKEN：标负向但错值==正确值，仿真会过)，不静默丢用户的负向意图。
+                if not v.is_negative and c["exp"] is not None:
+                    v.is_negative = True
+                    v.neg_value = c["exp"] & E.mask(v.exp_width)
+                    v.neg_mode = "value"
             else:
                 v = V.make_vector_from_base_values(
                     an["node"], an["bindings"], an["groups"], c["vals"], an["out_width"],
@@ -1465,7 +1480,11 @@ class SignalView(QtWidgets.QWidget):
     def _clear_detail(self):
         if self.chain is not None:
             self.chain.setPlainText("")
-        self.truth.clear(); self.truth.setRowCount(0); self.truth.setColumnCount(0)
+        self._ti_loading = True          # 清表也屏蔽 itemChanged（保持唯一不变量：写真值表一律带守卫）
+        try:
+            self.truth.clear(); self.truth.setRowCount(0); self.truth.setColumnCount(0)
+        finally:
+            self._ti_loading = False
         self.sv.setPlainText("")
         self.cur_an = None; self.cur_cols = None
 
@@ -2672,6 +2691,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if n_restored:
             msg += "；已恢复 %d 个信号的测试项编辑(含手填期望)" % n_restored
         _save_last_excel(path)         # 记住这次的文件，下次启动自动加载
+        # ⭐换表先清空各 SignalView 的逐信号编辑（否则上一张表的编辑会按同名 key 串进新表导出，
+        #   静默写错断言——MainWindow._edited 早已在上面清过，这两个桶也必须清，2026-06-24 对抗 review）。
+        self.topout_view.edits.clear()
+        for v in getattr(self, "page_views", {}).values():
+            v.edits.clear()
         # ⭐Topout 主视图 + 子视图（logic/mux/dft/iddq）：载表后各自刷新清单
         # （无对应页时优雅提示，不崩；护栏3）
         self._refresh_topout()

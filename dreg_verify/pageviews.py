@@ -88,9 +88,12 @@ class PageResult:
 
 
 def analyze_logiclike(wb, resolver, sig, mode="min", max_tests=256, exhaustive=False,
-                      want_vectors=True):
+                      want_vectors=True, page=None):
     """logic 形态(logic/dft/iddq)的页本地分析：解析表达式 + 一层解析输入 + 出向量。永不抛。"""
-    res = PageResult(sig, sig.suffix if sig.suffix in PAGES else "logic", "logic")
+    # page 来自调用方(权威)；缺省退到 suffix 推断（兼容直接调用方）。修『logic 行 M 列恰好写 dft/mux 时
+    # 被错标 page』(纯显示字段，2026-06-24 对抗 review M4)。
+    pg = page if page in PAGES else (sig.suffix if sig.suffix in PAGES else "logic")
+    res = PageResult(sig, pg, "logic")
     try:
         node = E.parse(sig.expr)
         bindings = resolver.resolve_signal_inputs(sig)   # 一层解析、不 cone（级联输入=force 衔接网）
@@ -139,7 +142,7 @@ def analyze_page_signal(wb, resolver, sig, page, mode="min", max_tests=256,
         return analyze_mux(wb, resolver, sig, mode=mode, max_tests=max_tests,
                            exhaustive=exhaustive, want_vectors=want_vectors)
     return analyze_logiclike(wb, resolver, sig, mode=mode, max_tests=max_tests,
-                             exhaustive=exhaustive, want_vectors=want_vectors)
+                             exhaustive=exhaustive, want_vectors=want_vectors, page=page)
 
 
 def analyze_all(wb, page, mode="min", max_tests=256, exhaustive=False, want_vectors=True):

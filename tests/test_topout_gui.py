@@ -394,6 +394,43 @@ def test_topout_coverage_in_toolbar(topo_win):
     v.cov.setCurrentText("全面")
 
 
+# ═══════════════ 2026-06-24 对抗 review 修复回归 ═══════════════
+def test_select_error_mux_does_not_crash(topo_win, monkeypatch):
+    """选中一个『展开失败的 mux』(expansion=None, status=error) → 不崩、非可编辑（BLOCKER 修复）。"""
+    from dreg_verify import gui as G
+    v = topo_win.topout_view
+    bad = {"kind": "mux", "status": "error", "issues": ["mux 展开失败"], "note": "",
+           "node": None, "bindings": None, "expansion": None, "vectors": [],
+           "out_width": 1, "chain": [], "name": "d_bt_lp_lna_itrim",
+           "sig": None, "groups": [], "src_out_name": "d_bt_lp_lna_itrim", "editable": ""}
+    monkeypatch.setattr(v.provider, "analyze", lambda *a, **k: bad)
+    v._load_signal("d_bt_lp_lna_itrim")          # 不应抛
+    assert v.truth.rowCount() == 0
+    assert not v._edit_btns["加列"].isEnabled()    # 非 ok → 编辑按钮禁用
+
+
+def test_edits_cleared_on_reload(topo_win):
+    """换表（重新 on_load）→ 清空逐信号编辑（否则按同名 key 串进新表导出，写错断言；MAJOR 修复）。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    v._e_clear()
+    assert v.edits                                # 有编辑
+    topo_win.on_load()                            # 重新载同表
+    assert topo_win.topout_view.edits == {}       # 编辑已清
+
+
+def test_negative_with_expected_eq_auto_stays_negative(topo_win):
+    """负向列期望被填成 == auto → 导出仍是负向（不静默退化成通过断言；MAJOR 修复）。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    v._e_regen()
+    v.truth.setCurrentCell(0, 0)
+    v._e_addneg()                                 # 加一条负向
+    negcol = next(c for c in v.cur_cols if c["neg"])
+    negcol["exp"] = negcol["auto"]                # 把负向期望填成正确值(auto)
+    v._commit()
+    vecs = v._cols_to_vectors(v.cur_an, v.cur_cols)
+    assert any(x.is_negative for x in vecs)       # 仍保住负向身份
+
+
 # ───────────── 截图：Topout 视图版面过目 ─────────────
 def test_topout_view_screenshot(topo_win, gui_app):
     """截一张 Topout 视图 PNG（版面过目；文字方框是 offscreen 缺中文字体所致，文字由上面断言把关）。"""

@@ -341,8 +341,10 @@ def cmd_page(args, wb, opts):
             return 0
 
     out = args.out or ("wr_rf_tc_%s.sv" % page)
+    # 信号筛选：--signals 限定只产出这些（与旧路径/GUI 勾选同义）。owner 筛选页本地暂用 --signals 即可。
+    only = sorted(opts.signals) if opts.signals else None
     text, b = P.build_page_sv(wb, page, mode=mode, max_tests=mt, exhaustive=exh,
-                              comments=opts.comments)
+                              comments=opts.comments, only=only)
     _write(out, text)
     s = b["summary"]
     print("已写出(%s 子视图·页本地): %s" % (P.PAGE_LABEL.get(page, page), out))
