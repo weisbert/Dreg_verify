@@ -1,8 +1,23 @@
 # 交接：Topout-rooted 验证（GUI/CLI 端到端）
 
-> 状态：**端到端可用 + 全功能化，已 push**。HEAD `5e4c573`（= origin/main），`775 passed + 1 xfailed`。
-> 旧 logic-rooted CLI/generator 输出**逐字节不变**（已显式 worktree diff `92da327` pre vs post 验过 mirror btlp+wl 的 .sv+report）。
+> 状态：**端到端可用 + 全功能化 + 改名桥接，已 push**。HEAD `17895b1`（= origin/main），`781 passed + 1 xfailed`。
+> 旧 logic-rooted CLI/generator 输出**逐字节不变**（worktree diff `92da327`/`cbf9967` pre vs post 验过 mirror btlp+wl 的 .sv+report；Topout .sv+report 也 IDENTICAL）。
 > 日期：2026-06-24。验证夹具：`mirror_btlp_dreg.xlsx`（7 真族金标准）。真表：`Hi1108_Pilot_BT_LP_DREG_95P_20260623.xlsx`（公司机 `D:\Onebox\Code\Dreg_verify\excel\`）。
+> **真表 diag 实况**：211 信号 = logic 123 / mux 7 / register 80 / ro 0 / **unresolved 0**（改名桥接做完后）。
+
+---
+
+## ⭐ 第三轮（2026-06-24 续）：改名桥接 + 探查脚本 —— 真表唯一未解析信号已解决
+
+真表里有信号在 logic 页叫一个名、过中间页观测后【改了名】，顶层 Topout 名对不上 logic 候选 → 旧版标『未解析』。
+
+- **探查脚本 `diag_topout_rename.py`**（不改文件）：`python diag_topout_rename.py 真表.xlsx`。输出 ① Topout 分类汇总（含「自动认出 N 条改名」）② 未解析清单 ③ 逐个未解析名在各结构页的定位（★=输出列=改名定义行，同行输入列=源名）。
+- **自动改名桥接（topout.py，additive）**：直接命中不到的 Topout 名 → **链式回溯** 改名表（**level_shift → dft → logic 可多跳**，带环/深度8护栏）到真正的 logic/mux/寄存器源，拿逻辑/驱动，但**断言探针贴顶层真名**（不是源名）。
+  - dft 改名：`_dft_rename_map`（dft 行输出 ≠ 唯一功能输入基名 = 改名）。
+  - level_shift 改名：`_ls_rename_map`（顶层 `_ls` 口 → 输入源名；补 `_apply_level_shift` 对不上的「源是再上一层改名」）。
+- **真表实证**：唯一未解析 `d_vco_en_faston_ls` = `level_shift ← d_vco_en_faston ←(dft) logic d_vco_en_faston_fsm`，现自动解析为 logic 源、`.sv` 断言贴 `ENV_RF.d_vco_en_faston_ls`（非 `_fsm`、非中间名）。
+- **安全**：正常 level_shift（源直接是 logic 输出，`_apply_level_shift` 设 `_ls_name`）走老路不经桥接；无改名表逐字节不变。改名 mux（无单一 node）暂记账（少见）。
+- 测试 `tests/test_topout_rename.py`（6）：dft 改名 / 链式 ls→dft→logic / 探顶层名 / 对照零改名 / GUI 编辑回流。
 
 ---
 
@@ -64,39 +79,55 @@ python -m dreg_verify.cli --excel 真表.xlsx --topout --report r.html  # 报告
 - `topout_report(...)` → `write_report` 兼容 dict（全 Topout 限定，summary/verifiability 来自 `compose_topout_account`，tables 来自 `report_for_topout` 含 mux + register 平凡表）。
 - `compose_topout_account`/`report_for_topout`/`topout_fortest_rows` + `validate_against_golden`（判据一，对 for_test 金标准）。
 
-**CLI** `dreg_verify/cli.py`：`--topout` flag + `cmd_topout`（在 `_dispatch` 里 wb 载入后第一个分支）。
+- `resolve_root` 改名桥接 + `_dft_rename_map`/`_ls_rename_map`/`_rename_map`（链式回溯，第三轮）；`_topout_probe_block`（改名/register 根：驱动来自源、断言贴顶层名）。
 
-**GUI** `dreg_verify/gui.py`：
-- `_build_ui` 重构：共享路径栏之上 → 外层 `self.main_tabs`（tab0 Topout 视图 default / tab1 排查(旧)=原 UI 整体搬进 `legacy_lay`）。
-- `_build_topout_tab` / `_refresh_topout`（on_load 末尾调）/ `_topo_*` 渲染 / `on_topo_preview/export_sv/export_report/fortest`。
-- Topout 视图列常量：`TOPO_HEADERS`/`TOPO_*`/`TOPO_KIND_LABEL`/`TOPO_STATUS_LABEL`。
+**数据层 子视图引擎** `dreg_verify/pageviews.py`（第二轮新增，页本地·不跨页 cone）：
+- `page_signals/analyze_page_signal/page_view_models`（force 级联=不递归代入上游）；`build_page_sv/page_report/page_fortest`（复用 `generator.build/report`，dft/iddq swap `wb.logic`，mux signals 过滤）。
+- dft/iddq 页由 `excel_model.read_logiclike_page` 读成 `LogicSignal`（D=输出/E=式/A-C=输入）→ `wb.dft_rows`/`wb.iddq_rows`。
 
-**测试**：`tests/test_topout.py`(41)、`tests/test_topout_cli.py`(8)、`tests/test_topout_gui.py`(16, 无头 Qt + 截图)。
+**CLI** `dreg_verify/cli.py`：`--topout`+`cmd_topout`；`--page logic|mux|dft|iddq`+`cmd_page`（页本地，第二轮）。
+
+**GUI** `dreg_verify/gui.py`（第二轮重构）：
+- 可复用控件 **`SignalView`**（Topout + 4 子视图共用）+ `_TopoutProvider`/`_PageProvider`（provider 决定 cone vs 页本地）。
+- 外层标签：`Topout 视图`(默认) + `logic/mux/dft/iddq 视图` + `排查(旧)`。
+- 真值表编辑（`_e_*`/`_on_truth_item`/`_cols_to_vectors`/`_mux_derive`/`_compute_edited`）→ `vector_overrides`/`reg_overrides`/`mux_*`/改名走 reg 路回流导出。
+- 旧 `topo_*` 属性/方法保留为 `SignalView` 别名/委托（旧 Topout 测试零改动）。
+- 清单表列常量：`TOPO_*`（0=选/1=负向/2=信号/3=owner/4=分类/5=状态/6=用例）/`SV_HEADERS`/`TOPO_KIND_LABEL`/`TOPO_STATUS_LABEL`。
+
+**探查脚本** `diag_topout_rename.py`（第三轮，不改文件）：找 Topout 未解析信号在哪页被改名+源名。
+
+**测试**：`test_topout.py`(41)、`test_topout_cli.py`(8)、`test_topout_gui.py`(25)、`test_topout_rename.py`(6)、`test_pageviews.py`(10)、`test_pageviews_gui.py`(8)、`test_pageviews_cli.py`(5)。
 
 ---
 
 ## 4. 仍开 / 下一步（按优先级）
 
-1. **在真表上跑全量**（唯一真·前置）—— mirror 已够验所有 GUI/CLI 功能，但 ~211 真信号的完整 Topout dump 只有公司机能跑。打开 GUI 点 Topout 视图载 `Hi1108_Pilot_BT_LP_DREG_95P_20260623.xlsx`，或 `--topout --account`，看分类分布/有没有大批 unresolved/性能（211 信号 × 深 cone × openpyxl 慢载）。回报。
-2. **ISO/iddq 当 cone 一级**（`test_iddq_as_a_cone_level` xfail）—— 要扩 `read_logic` 后缀剥离 + `cone._find_logic` 搜索 + `resolver._logic_outputs` 索引，属【改公共行为】，按护栏单开 additive 扩展。
-3. **bit-split 验证侧**：`evaluate_at` 已按 slice_lsb 取位（fix A）；`read_fortest_golden` 不暴露切片导致同寄存器多切片金标准行 overwrite（fix B）未做 = minor，**只影响判据一对照、不影响 .sv/报告**，真表跑到再说。
-4. **scope** 已按 goal 拍成 additive 两标签（Topout 上位、旧降级保留正确），不再悬。
+1. **真表上跑全量验证（用户验收）**—— diag 已确认 211 信号全部能解析（unresolved 0）。下一步是真机打开 GUI Topout 视图载真表，逐信号肉眼核对真值表/`.sv`，挑几条仿真跑通。性能（211 信号 × 深 cone × openpyxl 慢载）留意。
+2. **ISO/iddq 当 cone 一级**（`test_iddq_as_a_cone_level` xfail）—— 改公共行为，按护栏单开 additive。
+3. **改名 mux**（`renamed-mux` 记账）：dft/level_shift 改名指向 mux 源时（无单一 node）暂记账未渲染；真表里没出现（改名源都是 logic）。真碰到再补 mux 探针名覆盖渲染。
+4. **多视图共享 `_append_to_logic` 标志**（对抗 review Finding，低风险未根治）：各视图各建 Resolver 会回写 `wb.logic/mux` 的 `_append_to_logic`，但 build/report 导出前都从 GenOptions 重建 resolver→导出自愈（已验逐字节）。根治=把标志移出共享对象，留待单开。
+5. **bit-split 验证侧 fix B**（minor，只影响判据一对照、不影响 .sv/报告）。
 
 ---
 
 ## 5. 坑 / 注意
 
-- **旧路径神圣不可变**：generator.build/report、旧 CLI 默认、`fortest_writer.write_fortest`（`include_mux=False` 默认）输出逐字节不变是硬护栏。改 topout.py 随便，碰这些要重新 diff。
-- **Topout 路径用干净 cone 默认**：`build_for_topout`/`topout_view_models`/`topout_report` 内部自建 `Resolver(wb)`，**故意不吃**旧视图的前缀/后缀/级联设置（那些只属「排查(旧)」）。
-- **register 裸名位宽**：Topout B 列若写裸名（无 `[msb:lsb]`）但字段是多 bit，引擎按 regmap 字段全宽验（`root.obj.bit_msb/bit_lsb`），并在 issues 里标「按字段全宽验」——别当假绿警告，是对的。
+- **旧路径神圣不可变**：generator.build/report、旧 CLI 默认、`fortest_writer.write_fortest`（默认 `include_mux=False`）逐字节不变是硬护栏。改 topout.py/pageviews.py 随便，碰 generator/旧 CLI 要重新 diff。
+- **改名桥接只兜「源是再上一层改名」**：正常 level_shift（源直接 logic 输出，`_apply_level_shift` 设 `_ls_name`）走老路、不经桥接；无改名表逐字节不变。
+- **Topout/子视图各建干净 Resolver**：`Resolver(wb)` 默认（不吃旧视图前缀/后缀/级联）——那些只属「排查(旧)」。
+- **error/skip/unresolved 信号一律非可编辑**（`editable=""`）：防点选 error mux（expansion=None）崩。
+- **逐信号编辑随换表清空**（`on_load` 清各 `SignalView.edits`）：防上一张表编辑按同名串进新表。
 - **offscreen 截图中文成方框**：缺 CJK 字体，版面对、文字靠 `widget.text()` 断言；真机正常。
-- **对抗 review 已跑**：ultracode 18 agent，8 确认全修（2 major + 5 minor + 1 nit），见 `92da327` commit。
+- **对抗 review 已跑两轮**：第一轮 ultracode 18 agent（`92da327`）；第二轮 4 agent（`5e4c573`，1 BLOCKER+3 MAJOR+4 minor 全修）。
 
 ---
 
-## 6. 关键 commit
-- `7253d20` 数据层 .sv + 视图模型（build_for_topout / topout_view_models）
-- `29a64f6` CLI `--topout` + topout_report
-- `c2aaed7` GUI Topout 主视图 + 旧视图降级『排查(旧)』
-- `92da327` 对抗 review 修复（2 major + 5 minor + 1 nit）+ 回归  ← **HEAD**
-- 重构起点 `43e7ad7`，数据层 DoD 完成 `97ab6a2`。
+## 6. 关键 commit（本会话第二/三轮，origin/main）
+- `1d8a9d5` 数据层 pageviews.py（子视图页本地引擎）
+- `f5c55f8` SignalView 控件 + Topout 全功能化（编辑/筛选/链/覆盖度）
+- `7735cec` logic/mux/dft/iddq 子视图标签
+- `6c888a5` CLI `--page`
+- `5e4c573` 对抗 review 修复（1 BLOCKER + 3 MAJOR + 4 minor/nit）
+- `1a11c89` dft 改名桥接 + 探查脚本 `diag_topout_rename.py`
+- `17895b1` 改名桥接扩 level_shift + 链式回溯（真表唯一未解析解决）  ← **HEAD**
+- 第一轮（数据层→GUI/CLI）：`7253d20`/`29a64f6`/`c2aaed7`/`92da327`，起点 `43e7ad7`。
