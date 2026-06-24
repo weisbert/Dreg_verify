@@ -74,6 +74,9 @@ def build_argparser():
                         "cone 展到源寄存器、断言贴顶层真名(前后缀整类问题消失)。配合 --list(列清单+分类)/"
                         "--account(账目)/--report(报告)/默认(出 .sv)。clean cone 默认——级联/尾缀/前缀属"
                         "旧 logic-rooted 路径(排查/隔离用)，此路径不需要。")
+    p.add_argument("--page", choices=["logic", "mux", "dft", "iddq"], default=None,
+                   help="【子视图·页本地路径，2026-06-24】要验信号 = 该页每一行/组，**只看本模块输入输出、"
+                        "不跨页 cone 展开**(force 级联)。配合 --list/--report/默认(出 .sv)；与 GUI 子视图同口径。")
 
     g = p.add_argument_group("信号筛选")
     g.add_argument("--owner", help="按 owner 筛选(逗号分隔，匹配 logic P 列)")
@@ -299,6 +302,51 @@ def cmd_topout(args, wb, opts):
         for a in b["accounted"]:
             print("    - %s [%s/%s]: %s"
                   % (a["name"], a["kind"], a["status"], (a["reason"] or "").replace("\n", " ")[:60]))
+    return 0
+
+
+def cmd_page(args, wb, opts):
+    """【子视图·页本地路径，2026-06-24】要验信号 = 某页(logic/mux/dft/iddq)每行/组，不跨页 cone。
+
+    --list 列本页清单 / --report 出报告 / 默认出 .sv。force 级联=只看本模块输入输出（与 GUI 子视图一致）。"""
+    from . import pageviews as P
+    page = args.page
+    mode, mt, exh = opts.mode, opts.max_tests, opts.exhaustive
+    if not P.page_available(wb, page):
+        print("⚠ 该 Excel 的 %s 页没有可显示的行（空页/无此页）。"
+              % P.PAGE_LABEL.get(page, page))
+        return 0
+
+    if args.list:
+        ms = P.page_view_models(wb, page, mode=mode, max_tests=mt, exhaustive=exh)
+        by_kind = {}
+        for m in ms:
+            by_kind[m["kind"]] = by_kind.get(m["kind"], 0) + 1
+        print("%s 要验信号 %d 个（页本地·不 cone）：%s"
+              % (P.PAGE_LABEL.get(page, page), len(ms),
+                 " | ".join("%s %d" % (k, v) for k, v in sorted(by_kind.items()))))
+        print("%-40s %-12s %-6s %-7s %-5s %s" % ("信号", "owner", "分类", "状态", "用例", "表达式"))
+        print("-" * 100)
+        for m in ms:
+            print("%-40s %-12s %-6s %-7s %-5d %s"
+                  % (m["name"][:40], (m["owner"] or "")[:12], m["kind"], m["status"],
+                     m["n_vectors"], (m.get("expr", "") or "").replace("\n", " ")[:30]))
+        return 0
+
+    if args.report:
+        rep = P.page_report(wb, page, mode=mode, max_tests=mt, exhaustive=exh)
+        written = write_report(args.report, rep, args.excel)
+        print("%s 报告已写出: %s" % (P.PAGE_LABEL.get(page, page), "  ".join(written)))
+        if args.out is None:
+            return 0
+
+    out = args.out or ("wr_rf_tc_%s.sv" % page)
+    text, b = P.build_page_sv(wb, page, mode=mode, max_tests=mt, exhaustive=exh,
+                              comments=opts.comments)
+    _write(out, text)
+    s = b["summary"]
+    print("已写出(%s 子视图·页本地): %s" % (P.PAGE_LABEL.get(page, page), out))
+    print("  信号块 %d；产出断言块 %d；向量 %d" % (s["n_total"], s["n_emitted"], s["n_vectors"]))
     return 0
 
 
@@ -1310,6 +1358,10 @@ def _dispatch(args, opts):
     # 与旧 logic-rooted 路径完全并存：默认仍走旧路径；--topout 才切到新路径（旧 CLI 行为逐字节不变）。
     if args.topout:
         return cmd_topout(args, wb, opts)
+
+    # 子视图·页本地路径（2026-06-24）：logic/mux/dft/iddq 各页本地不跨页 cone。与旧路径并存。
+    if args.page:
+        return cmd_page(args, wb, opts)
 
     if args.list:
         cmd_list(wb, opts)
