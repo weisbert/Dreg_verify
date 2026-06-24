@@ -638,10 +638,13 @@ class _PassthroughSig:
 
     _self_ref_suffixes = ()
 
-    def __init__(self, name, width, owner, aid, suffix="topout-reg"):
+    def __init__(self, name, width, owner, aid, suffix="topout-reg", rtl_name=None):
         self.out_name = name
         self.out_base = name
-        self.rtl_name = name            # Topout 顶层真名（无前后缀，断言直接贴它）
+        # 断言 LHS 真名：默认=Topout 顶层真名（无前后缀，断言直接贴它）；register 直连 / dft 改名根
+        # 带位宽切片时由 _topout_probe_block 传入 name+[msb:lsb]（否则断言丢切片 → 只验 bit0=假绿，
+        # 且与信号清单显示名 aac_ctf_bit_sel[2:0] 不一致——2026-06-24 修）。
+        self.rtl_name = name if rtl_name is None else rtl_name
         self.assert_id = aid
         self.owner = owner
         self.out_width = width or 1
@@ -661,12 +664,25 @@ def _account_block(name, kind, status, reason, owner):
     return (lines, stats)
 
 
+def _topout_slice_suffix(topo, out_width):
+    """Topout 断言探针 LHS / 信号清单显示名共用的位宽切片后缀（2026-06-24 抽出，单一口径）：
+    B 列写了显式切片 → 用它（忠于真表，含 [14:12] 这种非零起始）；裸名但有效位宽>1（寄存器字段宽
+    推断出的多 bit，如 d_vco_en_faston）→ 补 [w-1:0]；1 bit 裸名不加（返回空串）。
+    register 直连 / dft 改名根的 passthrough .sv 块据此把断言贴成 name[msb:lsb]（否则丢切片）。"""
+    if topo.msb is not None and topo.lsb is not None:
+        return "[%d:%d]" % (topo.msb, topo.lsb)
+    w = int(out_width or getattr(topo, "width", 1) or 1)
+    return "[%d:0]" % (w - 1) if w > 1 else ""
+
+
 def _topout_probe_block(result, probe_name, owner, aid, kind, comments=False, counters=False,
                         probe_prefix=""):
     """自定义 .sv 块：驱动来自源(result.node/bindings/vectors)，断言探针贴顶层真名 probe_name。
     用于直连寄存器根(probe=topo 名) 与 dft 改名根(probe=顶层名 A，驱动来自源 A_sm)。
-    probe_prefix：顶层探针网若埋在子模块(罕见，顶层口一般在 ENV_RF 顶层)时的层级前缀。"""
-    sig = _PassthroughSig(probe_name, result.out_width, owner, aid)
+    probe_prefix：顶层探针网若埋在子模块(罕见，顶层口一般在 ENV_RF 顶层)时的层级前缀。
+    位宽切片：断言 LHS 贴 probe_name+[msb:lsb]（与信号清单显示名同口径，否则多 bit 信号丢切片只验 bit0）。"""
+    rtl = probe_name + _topout_slice_suffix(result.topo, result.out_width)
+    sig = _PassthroughSig(probe_name, result.out_width, owner, aid, rtl_name=rtl)
     meta = dict(result.meta or {})
     meta.setdefault("truncated", False)
     lines, stats = W.render_signal_block(sig, result.bindings, result.vectors, meta,
@@ -864,12 +880,8 @@ def _fill_register_model(m, result):
 
 def _topout_disp_name(topo, out_width):
     """信号清单【显示名】：带位宽切片(aac_ctf_bit_sel[2:0])。name(key)仍是剥位宽的基名，仅显示用。
-    B 列写了显式切片 → 用它(忠于真表，含 [14:12] 这种非零起始)；裸名但有效位宽>1(寄存器字段宽推断
-    出的多 bit，如 d_vco_en_faston) → 补 [w-1:0] 让用户看见是多位；1 bit 裸名不加。"""
-    if topo.msb is not None and topo.lsb is not None:
-        return "%s[%d:%d]" % (topo.name, topo.msb, topo.lsb)
-    w = int(out_width or topo.width or 1)
-    return "%s[%d:0]" % (topo.name, w - 1) if w > 1 else topo.name
+    切片后缀与断言 LHS 同口径（_topout_slice_suffix）：显示什么、.sv 就断言什么，不再两套规则。"""
+    return "%s%s" % (topo.name, _topout_slice_suffix(topo, out_width))
 
 
 def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):

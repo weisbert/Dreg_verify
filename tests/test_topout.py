@@ -540,6 +540,30 @@ def test_register_passthrough_width_from_resolved_field():
     assert max(v.exp_value for v in r.vectors) > 1            # 高位真被驱动/断言（非只 bit0）
 
 
+def test_register_passthrough_assert_carries_width_slice():
+    """⭐功能 bug 修复(2026-06-24)：直连寄存器 / dft 改名根的断言 LHS 必须带位宽切片
+    (aac_ctf_bit_sel[2:0] 那类)——旧 .sv 只断言裸名(`ENV_RF.d_dcoc==)=只比 bit0 假绿，且与信号清单
+    显示名 d_dcoc[6:0] 不一致。修后：显示什么、.sv 就断言什么（_topout_slice_suffix 单一口径）。"""
+    from dreg_verify import sv_writer as W
+    # (a) 裸名但解析出的字段是 7 bit → 断言贴推断切片 [6:0]，不再裸名
+    reg = {"d_dcoc": M.RegmapEntry("d_dcoc", "DCOC", "RW", "0", 0, 6, "BT", address=0x2E)}
+    wb = M.DregWorkbook(logic=[], regmap=reg, tmm={}, sheet_names=[])
+    wb.topout = [M.TopoutSignal(3, "d_dcoc", 1, "BT")]
+    txt = W.render_file(T.build_for_topout(wb, mode="max", exhaustive=True)["blocks"])
+    assert "`ENV_RF.d_dcoc[6:0]==" in txt                     # 带推断切片
+    assert "`ENV_RF.d_dcoc==" not in txt                      # 旧 bug：裸名断言不再出现
+    ms = {m["name"]: m for m in T.topout_view_models(wb, mode="max")}
+    assert ms["d_dcoc"]["disp"] == "d_dcoc[6:0]"              # 显示名与断言 LHS 同口径
+
+    # (b) B 列显式切片(含 [14:12] 那类非零起始) → 断言贴显式切片，不是 [w-1:0]
+    reg2 = {"d_sel": M.RegmapEntry("d_sel", "SEL", "RW", "0", 12, 14, "BT", address=0x10)}
+    wb2 = M.DregWorkbook(logic=[], regmap=reg2, tmm={}, sheet_names=[])
+    wb2.topout = [M.TopoutSignal(3, "d_sel", 3, "BT", msb=14, lsb=12, raw="d_sel[14:12]")]
+    txt2 = W.render_file(T.build_for_topout(wb2, mode="max", exhaustive=True)["blocks"])
+    assert "`ENV_RF.d_sel[14:12]==" in txt2                   # 忠于真表显式切片
+    assert "`ENV_RF.d_sel==" not in txt2
+
+
 def test_register_unresolved_is_error_not_false_green():
     """⭐minor 修复：直连寄存器(RW)但解析不到(如缺地址) → status='error'，不发『ok』绿块驱不存在的网。"""
     reg = {"d_noaddr": M.RegmapEntry("d_noaddr", "NA", "RW", "0", 0, 0, "BT")}   # address=None
