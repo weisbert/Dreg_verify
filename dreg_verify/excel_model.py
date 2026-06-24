@@ -867,12 +867,18 @@ def _normalize_type(v):
 # ───────────────────────────── 顶层装载 ─────────────────────────────
 class DregWorkbook:
     def __init__(self, logic, regmap, tmm, sheet_names, mux=None, dft=None,
-                 fortest_order=None, regmap_dups=None, topout=None):
+                 fortest_order=None, regmap_dups=None, topout=None,
+                 dft_rows=None, iddq_rows=None):
         self.logic = logic              # list[LogicSignal]
         self.regmap = regmap            # dict
         self.tmm = tmm                  # dict
         self.sheet_names = sheet_names
         self.mux = mux if mux is not None else []   # list[MuxGroup]（无 mux 页 = 空列表）
+        # dft / iddq 页【按行读成 LogicSignal】（2026-06-24 子视图模型 pageviews 用，additive）：
+        # 旧 logic-rooted 路径完全不读它们（默认空，逐字节不变）。每行 = 一个被观测/门控输出 +
+        # 其表达式(D=输出, E=表达式, A/B/C=输入)。注意 self.dft(上面那个 dict)是【门控信息】、用途不同。
+        self.dft_rows = dft_rows if dft_rows is not None else []     # list[LogicSignal]（dft 页全行）
+        self.iddq_rows = iddq_rows if iddq_rows is not None else []  # list[LogicSignal]（iddq 页全行）
         # {signal_low: [RegmapEntry,…]} regmap 同名重复定义(已按首个采纳)，供 generator 告警。
         # 空 = 无重复(绝大多数表)。来自 read_regmap；手构 wb 不传=空。
         self.regmap_dups = regmap_dups if regmap_dups is not None else {}
@@ -883,6 +889,42 @@ class DregWorkbook:
         # list[TopoutSignal]（Topout 页；无/空页=空）。新模型『要验信号清单』锚点，2026-06-23。
         # 旧 logic-rooted 路径完全不读它（默认空）；新 Topout 引擎(topout.py)以它为外层枚举源。
         self.topout = topout if topout is not None else []
+
+
+def read_logiclike_page(ws, header_row=2, input_letters=("A", "B", "C"),
+                        out_letter="D", expr_letter="E", owner_letter="H",
+                        suffix_tag="", id_prefix="X"):
+    """读一个【logic 形态】的页（dft / iddq）→ list[LogicSignal]（2026-06-24 子视图模型 pageviews 用）。
+
+    与 read_logic 同构但列位置可配（dft/iddq：D=输出名, E=表达式, A/B/C=输入；read_logic 是 K/L）。
+    只保留 out_letter 与 expr_letter 同时非空的行。每行建一个 LogicSignal（suffix=suffix_tag、
+    top_output=""→非顶层、assert_id=<id_prefix><序号>），供 pageviews 做【页本地·不 cone】真值表。
+    """
+    signals = []
+    n = 0
+    for ri, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True),
+                             start=header_row + 1):
+        out_raw = _s(_col(row, out_letter))
+        expr = _s(_col(row, expr_letter))
+        if out_raw == "" or expr == "":
+            continue
+        out_base, out_width, _m, _l = _strip_width(out_raw)
+        inputs = {}
+        for letter in input_letters:
+            cell = _s(_col(row, letter))
+            if cell == "":
+                continue
+            base_with_tl, width, msb, lsb = _strip_width(cell)
+            # 剥接线后缀拿基名（查表/显示用）；force 时仍用原网名（含后缀），见 pageviews._force_binding
+            base = strip_to_logic(base_with_tl)
+            inputs[letter] = {"raw": cell, "base": base, "width": width, "msb": msb, "lsb": lsb}
+        n += 1
+        signals.append(LogicSignal(
+            row=ri, out_name=out_raw, out_width=out_width, expr=expr,
+            suffix=suffix_tag, top_output="", notes="",
+            owner=_s(_col(row, owner_letter)), assert_id="%s%d" % (id_prefix, n),
+            inputs=inputs))
+    return signals
 
 
 def _dft_strip(name):
@@ -1224,6 +1266,7 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     ws_ls = _find_sheet(wb, "level_shift", "level shift", "levelshift")
     ws_ft = _find_sheet(wb, "for_test")
     ws_top = _find_sheet(wb, "Topout", "top_out", "topoutput", "top out")
+    ws_iddq = _find_sheet(wb, "iddq", "IDDQ")
 
     logic = read_logic(ws_logic, logic_header_row)
     regmap, regmap_dups = (read_regmap(ws_regmap, regmap_header_row)
@@ -1235,10 +1278,16 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     # 跨页：level_shift 页声明的顶层电平移位口 → 把 logic/mux 输出探针定到 _ls 顶层口(_ls_name 最优先)
     _apply_level_shift(logic, mux, read_level_shift(ws_ls) if ws_ls is not None else {})
     dft = read_dft(ws_dft) if ws_dft is not None else {}
+    # dft / iddq 页【按行】读成 LogicSignal（子视图模型用，additive；旧路径不读 → 逐字节不变）。
+    # dft/iddq 列位：D=输出名 E=表达式 A/B/C=输入 H=owner（mirror/真表 inspect 实证）。
+    dft_rows = (read_logiclike_page(ws_dft, suffix_tag="dft", id_prefix="D")
+                if ws_dft is not None else [])
+    iddq_rows = (read_logiclike_page(ws_iddq, suffix_tag="iddq", id_prefix="Q")
+                 if ws_iddq is not None else [])
     fortest_order = read_fortest_order(ws_ft) if ws_ft is not None else {}
     topout = read_topout(ws_top) if ws_top is not None else []
     names = list(wb.sheetnames)
     wb.close()
     return DregWorkbook(logic, regmap, tmm, names, mux=mux, dft=dft,
                         fortest_order=fortest_order, regmap_dups=regmap_dups,
-                        topout=topout)
+                        topout=topout, dft_rows=dft_rows, iddq_rows=iddq_rows)
