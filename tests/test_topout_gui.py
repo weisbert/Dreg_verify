@@ -201,6 +201,36 @@ def test_topout_export_sv_options_comments_and_summary(topo_win, tmp_path, monke
     v._e_regen()
 
 
+def test_topout_export_nets_from_signalview(topo_win, tmp_path, monkeypatch):
+    """⭐N5：默认 Topout 视图工具条可导出 nets.txt（委托 main.on_export_nets，跨视图通用入口）。"""
+    from PySide6 import QtWidgets
+    w = topo_win
+    out = tmp_path / "nets.txt"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    w.topout_view.on_export_nets()
+    assert out.exists()
+
+
+def test_topout_coverage_dropdown_persists(gui_app, mirror_path, monkeypatch):
+    """⭐N2：本视图全局覆盖度下拉关 GUI 不复位——改『穷举』即存盘(按 view_id) → 新开窗口恢复『穷举』。
+    (pytest 下 _save_settings 默认 no-op，用内存 store 验持久化语义。)"""
+    from dreg_verify import gui as G
+    store = {}
+    monkeypatch.setattr(G, "_save_settings", lambda d: store.update(d))
+    monkeypatch.setattr(G, "_load_settings", lambda: dict(store))
+    w = G.MainWindow(); w.path_edit.setText(mirror_path); w.on_load()
+    w.topout_view.cov.setCurrentText("穷举")
+    assert store.get("cov_topout") == "穷举"          # 改动即存（按 view_id）
+    w.close()
+    w2 = G.MainWindow(); w2.path_edit.setText(mirror_path); w2.on_load()
+    try:
+        assert w2.topout_view.cov.currentText() == "穷举"   # 新窗口恢复
+    finally:
+        w2.close()
+
+
 def test_topout_export_aborts_on_dup_labels(topo_win, tmp_path, monkeypatch):
     """⭐N9：导出前检测到重复 assert 标号(非法 SV) → 弹确认；用户取消 → 不写文件(不静默导出)。"""
     from PySide6 import QtWidgets

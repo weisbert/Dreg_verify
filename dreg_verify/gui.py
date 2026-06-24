@@ -726,9 +726,11 @@ class SignalView(QtWidgets.QWidget):
         bar.addWidget(QtWidgets.QLabel("覆盖度:"))
         self.cov = QtWidgets.QComboBox()
         self.cov.addItems(["精简", "全面", "穷举"])
-        self.cov.setCurrentText("全面")
+        _saved_cov = _load_settings().get("cov_%s" % self.view_id)   # N2：本视图全局覆盖度持久化
+        self.cov.setCurrentText(_saved_cov if _saved_cov in ("精简", "全面", "穷举") else "全面")
         self.cov.setToolTip(_COVERAGE_HELP)
         self.cov.currentIndexChanged.connect(self.refresh)
+        self.cov.currentIndexChanged.connect(self._persist_cov)
         bar.addWidget(self.cov)
         cov_help = QtWidgets.QPushButton("?")
         cov_help.setFixedWidth(24)
@@ -848,11 +850,28 @@ class SignalView(QtWidgets.QWidget):
         b_rep = QtWidgets.QPushButton("导出报告(HTML/CSV)…"); b_rep.clicked.connect(self.on_export_report)
         b_ft = QtWidgets.QPushButton("回填 for_test…"); b_ft.clicked.connect(self.on_fortest)
         b_ft.setToolTip("把真值表按 for_test 排版回填 Excel（含 mux 表）")
+        b_nets = QtWidgets.QPushButton("导出 nets.txt…"); b_nets.clicked.connect(self.on_export_nets)
+        b_nets.setToolTip("导出当前表需在 ENV_RF 层定位的网清单，供仿真服务器跑 scan_rtl 扫 RTL（N5：\n"
+                          "跨机器两段式工作流第①步，与具体视图无关、从默认 Topout 视图直接够得着）。")
         btns.addWidget(b_pfx)
+        btns.addWidget(b_nets)
         btns.addStretch(1)
         for b in (b_prev, b_sv, b_rep, b_ft):
             btns.addWidget(b)
         lay.addLayout(btns)
+
+    def _persist_cov(self, *_):
+        """本视图全局覆盖度下拉改动 → 存盘（按 view_id），下次打开恢复（N2）。"""
+        st = _load_settings()
+        st["cov_%s" % self.view_id] = self.cov.currentText()
+        _save_settings(st)
+
+    def on_export_nets(self):
+        """导出 nets.txt（委托 MainWindow 现成 handler，与视图/勾选无关，N5）。"""
+        if not self.main.wb:
+            QtWidgets.QMessageBox.information(self, "未加载", "请先加载 Excel。")
+            return
+        self.main.on_export_nets()
 
     # ───────────── 刷新清单 ─────────────
     def refresh(self, *_):
