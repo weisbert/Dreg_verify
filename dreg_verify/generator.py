@@ -1091,6 +1091,37 @@ def _regmap_dup_warning(used_letters, bindings, wb):
     return " | ".join(msgs) if msgs else None
 
 
+def _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb):
+    """块顶 ⚠ 注入(iddq_skipped/regmap_dup/supplement/selfaudit) + claims 收集——source-agnostic。
+
+    从 build 的 logic 循环抽出(重构 S0b，2026-06-25)，logic/mux(build) 与 register/dft 改名根
+    (topout passthrough，S1 接) 共用同一注入圈，杜绝缝B『裸渲染绕过 build 后处理』。
+    ⚠ 注入【顺序与 build 原序逐字节一致】(依次 prepend：iddq_skipped→regmap→supplement→selfaudit，
+    故输出由上到下 = selfaudit/supplement/regmap/iddq)。node=None(mux 根无单一 AST)时跳过需 node 的检查。
+    返回 (lines, warnings{regmap/supplement/selfaudit:[(out_name,aid,msg)]}, claims)。"""
+    warnings = {"regmap": [], "supplement": [], "selfaudit": []}
+    if meta.get("iddq_skipped"):
+        lines = ["// ⚠ %s" % meta["iddq_skipped"]] + lines
+    _rmdup = _regmap_dup_warning(E.collect_vars(node), bindings, wb) if node is not None else None
+    if _rmdup:
+        lines = ["// ⚠ %s" % _rmdup] + lines
+        warnings["regmap"].append((sig.out_name, sig.assert_id, _rmdup))
+    if getattr(sig, "_is_supplement", False):
+        _smsg = _supplement_warning(sig)
+        lines = ["// ⚠ %s" % _smsg] + lines
+        warnings["supplement"].append((sig.out_name, sig.assert_id, _smsg))
+    _sa_env = E.Env({ltr: b.width for ltr, b in bindings.items() if b is not None})
+    for _samsg in (_selfaudit_probe_self_ref(sig),
+                   (_selfaudit_output_width(sig, node, _sa_env) if node is not None else None),
+                   _selfaudit_rw_truncation(bindings)):
+        if _samsg:
+            lines = ["// ⚠ %s" % _samsg] + lines
+            warnings["selfaudit"].append((sig.out_name, sig.assert_id, _samsg))
+    claims = collect_claims(sig, bindings, probe_prefix_for(sig, opts), False,
+                            _on_missing_for(sig, opts))
+    return lines, warnings, claims
+
+
 def build(wb, opts):
     """
     返回 dict:
@@ -1255,34 +1286,15 @@ def _build_core(wb, opts):
                                              probe_prefix=probe_prefix_for(sig, opts),
                                              owner_in_msg=opts.owner_in_msg,
                                              counters=opts.sv_summary)
-        # 缺口可见（M2）：logic 输出被 dft 门控却补不上 DFT 拍 → 块顶留 ⚠（与 mux 路同口径，
-        # 别让"少验一支 iddq"在 logic 侧无声无息；render_signal_block 不读 meta 故在此补）。
-        # 不进 mux_warnings（那是 mux 专用通道，CLI 文案会误标）；报告侧由 summary.warning 透出。
-        if meta.get("iddq_skipped"):
-            lines = ["// ⚠ %s" % meta["iddq_skipped"]] + lines
-        # regmap 同名重复(已按首个采纳)：块顶留 ⚠ + 汇总，别让"绑到哪个寄存器"的歧义无声无息
-        _rmdup = _regmap_dup_warning(E.collect_vars(node), bindings, wb)
-        if _rmdup:
-            lines = ["// ⚠ %s" % _rmdup] + lines
-            regmap_warnings.append((sig.out_name, sig.assert_id, _rmdup))
-        # RTL 补充逻辑(Excel 缺此级，手工补)：块顶强制 ⚠ + 汇总，偏离纯 Excel 推导必显式标注供 SE review
-        if getattr(sig, "_is_supplement", False):
-            _smsg = _supplement_warning(sig)
-            lines = ["// ⚠ %s" % _smsg] + lines
-            supplement_warnings.append((sig.out_name, sig.assert_id, _smsg))
-        # 生成期自检闸门(logic)：探针读回自身输入(检查1) / K列漏标位宽(检查2) / RW写值截断(检查3)。
-        # 检查1 在 _pick_ref_suffix 修复后正常恒 0(纵深防御)；检查2/3 命中真实潜伏 bug → 块顶 ⚠。
-        _sa_env = E.Env({ltr: b.width for ltr, b in bindings.items() if b is not None})
-        for _samsg in (_selfaudit_probe_self_ref(sig),
-                       _selfaudit_output_width(sig, node, _sa_env),
-                       _selfaudit_rw_truncation(bindings)):
-            if _samsg:
-                lines = ["// ⚠ %s" % _samsg] + lines
-                selfaudit_warnings.append((sig.out_name, sig.assert_id, _samsg))
+        # 块顶 ⚠ 注入(iddq_skipped/regmap_dup/supplement/selfaudit) + claims —— 抽成 source-agnostic
+        # _inject_block_warnings(S0b)，与 topout passthrough 共用、杜绝缝B；注入顺序逐字节同原序。
+        lines, _w, _c = _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb)
+        regmap_warnings.extend(_w["regmap"])
+        supplement_warnings.extend(_w["supplement"])
+        selfaudit_warnings.extend(_w["selfaudit"])
         stats["cone_expanded"] = expanded
         blocks.append((lines, stats))
-        claims.extend(collect_claims(sig, bindings, probe_prefix_for(sig, opts), False,
-                                     _on_missing_for(sig, opts)))
+        claims.extend(_c)
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
         n_total_designer += stats.get("n_designer", 0)
