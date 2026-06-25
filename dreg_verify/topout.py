@@ -949,6 +949,17 @@ def _topout_disp_name(topo, out_width):
     return "%s%s" % (topo.name, _topout_slice_suffix(topo, out_width))
 
 
+def _topout_probe_net(r):
+    """该 Topout 信号 assert LHS 的网名（探针前缀按它查；与 build_for_topout 的 .sv 同口径）：
+    dft 改名根→probe_name；logic/mux 根→源 rtl_base；直连寄存器根/兜底→topo 名。"""
+    root = r.root
+    if root.renamed and root.probe_name:
+        return root.probe_name
+    if root.kind in (LOGIC, MUX) and root.obj is not None and not root.renamed:
+        return getattr(root.obj, "rtl_base", None) or r.topo.name
+    return r.topo.name
+
+
 def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
                        sig_cov=None):
     """每个 Topout 信号一个【视图模型】（GUI / 无头测试消费），按 Topout B 列序。
@@ -981,6 +992,9 @@ def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_pr
              "issues": list(r.issues), "matched_name": r.root.matched_name,
              "n_leaves": r.n_leaves, "n_vectors": len(r.vectors),
              "chain": [], "inputs": [], "tests": [], "auto_label": "", "exp_label": ""}
+        pnet = _topout_probe_net(r)                          # assert LHS 探针网 + 配的层级前缀
+        m["probe_net"] = pnet
+        m["prefix"] = _probe_prefix_for_name(probe_prefixes, pnet)
         t = tbl_by_topout.get(r.topo.name.lower())
         if t is not None:
             m["chain"] = t.get("chain", [])

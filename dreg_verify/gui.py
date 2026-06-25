@@ -206,8 +206,9 @@ def _skipped_detail_text(skipped):
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 
 # ── 信号清单表列（Topout + 子视图共用，2026-06-24 把『负向』放到『选』旁边，醒目易点）──
-(TOPO_SEL, TOPO_NEG, TOPO_NAME, TOPO_OWNER, TOPO_KIND, TOPO_STATUS, TOPO_NTEST) = range(7)
-TOPO_HEADERS = ["选", "负向", "信号", "owner", "分类", "状态", "用例"]
+(TOPO_SEL, TOPO_NEG, TOPO_NAME, TOPO_OWNER, TOPO_KIND, TOPO_STATUS,
+ TOPO_PREFIX, TOPO_NTEST) = range(8)
+TOPO_HEADERS = ["选", "负向", "信号", "owner", "分类", "状态", "探针前缀", "用例"]
 TOPO_KIND_LABEL = {"logic": "选路/logic", "mux": "mux", "register": "直连寄存器",
                    "ro-readback": "RO回读(跳过)", "unresolved": "未解析"}
 TOPO_STATUS_LABEL = {"ok": "✅ 可建", "skip": "↷ 跳过(RO)",
@@ -385,7 +386,7 @@ class _CheckableMenu(QtWidgets.QMenu):
 # provider 决定『要验什么信号、怎么分析(cone vs 页本地)、怎么出 .sv/报告』；视图层(交互/编辑)全共用。
 import re as _re
 
-SV_HEADERS = TOPO_HEADERS                      # 7 列：选/负向/信号/owner/分类/状态/用例
+SV_HEADERS = TOPO_HEADERS                      # 8 列：选/负向/信号/owner/分类/状态/探针前缀/用例
 SV_KIND_LABEL = dict(TOPO_KIND_LABEL)         # Topout 5 分类；子视图补 logic/mux 直观标签
 SV_KIND_LABEL.setdefault("logic", "logic")    # 子视图里 kind=logic/mux 直接显原词（Topout 用『选路/logic』）
 
@@ -1008,6 +1009,17 @@ class SignalView(QtWidgets.QWidget):
             if m["issues"]:
                 stt.setForeground(QtGui.QColor("#d97706"))
                 stt.setToolTip("; ".join(m["issues"]))
+            # 探针前缀列：显示该信号 assert 探针网配的层级前缀（空=没配）。蓝=已配(信息)。
+            # tooltip 始终给出探针网真名 + 断言完整路径，让『有没有前缀/会探到哪』一眼可见。
+            pfx = m.get("prefix") or ""
+            pnet = m.get("probe_net") or m["name"]
+            pit = self._set(r, TOPO_PREFIX, pfx)
+            if pfx:
+                pit.setForeground(QtGui.QColor("#2563eb"))
+                pit.setToolTip("探针网 %s 埋子模块 → 断言贴 `ENV_RF.%s.%s`" % (pnet, pfx, pnet))
+            else:
+                pit.setToolTip("探针网 %s 未配前缀：断言贴 `ENV_RF.%s`。\n"
+                               "在 ENV_RF 顶层则无需前缀；埋子模块则要配，否则仿真 CUVUNF。" % (pnet, pnet))
             self._set(r, TOPO_NTEST, str(m["n_vectors"]))
             neg = QtWidgets.QTableWidgetItem()
             editable = m["kind"] in ("logic", "register", "mux")
@@ -3656,6 +3668,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._probe_prefixes = mapping
         self._save_probe_prefixes()
         self._reanalyze_all()
+        # Topout/子视图也按新前缀重建（『探针前缀』列即时更新）；保住用户勾选（refresh 会重置成全勾）
+        for v in self._all_signal_views().values():
+            checks = v._collect_view_checks()
+            v.refresh()
+            if checks is not None:
+                v._apply_view_checks(checks)
         # 反馈映射生效范围：输出探针带前缀 / 任一输入 force 路径带前缀 的信号数
         affected = sum(1 for i, s in enumerate(self.signals)
                        if self._prefix_of(s)

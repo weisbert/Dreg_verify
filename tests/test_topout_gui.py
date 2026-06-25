@@ -327,6 +327,21 @@ def test_topout_export_nets_topout_only_includes_register_roots(topo_win, tmp_pa
     assert not out2.exists()
 
 
+def test_topout_signal_list_shows_probe_prefix_column(topo_win):
+    """⭐2026-06-25：Topout 信号清单加『探针前缀』列——配了前缀的信号显示前缀、没配为空；
+    改前缀后即时刷新。解决用户『配了探针但 Topout 视图看不见 prefix 情况』。"""
+    from dreg_verify import gui as G
+    w = topo_win
+    hdr = [w.topo_table.horizontalHeaderItem(c).text() for c in range(w.topo_table.columnCount())]
+    assert "探针前缀" in hdr                                  # 列存在
+    w._probe_prefixes = {"clk_force_on": "U_BT_LP_PLL_DIG"}  # 给一个寄存器根配前缀
+    w.topout_view.refresh()
+    r_set, r_unset = _topo_row(w, "clk_force_on"), _topo_row(w, "en_dig_clk")
+    assert r_set is not None and r_unset is not None
+    assert w.topo_table.item(r_set, G.TOPO_PREFIX).text() == "U_BT_LP_PLL_DIG"   # 配了 → 显示
+    assert w.topo_table.item(r_unset, G.TOPO_PREFIX).text() == ""                # 没配 → 空
+
+
 def test_topout_coverage_dropdown_persists(gui_app, mirror_path, monkeypatch):
     """⭐N2：本视图全局覆盖度下拉关 GUI 不复位——改『穷举』即存盘(按 view_id) → 新开窗口恢复『穷举』。
     (pytest 下 _save_settings 默认 no-op，用内存 store 验持久化语义。)"""

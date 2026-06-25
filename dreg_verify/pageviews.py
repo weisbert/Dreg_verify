@@ -219,11 +219,26 @@ def result_to_model(res):
     return m
 
 
+def _prefix_for(probe_prefixes, name):
+    """探针网层级前缀（按网名小写键查；与 topout._probe_prefix_for_name 同口径）。"""
+    if not probe_prefixes or not name:
+        return ""
+    pp = {k.strip().lower(): v.strip() for k, v in probe_prefixes.items() if v and str(v).strip()}
+    return pp.get(str(name).strip().lower(), "")
+
+
 def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
-    """某一页的【视图模型清单】（GUI 子视图 / 无头测试消费），按页行序。"""
-    return [result_to_model(r)
-            for r in analyze_all(wb, page, mode=mode, max_tests=max_tests,
-                                 exhaustive=exhaustive, probe_prefixes=probe_prefixes)]
+    """某一页的【视图模型清单】（GUI 子视图 / 无头测试消费），按页行序。
+    每个模型带 probe_net(assert LHS=输出 rtl_base) + prefix(配的探针层级前缀)，供『探针前缀』列显示。"""
+    models = []
+    for r in analyze_all(wb, page, mode=mode, max_tests=max_tests,
+                         exhaustive=exhaustive, probe_prefixes=probe_prefixes):
+        m = result_to_model(r)
+        pnet = getattr(r.sig, "rtl_base", None) or r.name
+        m["probe_net"] = pnet
+        m["prefix"] = _prefix_for(probe_prefixes, pnet)
+        models.append(m)
+    return models
 
 
 # ═══════════════ 页本地 .sv / 报告 / for_test 产出（复用 generator.build/report，force 级联=不跨页 cone）═══

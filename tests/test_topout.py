@@ -381,6 +381,18 @@ def test_collect_nets_topout_page(wb):
     assert len(rtl_scan.collect_nets(wb)) >= len(only_topo)
 
 
+def test_topout_view_models_carry_probe_prefix(wb):
+    """⭐2026-06-25：Topout 视图模型带 probe_net + prefix（GUI『探针前缀』列数据源）——
+    配了前缀的信号 prefix 非空、没配的为空；寄存器直连根按 topo 名查前缀。"""
+    pp = {"clk_force_on": "U_BT_LP_PLL_DIG"}
+    ms = {m["name"]: m for m in T.topout_view_models(wb, probe_prefixes=pp)}
+    assert ms["clk_force_on"]["probe_net"] == "clk_force_on"
+    assert ms["clk_force_on"]["prefix"] == "U_BT_LP_PLL_DIG"      # 配了 → 显示
+    assert ms["en_dig_clk"]["prefix"] == ""                       # 没配 → 空
+    # 不传前缀 → 全空
+    assert all(m["prefix"] == "" for m in T.topout_view_models(wb))
+
+
 def test_collect_page_nets_covers_dft_and_all_pages(wb):
     """⭐2026-06-25：collect_page_nets 按子模块页(logic/mux/dft/iddq)收探针+force 网，与 GUI
     各 tab 同口径——dft 页现在含【观测输出探针】(老 collect_dft_nets 只收 iddq 门网)；
