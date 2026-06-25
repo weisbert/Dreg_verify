@@ -28,7 +28,8 @@ class GenOptions:
                  mux_dropped=None, mux_cleared=None, mux_user_vecs=None,
                  suffix_override=None, append_to_mux=False,
                  logic_cascade=None, mux_cascade=None, sig_cascade=None,
-                 logic_overrides=None, on_missing=None, suppress_mux_bare_probe=False):
+                 logic_overrides=None, on_missing=None, suppress_mux_bare_probe=False,
+                 assert_id_override=None):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -67,6 +68,9 @@ class GenOptions:
         # t1：抑制 mux 块顶『top_out=0 用裸名探针』噪声警告——Topout 路径置 True（账目/报告已刻意抑制、
         # 新模型每信号都中会淹没；旧 logic-rooted 路径默认 False=保留，逐字节不变）。
         self.suppress_mux_bare_probe = bool(suppress_mux_bare_probe)
+        # #7：断言标号覆盖 {源 out_name(小写): 标号}——Topout 路径按行序 1..N 命名，取代源 Excel R/mux<N>。
+        # 经 render_signal_block 的 assert_id 参数注入(不写回源对象、守 R32)；默认 None=用源标号、逐字节不变。
+        self.assert_id_override = {str(k).lower(): str(v) for k, v in (assert_id_override or {}).items()}
         # 真·仅负向：每个信号只保留负向向量(保持原 T 编号便于与"全部"导出对照)，
         # 无负向的信号整个跳过。CLI --neg-file separate 的负向文件用——
         # 之前是块级过滤(负向文件里混着正例)，汇总/REAL FAIL 统计会误导。
@@ -453,7 +457,7 @@ def _claim(**kw):
     return c
 
 
-def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn", is_topout=False):
+def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn", is_topout=False, aid=None):
     """为一个已生成的 logic 信号 / mux 组导出网名声明(探针 + force/rfwrite 输入)。
 
     探针网名取 rtl_base/rtl_name(=.sv 里 assert 的真名，已含尾缀/开关/_ls/前缀逻辑)；输入网取 resolver
@@ -465,12 +469,13 @@ def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn", is_topout=F
     is_topout(C1,2026-06-23)：本探针来自 Topout 路径——探针名是顶层真名(无路由后缀)，provenance 标
     'topout'(binder 据此知道这名字权威、需前缀=意外埋件)。默认 False=旧 logic-rooted 路径(逐字节不变)。"""
     claims = []
+    _aid = aid if aid is not None else (obj.assert_id or "")   # #7 行序标号覆盖；默认源标号
     base = getattr(obj, "rtl_base", obj.out_base)
     name = getattr(obj, "rtl_name", obj.out_name)
     slc = name[len(base):] if name.startswith(base) else ""
     full = ("%s.%s" % (prefix.strip("."), name)) if prefix else name
     claims.append(_claim(
-        signal=obj.out_name, aid=obj.assert_id or "", kind="probe", identity="output",
+        signal=obj.out_name, aid=_aid, kind="probe", identity="output",
         net_base=base, slice=slc, prefix=prefix or "", full=full,
         found_in=_probe_provenance(obj, is_topout=is_topout),
         self_ref_suffixes=sorted(getattr(obj, "_self_ref_suffixes", ())),
@@ -491,7 +496,7 @@ def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn", is_topout=F
             seen.add(("force", lhs))
             slc = lhs[len(b.wire):] if lhs.startswith(b.wire) else ""
             claims.append(_claim(
-                signal=obj.out_name, aid=obj.assert_id or "", kind="force",
+                signal=obj.out_name, aid=_aid, kind="force",
                 identity="input", net_base=b.wire, slice=slc, prefix="", full=lhs,
                 found_in=b.found_in or "", self_ref_suffixes=[],
                 is_mux=bool(is_mux), top_output=False))
@@ -501,7 +506,7 @@ def collect_claims(obj, bindings, prefix, is_mux, on_missing="warn", is_topout=F
                 continue
             seen.add(("rfwrite", b.base, b.address))
             claims.append(_claim(
-                signal=obj.out_name, aid=obj.assert_id or "", kind="rfwrite",
+                signal=obj.out_name, aid=_aid, kind="rfwrite",
                 identity="input", net_base=b.base, slice="", prefix="", full=b.base,
                 found_in=b.found_in or "", addr=("0x%X" % b.address) if b.address is not None else None,
                 self_ref_suffixes=[], is_mux=bool(is_mux), top_output=False))
@@ -1094,7 +1099,7 @@ def _regmap_dup_warning(used_letters, bindings, wb):
     return " | ".join(msgs) if msgs else None
 
 
-def _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb, is_topout=False):
+def _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb, is_topout=False, aid=None):
     """块顶 ⚠ 注入(iddq_skipped/regmap_dup/supplement/selfaudit) + claims 收集——source-agnostic。
 
     从 build 的 logic 循环抽出(重构 S0b，2026-06-25)，logic/mux(build) 与 register/dft 改名根
@@ -1103,27 +1108,29 @@ def _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb, is_topout
     故输出由上到下 = selfaudit/supplement/regmap/iddq)。node=None(mux 根无单一 AST)时跳过需 node 的检查。
     is_topout(S1)：探针来自 Topout 路径(顶层真名)→ claims provenance 标 'topout'(M4)；
     build 的 logic/mux 循环默认 False(逐字节不变，claims 不进 .sv)。
+    aid(#7)：断言标号覆盖(Topout 行序)；None 则用 sig.assert_id。汇总告警/claims 的 aid 字段随之一致。
     返回 (lines, warnings{regmap/supplement/selfaudit:[(out_name,aid,msg)]}, claims)。"""
+    _aid = aid if aid is not None else sig.assert_id
     warnings = {"regmap": [], "supplement": [], "selfaudit": []}
     if meta.get("iddq_skipped"):
         lines = ["// ⚠ %s" % meta["iddq_skipped"]] + lines
     _rmdup = _regmap_dup_warning(E.collect_vars(node), bindings, wb) if node is not None else None
     if _rmdup:
         lines = ["// ⚠ %s" % _rmdup] + lines
-        warnings["regmap"].append((sig.out_name, sig.assert_id, _rmdup))
+        warnings["regmap"].append((sig.out_name, _aid, _rmdup))
     if getattr(sig, "_is_supplement", False):
         _smsg = _supplement_warning(sig)
         lines = ["// ⚠ %s" % _smsg] + lines
-        warnings["supplement"].append((sig.out_name, sig.assert_id, _smsg))
+        warnings["supplement"].append((sig.out_name, _aid, _smsg))
     _sa_env = E.Env({ltr: b.width for ltr, b in bindings.items() if b is not None})
     for _samsg in (_selfaudit_probe_self_ref(sig),
                    (_selfaudit_output_width(sig, node, _sa_env) if node is not None else None),
                    _selfaudit_rw_truncation(bindings)):
         if _samsg:
             lines = ["// ⚠ %s" % _samsg] + lines
-            warnings["selfaudit"].append((sig.out_name, sig.assert_id, _samsg))
+            warnings["selfaudit"].append((sig.out_name, _aid, _samsg))
     claims = collect_claims(sig, bindings, probe_prefix_for(sig, opts), False,
-                            _on_missing_for(sig, opts), is_topout=is_topout)
+                            _on_missing_for(sig, opts), is_topout=is_topout, aid=_aid)
     return lines, warnings, claims
 
 
@@ -1278,7 +1285,8 @@ def _build_core(wb, opts):
 
         # 全局 assert 标号唯一性检查：标号 = <R>_<test_label>，重复(同信号自定义名撞自动名、
         # 或两信号共用同一 R)在 SV 同一作用域里非法，会 elaboration 失败 → 收集并上报，不静默。
-        aid = sig.assert_id or "X"
+        _aid_ov = opts.assert_id_override.get(sig.out_name.lower()) if opts.assert_id_override else None
+        aid = _aid_ov or sig.assert_id or "X"          # #7：Topout 行序命名覆盖源 Excel R
         for v in vecs:
             lbl = "%s_%s" % (aid, W.test_label(v))
             if lbl in seen_labels:
@@ -1290,10 +1298,11 @@ def _build_core(wb, opts):
                                              comments=opts.comments, node=node,
                                              probe_prefix=probe_prefix_for(sig, opts),
                                              owner_in_msg=opts.owner_in_msg,
-                                             counters=opts.sv_summary)
+                                             counters=opts.sv_summary, assert_id=_aid_ov)
         # 块顶 ⚠ 注入(iddq_skipped/regmap_dup/supplement/selfaudit) + claims —— 抽成 source-agnostic
         # _inject_block_warnings(S0b)，与 topout passthrough 共用、杜绝缝B；注入顺序逐字节同原序。
-        lines, _w, _c = _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb)
+        lines, _w, _c = _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb,
+                                               aid=_aid_ov)
         regmap_warnings.extend(_w["regmap"])
         supplement_warnings.extend(_w["supplement"])
         selfaudit_warnings.extend(_w["selfaudit"])
@@ -1396,7 +1405,8 @@ def _build_core(wb, opts):
                 continue
 
         # 全局 assert 标号唯一性：assert_mux<N>_T<n> 也纳入同一张查重表（与 logic 跨表查重）
-        aid = grp.assert_id
+        _maid_ov = opts.assert_id_override.get(grp.out_name.lower()) if opts.assert_id_override else None
+        aid = _maid_ov or grp.assert_id          # #7：Topout 行序命名覆盖 mux<N>
         for v in vecs:
             lbl = "%s_%s" % (aid, W.test_label(v))
             if lbl in seen_labels:
@@ -1409,7 +1419,7 @@ def _build_core(wb, opts):
                                              probe_prefix=probe_prefix_for(grp, opts),
                                              owner_in_msg=opts.owner_in_msg,
                                              counters=opts.sv_summary,
-                                             used_vars=exp["used_vars"])
+                                             used_vars=exp["used_vars"], assert_id=_maid_ov)
         # top_out=0 且没配前缀：照常生成裸名探针，但在块顶留一句警告 + 汇总到 mux_warnings
         # （t1：Topout 路径 suppress_mux_bare_probe=True 时抑制——账目/报告已抑制此噪声、保持一致）
         out_warn = "" if opts.suppress_mux_bare_probe else mux_output_warning(grp, opts)
@@ -1480,7 +1490,7 @@ def _build_core(wb, opts):
         stats["scan_path"] = meta.get("scan_path")
         blocks.append((lines, stats))
         claims.extend(collect_claims(grp, exp["bindings"], probe_prefix_for(grp, opts), True,
-                                     _on_missing_for(grp, opts)))
+                                     _on_missing_for(grp, opts), aid=_maid_ov))
         n_total_vectors += stats["n_vectors"]
         n_total_neg += stats["n_negative"]
         n_total_designer += stats.get("n_designer", 0)

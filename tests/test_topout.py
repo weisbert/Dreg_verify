@@ -580,7 +580,27 @@ def test_build_for_topout_register_passthrough(wb):
     txt = "\n".join(lines)
     assert "`RF_WRITE(" in txt                          # 驱寄存器
     assert "`ENV_RF.clk_force_on==" in txt              # 断言顶层口
-    assert st["assert_id"].startswith("TOP")            # 独立标号，不与 logic/mux 撞
+    assert st["assert_id"] == "1"                       # #7：Topout 行序命名(clk_force_on=第1行)
+
+
+def test_topout_assert_labels_are_row_order(wb):
+    """#7：.sv 断言标号 = Topout 页行序 1..N（取代旧 TOP0/源 Excel R/mux<N> 混排）。
+    第k个 Topout 信号(可产出)→ assert_<k>_T<n>；行序连续、与清单位置一致。"""
+    import re
+    from dreg_verify import sv_writer as W
+    text = W.render_file(T.build_for_topout(wb, mode="max")["blocks"])
+    # 每个 emit 的 Topout 信号(非 RO/dup)块顶 assert 标号 R = 其 Topout 行号
+    row = {t.name.lower(): str(i + 1) for i, t in enumerate(wb.topout)}
+    # clk_force_on=1, d_bt_lp_lna_itrim=2, d_logic_bt_lp_rx_en=9 ...
+    assert re.search(r"^assert_1_T\d+:", text, re.M)         # clk_force_on(寄存器根)=第1行
+    assert re.search(r"^assert_2_T\d+:", text, re.M)         # d_bt_lp_lna_itrim(mux)=第2行
+    assert re.search(r"^assert_9_T\d+:", text, re.M)         # d_logic_bt_lp_rx_en(logic)=第9行
+    # 不再有旧 TOP<n> / mux<N> 风格标号
+    assert not re.search(r"^assert_TOP\d", text, re.M)
+    assert not re.search(r"^assert_mux\d", text, re.M)
+    # 标号全是纯数字行序
+    rlabels = set(re.findall(r"^assert_(\w+?)_T\d+", text, re.M))
+    assert all(x.isdigit() for x in rlabels), rlabels
 
 
 # ───────────── S1 缝B：register/dft 改名根接回 build 的警告/claims 注入圈（M3/M4/M6） ─────────────

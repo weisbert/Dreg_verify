@@ -363,17 +363,16 @@ def test_topout_signal_list_shows_probe_prefix_column(topo_win):
 
 
 def test_topout_signal_list_shows_assert_id_column(topo_win):
-    """⭐2026-06-25：Topout 清单加『断言号』列——= .sv assert_<R> 的 R（仿真报 assert_95 时据此
-    回查信号，故意≠清单第几号）。搜索框也匹配断言号。"""
+    """⭐2026-06-25→#7：Topout 清单『断言号』列 = .sv assert_<R> 的 R = Topout 行序(1..N)。
+    #7 起断言号【就是】清单行号(行序命名，取代旧 TOP0/Excel R/mux<N> 混排；仿真报 assert_9 即第9行)。"""
     from dreg_verify import gui as G
     w = topo_win
     hdr = [w.topo_table.horizontalHeaderItem(c).text() for c in range(w.topo_table.columnCount())]
     assert "断言号" in hdr
-    r = _topo_row(w, "d_logic_bt_lp_rx_en")            # 该 logic 根 R=1，但不是第1行
+    r = _topo_row(w, "d_logic_bt_lp_rx_en")
     assert r is not None
-    assert w.topo_table.item(r, G.TOPO_AID).text() == "1"
-    assert r != 1                                       # 断言号≠清单位置（正是用户疑惑点）
-    # 搜索框输入断言号 → 该信号仍可见（haystack 含 assert_id）
+    assert w.topo_table.item(r, G.TOPO_AID).text() == str(r + 1)   # #7：断言号=Topout 行序(=行号)
+    # 搜索框输入信号名 → 该信号仍可见（haystack 含 assert_id）
     w.topout_view.search.setText("d_logic_bt_lp_rx_en")
     assert not w.topo_table.isRowHidden(r)
 

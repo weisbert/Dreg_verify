@@ -993,6 +993,22 @@ def _topout_neg_enabled(name, neg_all, neg_signals):
     return str(name).lower() in {str(s).strip().lower() for s in ns if s}
 
 
+def topout_row_aids(wb):
+    """#7：Topout 信号 → 断言标号 = 该信号在 Topout 页的【行序】(1..N)。取代旧 TOP<n>/源 Excel R/mux<N>
+    混排(TOP0→101→103 割裂)。返回 {Topout 名(小写): '行号'}。仿真 log 报 assert_<行号>_T<n>。"""
+    return {t.name.lower(): str(i + 1) for i, t in enumerate(wb.topout)}
+
+
+def _logic_mux_aid_override(wb, results, row_aid):
+    """logic/mux 根的 assert 标号覆盖 {源 out_name(小写): 行号}——喂 generator.build 的 assert_id_override。
+    一源对多 Topout 行(dup-source)时取【首个】(=实际产出块的那行，与 build_for_topout seen_src 一致)。"""
+    ov = {}
+    for r in results:
+        if r.status == "ok" and r.root.kind in (LOGIC, MUX) and not r.root.renamed:
+            ov.setdefault(r.root.obj.out_name.lower(), row_aid.get(r.topo.name.lower(), ""))
+    return ov
+
+
 def _apply_passthrough_negatives(vecs, neg_mode, neg_which, neg_value):
     """register/dft 改名 passthrough 根补全局自检负向（m1）：只对功能正向加负向、DFT 拍(iddq=1 压0)
     不补(它本身是常量支自检)，与 build 的 logic/mux 同口径([pos,neg,pitch] 排序)，再重排 T 编号。"""
@@ -1056,12 +1072,17 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
         # 仅负向：只 build【有负向的源】(neg_src=源 out_name)，其余正向自动信号不出现（仅记账）。
         want_names &= (neg_src or set())
 
+    # #7：断言标号按 Topout 行序 1..N（取代 build 的源 Excel R / mux<N> 混排）
+    row_aid = topout_row_aids(wb)
+    aid_override = _logic_mux_aid_override(wb, results, row_aid)
+
     opts = G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                         include_risky=True, comments=comments, sv_summary=sv_summary,
                         owner_in_msg=owner_in_msg, signals=want_names,
                         suppress_mux_bare_probe=True,           # t1：Topout .sv 抑制 mux 裸名探针噪声
                         neg_all=neg_all, neg_signals=neg_signals,    # m1：logic/mux 根全局/批量负向
                         neg_which=neg_which, neg_mode=neg_mode, neg_value=neg_value,
+                        assert_id_override=aid_override or None,      # #7：行序命名
                         probe_prefixes=probe_prefixes, sig_cov=gen_sig_cov or None,
                         vector_overrides=eo.get("vector_overrides") or None,
                         mux_user_vecs=eo.get("mux_user_vecs"),
@@ -1106,7 +1127,7 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
                     accounted.append({"name": name, "kind": r.root.kind, "status": "scope-empty", "reason": _why})
                     continue
                 ln, st, _w, _c = _passthrough_block(
-                    r, r.root.probe_name, owner, "TOP%d" % reg_i, r.root.kind, opts, wb,
+                    r, r.root.probe_name, owner, row_aid.get(name.lower(), ""), r.root.kind, opts, wb,
                     comments=comments, counters=sv_summary,
                     probe_prefix=_probe_prefix_for_name(probe_prefixes, r.root.probe_name))
                 reg_i += 1
@@ -1167,7 +1188,7 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
                 accounted.append({"name": name, "kind": REGISTER, "status": "scope-empty", "reason": _why})
                 continue
             ln, st, _w, _c = _register_passthrough_block(
-                r, owner, "TOP%d" % reg_i, opts, wb,
+                r, owner, row_aid.get(name.lower(), ""), opts, wb,
                 comments=comments, counters=sv_summary,
                 probe_prefix=_probe_prefix_for_name(probe_prefixes, r.topo.name))
             reg_i += 1
@@ -1282,7 +1303,8 @@ def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, pr
             tbl_by_topout.setdefault(nm.lower(), t)
 
     models = []
-    reg_i = 0                                                # 与 build_for_topout 的 TOP<n> 计数器同口径
+    row_aid = topout_row_aids(wb)                            # #7：断言号 = Topout 行序 1..N
+    aid_override = _logic_mux_aid_override(wb, results, row_aid)   # logic/mux 源→首行号(dup-source 共享)
     for r in results:
         _shape = result_form(wb, r) if r.status == "ok" else None
         m = {"name": r.topo.name, "disp": _topout_disp_name(r.topo, r.out_width),
@@ -1297,18 +1319,16 @@ def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, pr
         pnet = _topout_probe_net(r)                          # assert LHS 探针网 + 配的层级前缀
         m["probe_net"] = pnet
         m["prefix"] = _probe_prefix_for_name(probe_prefixes, pnet)
-        # 断言号 = .sv assert 标签的 <R> 部分（仿真 log 报 assert_<R>_T<n>，据此回查信号）：
-        #   logic/mux 根 = 源对象 assert_id（logic=Excel R 列、mux=mux<id>，固定、≠清单位置）；
-        #   寄存器/dft 改名根 = TOP<n>（build 按 B 列序给可产出块顺序编号，复刻其计数器）。
+        # 断言号 = .sv assert 标签的 <R> 部分（仿真 log 报 assert_<R>_T<n>，据此回查信号）= Topout 行序(#7)。
+        #   logic/mux 根：取同源【首行】号(dup-source 行共享、与 .sv 实际产出块标号一致)；
+        #   register/dft 改名根：本行号(各自产出一块)。非产出(RO/dup/未解析/error)→ 空。
         if r.status == "ok" and r.root.renamed:
             _emit = r.node is not None and r.bindings is not None and bool(r.vectors)
-            m["assert_id"] = ("TOP%d" % reg_i) if _emit else ""
-            reg_i += 1 if _emit else 0
+            m["assert_id"] = row_aid.get(r.topo.name.lower(), "") if _emit else ""
         elif r.status == "ok" and r.root.kind == REGISTER:
-            m["assert_id"] = ("TOP%d" % reg_i) if r.vectors else ""
-            reg_i += 1 if r.vectors else 0
+            m["assert_id"] = row_aid.get(r.topo.name.lower(), "") if r.vectors else ""
         elif r.status == "ok" and r.root.kind in (LOGIC, MUX) and r.root.obj is not None:
-            m["assert_id"] = str(getattr(r.root.obj, "assert_id", "") or "")
+            m["assert_id"] = aid_override.get(r.root.obj.out_name.lower(), "")
         else:
             m["assert_id"] = ""
         t = tbl_by_topout.get(r.topo.name.lower())

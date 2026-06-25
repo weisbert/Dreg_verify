@@ -187,7 +187,8 @@ def _s(v):
 
 # ───────────────────────────── 单个信号块 ─────────────────────────────
 def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
-                        probe_prefix="", owner_in_msg=False, counters=False, used_vars=None):
+                        probe_prefix="", owner_in_msg=False, counters=False, used_vars=None,
+                        assert_id=None):
     """
     返回 (lines:list[str], stats:dict)。comments=True 时每信号加 1 行 // <名> 便于导航(默认零注释)。
     node: 已解析(或 cone 展开后)的表达式 AST；None 则从 sig.expr 解析。
@@ -198,11 +199,13 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
               否则产物里是未声明变量；generator.build 保证两者同开同关）。
     used_vars: 显式给定输入键列表（mux 块用——其输入不是表达式变量，键为 "c:*"/"d:*"）；
                None 则从表达式 AST 收集（logic 块，原行为不变）。
+    assert_id: 覆盖断言标号(#7：Topout 行序命名)；None 则用 sig.assert_id(默认，逐字节不变)。
+               不改源对象、不破 R32(标号经参数注入、不写回 sig)。
     """
     lines = []
     if used_vars is None:
         used_vars = E.collect_vars(node if node is not None else E.parse(sig.expr))
-    aid = sig.assert_id or "X"
+    aid = assert_id if assert_id is not None else (sig.assert_id or "X")
     # 探针名用 RTL 真实网名（ls 行 = K 列名 + "_ls" 后缀），不是 K 列原文
     rtl_name = getattr(sig, "rtl_name", sig.out_name)
     if probe_prefix:
