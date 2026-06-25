@@ -66,6 +66,31 @@ def test_dft_rename_sv_asserts_top_name_not_source(renamed_path):
     assert text.count("assert (") > 0
 
 
+def test_dft_rename_fortest_uses_top_name_not_source(renamed_path):
+    """m3：改名根 for_test 回填 D 列(输出网名)/真表标题用【顶层探针真名 a_top】，不是源内部名 a_sm
+    （此前用源名 → designer 对不上 / 仿真 CUVUNF）。"""
+    from dreg_verify import resolver as R
+    wb = M.load_workbook(renamed_path)
+    res = R.Resolver(wb)
+    rep = T.report_for_topout(wb, res, mode="max", max_tests=32)
+    t = next(x for x in rep["tables"] if x.get("topout_name") == "a_top")
+    assert t["sv_net"] == "a_top" and t["signal"] == "a_sm"   # sv_net=顶层真名、signal 仍源名(供 join)
+    rows = T.topout_fortest_rows(wb, res, mode="max", max_tests=32)
+    grp = next(g for g in rows if g["name"].startswith("a_top"))
+    out_row = next(r for r in grp["rows"] if r.get("kind") == "output")
+    assert out_row["d"] == "a_top"                            # D 列=顶层真名
+    assert not grp["name"].startswith("a_sm")
+
+
+def test_ls_root_fortest_uses_ls_name(renamed_path):
+    """m3（_ls 根同类）：_ls 顶层口的 for_test D 列用 _ls 真名（rtl_name），非源 K 列裸名。"""
+    from dreg_verify import resolver as R
+    wb = M.load_workbook("mirror_btlp_dreg.xlsx")
+    rep = T.report_for_topout(wb, R.Resolver(wb), mode="max")
+    t = next(x for x in rep["tables"] if x.get("topout_name") == "d_en_refbuf_ls")
+    assert t["sv_net"] == "d_en_refbuf_ls" and t["signal"] == "d_en_refbuf"
+
+
 def test_no_rename_table_has_zero_renames(renamed_path, tmp_path_factory):
     """对照：无改名的 mirror → 改名表为空（旧表零影响）。"""
     plain = str(tmp_path_factory.mktemp("plain") / "mirror.xlsx")

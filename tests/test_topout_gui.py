@@ -577,6 +577,43 @@ def _sel(w, name):
     return w.topout_view
 
 
+def test_logic_view_input_order_matches_report_fortest(topo_win):
+    """m4：GUI 可编辑真表 logic 输入行序 == report/HTML/for_test 的寄存器地址序——单一行序，不再两套
+    (此前 GUI 用 Excel 原始序、导出用 for_test 序 → 人工核对/截图错位)。"""
+    from dreg_verify import vectors as V
+    v = _sel(topo_win, "d_logic_bt_lp_reserve")
+    wb = v.provider.wb
+    groups, bindings = v.cur_an["groups"], v.cur_an["bindings"]
+    gui_bases = [str(g.get("base")).lower() for g in groups]
+    rep = T.report_for_topout(wb, R.Resolver(wb), mode="min")
+    t = next(x for x in rep["tables"] if x.get("topout_name") == "d_logic_bt_lp_reserve")
+    rep_bases = [str(i.get("base")).lower() for i in t["inputs"] if i.get("letters") != "dft门"]
+    assert gui_bases == rep_bases                         # ⭐m4 不变量：GUI 与导出同一行序
+    # 证明重排非平凡：raw input_groups(Excel 原序) 与重排后行序确实不同（reserve 在 mirror 有 for_test 样例）
+    raw_bases = [str(g.get("base")).lower()
+                 for g in V.input_groups(v.cur_an["node"], bindings)]
+    assert set(raw_bases) == set(gui_bases) and raw_bases != gui_bases
+
+
+def test_e_addneg_avoids_designer_expected_collision(topo_win):
+    """m6：新视图『加负向』错值防撞——designer 手填期望恰=朴素 ~auto 时，反例错值不再等于该期望
+    (否则反例 RTL 正确仍 PASS=NEG-BROKEN，静默失自检意义)。用多 bit 信号(1bit 两值无解)。"""
+    from dreg_verify import expr as E
+    v = _sel(topo_win, "d_logic_bt_lp_lna_agc")       # 3 bit [2:0]，有避撞空间
+    col = v.cur_cols[0]
+    w = col["auto_w"]
+    assert w > 1
+    col["exp"] = (~col["auto"]) & E.mask(w)           # designer 手填恰=朴素 ~auto → 制造撞值
+    n0 = len(v.cur_cols)
+    v.truth.setCurrentCell(0, 0)
+    v._e_addneg()
+    assert len(v.cur_cols) == n0 + 1
+    neg = v.cur_cols[-1]
+    assert neg["neg"]
+    assert neg["exp"] != col["exp"]                   # 错值避开 designer 期望(不再 NEG-BROKEN)
+    assert neg["exp"] != col["auto"]                  # 也避开 auto(correct)
+
+
 # ── 点1：真值表清零/加列/删列/改预填 ──
 def test_topout_truth_add_delete_column(topo_win):
     """加列→列数+1；删列→回到原数；清零→零列（可逆：重新生成恢复）。"""

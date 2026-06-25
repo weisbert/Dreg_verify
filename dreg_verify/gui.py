@@ -432,8 +432,26 @@ def _subst_expr(expr, name_of):
     return _SV_VAR_RE.sub(lambda m: name_of.get(m.group(1), m.group(1)), expr or "")
 
 
-def _norm_topout_result(res):
-    """topout.TopoutResult → SignalView 统一分析 dict（编辑/导出消费）。"""
+def _order_groups_fortest(groups, bindings, wb, out_base):
+    """输入分组按 for_test 行序排（寄存器地址+bit 位 / for_test 样例组）——与 generator.report/HTML/
+    for_test 同一口径(m4)，免 GUI 可编辑真表/CSV 与导出两套行序、人工核对/截图错位。groups 对象不变、
+    只换顺序 → 列 vals(按 group['key'] 绑)/真值表求值均不受影响(纯显示重排)。wb=None 或空 → 原序。"""
+    if not groups or wb is None:
+        return groups
+
+    def _name(g):
+        return excel_model._strip_width(g.get("base") or g.get("label") or "")[0].lower()
+
+    def _key(g):
+        b = (bindings or {}).get(g.get("rep"))
+        return ((b.address, b.reg_lsb) if (b is not None and getattr(b, "address", None) is not None)
+                else (None, None))
+    return generator.fortest_order_entries(groups, wb, out_base, _name, key_fn=_key)
+
+
+def _norm_topout_result(res, wb=None):
+    """topout.TopoutResult → SignalView 统一分析 dict（编辑/导出消费）。wb 传入则 logic 根输入按
+    for_test 行序排（m4，与报告/导出一致）。"""
     kind = res.root.kind
     sig = res.root.obj
     an = {"kind": kind, "status": res.status, "issues": list(res.issues),
@@ -444,6 +462,9 @@ def _norm_topout_result(res):
     an["groups"] = (V.input_groups(res.node, res.bindings)
                     if (kind in ("logic", "register") and res.node is not None
                         and res.bindings is not None) else [])
+    if kind == "logic" and an["groups"]:        # m4：logic 根输入按 for_test 行序(register 报告本就原序)
+        an["groups"] = _order_groups_fortest(an["groups"], res.bindings, wb,
+                                             sig.out_base if sig is not None else res.topo.name)
     # 编辑回流键：logic/mux → 源对象 out_name（generator.build 据此选）；register → Topout 名（reg_overrides）
     an["src_out_name"] = (sig.out_name if (kind in ("logic", "mux") and sig is not None)
                           else res.topo.name)
@@ -460,14 +481,16 @@ def _norm_topout_result(res):
     return an
 
 
-def _norm_page_result(res):
-    """pageviews.PageResult → SignalView 统一分析 dict。"""
+def _norm_page_result(res, wb=None):
+    """pageviews.PageResult → SignalView 统一分析 dict。wb 传入则 logic 形态输入按 for_test 行序(m4)。"""
     an = {"kind": res.kind, "status": res.status, "issues": list(res.issues),
           "note": res.note, "node": res.node, "bindings": res.bindings,
           "expansion": res.expansion, "vectors": list(res.vectors),
           "out_width": res.out_width, "chain": list(res.chain),
           "name": res.name, "sig": res.sig}
     an["groups"] = (res.groups or []) if res.kind == "logic" else []
+    if res.kind == "logic" and an["groups"]:    # m4：页 logic 视图输入按 for_test 行序，与页报告一致
+        an["groups"] = _order_groups_fortest(an["groups"], res.bindings, wb, res.sig.out_base)
     an["src_out_name"] = res.sig.out_name
     an["editable"] = "" if res.status != "ok" else (
         "logic" if res.kind == "logic" else ("mux" if res.kind == "mux" else ""))
@@ -543,7 +566,7 @@ class _TopoutProvider:
             res = T.analyze_signal(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()), topo,
                                    mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                    mux_data=mux_data)
-            return _norm_topout_result(res)
+            return _norm_topout_result(res, self.wb)      # m4：传 wb → 输入按 for_test 行序
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
                   sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None):
@@ -673,7 +696,7 @@ class _PageProvider:
             return None
         res = P.analyze_page_signal(self.wb, P._page_resolver(self.wb, self._pp()), sig, self.page,
                                     mode=mode, max_tests=max_tests, exhaustive=exhaustive)
-        return _norm_page_result(res)
+        return _norm_page_result(res, self.wb)            # m4：传 wb → 输入按 for_test 行序
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
                   sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None):
@@ -1549,7 +1572,11 @@ class SignalView(QtWidgets.QWidget):
             if j >= len(self.cur_cols):
                 continue
             src = self.cur_cols[j]
-            wrong = (~src["auto"]) & E.mask(src["auto_w"])
+            # m6：错值防撞——避开 auto_out(=src['auto']) 与 designer 手填期望(=src['exp'])两个『正确值』，
+            # 否则 ~auto 恰=designer 期望时反例会 PASS=NEG-BROKEN(静默)。复用 vectors.make_negative 的防撞
+            # 逻辑(避 correct + designer)，不再裸 ~auto。src['exp']=None(无手填)时退化成 ~auto、行为不变。
+            _tmpv = V.TestVector(0, {}, src["auto"], src["auto_w"], designer_expected=src["exp"])
+            wrong = V.make_negative(_tmpv, mode="invert").neg_value
             new = {"name": self._new_col_name() + "_NEG", "neg": True,
                    "vals": dict(src["vals"]), "exp": wrong,
                    "auto": src["auto"], "auto_w": src["auto_w"], "user": True,

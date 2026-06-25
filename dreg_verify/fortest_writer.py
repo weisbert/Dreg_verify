@@ -80,7 +80,10 @@ def build_fortest_rows(rep, include_mux=False):
         inputs = t["inputs"]
         tests = t["tests"]
         ntest = len(tests)
-        case_name = "%s_g%d" % (_strip_width(t["signal"]), gi)
+        # m3：D 列(输出网名)/case 名用【.sv 实际断言的顶层真名】sv_net（改名根=顶层名、_ls 根=_ls 名），
+        # 非源内部名（d_en_vco_fc_fsm vs 顶层 d_en_vco_fc_ls）；缺 sv_net(旧 rep)退回 signal。
+        out_net = t.get("sv_net") or t["signal"]
+        case_name = "%s_g%d" % (_strip_width(out_net), gi)
 
         last_raw = (tests[-1]["raw"] if ntest else [])
 
@@ -144,9 +147,9 @@ def build_fortest_rows(rep, include_mux=False):
                       for j in range(ntest)]
             rows.append(r)
 
-        # 输出行：D=输出名, E/G=末拍期望(十进制), T=逐拍期望(十进制)
+        # 输出行：D=输出名(sv_net=.sv 顶层真名，m3), E/G=末拍期望(十进制), T=逐拍期望(十进制)
         exp_nums = [int(tests[j].get("exp_num", 0)) for j in range(ntest)]
-        out_row = {"kind": "output", "d": t["signal"], "n": gi,
+        out_row = {"kind": "output", "d": out_net, "n": gi,
                    "e": exp_nums[-1] if exp_nums else "",
                    "g": (str(exp_nums[-1]) if exp_nums else ""),
                    "t": [str(v) for v in exp_nums]}
