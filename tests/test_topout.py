@@ -536,6 +536,45 @@ def test_build_for_topout_register_passthrough(wb):
     assert st["assert_id"].startswith("TOP")            # 独立标号，不与 logic/mux 撞
 
 
+# ───────────── S1 缝B：register/dft 改名根接回 build 的警告/claims 注入圈（M3/M4/M6） ─────────────
+def test_build_for_topout_returns_warning_channels(wb):
+    """M3：build_for_topout 返回 dict 透出 selfaudit/regmap/supplement 三警告通道 + summary 计数
+    （旧版只透 dup_labels，把 G.build 算好的全丢 → 账目 n_with_issues 恒 0）。"""
+    b = T.build_for_topout(wb, mode="max")
+    for k in ("regmap_warnings", "supplement_warnings", "selfaudit_warnings", "claims"):
+        assert k in b, k
+        assert isinstance(b[k], list)
+    s = b["summary"]
+    assert s["n_selfaudit_warnings"] == len(b["selfaudit_warnings"])
+    assert s["n_regmap_warnings"] == len(b["regmap_warnings"])
+    assert s["n_supplement"] == len(b["supplement_warnings"])
+
+
+def test_build_for_topout_emits_claims_for_register_root(wb):
+    """M4：build_for_topout 产 claims（红区 binder 契约）；register 根探针 claim provenance='topout'
+    （顶层真名权威）、kind=probe/identity=output、net_base=顶层名。此前 passthrough 不产任何 claim。"""
+    b = T.build_for_topout(wb, mode="max")
+    assert b["claims"], "应产出 claims"
+    reg_probes = [c for c in b["claims"]
+                  if c["kind"] == "probe" and c["net_base"] == "clk_force_on"]
+    assert reg_probes, "register 根应有探针 claim"
+    c = reg_probes[0]
+    assert c["found_in"] == "topout" and c["identity"] == "output"
+
+
+def test_passthrough_block_injects_block_top_warning_and_claims(wb):
+    """M6：register/改名根 .sv 块顶补 // ⚠（此前裸渲染绕过 build 后处理）。手工把 iddq_skipped 塞进
+    meta，验证 _passthrough_block 注入块顶 ⚠ + claims 走 is_topout 注入圈。"""
+    topo = next(t for t in wb.topout if t.name == "clk_force_on")
+    res = T.analyze_signal(wb, R.Resolver(wb), topo, mode="max")
+    assert res.root.kind == T.REGISTER
+    res.meta["iddq_skipped"] = "iddq 门 d_fake_gate 非可 force 的 RO 网，未补 DFT 拍"
+    lines, stats, warns, claims = T._passthrough_block(
+        res, topo.name, "BT", "TOP0", T.REGISTER, T.G.GenOptions(), wb)
+    assert any("iddq" in ln and ln.startswith("// ⚠") for ln in lines[:2]), "块顶应有 iddq ⚠"
+    assert any(c["kind"] == "probe" and c["found_in"] == "topout" for c in claims)
+
+
 def test_build_for_topout_ro_unresolved_accounted_not_dropped(wb):
     """护栏3：RO 回读 / 未解析在 .sv 里【优雅记账】（块顶注释 + accounted 列表），绝不静默丢、不崩。"""
     from dreg_verify import sv_writer as W

@@ -1091,13 +1091,15 @@ def _regmap_dup_warning(used_letters, bindings, wb):
     return " | ".join(msgs) if msgs else None
 
 
-def _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb):
+def _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb, is_topout=False):
     """块顶 ⚠ 注入(iddq_skipped/regmap_dup/supplement/selfaudit) + claims 收集——source-agnostic。
 
     从 build 的 logic 循环抽出(重构 S0b，2026-06-25)，logic/mux(build) 与 register/dft 改名根
     (topout passthrough，S1 接) 共用同一注入圈，杜绝缝B『裸渲染绕过 build 后处理』。
     ⚠ 注入【顺序与 build 原序逐字节一致】(依次 prepend：iddq_skipped→regmap→supplement→selfaudit，
     故输出由上到下 = selfaudit/supplement/regmap/iddq)。node=None(mux 根无单一 AST)时跳过需 node 的检查。
+    is_topout(S1)：探针来自 Topout 路径(顶层真名)→ claims provenance 标 'topout'(M4)；
+    build 的 logic/mux 循环默认 False(逐字节不变，claims 不进 .sv)。
     返回 (lines, warnings{regmap/supplement/selfaudit:[(out_name,aid,msg)]}, claims)。"""
     warnings = {"regmap": [], "supplement": [], "selfaudit": []}
     if meta.get("iddq_skipped"):
@@ -1118,7 +1120,7 @@ def _inject_block_warnings(sig, node, bindings, lines, meta, opts, wb):
             lines = ["// ⚠ %s" % _samsg] + lines
             warnings["selfaudit"].append((sig.out_name, sig.assert_id, _samsg))
     claims = collect_claims(sig, bindings, probe_prefix_for(sig, opts), False,
-                            _on_missing_for(sig, opts))
+                            _on_missing_for(sig, opts), is_topout=is_topout)
     return lines, warnings, claims
 
 

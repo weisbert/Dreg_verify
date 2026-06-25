@@ -305,9 +305,20 @@ def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
                "n_vectors": sum(s.get("n_vectors", 0) for _l, s in built["blocks"]),
                "n_negative": sum(s.get("n_negative", 0) for _l, s in built["blocks"]),
                "n_designer": sum(s.get("n_designer", 0) for _l, s in built["blocks"]),
-               "n_accounted": len(built.get("skipped", [])) + len(built.get("errors", []))}
+               "n_accounted": len(built.get("skipped", [])) + len(built.get("errors", [])),
+               # S1 警告计数（M3）：build 已算好 selfaudit/regmap/supplement/mux，页本地视图原样透出
+               "n_selfaudit_warnings": len(built.get("selfaudit_warnings") or []),
+               "n_regmap_warnings": len(built.get("regmap_warnings") or []),
+               "n_supplement": len(built.get("supplement_warnings") or []),
+               "n_mux_warnings": len(built.get("mux_warnings") or [])}
+    # 警告通道 + claims 透出（S1 M3/M4）：页本地 .sv 走 G.build，本就算好，别像旧 return 那样丢弃。
     return text, {"summary": summary, "accounted": [],
-                  "dup_labels": built.get("dup_labels") or []}
+                  "dup_labels": built.get("dup_labels") or [],
+                  "regmap_warnings": built.get("regmap_warnings") or [],
+                  "supplement_warnings": built.get("supplement_warnings") or [],
+                  "selfaudit_warnings": built.get("selfaudit_warnings") or [],
+                  "mux_warnings": built.get("mux_warnings") or [],
+                  "claims": built.get("claims") or []}
 
 
 def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,

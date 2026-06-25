@@ -287,8 +287,15 @@ def cmd_topout(args, wb, opts):
         written = write_report(args.report, rep, args.excel)
         print("Topout 报告已写出: %s" % "  ".join(written))
         print("  Topout 信号 %d 个（真值表 %d 个）" % (len(rep["summary"]), len(rep["tables"])))
-        if args.out is None:
+        if args.out is None and not args.export_claims:
             return 0
+
+    # 只导 claims(无 --out)：build_for_topout 一次拿 claims，不出 .sv（与主路径对称，M4）。
+    if args.out is None and args.export_claims:
+        b = T.build_for_topout(wb, mode=mode, max_tests=mt, exhaustive=exh, probe_prefixes=pp)
+        _export_claims(b, args.export_claims, args.excel,
+                       naming_model=generator.NAMING_MODEL_TOPOUT)
+        return 0
 
     out = args.out or "wr_rf_tc.sv"
     text, b = T.render_topout_sv(wb, mode=mode, max_tests=mt, exhaustive=exh,
@@ -299,11 +306,18 @@ def cmd_topout(args, wb, opts):
     print("已写出(Topout 路径): %s" % out)
     print("  Topout 信号 %d；产出断言块 %d；向量 %d（负向 %d）；记账(不产断言) %d"
           % (s["n_total"], s["n_emitted"], s["n_vectors"], s["n_negative"], s["n_accounted"]))
+    # S1 生成期警告小结（M3/M5）：假绿可疑 / regmap 重名 / RTL 补充——非 0 才提示，让 .sv 路径也看得到
+    if s.get("n_selfaudit_warnings") or s.get("n_regmap_warnings") or s.get("n_supplement"):
+        print("  ⚠ 自检 %d（假绿可疑） | regmap 重名 %d | RTL 补充 %d —— 详见块顶 // ⚠"
+              % (s.get("n_selfaudit_warnings", 0), s.get("n_regmap_warnings", 0),
+                 s.get("n_supplement", 0)))
     if b["accounted"]:
         print("  记账（解析不了/跳过的信号也不静默丢）：")
         for a in b["accounted"]:
             print("    - %s [%s/%s]: %s"
                   % (a["name"], a["kind"], a["status"], (a["reason"] or "").replace("\n", " ")[:60]))
+    _export_claims(b, args.export_claims, args.excel,
+                   naming_model=generator.NAMING_MODEL_TOPOUT)   # 设了 --export-claims 才导
     return 0
 
 
@@ -339,7 +353,7 @@ def cmd_page(args, wb, opts):
         rep = P.page_report(wb, page, mode=mode, max_tests=mt, exhaustive=exh)
         written = write_report(args.report, rep, args.excel)
         print("%s 报告已写出: %s" % (P.PAGE_LABEL.get(page, page), "  ".join(written)))
-        if args.out is None:
+        if args.out is None and not args.export_claims:
             return 0
 
     out = args.out or ("wr_rf_tc_%s.sv" % page)
@@ -351,6 +365,13 @@ def cmd_page(args, wb, opts):
     s = b["summary"]
     print("已写出(%s 子视图·页本地): %s" % (P.PAGE_LABEL.get(page, page), out))
     print("  信号块 %d；产出断言块 %d；向量 %d" % (s["n_total"], s["n_emitted"], s["n_vectors"]))
+    if s.get("n_selfaudit_warnings") or s.get("n_regmap_warnings") or s.get("n_supplement"):
+        print("  ⚠ 自检 %d（假绿可疑） | regmap 重名 %d | RTL 补充 %d —— 详见块顶 // ⚠"
+              % (s.get("n_selfaudit_warnings", 0), s.get("n_regmap_warnings", 0),
+                 s.get("n_supplement", 0)))
+    # 页本地探针名仍按命名约定/尾缀猜(logic-rooted)，非 Topout 顶层真名 → claims naming_model 标 logic（M4）
+    _export_claims(b, args.export_claims, args.excel,
+                   naming_model=generator.NAMING_MODEL_LOGIC)   # 设了 --export-claims 才导
     return 0
 
 

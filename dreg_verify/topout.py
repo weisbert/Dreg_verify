@@ -680,6 +680,34 @@ class _PassthroughSig:
         self.suffix = suffix
 
 
+class _InjectSig:
+    """供 generator._inject_block_warnings 的轻量信号（register / dft 改名 passthrough 根，S1 缝B 收口）。
+
+    M6：register/改名根的 .sv 此前只 render_signal_block、绕过 build 的块顶 ⚠ 注入圈——本类把它们
+    接回同一注入层(iddq_skipped/regmap_dup/selfaudit/claims)。两点保证金标准逐字节不变：
+      · out_name 带位宽切片 → _selfaudit_output_width 视为有意为之而跳过(passthrough 断言本就贴全宽
+        切片、非『漏位宽只验 bit0』假绿)；
+      · _self_ref_suffixes 空 + 非 supplement → 探针自读/supplement 检查恒不触发(passthrough 无此隐患)。
+    rtl_base 留裸名、rtl_name 带切片 → collect_claims 的 net_base/slice 与 .sv assert LHS 同口径。"""
+
+    _self_ref_suffixes = ()
+    _is_supplement = False
+    _supplement_note = ""
+    _ls_name = None
+    ref_suffix = ""
+
+    def __init__(self, probe_name, aid, out_width, slice_suffix, is_top=True):
+        self.out_name = probe_name + slice_suffix
+        self.out_base = probe_name
+        self.rtl_base = probe_name
+        self.rtl_name = probe_name + slice_suffix
+        self.rtl_base_full = probe_name
+        self.rtl_name_full = probe_name + slice_suffix
+        self.assert_id = aid or ""
+        self.out_width = out_width or 1
+        self.is_top = is_top                     # Topout B 列=顶层真名 → claims top_output=True
+
+
 def _account_block(name, kind, status, reason, owner):
     """RO 回读 / 未解析 / error / 同源已覆盖 → 块顶注释记账（护栏3：绝不静默丢、绝不崩）。
     注释行不进 SV 字符串字面量，可含中文（与 generator 现有 '// ⚠ <中文>' 一致）。"""
@@ -704,10 +732,11 @@ def _topout_slice_suffix(topo, out_width):
 
 
 def _topout_probe_block(result, probe_name, owner, aid, kind, comments=False, counters=False,
-                        probe_prefix=""):
+                        probe_prefix="", owner_in_msg=False):
     """自定义 .sv 块：驱动来自源(result.node/bindings/vectors)，断言探针贴顶层真名 probe_name。
     用于直连寄存器根(probe=topo 名) 与 dft 改名根(probe=顶层名 A，驱动来自源 A_sm)。
     probe_prefix：顶层探针网若埋在子模块(罕见，顶层口一般在 ENV_RF 顶层)时的层级前缀。
+    owner_in_msg(m5)：True 时断言消息尾追加 owner（与 logic 根同口径，否则半数 Topout 信号 log 无 owner）。
     位宽切片：断言 LHS 贴 probe_name+[msb:lsb]（与信号清单显示名同口径，否则多 bit 信号丢切片只验 bit0）。"""
     rtl = probe_name + _topout_slice_suffix(result.topo, result.out_width)
     sig = _PassthroughSig(probe_name, result.out_width, owner, aid, rtl_name=rtl)
@@ -715,7 +744,8 @@ def _topout_probe_block(result, probe_name, owner, aid, kind, comments=False, co
     meta.setdefault("truncated", False)
     lines, stats = W.render_signal_block(sig, result.bindings, result.vectors, meta,
                                          comments=comments, node=result.node,
-                                         counters=counters, probe_prefix=probe_prefix)
+                                         counters=counters, probe_prefix=probe_prefix,
+                                         owner_in_msg=owner_in_msg)
     stats["topout_name"] = result.topo.name
     stats["topout_kind"] = kind
     stats["topout_status"] = result.status
@@ -723,11 +753,32 @@ def _topout_probe_block(result, probe_name, owner, aid, kind, comments=False, co
     return (lines, stats)
 
 
-def _register_passthrough_block(result, owner, aid, comments=False, counters=False,
+def _passthrough_block(result, probe_name, owner, aid, kind, opts, wb,
+                       comments=False, counters=False, probe_prefix=""):
+    """passthrough 根(register / dft 改名) → .sv 块 **+ generator 块顶 ⚠/claims 注入圈**（S1 缝B 收口 M6）。
+
+    render_signal_block 出块后跑 generator._inject_block_warnings：register/改名根与 logic 根共用同一
+    警告注入层（iddq_skipped/regmap_dup/selfaudit + claims，is_topout=True→provenance 标 topout），
+    杜绝『裸渲染绕过 build 后处理』。金标准无门/无重名/无截断 → 注入零行 → 逐字节不变（实证）。
+    返回 (lines, stats, warnings{regmap/supplement/selfaudit}, claims)。"""
+    lines, stats = _topout_probe_block(result, probe_name, owner, aid, kind,
+                                       comments=comments, counters=counters,
+                                       probe_prefix=probe_prefix,
+                                       owner_in_msg=getattr(opts, "owner_in_msg", False))
+    ssuf = _topout_slice_suffix(result.topo, result.out_width)
+    sig = _InjectSig(probe_name, aid, result.out_width, ssuf)
+    lines, warnings, claims = G._inject_block_warnings(
+        sig, result.node, result.bindings, lines, dict(result.meta or {}), opts, wb,
+        is_topout=True)
+    return lines, stats, warnings, claims
+
+
+def _register_passthrough_block(result, owner, aid, opts, wb, comments=False, counters=False,
                                 probe_prefix=""):
-    """直连寄存器根 → 平凡 passthrough .sv 块：RF_WRITE 该寄存器 + 断言 顶层口 == 写值。"""
-    return _topout_probe_block(result, result.topo.name, owner, aid, REGISTER,
-                               comments=comments, counters=counters, probe_prefix=probe_prefix)
+    """直连寄存器根 → 平凡 passthrough .sv 块：RF_WRITE 该寄存器 + 断言 顶层口 == 写值。
+    经 _passthrough_block 跑同一警告注入圈（M6）。返回 (lines, stats, warnings, claims)。"""
+    return _passthrough_block(result, result.topo.name, owner, aid, REGISTER, opts, wb,
+                              comments=comments, counters=counters, probe_prefix=probe_prefix)
 
 
 def _scope_empty_reason(scope):
@@ -811,6 +862,15 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
 
     blocks, accounted, seen_src = [], [], set()
     reg_i = 0
+    # S1 警告通道 + claims 聚合(M3/M4)：logic/mux 根来自 built（G.build 已算好 selfaudit/regmap/
+    # supplement/claims）；register/dft 改名根来自 _passthrough_block 的注入圈（M6，与 logic 根同一层）。
+    regmap_warnings = list(built.get("regmap_warnings") or [])
+    supplement_warnings = list(built.get("supplement_warnings") or [])
+    selfaudit_warnings = list(built.get("selfaudit_warnings") or [])
+    claims = []
+    claims_by_src = {}        # 源 out_name低 → 该块 claims（只把【真正 emit 的】源 claim 计入，不含被去重/记账的）
+    for _c in (built.get("claims") or []):
+        claims_by_src.setdefault(str(_c.get("signal", "")).lower(), []).append(_c)
     for r in results:
         name, owner = r.topo.name, r.topo.owner
         if r.status == "ok" and r.root.renamed:
@@ -830,12 +890,14 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                     blocks.append(_account_block(name, r.root.kind, "scope-empty", _why, owner))
                     accounted.append({"name": name, "kind": r.root.kind, "status": "scope-empty", "reason": _why})
                     continue
-                blk = _topout_probe_block(r, r.root.probe_name, owner, "TOP%d" % reg_i,
-                                          r.root.kind, comments=comments, counters=sv_summary,
-                                          probe_prefix=_probe_prefix_for_name(probe_prefixes,
-                                                                              r.root.probe_name))
+                ln, st, _w, _c = _passthrough_block(
+                    r, r.root.probe_name, owner, "TOP%d" % reg_i, r.root.kind, opts, wb,
+                    comments=comments, counters=sv_summary,
+                    probe_prefix=_probe_prefix_for_name(probe_prefixes, r.root.probe_name))
                 reg_i += 1
-                blocks.append(blk)
+                blocks.append((ln, st))
+                regmap_warnings.extend(_w["regmap"]); supplement_warnings.extend(_w["supplement"])
+                selfaudit_warnings.extend(_w["selfaudit"]); claims.extend(_c)
             else:                                          # 改名指向 mux 源(无单一 node)→ 暂记账（少见）
                 _why = "dft 改名指向 mux 源——探针名覆盖暂未支持改名 mux（记账，不静默丢）"
                 blocks.append(_account_block(name, r.root.kind, "renamed-mux", _why, owner))
@@ -867,6 +929,7 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                 accounted.append({"name": name, "kind": r.root.kind, "status": "skipped", "reason": reason})
                 continue
             seen_src.add(src)
+            claims.extend(claims_by_src.get(src, []))     # 该源块的 logic/mux claims（M4，只计 emit 的）
             ln, st = blk
             st = dict(st); st["owner"] = owner; st["topout_name"] = name
             st["topout_kind"] = r.root.kind; st["topout_status"] = "ok"
@@ -886,12 +949,14 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                 blocks.append(_account_block(name, REGISTER, "scope-empty", _why, owner))
                 accounted.append({"name": name, "kind": REGISTER, "status": "scope-empty", "reason": _why})
                 continue
-            blk = _register_passthrough_block(r, owner, "TOP%d" % reg_i,
-                                              comments=comments, counters=sv_summary,
-                                              probe_prefix=_probe_prefix_for_name(probe_prefixes,
-                                                                                  r.topo.name))
+            ln, st, _w, _c = _register_passthrough_block(
+                r, owner, "TOP%d" % reg_i, opts, wb,
+                comments=comments, counters=sv_summary,
+                probe_prefix=_probe_prefix_for_name(probe_prefixes, r.topo.name))
             reg_i += 1
-            blocks.append(blk)
+            blocks.append((ln, st))
+            regmap_warnings.extend(_w["regmap"]); supplement_warnings.extend(_w["supplement"])
+            selfaudit_warnings.extend(_w["selfaudit"]); claims.extend(_c)
         else:                                       # skip(RO) / unresolved / error
             reason = (r.note or "; ".join(r.issues) or r.status)
             blocks.append(_account_block(name, r.root.kind, r.status, reason, owner))
@@ -905,11 +970,18 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
         "n_vectors": sum(s.get("n_vectors", 0) for _l, s in blocks),
         "n_negative": sum(s.get("n_negative", 0) for _l, s in blocks),
         "n_designer": sum(s.get("n_designer", 0) for _l, s in blocks),
+        # S1 生成期警告计数（M3/M5）：assert 假绿可疑 / regmap 重名 / RTL 补充偏离——账目/汇总据此不再恒 0
+        "n_selfaudit_warnings": len(selfaudit_warnings),
+        "n_regmap_warnings": len(regmap_warnings),
+        "n_supplement": len(supplement_warnings),
     }
     # 重复 assert 标号(非法 SV)：generator.build 已算好(logic/mux 共用同一 R 时)，原样透出供导出前确认，
     # 别像旧 Topout 路径那样丢弃 → 静默导出会 elaboration 失败的 .sv（N9）。
+    # 警告通道 + claims 透出（S1 M3/M4）：让 CLI/GUI 账目看到假绿/重名/补充，并能 --export-claims。
     return {"blocks": blocks, "results": results, "accounted": accounted, "summary": summary,
-            "dup_labels": built.get("dup_labels") or []}
+            "dup_labels": built.get("dup_labels") or [],
+            "regmap_warnings": regmap_warnings, "supplement_warnings": supplement_warnings,
+            "selfaudit_warnings": selfaudit_warnings, "claims": claims}
 
 
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,

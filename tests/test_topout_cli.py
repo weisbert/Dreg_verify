@@ -92,6 +92,34 @@ def test_topout_report_csv(mirror, tmp_path, capsys):
     assert "clk_force_on" in summ                        # 直连寄存器也在 summary
 
 
+# ───────────── ④b --topout --export-claims（M4：红区 binder 契约不再被静默吞）─────────────
+def test_topout_export_claims(mirror, tmp_path, capsys):
+    """M4：--topout --export-claims c.json 真写 JSON（旧版静默吞、退出码 0 不写文件）。
+    naming_model=topout；含 register 根顶层真名探针 claim（found_in=topout）。"""
+    import json
+    cj = tmp_path / "claims.json"
+    out = tmp_path / "t.sv"
+    cli.main(["--excel", mirror, "--topout", "--out", str(out), "--export-claims", str(cj)])
+    msg = capsys.readouterr().out
+    assert "claim 清单已导出" in msg
+    payload = json.loads(cj.read_text(encoding="utf-8"))
+    assert payload["naming_model"] == "topout"
+    assert payload["n_claims"] == len(payload["claims"]) > 0
+    reg = [c for c in payload["claims"]
+           if c["kind"] == "probe" and c["net_base"] == "clk_force_on"]
+    assert reg and reg[0]["found_in"] == "topout"
+
+
+def test_topout_export_claims_without_out(mirror, tmp_path, capsys):
+    """只 --topout --export-claims（无 --out）→ 仅导 claims、不写默认 .sv（与主路径对称）。"""
+    cj = tmp_path / "c2.json"
+    rc = cli.main(["--excel", mirror, "--topout", "--export-claims", str(cj)])
+    assert rc == 0
+    assert "claim 清单已导出" in capsys.readouterr().out
+    assert cj.exists()
+    assert "已写出(Topout 路径)" not in capsys.readouterr().out   # 没出 .sv
+
+
 # ───────────── ⑤ 旧 CLI 路径不破（不带 --topout）─────────────
 def test_old_cli_path_still_works(mirror, capsys):
     """不带 --topout → 旧 logic-rooted 路径照常（这里验仍可跑；逐字节回归在主套件其它用例）。"""
