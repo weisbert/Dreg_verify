@@ -545,14 +545,15 @@ def test_topout_graceful_when_no_topout_page(gui_app, tmp_path):
 
 
 # ───────────── 对抗 review GUI 修复回归 ─────────────
-def test_topout_refresh_on_tab_switch_after_maxtests_change(topo_win):
-    """切回 Topout 视图时，若『排查(旧)』改过上限 → 重建清单（『用例』列不再陈旧 vs 实际导出）。"""
+def test_topout_maxt_in_coverage_panel_rebuilds(topo_win):
+    """『穷举上限』归到 Topout 视图自己的【覆盖度功能区】(per-view，不再依赖『排查(旧)』tab)：
+    改本视图 maxt_spin → 即时重建清单(用例数按新上限算)。"""
     w = topo_win
-    new = (w._topo_maxt() % 64) + 7                       # 保证与当前不同且合理
-    w.main_tabs.setCurrentIndex(1)                        # 去『排查(旧)』
-    w.max_tests.setValue(new)
-    w.main_tabs.setCurrentIndex(0)                        # 切回 Topout → currentChanged 触发重建
-    assert w._topo_built_key[2] == new
+    v = w.topout_view
+    assert hasattr(v, "maxt_spin")                        # 上限控件就在覆盖度功能区里
+    new = (v._maxt() % 64) + 7                            # 与当前不同且合理
+    v.maxt_spin.setValue(new)                             # valueChanged → refresh
+    assert v.built_key[2] == new and v._maxt() == new
 
 
 def test_topout_refresh_failure_clears_stale_panels(topo_win, monkeypatch):

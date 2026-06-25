@@ -793,6 +793,19 @@ class SignalView(QtWidgets.QWidget):
         cov_help.clicked.connect(lambda: QtWidgets.QMessageBox.information(
             self, "覆盖度算法", _COVERAGE_HELP))
         gr.addWidget(cov_help)
+        # 穷举/全面上限（安全阀）——归到覆盖度功能区(此前只在『排查(旧)』tab，Topout 视图够不着)
+        gr.addWidget(QtWidgets.QLabel("上限:"))
+        self.maxt_spin = QtWidgets.QSpinBox()
+        self.maxt_spin.setRange(1, 100000)
+        self.maxt_spin.setValue(256)
+        self.maxt_spin.setToolTip("用例数上限（安全阀，防穷举/全面产生过多用例）。穷举位数过多时由引擎"
+                                  "自动退化为『全面』；该上限对各档都生效。")
+        _saved_mt = _load_settings().get("maxt_%s" % self.view_id)   # 本视图上限持久化，下次恢复
+        if "pytest" not in sys.modules and isinstance(_saved_mt, int) and 1 <= _saved_mt <= 100000:
+            self.maxt_spin.setValue(_saved_mt)
+        self.maxt_spin.valueChanged.connect(self.refresh)
+        self.maxt_spin.valueChanged.connect(self._persist_maxt)
+        gr.addWidget(self.maxt_spin)
         self.cov_hint = QtWidgets.QLabel(""); self.cov_hint.setStyleSheet("color:#1558d6;")
         gr.addWidget(self.cov_hint); gr.addStretch(1)
         v.addLayout(gr)
@@ -837,7 +850,7 @@ class SignalView(QtWidgets.QWidget):
 
     def _maxt(self):
         try:
-            return int(self.main.max_tests.value())
+            return int(self.maxt_spin.value())          # 本视图覆盖度功能区的『上限』（per-view）
         except Exception:  # noqa: BLE001
             return 256
 
@@ -1033,6 +1046,12 @@ class SignalView(QtWidgets.QWidget):
         """本视图全局覆盖度下拉改动 → 存盘（按 view_id），下次打开恢复（N2）。"""
         st = _load_settings()
         st["cov_%s" % self.view_id] = self.cov.currentText()
+        _save_settings(st)
+
+    def _persist_maxt(self, *_):
+        """本视图用例上限改动 → 存盘（按 view_id），下次打开恢复。"""
+        st = _load_settings()
+        st["maxt_%s" % self.view_id] = int(self.maxt_spin.value())
         _save_settings(st)
 
     def on_export_nets(self):
