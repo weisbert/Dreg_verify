@@ -347,6 +347,38 @@ def test_topout_truth_table_shows_iddq_gate_row(gui_app, tmp_path):
         w.close()
 
 
+def test_topout_dft_pitch_column_not_false_red(gui_app, tmp_path):
+    """⭐2026-06-25：iddq 漏电态自检拍(末列, iddq=1→输出压0)不能被当成『反例/手填不符』染红。
+    根因=该列输入克隆自非零功能向量, _recompute_col_an 用节点(不含 iddq 门)重算 auto 得功能值≠0,
+    与 force 的常量 0 不符→假红(DIFF_BG)。用户实证 ct_band1_f_ls 第32列被标红『我也没添加反例』。
+    修=_is_dft_pitch_col 识别该列→重算跳过(auto 保持0)+期望格染淡紫(DFT_BG)非红。"""
+    from dreg_verify import gui as G
+    p = tmp_path / "gated_ls.xlsx"
+    make_mirror_btlp.build_dft_gated_ls(str(p))
+    w = G.MainWindow(); w.path_edit.setText(str(p)); w.on_load()
+    try:
+        sv = w.topout_view
+        sv._load_signal("d_en_vco_fc_ls")
+        cols = sv.cur_cols
+        pitch = cols[-1]                                   # DFT 拍恒在末尾
+        assert sv._is_dft_pitch_col(sv.cur_an, pitch)      # 被识别为 iddq 自检拍
+        assert pitch["auto"] == 0 and pitch["exp"] == 0    # 输出压 0、未被重算成功能值
+        # 期望格底色=淡紫(DFT_BG)，不是负向琥珀、不是手填红(DIFF_BG)
+        ni = len(sv.e_inputs); j = len(cols) - 1
+        bg = sv.truth.item(ni + 1, j).background().color().name()
+        assert bg == G.DFT_BG.name() and bg != G.DIFF_BG.name() and bg != G.NEG_BG.name()
+        # 编辑→序列化→还原 round-trip：还原路径会调 _recompute_col_an，DFT 拍 auto 必须仍是 0
+        sv.edits[sv.cur_name] = {"kind": sv.cur_an["kind"], "src_out_name": sv.cur_an["src_out_name"],
+                                 "name": sv.cur_an["name"], "cols": cols, "an": sv.cur_an,
+                                 "renamed": sv.cur_an.get("renamed", False)}
+        ser = sv._serialize_view_edits()                   # 含本信号(dft 标记一并序列化)
+        restored = sv._restore_cols(sv.cur_an, ser[sv.cur_name]["cols"])
+        rp = restored[-1]
+        assert sv._is_dft_pitch_col(sv.cur_an, rp) and rp["auto"] == 0   # 还原后没被重算成功能值
+    finally:
+        w.close()
+
+
 def test_topout_signal_list_shows_probe_prefix_column(topo_win):
     """⭐2026-06-25：Topout 信号清单加『探针前缀』列——配了前缀的信号显示前缀、没配为空；
     改前缀后即时刷新。解决用户『配了探针但 Topout 视图看不见 prefix 情况』。"""

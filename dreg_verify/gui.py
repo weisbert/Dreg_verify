@@ -264,6 +264,7 @@ DSGN_BG = QtGui.QColor("#e2f2e2")       # 已手填且 == auto_out（绿：desig
 DIFF_BG = QtGui.QColor("#ffd9d9")       # 已手填但 != auto_out（红：表达式可能与 designer 意图不符）
 FB_FG = QtGui.QColor("#999999")         # 未手填（灰字显示兜底的 auto_out 值）
 USER_BG = QtGui.QColor("#eef3fb")       # mux 用户手编/复制列（第二十八轮）的整列淡底色，与自动生成列区分
+DFT_BG = QtGui.QColor("#ede9fe")        # iddq 漏电态自检拍列的「期望」底色（淡紫，与负向琥珀/手填红区分，非反例）
 
 # 「级联 ?」内置帮助的兜底内容：仓库根目录的 级联模式说明.md 缺失时显示(正常显示完整 .md)
 CASCADE_DOC_FALLBACK = """\
@@ -1380,8 +1381,19 @@ class SignalView(QtWidgets.QWidget):
                    else (vec.designer_expected if vec.designer_expected is not None else None))
             cols.append({"name": W.test_label(vec), "neg": neg, "vals": vals,
                          "exp": exp, "auto": vec.exp_value, "auto_w": vec.exp_width,
-                         "user": False, "vec": vec})
+                         "user": False, "vec": vec,
+                         "dft": bool(getattr(vec, "dft_pitch", False))})
         return cols
+
+    def _is_dft_pitch_col(self, an, col):
+        """该列是否 iddq 漏电态自检拍（iddq 门被 force 到非透传值=DFT 态、输出压常量）。
+        节点表达式不建模 iddq 门，故重算 auto / 染色都要把它当特例，否则会假红当成反例。"""
+        gate = an.get("dft_gate") if an else None
+        if not gate:
+            return False
+        if col.get("dft"):
+            return True
+        return col.get("vals", {}).get(gate["key"]) != gate["transp"]
 
     def _render_head(self, an):
         import html
@@ -1489,7 +1501,13 @@ class SignalView(QtWidgets.QWidget):
                 e_it.setFlags(e_it.flags() | QtCore.Qt.ItemIsEditable)
             else:
                 e_it.setFlags(e_it.flags() & ~QtCore.Qt.ItemIsEditable)
-            if c["neg"]:
+            if self._is_dft_pitch_col(self.cur_an, c):   # iddq 漏电态自检拍：淡紫，区别于反例(琥珀)/手填红
+                e_it.setForeground(QtGui.QColor("#7c3aed"))
+                e_it.setBackground(DFT_BG)
+                e_it.setToolTip("iddq 漏电态自检拍（工具自动加，不是反例）：\n"
+                                "force iddq=1（DFT 态），断言输出压到 0。\n"
+                                ".sv/报告同口径；表达式不建模 iddq 门，故此列输出固定 0、不参与表达式比对。")
+            elif c["neg"]:
                 e_it.setForeground(QtGui.QColor("#d97706"))
                 e_it.setBackground(NEG_BG)
             elif c["exp"] is None:
@@ -1568,6 +1586,8 @@ class SignalView(QtWidgets.QWidget):
     def _recompute_col_an(self, an, col):
         if an is None or an["editable"] != "logic":
             return
+        if self._is_dft_pitch_col(an, col):
+            return    # iddq DFT 拍：节点不含 iddq 门，重算会得功能值→与 force 的常量 0 假红；保留 0
         vec = V.make_vector_from_base_values(an["node"], an["bindings"], an["groups"],
                                              col["vals"], an["out_width"])
         col["auto"], col["auto_w"] = vec.exp_value, vec.exp_width
@@ -1904,7 +1924,7 @@ class SignalView(QtWidgets.QWidget):
                     "vals": {str(k): int(v) for k, v in (c.get("vals") or {}).items()},
                     "exp": None if c.get("exp") is None else int(c["exp"]),
                     "auto": int(c.get("auto") or 0), "auto_w": int(c.get("auto_w") or 1),
-                    "user": bool(c.get("user")),
+                    "user": bool(c.get("user")), "dft": bool(c.get("dft")),
                     "case_index": (int(vec.case_index) if vec is not None
                                    and getattr(vec, "case_index", None) is not None else None),
                 })
@@ -1925,9 +1945,9 @@ class SignalView(QtWidgets.QWidget):
             col = {"name": cs.get("name") or "T", "neg": bool(cs.get("neg")), "vals": vals,
                    "exp": None if exp is None else int(exp),
                    "auto": int(cs.get("auto") or 0), "auto_w": int(cs.get("auto_w") or ow),
-                   "user": bool(cs.get("user")), "vec": None}
+                   "user": bool(cs.get("user")), "dft": bool(cs.get("dft")), "vec": None}
             if an["editable"] == "logic":
-                self._recompute_col_an(an, col)              # 权威重算 auto（改表后不陈旧）
+                self._recompute_col_an(an, col)              # 权威重算 auto（改表后不陈旧；DFT 拍跳过）
             elif an["editable"] == "mux":
                 ci = cs.get("case_index")
                 col["vec"] = V.TestVector(0, dict(vals), col["auto"], col["auto_w"],
