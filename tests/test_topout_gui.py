@@ -294,11 +294,37 @@ def test_topout_export_nets_from_signalview(topo_win, tmp_path, monkeypatch):
     from PySide6 import QtWidgets
     w = topo_win
     out = tmp_path / "nets.txt"
+    monkeypatch.setattr(w, "_ask_nets_pages", lambda: {"topout", "logic", "mux", "dft"})
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: (str(out), "")))
     monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
     w.topout_view.on_export_nets()
     assert out.exists()
+
+
+def test_topout_export_nets_topout_only_includes_register_roots(topo_win, tmp_path, monkeypatch):
+    """⭐2026-06-25：导出 nets.txt 按类别勾选——只勾『Topout』→ 文件含寄存器直连根探针
+    (clk_force_on/en_dig_clk)，这正是老固定 logic+mux+dft 口径整类漏掉的(aac_ctf_bit_sel 类)。
+    取消类别选择(_ask_nets_pages 返回 None)则不写文件。"""
+    from PySide6 import QtWidgets
+    from dreg_verify import rtl_scan
+    w = topo_win
+    out = tmp_path / "nets_topo.txt"
+    monkeypatch.setattr(w, "_ask_nets_pages", lambda: {"topout"})
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    w.topout_view.on_export_nets()
+    assert out.exists()
+    nets = rtl_scan.parse_nets_text(out.read_text(encoding="utf-8"))
+    assert "clk_force_on" in nets and "en_dig_clk" in nets        # 寄存器直连根探针(老口径漏)
+    # 取消类别选择 → 不写文件
+    out2 = tmp_path / "nets_cancel.txt"
+    monkeypatch.setattr(w, "_ask_nets_pages", lambda: None)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out2), "")))
+    w.topout_view.on_export_nets()
+    assert not out2.exists()
 
 
 def test_topout_coverage_dropdown_persists(gui_app, mirror_path, monkeypatch):

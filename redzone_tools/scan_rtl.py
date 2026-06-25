@@ -283,6 +283,17 @@ def _load_excel_nets(excel_path):
     if dft_nets:
         print("✓ dft 页: 发现 %d 个 iddq 门网，新增导出 %d 个（IDDQ 漏电态拍 force 目标）"
               % (len(dft_nets), added_dft))
+    # Topout 探针网（2026-06-25）——寄存器/dft 直连根的 assert 探针(如 aac_ctf_bit_sel)，
+    # logic/mux/dft 三页都遍历不到，漏导则这些信号埋子模块时 CUVUNF 且无提示。
+    topo_nets = rtl_scan.collect_topout_nets(wb)
+    added_topo = 0
+    for name, why in topo_nets.items():
+        if name not in nets:
+            nets[name] = why
+            added_topo += 1
+    if topo_nets:
+        print("✓ Topout 页: %d 个信号探针网，新增导出 %d 个（寄存器/dft 直连根 assert 探针）"
+              % (len(topo_nets), added_topo))
     return nets
 
 

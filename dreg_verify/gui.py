@@ -3664,33 +3664,76 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("探针前缀映射已更新（共 %d 条），影响 %d 个信号"
                                 "（见蓝色『探针前缀』列；状态列应变 clean）" % (len(mapping), affected))
 
+    # nets.txt 类别 → (复选框标题, 提示)。Topout=寄存器/dft 直连根探针只在此导得到。
+    _NETS_PAGE_ROWS = [
+        ("topout", "Topout 信号探针网（含寄存器 / dft 直连根）",
+         "每个可验证 Topout 信号的 assert 探针网。寄存器直连根(如 aac_ctf_bit_sel)和 dft 改名根\n"
+         "只在这里导得到——logic/mux/dft 三页都遍历不到它们(老 nets.txt 整类漏掉=仿真 CUVUNF\n"
+         "且无提示)。只勾这一个 = 只导 Topout 那批探针网。"),
+        ("logic", "Logic 页（探针 + force 输入）",
+         "logic 行输出探针 + 两种级联模式(cone/force)的 force 输入网。"),
+        ("mux", "Mux 页（输出 / 控制 / 数据网）", "mux 组输出探针 + 控制衔接网 + case 数据网。"),
+        ("dft", "IDDQ 门网（dft 页）", "IDDQ 漏电态拍的 force 门网 + _to_dft 衔接网。"),
+    ]
+    _NETS_PAGE_LABEL = {"topout": "Topout", "logic": "logic", "mux": "mux", "dft": "iddq"}
+
+    def _ask_nets_pages(self):
+        """导出 nets.txt 前选要导哪些类别的网（2026-06-25）。返回 page 集合
+        (⊆ {'topout','logic','mux','dft'}) 或 None(取消/没勾)。记住上次勾选，下次预选。"""
+        st = _load_settings()
+        last = st.get("nets_pages")
+        if not isinstance(last, list) or not last:
+            last = ["topout", "logic", "mux", "dft"]      # 默认全勾(超集，宁多勿漏)
+        last = {str(p).strip().lower() for p in last}
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("导出 nets.txt — 选类别")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.addWidget(QtWidgets.QLabel("勾选要导出哪些类别的网（去重并集）："))
+        checks = {}
+        for key, label, tip in self._NETS_PAGE_ROWS:
+            cb = QtWidgets.QCheckBox(label)
+            cb.setToolTip(tip)
+            cb.setChecked(key in last)
+            lay.addWidget(cb)
+            checks[key] = cb
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return None
+        pages = {k for k, cb in checks.items() if cb.isChecked()}
+        if not pages:
+            QtWidgets.QMessageBox.information(self, "未选类别", "至少勾选一个类别再导出。")
+            return None
+        st["nets_pages"] = sorted(pages)
+        _save_settings(st)               # 记住，下次预选
+        return pages
+
     def on_export_nets(self):
         """导出 nets.txt：当前表需要在 ENV_RF 层级定位的网清单，供仿真服务器跑 scan_rtl 扫 RTL。
 
-        这是跨机器两段式工作流（Excel 在 Windows、RTL 在 Linux）的第①步——以前要落到命令行
-        跑 `python scan_rtl.py --excel 真表.xlsx --export-nets nets.txt`，现在直接在 GUI 出。
-        网清单取 logic 探针 + 两种级联模式的 force 输入 + mux 三类网 + dft iddq 门网的并集
-        （与 scan_rtl._load_excel_nets 同口径，一次扫覆盖 cone/force 两模式，宁多勿漏）。
+        按类别勾选导出(2026-06-25)：Topout 探针网(含寄存器/dft 直连根) / Logic / Mux / IDDQ 门，
+        去重并集。以前固定 logic+mux+dft、且 **漏掉 Topout 寄存器/dft 直连根的探针网**(aac_ctf_bit_sel
+        类整类不导→跑 scan_rtl 也不给它找前缀)；现在 Topout 成独立类别、默认勾上。
+        跨机器两段式(Excel 在 Windows、RTL 在 Linux)的第①步，等价 CLI：
+            python redzone_tools/scan_rtl.py --excel 真表.xlsx --export-nets nets.txt
         """
         if not self.wb:
             QtWidgets.QMessageBox.information(self, "无表", "先加载一张 Excel 真表，再导出 nets.txt。")
             return
+        pages = self._ask_nets_pages()
+        if not pages:
+            return
         from dreg_verify import rtl_scan
         try:
-            nets = rtl_scan.collect_excel_nets(self.wb)
-            n_logic = len(nets)
-            mux_nets = rtl_scan.collect_mux_nets(self.wb)
-            for name, why in mux_nets.items():
-                nets.setdefault(name, why)
-            dft_nets = rtl_scan.collect_dft_nets(self.wb)
-            for name, why in dft_nets.items():
-                nets.setdefault(name, why)
+            nets = rtl_scan.collect_nets(self.wb, pages=pages)
+            per = {p: len(rtl_scan.collect_nets(self.wb, pages=[p])) for p in sorted(pages)}
         except Exception as ex:  # noqa: BLE001
             QtWidgets.QMessageBox.critical(self, "导出失败", "收集网清单出错：\n%s" % ex)
             return
         finally:
-            # collect_excel_nets 会把 logic 信号的 _append_to_logic 强设为 True(找 RTL 真名)，
-            # 内部又建临时 Resolver 重盖所有信号的尾缀标记——重建本 GUI 的 Resolver 还原成当前设置，
+            # collect_excel_nets/collect_topout_nets 会把 logic 信号 _append_to_logic 强设 True
+            # (找 RTL 真名)，内部又建临时 Resolver 重盖尾缀标记——重建本 GUI 的 Resolver 还原，
             # 否则后续左表/预览会按被污染的尾缀标记显示。
             self._reanalyze_all()
 
@@ -3706,14 +3749,15 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
+        brk = " · ".join("%s %d" % (self._NETS_PAGE_LABEL.get(p, p), per[p]) for p in sorted(per))
         QtWidgets.QMessageBox.information(
             self, "已导出 nets.txt",
-            "共 %d 个网已写出（logic %d · mux %d · dft %d，去重并集）：\n%s\n\n"
+            "共 %d 个网已写出（%s，去重并集）：\n%s\n\n"
             "下一步（跨机器两段式）：\n"
             "  ① 把 redzone_tools/ 里的 scan_rtl.py + 这个 nets.txt 一起传到仿真服务器\n"
             "  ② source dreg 环境后跑：python3 scan_rtl.py\n"
             "  ③ 把生成的 probe_prefixes.txt 拷回 → 『设置探针前缀 → 导入…』套用"
-            % (len(nets), n_logic, len(mux_nets), len(dft_nets), path))
+            % (len(nets), brk, path))
 
     def _save_force_signals(self):
         """强制 force 基名按 Excel 路径写入 settings（pytest 下 no-op，与其它持久化策略一致）。"""

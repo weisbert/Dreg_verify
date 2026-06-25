@@ -171,6 +171,62 @@ def collect_dft_nets(wb, signals=None):
     return nets
 
 
+def collect_topout_nets(wb, signals=None):
+    """Topout 页 → 每个【可验证】Topout 信号的 assert 探针网（2026-06-25）。
+
+    ⭐ 这是 Topout-rooted 主流程真正需要的网清单。以前 collect_excel_nets/mux/dft 只遍历
+    logic/mux/dft 页 —— **直连寄存器(RW)根 / dft 改名根** 的探针网（断言贴 topo 名 / probe_name，
+    不在 wb.logic）整类漏导 → scan_rtl 不检查它们 → 这些信号埋子模块时仿真 CUVUNF 且无提示
+    （aac_ctf_bit_sel 正是此类：register 直连根，断言探 `ENV_RF.aac_ctf_bit_sel`，net 埋在
+    U_BT_LP_PLL_DIG 里 → 老 nets.txt 根本没它 → 跑 scan_rtl 也不会帮它找前缀）。
+
+    按 resolve_root 分类取断言 LHS 网名（与 build_for_topout 的 .sv 同口径）：
+      · logic / mux 根（未改名）→ 源对象 rtl_base（generator.build 探它）
+      · 直连寄存器(RW)根       → topo 名（_register_passthrough_block 探它）
+      · dft 改名根             → probe_name（= 顶层真名 = topo 名）
+      · RO 回读 / 未解析 / error → 不产断言、无探针 → 跳过
+
+    signals(可选过滤)：只导这些 Topout 名(按基名)的网；None=全导。
+    无 Topout 页 / 任何异常 → 返回空 dict，绝不波及其它页导出。
+    """
+    nets = {}
+    want = _sig_filter(signals)
+    try:
+        from . import topout as T
+        from .excel_model import _strip_width
+        logic_idx, mux_idx = T.build_index(wb)
+        for t in (getattr(wb, "topout", None) or []):
+            tb = _strip_width(t.name)[0]
+            if want is not None and tb.lower() not in want:
+                continue
+            try:
+                root = T.resolve_root(wb, t.name, logic_idx, mux_idx)
+            except Exception:  # noqa: BLE001  解析失败的单信号跳过，不连累整批
+                continue
+            if root is None:
+                continue
+            net, why = None, None
+            if root.renamed:                       # dft 改名根：断言贴顶层真名 probe_name(=topo 名)
+                net = _strip_width(root.probe_name or t.name)[0]
+                why = "Topout 改名根 %s 的 assert 探针（顶层真名）" % t.name
+            elif root.kind == T.REGISTER:          # 直连寄存器(RW)根：断言探 topo 名
+                net, why = tb, "Topout 直连寄存器根 %s 的 assert 探针" % t.name
+            elif root.kind in (T.LOGIC, T.MUX) and root.obj is not None:
+                try:
+                    if root.kind == T.LOGIC:
+                        root.obj._append_to_logic = True   # 找 RTL 真名(与 collect_excel_nets 同口径)
+                    net = root.obj.rtl_base
+                except Exception:  # noqa: BLE001
+                    net = None
+                why = "Topout %s 根 %s 的 assert 探针" % (root.kind, t.name)
+            # RO_READBACK / UNRESOLVED → 不产断言，不导
+            if net and re.match(r"^[A-Za-z_]\w*$", net):
+                nets.setdefault(net, why)
+    except Exception:  # noqa: BLE001  无 Topout 页 / 解析层异常 → 空，绝不波及其它页
+        return {}
+    return nets
+
+
 def filter_nets_by_dest(nets, dest_suffix):
     """按【目的地后缀】过滤网集合（C3，Q3 后缀规则）：只保留网名以 `_<dest_suffix>` 结尾的。
 
@@ -188,11 +244,12 @@ def filter_nets_by_dest(nets, dest_suffix):
 def collect_nets(wb, signals=None, pages=None, dest_suffix=None):
     """统一【可选过滤】网导出（C3 块D2，2026-06-23）：合并 logic/mux/dft 三页网，按需过滤。
 
-    signals    — 只导这些信号(out_base/G 列基名/dft 输出基名)的网；None=全部。
-    pages      — 取这些页：{'logic','mux','dft'} 的子集；None=三页全取。
+    signals    — 只导这些信号(out_base/G 列基名/dft 输出基名/Topout 名)的网；None=全部。
+    pages      — 取这些页：{'topout','logic','mux','dft'} 的子集；None=四页全取。
     dest_suffix— 只留以 `_<dest_suffix>` 结尾的衔接网(同源多目的地时选一页)；None=不按后缀过滤。
 
-    返回 {网名: 用途}。新 Topout 主流程顶层无前缀基本不需 nets；这是『单独测某页/某信号』的入口。
+    返回 {网名: 用途}。Topout 页(2026-06-25)= 每个可验证 Topout 信号的 assert 探针网，含
+    寄存器/dft 直连根(logic/mux/dft 三页都遍历不到的那批) —— 勾选『仅 Topout』即只导这批。
     旧全导调用方(collect_excel_nets() 无参)逐字节不变；本函数是新增叠加层。"""
     want_pages = None if pages is None else {str(p).strip().lower() for p in pages}
 
@@ -207,6 +264,9 @@ def collect_nets(wb, signals=None, pages=None, dest_suffix=None):
             nets.setdefault(k, v)
     if _on("dft"):
         for k, v in collect_dft_nets(wb, signals=signals).items():
+            nets.setdefault(k, v)
+    if _on("topout"):                    # Topout 探针网(寄存器/dft 直连根的探针在此补齐)
+        for k, v in collect_topout_nets(wb, signals=signals).items():
             nets.setdefault(k, v)
     return filter_nets_by_dest(nets, dest_suffix)
 

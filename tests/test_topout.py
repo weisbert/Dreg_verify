@@ -347,6 +347,40 @@ def test_collect_nets_pages_and_dest_suffix(wl_wb):
     assert len(rtl_scan.collect_nets(wl_wb)) >= len(only_mux)
 
 
+def test_collect_topout_nets_covers_register_roots(wb):
+    """⭐2026-06-25：collect_topout_nets 收每个可验证 Topout 信号的 assert 探针网，
+    含【寄存器/dft 直连根】——这正是 collect_excel_nets/mux/dft 三页都遍历不到、老 nets.txt
+    整类漏掉的那批(aac_ctf_bit_sel 类：埋子模块时仿真 CUVUNF 且无提示)。"""
+    topo = rtl_scan.collect_topout_nets(wb)
+    assert topo                                    # 非空
+    assert "clk_force_on" in topo                  # 直连寄存器(RW)根的探针网
+    assert "en_dig_clk" in topo
+    # 证实老三页口径确实漏掉这俩寄存器根
+    old = rtl_scan.collect_excel_nets(wb)
+    for k, v in rtl_scan.collect_mux_nets(wb).items():
+        old.setdefault(k, v)
+    for k, v in rtl_scan.collect_dft_nets(wb).items():
+        old.setdefault(k, v)
+    assert "clk_force_on" not in old
+    assert "en_dig_clk" not in old
+    # signals 过滤：只导一个 Topout 名
+    one = rtl_scan.collect_topout_nets(wb, signals=["clk_force_on"])
+    assert one == {"clk_force_on": one["clk_force_on"]}
+
+
+def test_collect_nets_topout_page(wb):
+    """⭐2026-06-25：collect_nets 支持 'topout' 页——只勾 topout=只导 Topout 探针网；
+    寄存器根只在 topout 类别出现；默认(pages=None)四页全取含 topout。"""
+    only_topo = rtl_scan.collect_nets(wb, pages=["topout"])
+    assert only_topo == rtl_scan.collect_topout_nets(wb)
+    only_logic = rtl_scan.collect_nets(wb, pages=["logic"])
+    assert "clk_force_on" in only_topo
+    assert "clk_force_on" not in only_logic        # 寄存器根不在 logic 页
+    assert "clk_force_on" in rtl_scan.collect_nets(wb)            # 默认四页全取含 topout
+    # 全页并集 ⊇ 单 topout 页
+    assert len(rtl_scan.collect_nets(wb)) >= len(only_topo)
+
+
 def test_filter_nets_by_dest_helper():
     """C3：filter_nets_by_dest 容 'to_dft' 与 '_to_dft' 两种写法，空后缀原样返回。"""
     nets = {"a_to_dft": "x", "b_to_iddq": "y", "c": "z"}
