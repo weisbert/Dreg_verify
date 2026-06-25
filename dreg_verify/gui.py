@@ -770,38 +770,61 @@ class SignalView(QtWidgets.QWidget):
         self._mux_data = {}
         self._build()
 
-    # ───────────── 覆盖度（每视图一个，从右上角迁出到工具条；含 ? 解释 logic/mux 算法）─────────────
-    def _build_form_cov_panel(self):
-        """#3 『覆盖度·按逻辑类型』功能区(仅 Topout 视图)：4 形态各一档(跟随全局/精简/全面/穷举) + 例子
-        表达式 + 各档说明。可折叠。优先级：本信号单点(信号页) > 此处类型 > 全局默认(上方下拉)。会话内临时档。"""
-        box = QtWidgets.QGroupBox("覆盖度·按逻辑类型（覆盖『全局默认』；本信号档再覆盖它）")
-        box.setCheckable(True)
-        box.setToolTip("覆盖方案据【展开后表达式形态】派发。这里按【逻辑类型】整批设档，压过上方『全局』下拉、"
-                       "被信号页『本信号覆盖度』再压过。会话内临时档(不存盘)。")
-        ov = QtWidgets.QVBoxLayout(box)
-        content = QtWidgets.QWidget()
-        g = QtWidgets.QGridLayout(content)
-        g.setContentsMargins(2, 2, 2, 2); g.setHorizontalSpacing(12); g.setVerticalSpacing(3)
-        for c, h in enumerate(("逻辑类型", "表达式例子", "覆盖度")):
-            lab = QtWidgets.QLabel(h); lab.setStyleSheet("font-weight:bold;color:#444;")
-            g.addWidget(lab, 0, c)
-        for i, (key, label, example, tip) in enumerate(_FORM_COV_ROWS, start=1):
-            g.addWidget(QtWidgets.QLabel(label), i, 0)
-            ex = QtWidgets.QLabel(example)
-            ex.setStyleSheet("color:#333;font-family:Consolas,monospace;")
-            ex.setToolTip(tip)
-            g.addWidget(ex, i, 1)
-            cb = QtWidgets.QComboBox()
-            for lab, data in [("跟随全局", ""), ("精简", "min"), ("全面", "max"), ("穷举", "exhaustive")]:
-                cb.addItem(lab, data)
-            cb.setToolTip(tip)
-            cb.currentIndexChanged.connect(self._on_form_cov_changed)
-            self._form_cov_combos[key] = cb
-            g.addWidget(cb, i, 2)
-        g.setColumnStretch(1, 1)
-        ov.addWidget(content)
-        box.toggled.connect(content.setVisible)
-        box.setChecked(True)                         # 默认展开（用户要的『专门功能区』，可手动折叠省空间）
+    # ───────────── 覆盖度功能区（全局默认 + 按逻辑类型，全部覆盖度控件归一处）─────────────
+    def _build_coverage_panel(self):
+        """覆盖度功能区（左栏，全视图）：① 全局默认档(所有信号基线) + ②(仅 Topout)按逻辑类型整批档
+        (4 形态 + 例子表达式 + 各档说明，可折叠)。三层优先级：本信号(信号页) > 逻辑类型 > 全局默认。
+        全局/逻辑类型逻辑上同一功能、归这一处(用户反馈)；本信号档因是单信号上下文仍留在信号页。"""
+        box = QtWidgets.QGroupBox("覆盖度")
+        v = QtWidgets.QVBoxLayout(box); v.setSpacing(4)
+        # ① 全局默认（所有视图）
+        gr = QtWidgets.QHBoxLayout()
+        gr.addWidget(QtWidgets.QLabel("全局默认:"))
+        self.cov = QtWidgets.QComboBox(); self.cov.addItems(["精简", "全面", "穷举"])
+        _saved_cov = _load_settings().get("cov_%s" % self.view_id)   # N2：本视图全局覆盖度持久化
+        self.cov.setCurrentText(_saved_cov if _saved_cov in ("精简", "全面", "穷举") else "全面")
+        self.cov.setToolTip("【全局默认】覆盖度——所有信号的基线档。被『按逻辑类型』整批覆盖、再被信号页"
+                            "『本信号覆盖度』单点覆盖（优先级：本信号 > 逻辑类型 > 全局）。\n\n" + _COVERAGE_HELP)
+        self.cov.currentIndexChanged.connect(self.refresh)
+        self.cov.currentIndexChanged.connect(self._persist_cov)
+        gr.addWidget(self.cov)
+        cov_help = QtWidgets.QPushButton("?"); cov_help.setFixedWidth(24)
+        cov_help.setToolTip("覆盖度算法说明（logic vs mux 各自怎么展开）")
+        cov_help.clicked.connect(lambda: QtWidgets.QMessageBox.information(
+            self, "覆盖度算法", _COVERAGE_HELP))
+        gr.addWidget(cov_help)
+        self.cov_hint = QtWidgets.QLabel(""); self.cov_hint.setStyleSheet("color:#1558d6;")
+        gr.addWidget(self.cov_hint); gr.addStretch(1)
+        v.addLayout(gr)
+        # ②（仅 Topout）按逻辑类型——可折叠
+        if getattr(self.provider, "supports_sig_cov", False):
+            sub = QtWidgets.QGroupBox("按逻辑类型（覆盖全局默认；本信号档再覆盖它）")
+            sub.setCheckable(True)
+            sv = QtWidgets.QVBoxLayout(sub)
+            content = QtWidgets.QWidget()
+            g = QtWidgets.QGridLayout(content)
+            g.setContentsMargins(2, 2, 2, 2); g.setHorizontalSpacing(12); g.setVerticalSpacing(3)
+            for c, h in enumerate(("逻辑类型", "表达式例子", "覆盖度")):
+                lab = QtWidgets.QLabel(h); lab.setStyleSheet("font-weight:bold;color:#444;")
+                g.addWidget(lab, 0, c)
+            for i, (key, label, example, tip) in enumerate(_FORM_COV_ROWS, start=1):
+                g.addWidget(QtWidgets.QLabel(label), i, 0)
+                ex = QtWidgets.QLabel(example)
+                ex.setStyleSheet("color:#333;font-family:Consolas,monospace;")
+                ex.setToolTip(tip)
+                g.addWidget(ex, i, 1)
+                cb = QtWidgets.QComboBox()
+                for lab2, data in [("跟随全局", ""), ("精简", "min"), ("全面", "max"), ("穷举", "exhaustive")]:
+                    cb.addItem(lab2, data)
+                cb.setToolTip(tip)
+                cb.currentIndexChanged.connect(self._on_form_cov_changed)
+                self._form_cov_combos[key] = cb
+                g.addWidget(cb, i, 2)
+            g.setColumnStretch(1, 1)
+            sv.addWidget(content)
+            sub.toggled.connect(content.setVisible)
+            sub.setChecked(True)                     # 默认展开（用户要的专门功能区，可手动折叠省空间）
+            v.addWidget(sub)
         return box
 
     def _mode(self):
@@ -861,26 +884,8 @@ class SignalView(QtWidgets.QWidget):
         self.search.setToolTip("按信号名、表达式、或输入信号名匹配（支持正则）。")
         self.search.textChanged.connect(self._apply_filter)
         bar.addWidget(self.search, 1)
-        bar.addWidget(QtWidgets.QLabel("全局覆盖度:"))
-        self.cov = QtWidgets.QComboBox()
-        self.cov.addItems(["精简", "全面", "穷举"])
-        _saved_cov = _load_settings().get("cov_%s" % self.view_id)   # N2：本视图全局覆盖度持久化
-        self.cov.setCurrentText(_saved_cov if _saved_cov in ("精简", "全面", "穷举") else "全面")
-        self.cov.setToolTip("【全局默认】覆盖度——所有信号的基线档。可被左侧『覆盖度·按逻辑类型』整批覆盖、"
-                            "再被信号页『本信号覆盖度』单点覆盖（优先级：本信号 > 逻辑类型 > 全局）。\n\n"
-                            + _COVERAGE_HELP)
-        self.cov.currentIndexChanged.connect(self.refresh)
-        self.cov.currentIndexChanged.connect(self._persist_cov)
-        bar.addWidget(self.cov)
-        cov_help = QtWidgets.QPushButton("?")
-        cov_help.setFixedWidth(24)
-        cov_help.setToolTip("覆盖度算法说明（logic vs mux 各自怎么展开）")
-        cov_help.clicked.connect(lambda: QtWidgets.QMessageBox.information(
-            self, "覆盖度算法", _COVERAGE_HELP))
-        bar.addWidget(cov_help)
-        self.cov_hint = QtWidgets.QLabel("")
-        self.cov_hint.setStyleSheet("color:#1558d6;")
-        bar.addWidget(self.cov_hint)
+        # 覆盖度控件（全局默认 + 按逻辑类型）统一挪到左栏『覆盖度』功能区（_build_coverage_panel），
+        # 顶部工具条只留筛选/搜索——它们逻辑上是一回事，放一处不再散乱（用户反馈）。
         lay.addLayout(bar)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -888,8 +893,7 @@ class SignalView(QtWidgets.QWidget):
         left = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left); lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(3)
         self._form_cov_combos = {}
-        if getattr(self.provider, "supports_sig_cov", False):   # #3 覆盖度·按逻辑类型功能区(仅 Topout)
-            lv.addWidget(self._build_form_cov_panel())
+        lv.addWidget(self._build_coverage_panel())     # 覆盖度功能区：全局默认 +(Topout)按逻辑类型
         self.sig_table = QtWidgets.QTableWidget(0, len(SV_HEADERS))
         self.sig_table.setHorizontalHeaderLabels(SV_HEADERS)
         self.sig_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
