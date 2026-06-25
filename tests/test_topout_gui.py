@@ -593,6 +593,20 @@ def test_form_cov_flows_through_gui_provider(topo_win):
     assert all(after[n] == base[n][1] for n in nonsel)         # 非 select 不受影响
 
 
+def test_form_cov_panel_combo_drives_coverage(topo_win):
+    """#3 UI：『覆盖度·按逻辑类型』功能区(非弹窗)有 4 形态下拉；选『选路=穷举』→ _form_cov 更新 +
+    清单选路信号升档。验证从弹窗改成内嵌功能区后的端到端接线。"""
+    v = topo_win.topout_view
+    assert set(v._form_cov_combos) == {"register", "boolean", "select", "gated"}   # 4 形态
+    base = {m["name"]: (m["form"], m["n_vectors"]) for m in v.models}
+    cb = v._form_cov_combos["select"]
+    cb.setCurrentIndex(cb.findData("exhaustive"))             # 选穷举 → 触发 _on_form_cov_changed
+    assert v._form_cov.get("select") == "exhaustive"
+    after = {m["name"]: m["n_vectors"] for m in v.models}
+    sel = [n for n, (f, _) in base.items() if f == "select"]
+    assert any(after[n] > base[n][1] for n in sel)           # 选路信号升档
+
+
 def test_logic_view_input_order_matches_report_fortest(topo_win):
     """m4：GUI 可编辑真表 logic 输入行序 == report/HTML/for_test 的寄存器地址序——单一行序，不再两套
     (此前 GUI 用 Excel 原始序、导出用 for_test 序 → 人工核对/截图错位)。"""

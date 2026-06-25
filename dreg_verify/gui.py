@@ -404,6 +404,22 @@ _COVERAGE_HELP = (
     "  穷举 = 全面 + 另一条物理控制路径(line/local)全扫每 case\n\n"
     "选信号后下方会实时显示当前信号的用例条数；改档即时重算。")
 
+# #3 『覆盖度·按逻辑类型』功能区每行：(形态键, 显示名, 例子表达式, 各档说明 tooltip)。
+# 覆盖方案据【展开后表达式形态 F0-F4】派发(用户第一性原理)，与设计稿② 一致。
+_FORM_COV_ROWS = [
+    ("register", "直连寄存器 (F0)", "out = d_reg[3:0]",
+     "单字段透传：精简/全面/穷举均验【全0 + 各位异值】(约 2 条，位宽取字段全宽)。"),
+    ("boolean", "布尔/位运算 (F1)", "out = (A & ~B) | C",
+     "精简=控制位关键组合各 1 组数据；全面=控制位全组合 × 多组数据(全0/全1/反码/走步)；"
+     "穷举=所有输入位全组合(≤10 位，否则退『全面』)。"),
+    ("select", "选路 (F2)", "out = sel ? A : B",
+     "精简=每条路 1 个代表值；全面=精简 + x 位展开 + 每路反码数据轮(抓数据通路坏位)；"
+     "穷举=全面 + 换另一条物理控制路径(line/local)全扫。mux 八选一同理。"),
+    ("gated", "门控·iddq (F3/F4)", "out = iddq ? 0 : (sel ? A : B)",
+     "= 内层形态(选路/布尔)覆盖 × iddq 透传(功能向量门=0) + 追加 1 条 DFT 漏电拍(门=1 压输出到 0)。"
+     "档位作用于内层，DFT 拍恒 1 条。"),
+]
+
 
 def _parse_cell_int(text):
     """真值表单元格输入 → int（接受 0x../'h../0b../十进制；空/非法 → None）。"""
@@ -755,6 +771,39 @@ class SignalView(QtWidgets.QWidget):
         self._build()
 
     # ───────────── 覆盖度（每视图一个，从右上角迁出到工具条；含 ? 解释 logic/mux 算法）─────────────
+    def _build_form_cov_panel(self):
+        """#3 『覆盖度·按逻辑类型』功能区(仅 Topout 视图)：4 形态各一档(跟随全局/精简/全面/穷举) + 例子
+        表达式 + 各档说明。可折叠。优先级：本信号单点(信号页) > 此处类型 > 全局默认(上方下拉)。会话内临时档。"""
+        box = QtWidgets.QGroupBox("覆盖度·按逻辑类型（覆盖『全局默认』；本信号档再覆盖它）")
+        box.setCheckable(True)
+        box.setToolTip("覆盖方案据【展开后表达式形态】派发。这里按【逻辑类型】整批设档，压过上方『全局』下拉、"
+                       "被信号页『本信号覆盖度』再压过。会话内临时档(不存盘)。")
+        ov = QtWidgets.QVBoxLayout(box)
+        content = QtWidgets.QWidget()
+        g = QtWidgets.QGridLayout(content)
+        g.setContentsMargins(2, 2, 2, 2); g.setHorizontalSpacing(12); g.setVerticalSpacing(3)
+        for c, h in enumerate(("逻辑类型", "表达式例子", "覆盖度")):
+            lab = QtWidgets.QLabel(h); lab.setStyleSheet("font-weight:bold;color:#444;")
+            g.addWidget(lab, 0, c)
+        for i, (key, label, example, tip) in enumerate(_FORM_COV_ROWS, start=1):
+            g.addWidget(QtWidgets.QLabel(label), i, 0)
+            ex = QtWidgets.QLabel(example)
+            ex.setStyleSheet("color:#333;font-family:Consolas,monospace;")
+            ex.setToolTip(tip)
+            g.addWidget(ex, i, 1)
+            cb = QtWidgets.QComboBox()
+            for lab, data in [("跟随全局", ""), ("精简", "min"), ("全面", "max"), ("穷举", "exhaustive")]:
+                cb.addItem(lab, data)
+            cb.setToolTip(tip)
+            cb.currentIndexChanged.connect(self._on_form_cov_changed)
+            self._form_cov_combos[key] = cb
+            g.addWidget(cb, i, 2)
+        g.setColumnStretch(1, 1)
+        ov.addWidget(content)
+        box.toggled.connect(content.setVisible)
+        box.setChecked(True)                         # 默认展开（用户要的『专门功能区』，可手动折叠省空间）
+        return box
+
     def _mode(self):
         t = self.cov.currentText()
         if t == "穷举":
@@ -812,12 +861,14 @@ class SignalView(QtWidgets.QWidget):
         self.search.setToolTip("按信号名、表达式、或输入信号名匹配（支持正则）。")
         self.search.textChanged.connect(self._apply_filter)
         bar.addWidget(self.search, 1)
-        bar.addWidget(QtWidgets.QLabel("覆盖度:"))
+        bar.addWidget(QtWidgets.QLabel("全局覆盖度:"))
         self.cov = QtWidgets.QComboBox()
         self.cov.addItems(["精简", "全面", "穷举"])
         _saved_cov = _load_settings().get("cov_%s" % self.view_id)   # N2：本视图全局覆盖度持久化
         self.cov.setCurrentText(_saved_cov if _saved_cov in ("精简", "全面", "穷举") else "全面")
-        self.cov.setToolTip(_COVERAGE_HELP)
+        self.cov.setToolTip("【全局默认】覆盖度——所有信号的基线档。可被左侧『覆盖度·按逻辑类型』整批覆盖、"
+                            "再被信号页『本信号覆盖度』单点覆盖（优先级：本信号 > 逻辑类型 > 全局）。\n\n"
+                            + _COVERAGE_HELP)
         self.cov.currentIndexChanged.connect(self.refresh)
         self.cov.currentIndexChanged.connect(self._persist_cov)
         bar.addWidget(self.cov)
@@ -836,6 +887,9 @@ class SignalView(QtWidgets.QWidget):
         # ── 左：信号清单 + 批量条 ──
         left = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left); lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(3)
+        self._form_cov_combos = {}
+        if getattr(self.provider, "supports_sig_cov", False):   # #3 覆盖度·按逻辑类型功能区(仅 Topout)
+            lv.addWidget(self._build_form_cov_panel())
         self.sig_table = QtWidgets.QTableWidget(0, len(SV_HEADERS))
         self.sig_table.setHorizontalHeaderLabels(SV_HEADERS)
         self.sig_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -909,16 +963,11 @@ class SignalView(QtWidgets.QWidget):
             self.sig_cov_combo = QtWidgets.QComboBox()
             for label, data in [("跟随全局", ""), ("精简", "min"), ("全面", "max"), ("穷举", "exhaustive")]:
                 self.sig_cov_combo.addItem(label, data)
-            self.sig_cov_combo.setToolTip("给【当前这一个信号】单设覆盖档，压过工具栏的全局覆盖度下拉。\n"
+            self.sig_cov_combo.setToolTip("给【当前这一个信号】单设覆盖档，最高优先级——压过『全局覆盖度』"
+                                          "和左侧『覆盖度·按逻辑类型』档。\n"
                                           "『跟随全局』=不单设。会话内临时档：关 GUI 即忘、不存盘/不导出(R25 教训)。")
             self.sig_cov_combo.currentIndexChanged.connect(self._on_sig_cov_changed)
             eb.addWidget(self.sig_cov_combo)
-            # #3：按【逻辑类型】(展开后形态)设覆盖度——介于全局与单点之间(优先级 单点>形态>全局)
-            b_fc = QtWidgets.QPushButton("逻辑类型覆盖度…")
-            b_fc.setToolTip("按【逻辑类型】(直连寄存器/布尔/选路/门控)分别设覆盖档，压过全局、被本信号单点压过。\n"
-                            "覆盖方案据展开后表达式形态派发(#3)。会话内临时档。")
-            b_fc.clicked.connect(self._on_form_cov_dialog)
-            eb.addWidget(b_fc)
         ttv.addWidget(eb_box)
         self.truth = QtWidgets.QTableWidget(0, 0)
         self.main._mono(self.truth)
@@ -1263,42 +1312,19 @@ class SignalView(QtWidgets.QWidget):
         self._refresh_row_counts()
         self._update_cov_hint()
 
-    def _on_form_cov_dialog(self, *_):
-        """#3：弹『按逻辑类型覆盖度』对话框——4 个形态各设一档(跟随全局/精简/全面/穷举)。
-        改后存进会话档 self._form_cov，全量重析(影响该形态所有信号的用例数/导出/报告)。"""
-        from PySide6 import QtWidgets as Q
-        dlg = Q.QDialog(self)
-        dlg.setWindowTitle("按逻辑类型设覆盖度（#3）")
-        lay = Q.QFormLayout(dlg)
-        lay.addRow(Q.QLabel("覆盖方案据【展开后表达式形态】派发。优先级：本信号单点 > 此处形态 > 全局下拉。"))
-        opts = [("跟随全局", ""), ("精简", "min"), ("全面", "max"), ("穷举", "exhaustive")]
-        forms = [("register", "直连寄存器(F0)"), ("boolean", "布尔/位运算(F1)"),
-                 ("select", "选路(F2)"), ("gated", "门控(F3/F4)")]
-        combos = {}
-        for key, label in forms:
-            cb = Q.QComboBox()
-            for lab, data in opts:
-                cb.addItem(lab, data)
-            cur = self._form_cov.get(key, "")
-            i = cb.findData(cur)
-            cb.setCurrentIndex(i if i >= 0 else 0)
-            combos[key] = cb
-            lay.addRow(label, cb)
-        bb = Q.QDialogButtonBox(Q.QDialogButtonBox.Ok | Q.QDialogButtonBox.Cancel)
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
-        lay.addRow(bb)
-        if dlg.exec() != Q.QDialog.Accepted:
+    def _on_form_cov_changed(self, *_):
+        """#3：『覆盖度·按逻辑类型』功能区任一形态档变更 → 重建会话档 self._form_cov + 全量重析
+        (形态覆盖影响该形态所有信号的用例数/导出/报告)。优先级：本信号单点 > 此处形态 > 全局下拉。"""
+        if not getattr(self, "_form_cov_combos", None):
             return
-        self._form_cov = {k: cb.currentData() for k, cb in combos.items() if cb.currentData()}
+        self._form_cov = {k: cb.currentData() for k, cb in self._form_cov_combos.items()
+                          if cb.currentData()}
         _cur = self.cur_name                     # 重建清单会清 cur_name，先存
         self.refresh()                           # 全量重建清单：形态覆盖影响一批信号的用例数
         if _cur and _cur not in self.edits:      # 当前信号未编辑 → 按新形态档重载真值表
             real = next((m["name"] for m in self.models if m["name"].lower() == _cur), None)
             if real:
                 self._load_signal(real)
-        n = len(self._form_cov)
-        self.main.status.showMessage("已设 %d 个逻辑类型的覆盖度（#3）" % n if n
-                                     else "已清空逻辑类型覆盖度（全跟随全局）")
 
     def _cols_from_vectors(self, an):
         cols = []
