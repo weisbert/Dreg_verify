@@ -545,8 +545,11 @@ tr.neg{background:#fff3f3} tr.err{background:#ffe9e9}
 .tt tr.exprow th,.tt tr.exprow td{font-weight:600;border-top:2px solid #999}
 .tt td.drv{font-family:Consolas,monospace;font-size:11px;text-align:left;color:#555}
 /* 屏幕外的真值表块跳过布局/绘制：一页几十张表，窗口缩放/滚动只算可见的几张，不再全量重排。
-   contain-intrinsic-size 给屏外块占位高度(auto=记住实测值)，滚动条稳定。检查切换的重排也跟着变轻。 */
-.ttblock{margin-bottom:6px;content-visibility:auto;contain-intrinsic-size:auto 320px}
+   contain-intrinsic-size 给屏外块占位高度(auto=记住实测值)，滚动条稳定。检查切换的重排也跟着变轻。
+   overflow-x:auto + max-width:100% = 转置真值表用例为列、穷举可达上百列时【本块内左右滚动】，
+   不把整页撑宽(此前无横向滚动条、超宽表被截断看不全)。每块独立滚动，与窗口化懒渲染不冲突。 */
+.ttblock{margin-bottom:6px;content-visibility:auto;contain-intrinsic-size:auto 320px;
+ overflow-x:auto;max-width:100%}
 .ex{color:#888} code{background:#f5f5f5;padding:0 3px}
 pre.chain{background:#f4f8ff;border:1px solid #d4e0f5;border-radius:4px;padding:8px 10px;
  font-family:Consolas,monospace;font-size:12px;color:#234;margin:6px 0 2px;overflow-x:auto}
