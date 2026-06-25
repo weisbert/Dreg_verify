@@ -422,6 +422,15 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     grp, expansion, mode=mux_gen.coverage_mode(mode, exhaustive),
                     max_tests=max_tests, data_overrides=(mux_data or None))
                 res.bindings = expansion.get("bindings", {})
+                # M1（缝A 第三分支）：dft 门控的 mux 输出补 iddq DFT 拍 + 把门当显式输入——与 build mux
+                # 循环(generator.build:1380/1383)【完全同口径】(同 obs 键、不传 input_bases)，使 res.vectors
+                # ==.sv 的 mux 块向量。此前 MUX 分支从不调 → GUI 真表少一列、n_vectors 与 .sv 差 1(刚修
+                # iddq bug 的第三个未修分支，logic/register 早已补)。无门时两调用均 no-op。
+                obs = getattr(root, "dft_obs_name", None) or grp.out_base.lower()
+                _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver)
+                if _skip:
+                    res.meta["iddq_skipped"] = _skip
+                res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver)
         except cone.ConeError as ex:
             res.status = "error"
             res.issues.append("mux 展开失败: %s" % ex)
@@ -627,24 +636,36 @@ def _register_report_table(result):
     used = E.collect_vars(result.node)
     out_w = result.out_width or 1
     slc = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+    # m2：iddq 门作只读输入行（门在向量 extra_forces、不在 cone groups）——HTML/CSV/for_test 都带上，
+    # 与 logic 根报告同口径(generator._report_core 的门行)。无门(gate=None)→ 不加、逐字节同 M7 原表。
+    gate = getattr(result, "dft_gate", None)
+    inputs = [G._input_meta(g, result.bindings) for g in groups]
+    if gate:
+        gb = gate[0]
+        inputs.append({"label": gb.base, "letters": "dft门", "base": gb.base, "kind": "RO",
+                       "ro": True, "addr": None, "reg_lsb": None, "reg_msb": None,
+                       "slice_lsb": None, "slice_msb": None, "wire": gb.wire, "width": 1})
     tests = []
     for vec in result.vectors:
         bv = V.vector_to_base_values(vec, groups)
         _forces, writes, _unres = W.compute_drives(vec, result.bindings, used)
+        vals = [G._fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups]
+        raw = [bv.get(g["key"], 0) for g in groups]
+        if gate:                                    # 门值：功能拍=透传值、DFT 拍=force 的常量支值
+            gv = (1 - gate[1]) if getattr(vec, "dft_pitch", False) else gate[1]
+            vals.append(G._fmt_cell(gv, 1)); raw.append(gv)
         tests.append({
-            "name": W.test_label(vec), "neg": vec.is_negative,
-            "values": [G._fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups],
+            "name": W.test_label(vec), "neg": vec.is_negative, "values": vals,
             "auto_out": G._fmt_cell(vec.exp_value, vec.exp_width),
             "expected": G._fmt_cell(vec.asserted_value, vec.exp_width),
             # for_test 回填字段(M7)：raw=逐输入整数、writes=compute_drives 权威 RF_WRITE、exp_num=断言期望
-            "raw": [bv.get(g["key"], 0) for g in groups],
-            "writes": writes, "exp_num": vec.asserted_value,
+            "raw": raw, "writes": writes, "exp_num": vec.asserted_value,
         })
     return {
         "R": "", "signal": _topout_disp_name(result.topo, result.out_width),
         "owner": result.topo.owner, "type": REGISTER, "expr": "",
         "is_logic": True, "out_width": out_w, "chain": [], "supplement": "",
-        "inputs": [G._input_meta(g, result.bindings) for g in groups], "tests": tests,
+        "inputs": inputs, "tests": tests,
         "auto_label": "auto_out%s" % slc, "exp_label": "期望(out)%s" % slc,
         "topout_name": result.topo.name,
     }

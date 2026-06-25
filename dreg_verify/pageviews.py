@@ -77,6 +77,7 @@ class PageResult:
         self.vectors = []
         self.meta = {}
         self.chain = []                 # 页本地无 cone → 恒空(显示链=单行原式代入)
+        self.dft_gate = None            # M2：钉上的 iddq 门 (binding, 透传值)——供 GUI 门输入行显示
         self.status = "ok"              # ok / error
         self.issues = []
         self.note = ""
@@ -104,6 +105,17 @@ def analyze_logiclike(wb, resolver, sig, mode="min", max_tests=256, exhaustive=F
             res.vectors, res.meta = V.generate_vectors(
                 node, bindings, sig.out_width, mode=mode, max_tests=max_tests,
                 exhaustive=exhaustive)
+            # M2（缝A 页视图分支）：dft 门控的页输出补 iddq DFT 拍 + 门当显式输入——与 build_page_sv 的
+            # .sv(走 G.build 的 logic 循环)【同口径】(obs=out_base、传 input_bases 去重)，否则页子视图真表
+            # 少门行/列、与同页 .sv 矛盾。input_bases 关键：dft/iddq 页本行表达式已含门(B 是输入)时
+            # 自动去重 no-op、不双钉；logic 页门在【独立 dft 页】不在本式 → 正常钉。
+            obs = sig.out_base.lower()
+            _ib = {b.base.lower() for b in bindings.values()
+                   if b is not None and getattr(b, "base", None)}
+            _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
+            if _skip:
+                res.meta["iddq_skipped"] = _skip
+            res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
     except E.ExprError as ex:
         res.status = "error"
         res.issues.append("表达式解析/求值失败: %s" % ex)
@@ -130,6 +142,14 @@ def analyze_mux(wb, resolver, grp, mode="min", max_tests=256, exhaustive=False,
             mux_mode = mux_gen.coverage_mode(mode, exhaustive)
             res.vectors, res.meta = mux_gen.make_mux_vectors(
                 grp, exp, mode=mux_mode, max_tests=max_tests)
+            # M2（缝A，mux 页分支——审计原文只列 logic/dft/iddq 页，但同理 mux 页也漏）：dft 门控的 mux
+            # 组补 iddq DFT 拍 + 门当显式输入，与 build_page_sv(走 G.build 的 mux 循环 generator:1380/1383)
+            # 【完全同口径】(grp.out_base、不传 input_bases)，否则 mux 页真表与同页 .sv 差一列。无门 no-op。
+            obs = grp.out_base.lower()
+            _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver)
+            if _skip:
+                res.meta["iddq_skipped"] = _skip
+            res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver)
     except Exception as ex:    # noqa: BLE001 —— 护栏3：永不抛
         res.status = "error"
         res.issues.append("mux 分析异常: %r" % ex)

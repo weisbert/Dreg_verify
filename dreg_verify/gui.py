@@ -472,6 +472,11 @@ def _norm_page_result(res):
     an["editable"] = "" if res.status != "ok" else (
         "logic" if res.kind == "logic" else ("mux" if res.kind == "mux" else ""))
     an["renamed"] = False               # 页本地子视图无 dft 改名根（每行就是本页声明名）
+    # M2：钉上的 iddq DFT 门 → 真值表只读输入行（与 Topout 视图 _norm_topout_result 同口径，门在向量
+    # extra_forces 里、不在 cone groups，否则页子视图真表看不见门、与同页 .sv 不一致）。
+    g = getattr(res, "dft_gate", None)
+    an["dft_gate"] = ({"key": "__dft_gate__", "label": g[0].base, "wire_lhs": g[0].wire_lhs,
+                       "transp": int(g[1]), "width": 1} if g else None)
     return an
 
 

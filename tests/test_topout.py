@@ -188,6 +188,23 @@ def test_wl_topout_all_analyze_no_unresolved(wl_wb, wl_res):
     assert all(r.status == "ok" for r in results)
 
 
+def test_wl_gated_mux_analyze_pins_iddq_matches_sv(wl_wb, wl_res):
+    """M1（缝A 第三分支）：dft 门控的 mux 根 analyze 补 iddq DFT 拍 + dft_gate——res.vectors 与 .sv
+    的 mux 块逐数对齐（此前 MUX 分支从不 pin → GUI 真表少一列、n_vectors 与 .sv 差 1）。"""
+    name = "d_wl_rf_lo2g5g_mixer2g_trim"
+    topo = next(t for t in wl_wb.topout if t.name == name)
+    r = T.analyze_signal(wl_wb, wl_res, topo, mode="max", exhaustive=True)
+    assert r.root.kind == T.MUX and r.dft_gate is not None      # 门已钉、供 GUI 门输入行显示
+    # analyze res.vectors 数 == build 出的 .sv mux 块 n_vectors
+    b = T.build_for_topout(wl_wb, mode="max", exhaustive=True)
+    sv_n = next(st["n_vectors"] for ln, st in b["blocks"] if st.get("topout_name") == name)
+    assert len(r.vectors) == sv_n
+    assert any(getattr(v, "dft_pitch", False) for v in r.vectors)  # DFT 拍在内
+    # 视图模型 n_vectors 同样对上（GUI 左清单不再与 .sv 矛盾）
+    vm = next(m for m in T.topout_view_models(wl_wb, mode="max", exhaustive=True) if m["name"] == name)
+    assert vm["n_vectors"] == sv_n
+
+
 def test_wl_lo2g5g_cross_boundary_expansion(wl_wb, wl_res):
     """lo2g5g_bias_en：logic←mux 跨边界展开——mux B(logen_mixer_en) 拆成 {选择+local+line}，
     端到端到源寄存器（对齐 make_mirror_excel 注释『VBA 6 输入』；iddq 门在 build 期另加）。"""
@@ -571,6 +588,25 @@ def test_report_for_topout_includes_register_tables_for_fortest(wb, res):
     t = reg[0]
     assert t["is_logic"] and t["type"] == T.REGISTER
     assert t["tests"] and all(("raw" in x and "writes" in x and "exp_num" in x) for x in t["tests"])
+
+
+def test_register_report_table_includes_iddq_gate_row(wb, res):
+    """m2：门控直连寄存器根的报告表/HTML/for_test 含 iddq 门输入行（此前 _register_report_table 不读
+    result.dft_gate）。手工给 register result 钉一个真实 RO iddq 门，验证表加门行 + 逐拍门值。"""
+    topo = next(t for t in wb.topout if t.name == "clk_force_on")
+    r = T.analyze_signal(wb, res, topo, mode="max")
+    assert r.root.kind == T.REGISTER
+    info = {"raw": "d_bt_lp_pll_dig_dft_iddq_mode", "base": "d_bt_lp_pll_dig_dft_iddq_mode",
+            "width": 1, "msb": None, "lsb": None}
+    gb = res.resolve("dft_gate_x", info)
+    assert gb.resolved and gb.kind == "RO"
+    r.dft_gate = (gb, 0)                              # 钉门，透传值 transp=0
+    tbl = T._register_report_table(r)
+    labels = [i["label"] for i in tbl["inputs"]]
+    assert "d_bt_lp_pll_dig_dft_iddq_mode" in labels         # 门作输入行
+    grow = next(i for i in tbl["inputs"] if i["label"] == "d_bt_lp_pll_dig_dft_iddq_mode")
+    assert grow["ro"] and grow["addr"] is None
+    assert all(t["raw"][-1] == 0 for t in tbl["tests"] if not t.get("neg"))  # 功能拍门=透传 0
 
 
 def test_topout_fortest_rows_backfills_register_root(wb, res):

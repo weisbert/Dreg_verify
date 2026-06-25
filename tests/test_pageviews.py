@@ -34,6 +34,34 @@ def wb(mirror):
     return M.load_workbook(mirror)
 
 
+@pytest.fixture(scope="module")
+def wl_wb(tmp_path_factory):
+    import make_mirror_excel
+    p = tmp_path_factory.mktemp("pvwl") / "mirror_wl_dreg.xlsx"
+    make_mirror_excel.build(str(p))
+    return M.load_workbook(str(p))
+
+
+# ───────────── M2（缝A）：页本地子视图 iddq 门 + DFT 拍，与同页 build_page_sv 的 .sv 同口径 ─────────────
+def test_logic_page_gated_output_pins_iddq(wl_wb):
+    """M2：logic 页门控输出(门在独立 dft 页)→ analyze_logiclike 补 iddq DFT 拍 + dft_gate，页真表
+    与同页 .sv 不再矛盾（此前页视图漏门、build_page_sv 的 .sv 含门）。"""
+    res = P.analyze_all(wl_wb, "logic", mode="max", exhaustive=True)
+    gated = [r for r in res if r.dft_gate is not None]
+    assert gated, "WL logic 页应有门控输出(d_wl_rf_lo2g5g_bias_en 等)"
+    r = next(r for r in res if r.name == "d_wl_rf_lo2g5g_bias_en")
+    assert r.dft_gate is not None
+    assert any(getattr(v, "dft_pitch", False) for v in r.vectors)
+
+
+def test_page_view_totals_match_page_sv_for_gated(wl_wb):
+    """M2：门控页(logic/dft) page 视图向量总数 == 同页 build_page_sv 的 .sv 总数（口径一致）。"""
+    for page in ("logic", "dft"):
+        vtot = sum(m["n_vectors"] for m in P.page_view_models(wl_wb, page, mode="max", exhaustive=True))
+        _txt, b = P.build_page_sv(wl_wb, page, mode="max", exhaustive=True)
+        assert vtot == b["summary"]["n_vectors"], page
+
+
 # ───────────── dft/iddq 页按行读 ─────────────
 def test_dft_rows_read_as_logic_signals(wb):
     names = [s.out_name for s in wb.dft_rows]
