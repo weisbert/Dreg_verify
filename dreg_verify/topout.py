@@ -319,10 +319,12 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                 res.vectors, res.meta = V.generate_vectors(
                     node, bindings, sig.out_width, mode=mode, max_tests=max_tests,
                     exhaustive=exhaustive)
-                # dft 改名根途经带门(iddq)观测层：门控(B?0:A)不在 logic 表达式里、在 dft 观测层，
-                # 按 dft 观测名(非 logic out_base)把 iddq 叠成显式输入(每条向量 force 透传值)+补 DFT 拍，
-                # 与 generator.build 对 logic 同口径（key 改用 dft_obs_name）。无门时此段是 no-op。
-                obs = getattr(root, "dft_obs_name", None)
+                # dft 门控的 logic 输出：把门(iddq)叠成显式输入(每条向量 force 透传值)+补 DFT 拍。
+                # 门键 = dft_obs_name(改名桥接途经的带门观测层) **或** 本 logic 行自己的 out_base
+                # ——后者修『_ls 经 level_shift 直接命中 logic 行(不走桥)→dft_obs_name=None，而该 logic
+                # out_base 本身就是 dft 页门控观测(d_en_vco_fc 类)→analyze 漏门、与 generator.build/report
+                # (按 out_base 钉门)不一致』(2026-06-25 实证 d_en_vco_fc_ls)。无门时 pin/append 均 no-op。
+                obs = getattr(root, "dft_obs_name", None) or sig.out_base.lower()
                 if obs:
                     _ib = {b.base.lower() for b in bindings.values()
                            if b is not None and getattr(b, "base", None)}

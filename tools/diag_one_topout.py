@@ -309,9 +309,37 @@ def main(path, signal, extras=None):
     print(" · 把整段贴回给 Claude 一起核对判断。")
 
 
+def _run_to_file(path, signal, extras):
+    """把整段诊断写到文件（terminal 太长不好复制——2026-06-25 用户要求）。
+    输出文件 = diag_<信号名>.txt（信号名里的非字母数字换成 _）放当前目录，stdout 只打印一行路径。
+    用 `--stdout` 作最后一个参数则照旧打印到终端。"""
+    import re as _re
+    to_stdout = extras and extras[-1] == "--stdout"
+    if to_stdout:
+        extras = extras[:-1]
+    if to_stdout:
+        main(path, signal, extras)
+        return
+    safe = _re.sub(r"[^0-9A-Za-z_]+", "_", signal).strip("_") or "signal"
+    out = "diag_%s.txt" % safe
+    import io
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        main(path, signal, extras)
+    finally:
+        sys.stdout = old
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(buf.getvalue())
+    print("✅ 诊断已写入: %s" % os.path.abspath(out))
+    print("   （不再刷屏；直接打开该文件，或把文件发回。想看终端输出则末尾加 --stdout）")
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("用法: python tools/diag_one_topout.py 真表.xlsx 信号名 [额外名1 额外名2 …]")
-        print("例:   python tools/diag_one_topout.py Hi1108_Pilot_BT_LP_DREG_95P_20260623.xlsx d_vco_en_faston_ls")
+        print("用法: python tools/diag_one_topout.py 真表.xlsx 信号名 [额外名1 额外名2 …] [--stdout]")
+        print("  默认写到 diag_<信号名>.txt（不刷屏）；末尾加 --stdout 则打印到终端。")
+        print("例:   .venv\\Scripts\\python.exe tools/diag_one_topout.py 真表.xlsx d_en_vco_fc_ls d_bt_lp_pll_dig_dft_iddq_mode fll_active")
         sys.exit(1)
-    main(sys.argv[1], sys.argv[2], sys.argv[3:])
+    _run_to_file(sys.argv[1], sys.argv[2], sys.argv[3:])

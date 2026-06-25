@@ -407,6 +407,48 @@ def build(path):
     return path
 
 
+def build_dft_gated_ls(path):
+    """变体夹具(2026-06-25)：在 mirror 基础上加 `d_en_vco_fc` 结构 —— 一个 logic 输出，**同时**
+    在 dft 页被 iddq 门控观测(E=B?0:A)，并经 level_shift 出顶层口 `d_en_vco_fc_ls`。
+
+    复刻真表 d_en_vco_fc_ls：Topout 名(_ls)经 level_shift 直接命中 logic 行(不走 dft 桥)→
+    resolve_root 的 dft_obs_name=None，但该 logic out_base(d_en_vco_fc)本身是 dft 门控观测。
+    用于回归『analyze_signal 漏 iddq 门、与 generator.build/report 不一致』的修复。
+    返回 path。"""
+    from openpyxl import load_workbook as _load
+    from openpyxl.utils import column_index_from_string as _ci
+    build(path)
+    wb = _load(path)
+
+    def _row(ws, d):
+        r = ws.max_row + 1
+        for col, val in d.items():
+            ws.cell(row=r, column=_ci(col), value=val)
+        return r
+
+    # logic: d_en_vco_fc = A?C:B（A=fc_sel B=en_vco_fc(reg) C=faston）M=to_dft N=0 R=95
+    _row(wb["logic"], {"A": "d_vco_fc_sel_to_logic[2]", "B": "d_en_vco_fc_to_logic",
+                       "C": "d_vco_en_faston_to_logic", "K": "d_en_vco_fc", "L": "A?C:B",
+                       "M": "to_dft", "N": 0, "O": "vco fc eco", "P": "Yao Wang", "R": 95})
+    # dft: 门控观测 D=d_en_vco_fc E=B?0:A B=iddq 门
+    _row(wb["dft"], {"A": "d_en_vco_fc_to_dft", "B": "d_bt_lp_pll_dig_dft_iddq_mode_to_dft",
+                     "D": "d_en_vco_fc", "E": "B?0:A", "F": "16", "H": "Yao Wang"})
+    # level_shift: d_en_vco_fc_to_ls -> d_en_vco_fc_ls
+    _row(wb["level_shift"], {"A": "d_en_vco_fc_to_ls", "B": "STD_SR_L2H",
+                             "C": "d_en_vco_fc_ls", "E": 1, "F": "Yao Wang",
+                             "G": "d_en_vco_fc_to_ls"})
+    # regmap: fc_sel / en_vco_fc / faston（RW）—— iddq_mode 已在 mirror(RO)
+    for sig, addr in (("d_vco_fc_sel", 19), ("d_en_vco_fc", 22), ("d_vco_en_faston", 24)):
+        r = _row(wb["regmap"], {"D": sig.upper(), "F": "RW", "G": sig, "H": "d%d" % addr,
+                                "Z": "to_logic", "AB": 0, "AE": "Yao Wang"})
+        wb["regmap"].cell(row=r, column=column_index_from_string("Y"), value=1)   # bit0
+    # Topout: d_en_vco_fc_ls
+    _row(wb["Topout"], {"A": "Yao Wang", "B": "d_en_vco_fc_ls", "C": "readro_reg_43",
+                        "G": "16'd0"})
+    wb.save(path)
+    return path
+
+
 def _fill_fortest_header(ft):
     _set(ft, 2, {"A": "case", "B": "输入寄存器地址", "C": "value", "D": "待验证输出信号", "E": "预计输出",
                  "F": "验证信号的输入信号", "G": "Signal Value(bin)", "H": "Reg(dec)", "I": "Addr",

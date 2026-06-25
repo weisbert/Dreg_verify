@@ -381,6 +381,32 @@ def test_collect_nets_topout_page(wb):
     assert len(rtl_scan.collect_nets(wb)) >= len(only_topo)
 
 
+@pytest.fixture(scope="module")
+def gated_ls_wb(tmp_path_factory):
+    p = tmp_path_factory.mktemp("gatedls") / "mirror_gated_ls.xlsx"
+    make_mirror_btlp.build_dft_gated_ls(str(p))
+    return M.load_workbook(str(p))
+
+
+def test_analyze_signal_pins_iddq_for_dft_gated_logic_via_ls(gated_ls_wb):
+    """⭐2026-06-25：`d_en_vco_fc_ls` 经 level_shift 直接命中 logic 行(不走 dft 桥)→ dft_obs_name=None，
+    但该 logic out_base(d_en_vco_fc)本身是 dft 页门控观测 → analyze_signal 曾漏 iddq 门、与
+    generator.build/report(按 out_base 钉门)不一致(.sv/GUI 富表都有、analyze 没有)。修后三路一致。"""
+    wb = gated_ls_wb
+    assert "d_en_vco_fc" in (wb.dft or {})                        # logic out_base 是 dft 门控观测
+    root = T.resolve_root(wb, "d_en_vco_fc_ls")
+    assert root.kind == "logic" and getattr(root, "dft_obs_name", None) is None  # 触发条件
+    topo = next(t for t in wb.topout if t.name == "d_en_vco_fc_ls")
+    res = T.analyze_signal(wb, R.Resolver(wb), topo, root=root)
+    ef = {tup[0] for v in res.vectors for tup in (getattr(v, "extra_forces", None) or [])}
+    assert any("d_bt_lp_pll_dig_dft_iddq_mode" in w for w in ef)  # iddq 门已钉(修复点)
+    # 三路一致：analyze / GUI 富表 / .sv 都含 iddq
+    vm = next(m for m in T.topout_view_models(wb) if m["name"] == "d_en_vco_fc_ls")
+    assert any("iddq" in (i.get("base", "") or "").lower() for i in vm["inputs"])
+    sv, _ = T.render_topout_sv(wb, only=["d_en_vco_fc_ls"], max_tests=8)
+    assert "d_bt_lp_pll_dig_dft_iddq_mode" in sv
+
+
 def test_topout_view_models_carry_probe_prefix(wb):
     """⭐2026-06-25：Topout 视图模型带 probe_net + prefix（GUI『探针前缀』列数据源）——
     配了前缀的信号 prefix 非空、没配的为空；寄存器直连根按 topo 名查前缀。"""
