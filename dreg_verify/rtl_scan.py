@@ -227,6 +227,48 @@ def collect_topout_nets(wb, signals=None):
     return nets
 
 
+def collect_page_nets(wb, page, signals=None):
+    """某一子模块页(logic/mux/dft/iddq) → 该页【每个信号】的 assert 探针网 + force 输入网。
+
+    与 GUI『排查(旧)』里该页视图同口径(pageviews.analyze_all，force 级联=只看本页输入输出)：
+      · 探针网 = 每行/每组输出 rtl_base（assert LHS）
+      · force 输入网 = 解析成 RO(force) 的叶子衔接网（force 路径）
+    这补齐 collect_excel_nets/mux/dft 各自没覆盖到的页：**dft 观测输出探针 / iddq 行**——
+    保证『每个子模块 tab 页都能单独导出它那批网』（功能完整，2026-06-25）。
+
+    signals(可选过滤)：只导这些信号(按 out_base)的网；None=全导。
+    页不存在 / 任何异常 → 返回空 dict，绝不波及其它页。
+    """
+    nets = {}
+    want = _sig_filter(signals)
+    try:
+        from . import pageviews as P
+        if page not in P.PAGES:
+            return {}
+        for r in P.analyze_all(wb, page, want_vectors=False):
+            sig = r.sig
+            ob = (getattr(sig, "out_base", "") or "").lower()
+            if want is not None and ob not in want:
+                continue
+            try:                                   # 探针网(assert LHS)；logic 形态用默认尾缀找 RTL 真名
+                if page in ("logic", "dft", "iddq"):
+                    sig._append_to_logic = True
+                probe = getattr(sig, "rtl_base", None)
+            except Exception:  # noqa: BLE001
+                probe = None
+            if probe and re.match(r"^[A-Za-z_]\w*$", probe):
+                nets.setdefault(probe, "%s 页 输出 %s 的 assert 探针" % (page, sig.out_name))
+            for b in (r.bindings or {}).values():  # force 输入网(RO 叶子)
+                if getattr(b, "kind", None) == "RO":
+                    base = str(getattr(b, "wire", "") or "").split(".")[-1]
+                    if base and re.match(r"^[A-Za-z_]\w*$", base):
+                        nets.setdefault(base, "%s 页 输出 %s 的输入 %s (force)"
+                                        % (page, sig.out_name, getattr(b, "base", base)))
+    except Exception:  # noqa: BLE001  无该页 / 解析层异常 → 空，绝不波及其它页
+        return {}
+    return nets
+
+
 def filter_nets_by_dest(nets, dest_suffix):
     """按【目的地后缀】过滤网集合（C3，Q3 后缀规则）：只保留网名以 `_<dest_suffix>` 结尾的。
 
@@ -245,29 +287,36 @@ def collect_nets(wb, signals=None, pages=None, dest_suffix=None):
     """统一【可选过滤】网导出（C3 块D2，2026-06-23）：合并 logic/mux/dft 三页网，按需过滤。
 
     signals    — 只导这些信号(out_base/G 列基名/dft 输出基名/Topout 名)的网；None=全部。
-    pages      — 取这些页：{'topout','logic','mux','dft'} 的子集；None=四页全取。
+    pages      — 取这些类别：{'topout','logic','mux','dft','iddq'} 的子集；None=全取。
+                 = GUI『导出 nets.txt』里的 5 个勾选类别(Topout + 四个子模块 tab 页)。
     dest_suffix— 只留以 `_<dest_suffix>` 结尾的衔接网(同源多目的地时选一页)；None=不按后缀过滤。
 
-    返回 {网名: 用途}。Topout 页(2026-06-25)= 每个可验证 Topout 信号的 assert 探针网，含
-    寄存器/dft 直连根(logic/mux/dft 三页都遍历不到的那批) —— 勾选『仅 Topout』即只导这批。
+    返回 {网名: 用途}。每个子模块页(logic/mux/dft/iddq)= 该页每个信号的探针网 + force 输入；
+    Topout 页 = 每个可验证 Topout 信号的探针网(含寄存器/dft 直连根，三子模块页遍历不到的那批)。
     旧全导调用方(collect_excel_nets() 无参)逐字节不变；本函数是新增叠加层。"""
     want_pages = None if pages is None else {str(p).strip().lower() for p in pages}
 
     def _on(p):
         return want_pages is None or p in want_pages
 
+    def _merge(d):
+        for k, v in d.items():
+            nets.setdefault(k, v)
+
     nets = {}
-    if _on("logic"):
+    if _on("logic"):                     # logic 页：cone+force 并集(旧口径) + 页本地探针/force
         nets.update(collect_excel_nets(wb, signals=signals))
-    if _on("mux"):
-        for k, v in collect_mux_nets(wb, signals=signals).items():
-            nets.setdefault(k, v)
-    if _on("dft"):
-        for k, v in collect_dft_nets(wb, signals=signals).items():
-            nets.setdefault(k, v)
-    if _on("topout"):                    # Topout 探针网(寄存器/dft 直连根的探针在此补齐)
-        for k, v in collect_topout_nets(wb, signals=signals).items():
-            nets.setdefault(k, v)
+        _merge(collect_page_nets(wb, "logic", signals=signals))
+    if _on("mux"):                       # mux 页：输出/控制/数据(旧口径) + 页本地
+        _merge(collect_mux_nets(wb, signals=signals))
+        _merge(collect_page_nets(wb, "mux", signals=signals))
+    if _on("dft"):                       # dft 页：iddq 门网 + 观测输出探针/DFT 接线网
+        _merge(collect_dft_nets(wb, signals=signals))
+        _merge(collect_page_nets(wb, "dft", signals=signals))
+    if _on("iddq"):                      # iddq 页：漏电门控输出探针 + 输入网
+        _merge(collect_page_nets(wb, "iddq", signals=signals))
+    if _on("topout"):                    # Topout：寄存器/dft 直连根的探针在此补齐
+        _merge(collect_topout_nets(wb, signals=signals))
     return filter_nets_by_dest(nets, dest_suffix)
 
 

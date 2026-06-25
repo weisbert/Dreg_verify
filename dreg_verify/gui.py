@@ -3664,33 +3664,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("探针前缀映射已更新（共 %d 条），影响 %d 个信号"
                                 "（见蓝色『探针前缀』列；状态列应变 clean）" % (len(mapping), affected))
 
-    # nets.txt 类别 → (复选框标题, 提示)。Topout=寄存器/dft 直连根探针只在此导得到。
-    _NETS_PAGE_ROWS = [
-        ("topout", "Topout 信号探针网（含寄存器 / dft 直连根）",
-         "每个可验证 Topout 信号的 assert 探针网。寄存器直连根(如 aac_ctf_bit_sel)和 dft 改名根\n"
-         "只在这里导得到——logic/mux/dft 三页都遍历不到它们(老 nets.txt 整类漏掉=仿真 CUVUNF\n"
-         "且无提示)。只勾这一个 = 只导 Topout 那批探针网。"),
-        ("logic", "Logic 页（探针 + force 输入）",
-         "logic 行输出探针 + 两种级联模式(cone/force)的 force 输入网。"),
-        ("mux", "Mux 页（输出 / 控制 / 数据网）", "mux 组输出探针 + 控制衔接网 + case 数据网。"),
-        ("dft", "IDDQ 门网（dft 页）", "IDDQ 漏电态拍的 force 门网 + _to_dft 衔接网。"),
-    ]
-    _NETS_PAGE_LABEL = {"topout": "Topout", "logic": "logic", "mux": "mux", "dft": "iddq"}
+    # nets.txt 导出类别 → (复选框标题, 提示)。键 = rtl_scan.collect_nets 的 page。
+    # 顺序 = Topout(门面) + 四个子模块 tab 页(pageviews.PAGES)，与 GUI 顶层标签一一对应。
+    _NETS_CAT_INFO = {
+        "topout": ("Topout 信号探针网（含寄存器 / dft 直连根）",
+                   "每个可验证 Topout 信号的 assert 探针网。寄存器直连根(如 aac_ctf_bit_sel)和 dft\n"
+                   "改名根只在这里导得到——四个子模块页都遍历不到它们(老 nets.txt 整类漏掉=仿真\n"
+                   "CUVUNF 且无提示)。只勾这个 = 只导 Topout 那批探针网。"),
+        "logic": ("logic 页（探针 + force 输入）",
+                  "logic 行输出探针 + 两种级联(cone/force)的 force 输入网 + 页本地探针。"),
+        "mux": ("mux 页（输出 / 控制 / 数据网）", "mux 组输出探针 + 控制衔接网 + case 数据网。"),
+        "dft": ("dft 页（观测输出探针 + DFT 接线 + iddq 门网）",
+                "dft 行观测输出探针 + DFT 接线/force 网 + IDDQ 漏电态拍的门网。"),
+        "iddq": ("iddq 页（漏电门控输出 + 输入网）", "iddq 行输出探针 + 其输入 force 网。"),
+    }
+
+    def _nets_categories(self):
+        """当前表【有内容】的导出类别(键)：Topout(有 Topout 页) + 四子模块页中可用的那些。
+        与 GUI 顶层 tab 一一对应——空页不出现在导出框里(空页导出也是空，无意义)。"""
+        cats = []
+        if getattr(self.wb, "topout", None):
+            cats.append("topout")
+        try:
+            from . import pageviews as P
+            cats += [p for p in P.PAGES if P.page_available(self.wb, p)]
+        except Exception:  # noqa: BLE001
+            cats += ["logic", "mux", "dft", "iddq"]
+        return cats
 
     def _ask_nets_pages(self):
-        """导出 nets.txt 前选要导哪些类别的网（2026-06-25）。返回 page 集合
-        (⊆ {'topout','logic','mux','dft'}) 或 None(取消/没勾)。记住上次勾选，下次预选。"""
+        """导出 nets.txt 前选要导哪些类别的网（2026-06-25）。类别 = Topout + 所有【有内容】的
+        子模块 tab 页(logic/mux/dft/iddq)，全覆盖、功能完整。返回 page 集合或 None(取消/没勾)。
+        记住上次勾选，下次预选。"""
+        cats = self._nets_categories()
+        if not cats:
+            QtWidgets.QMessageBox.information(self, "无可导类别", "当前表没有可导出的网类别。")
+            return None
         st = _load_settings()
         last = st.get("nets_pages")
         if not isinstance(last, list) or not last:
-            last = ["topout", "logic", "mux", "dft"]      # 默认全勾(超集，宁多勿漏)
+            last = list(cats)                         # 默认全勾(超集，宁多勿漏)
         last = {str(p).strip().lower() for p in last}
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("导出 nets.txt — 选类别")
         lay = QtWidgets.QVBoxLayout(dlg)
-        lay.addWidget(QtWidgets.QLabel("勾选要导出哪些类别的网（去重并集）："))
+        lay.addWidget(QtWidgets.QLabel("勾选要导出哪些类别的网（每类对应一个顶层 tab，去重并集）："))
         checks = {}
-        for key, label, tip in self._NETS_PAGE_ROWS:
+        for key in cats:
+            label, tip = self._NETS_CAT_INFO.get(key, (key, ""))
             cb = QtWidgets.QCheckBox(label)
             cb.setToolTip(tip)
             cb.setChecked(key in last)
@@ -3749,7 +3770,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
-        brk = " · ".join("%s %d" % (self._NETS_PAGE_LABEL.get(p, p), per[p]) for p in sorted(per))
+        brk = " · ".join("%s %d" % (p, per[p]) for p in sorted(per))
         QtWidgets.QMessageBox.information(
             self, "已导出 nets.txt",
             "共 %d 个网已写出（%s，去重并集）：\n%s\n\n"

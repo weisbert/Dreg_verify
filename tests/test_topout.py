@@ -381,6 +381,24 @@ def test_collect_nets_topout_page(wb):
     assert len(rtl_scan.collect_nets(wb)) >= len(only_topo)
 
 
+def test_collect_page_nets_covers_dft_and_all_pages(wb):
+    """⭐2026-06-25：collect_page_nets 按子模块页(logic/mux/dft/iddq)收探针+force 网，与 GUI
+    各 tab 同口径——dft 页现在含【观测输出探针】(老 collect_dft_nets 只收 iddq 门网)；
+    未知/空页 → 空 dict 不抛；全类别并集 = 5 个 tab 都覆盖(功能完整)。"""
+    import dreg_verify.pageviews as P
+    dft_page = rtl_scan.collect_page_nets(wb, "dft")
+    assert dft_page                                          # dft 观测输出探针 + 接线网
+    # dft 类别 ⊇ 老 iddq 门网口径(额外补了观测输出探针)
+    assert set(rtl_scan.collect_dft_nets(wb)) <= set(rtl_scan.collect_nets(wb, pages=["dft"]))
+    assert rtl_scan.collect_page_nets(wb, "nonexist") == {}  # 未知页 → 空，不抛
+    for pg in P.PAGES:                                       # 每个子模块页都返回 dict、不抛
+        assert isinstance(rtl_scan.collect_page_nets(wb, pg), dict)
+    # 全类别并集 ⊇ 单页；且涵盖 Topout + 四子模块页
+    alln = rtl_scan.collect_nets(wb)
+    assert len(alln) >= len(dft_page)
+    assert "clk_force_on" in alln                            # Topout 寄存器根也在并集里
+
+
 def test_filter_nets_by_dest_helper():
     """C3：filter_nets_by_dest 容 'to_dft' 与 '_to_dft' 两种写法，空后缀原样返回。"""
     nets = {"a_to_dft": "x", "b_to_iddq": "y", "c": "z"}

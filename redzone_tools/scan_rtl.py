@@ -253,7 +253,11 @@ def render_prefix_file(prefixes, at_top, missing, top_module=""):
 
 # ───────────────────────────── CLI ─────────────────────────────
 def _load_excel_nets(excel_path):
-    """从 Excel 抽取需要定位的网（需要 dreg_verify 包 + openpyxl，只在 Windows 工具机用）。"""
+    """从 Excel 抽取需要定位的网（需要 dreg_verify 包 + openpyxl，只在 Windows 工具机用）。
+
+    取【全类别】并集 = GUI『导出 nets.txt』全勾同口径：Topout + 四个子模块页(logic/mux/dft/iddq)。
+    （2026-06-25：以前固定 logic+mux+dft、漏掉 Topout 寄存器/dft 直连根 + iddq 页 + dft 观测输出探针。）
+    """
     # 本脚本在 redzone_tools/ 下 → 仓库根(含 dreg_verify 包)是上一级
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
@@ -262,38 +266,21 @@ def _load_excel_nets(excel_path):
         sys.exit("⛔ --excel 需要 dreg_verify 包和 openpyxl（服务器上请改用 --nets 模式）：%s" % ex)
     print("装载 Excel: %s ..." % excel_path)
     wb = excel_model.load_workbook(excel_path)
-    nets = rtl_scan.collect_excel_nets(wb)
-    # mux 页的网（2026-06-03：mux 验证环境核查）——从已装载的 wb 取，mux 页不存在时为空，纯 logic 流程不受影响
-    mux_nets = rtl_scan.collect_mux_nets(wb)
-    added = 0
-    for name, why in mux_nets.items():
-        if name not in nets:
-            nets[name] = why
-            added += 1
-    if mux_nets:
-        print("✓ mux 页: 发现 %d 个相关网，新增导出 %d 个（输出探针 + 控制衔接网 + 数据网）"
-              % (len(mux_nets), added))
-    # dft 页的 iddq 门网（2026-06-10）——IDDQ 漏电态拍的 force 目标，漏导则门埋子模块时 CUVUNF
-    dft_nets = rtl_scan.collect_dft_nets(wb)
-    added_dft = 0
-    for name, why in dft_nets.items():
-        if name not in nets:
-            nets[name] = why
-            added_dft += 1
-    if dft_nets:
-        print("✓ dft 页: 发现 %d 个 iddq 门网，新增导出 %d 个（IDDQ 漏电态拍 force 目标）"
-              % (len(dft_nets), added_dft))
-    # Topout 探针网（2026-06-25）——寄存器/dft 直连根的 assert 探针(如 aac_ctf_bit_sel)，
-    # logic/mux/dft 三页都遍历不到，漏导则这些信号埋子模块时 CUVUNF 且无提示。
-    topo_nets = rtl_scan.collect_topout_nets(wb)
-    added_topo = 0
-    for name, why in topo_nets.items():
-        if name not in nets:
-            nets[name] = why
-            added_topo += 1
-    if topo_nets:
-        print("✓ Topout 页: %d 个信号探针网，新增导出 %d 个（寄存器/dft 直连根 assert 探针）"
-              % (len(topo_nets), added_topo))
+    nets = rtl_scan.collect_nets(wb)                 # 全类别去重并集
+    try:                                             # 分类计数（信息提示）
+        from dreg_verify import pageviews as _P
+        cats = ["topout"] + list(_P.PAGES)
+    except Exception:  # noqa: BLE001
+        cats = ["topout", "logic", "mux", "dft", "iddq"]
+    parts = []
+    for c in cats:
+        try:
+            n = len(rtl_scan.collect_nets(wb, pages=[c]))
+            if n:
+                parts.append("%s %d" % (c, n))
+        except Exception:  # noqa: BLE001
+            pass
+    print("✓ 网清单: 共 %d 个网（%s，去重并集）" % (len(nets), " · ".join(parts)))
     return nets
 
 
