@@ -280,6 +280,7 @@ class TopoutResult:
         self.vectors = []                # 真值表向量
         self.meta = {}                   # generate_vectors meta
         self.expansion = None            # mux 根：expand_mux_group 结果
+        self.dft_gate = None             # 钉上的 iddq 门 (binding, 透传值) 或 None——供 GUI 显示门输入行
         self.status = "ok"               # ok / skip / unresolved / error
         self.note = root.note
         self.issues = []                 # 解析/展开问题
@@ -331,7 +332,7 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
                     if _skip:
                         res.meta["iddq_skipped"] = _skip
-                    G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
+                    res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
         except (cone.ConeError, E.ExprError) as ex:
             res.status = "error"
             res.issues.append("cone 展开失败: %s" % ex)
@@ -380,7 +381,7 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
                     if _skip:
                         res.meta["iddq_skipped"] = _skip
-                    G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
+                    res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
         except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛
             res.status = "error"
             res.issues.append("分析异常: %r" % ex)

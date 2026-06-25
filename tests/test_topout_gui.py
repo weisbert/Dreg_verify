@@ -327,6 +327,26 @@ def test_topout_export_nets_topout_only_includes_register_roots(topo_win, tmp_pa
     assert not out2.exists()
 
 
+def test_topout_truth_table_shows_iddq_gate_row(gui_app, tmp_path):
+    """⭐2026-06-25：dft 门控 logic(经 level_shift 直接命中 logic 行)的 iddq 门，GUI 真值表里要
+    看得见(只读行)——门在向量 extra_forces 里、不是 cone 输入，曾在真值表缺失(与 .sv/报告不一致)。"""
+    from dreg_verify import gui as G
+    p = tmp_path / "gated_ls.xlsx"
+    make_mirror_btlp.build_dft_gated_ls(str(p))
+    w = G.MainWindow(); w.path_edit.setText(str(p)); w.on_load()
+    try:
+        sv = w.topout_view
+        sv._load_signal("d_en_vco_fc_ls")
+        gates = [e for e in sv.e_inputs if e.get("is_dft_gate")]
+        assert len(gates) == 1 and gates[0]["label"] == "d_bt_lp_pll_dig_dft_iddq_mode"
+        labels = [e["label"] for e in sv.e_inputs]
+        assert "d_bt_lp_pll_dig_dft_iddq_mode" in labels       # 真值表竖表头看得见门
+        vals = [c["vals"].get(gates[0]["key"]) for c in sv.cur_cols]
+        assert vals[-1] == 1 and set(vals[:-1]) == {0}         # 功能拍=0 透传、末尾 DFT 拍=1
+    finally:
+        w.close()
+
+
 def test_topout_signal_list_shows_probe_prefix_column(topo_win):
     """⭐2026-06-25：Topout 信号清单加『探针前缀』列——配了前缀的信号显示前缀、没配为空；
     改前缀后即时刷新。解决用户『配了探针但 Topout 视图看不见 prefix 情况』。"""

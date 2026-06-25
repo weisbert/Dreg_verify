@@ -452,6 +452,11 @@ def _norm_topout_result(res):
     an["editable"] = "" if res.status != "ok" else (
         "logic" if kind in ("logic", "register") else ("mux" if kind == "mux" else ""))
     an["renamed"] = bool(getattr(res.root, "renamed", False))   # dft 改名根：编辑走 reg 路按顶层名键
+    # 钉上的 iddq DFT 门 → 真值表只读输入行（门在向量 extra_forces 里、不在 cone groups，
+    # 否则 GUI 真值表看不见这根门，与 .sv/报告不一致，2026-06-25 d_en_vco_fc_ls 实证）
+    g = getattr(res, "dft_gate", None)
+    an["dft_gate"] = ({"key": "__dft_gate__", "label": g[0].base, "wire_lhs": g[0].wire_lhs,
+                       "transp": int(g[1]), "width": 1} if g else None)
     return an
 
 
@@ -1172,6 +1177,12 @@ class SignalView(QtWidgets.QWidget):
                 self.e_inputs.append({"key": k, "label": lbl, "width": b.width,
                                       "editable": False, "control": role == "ctrl",
                                       "mux_data_base": (b.base.lower() if role == "data" else None)})
+        # iddq DFT 门：只读输入行（门在向量 extra_forces 里、不是 cone 输入，否则真值表看不见它）
+        gate = an.get("dft_gate")
+        if gate:
+            self.e_inputs.append({"key": gate["key"], "label": gate["label"], "width": gate["width"],
+                                  "editable": False, "control": False, "is_dft_gate": True,
+                                  "wire_lhs": gate["wire_lhs"], "transp": gate["transp"]})
         # 列模型
         if self.cur_name in self.edits:
             self.cur_cols = self.edits[self.cur_name]["cols"]
@@ -1220,6 +1231,13 @@ class SignalView(QtWidgets.QWidget):
             else:
                 bv = V.vector_to_base_values(vec, groups)
                 vals = {g["key"]: bv.get(g["key"], 0) for g in groups}
+            gate = an.get("dft_gate")            # iddq 门值：本向量 extra_forces 里 force 的值(功能拍=透传,DFT 拍=1)
+            if gate:
+                gv = gate["transp"]
+                for (wl, wv, _ww) in (getattr(vec, "extra_forces", None) or []):
+                    if wl == gate["wire_lhs"]:
+                        gv = wv
+                vals[gate["key"]] = gv
             neg = vec.is_negative
             exp = (vec.asserted_value if neg
                    else (vec.designer_expected if vec.designer_expected is not None else None))
@@ -1313,6 +1331,10 @@ class SignalView(QtWidgets.QWidget):
                 if not row_editable:
                     it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
                     it.setForeground(QtGui.QColor("#555555"))
+                if e.get("is_dft_gate"):           # iddq DFT 门行：紫字 + 提示，区别于 cone 输入
+                    it.setForeground(QtGui.QColor("#7c3aed"))
+                    it.setToolTip("iddq DFT 门（只读）：功能拍 force 透传值 %d，末尾 DFT 拍 force 1 验常量支。\n"
+                                  "门在向量 force 路径里(不是真值表自由输入)，与 .sv/报告同口径。" % e.get("transp", 0))
                 elif is_mux and e.get("mux_data_base"):
                     it.setForeground(QtGui.QColor("#1558d6"))   # 蓝=mux 数据行可手填
                 tbl.setItem(i, j, it)
