@@ -105,6 +105,8 @@ def main(path, signal, extras=None):
     print("   源名 source   = %s" % root.source_name)
     print("   探针名 probe  = %s   (None=用源对象自身名)" % root.probe_name)
     print("   reg_kind      = %s" % root.reg_kind)
+    print("   dft_obs_name  = %s   (≠None=途经带 iddq 门的 dft 观测层 → analyze 应据它把 iddq 门钉成输入)"
+          % getattr(root, "dft_obs_name", None))
     print("   note          = %s" % root.note)
 
     # ── ⑤ 若是直连寄存器：dump 字段 bit_msb/bit_lsb/地址/类型，核对位宽 ──
@@ -140,6 +142,46 @@ def main(path, signal, extras=None):
                 print("      [!] %s" % s)
         else:
             print("      （无）")
+        # cone 直接绑定的输入基名（注意：pin_dft_gate 钉的 iddq 门在【向量 extra_forces】里、不在 bindings）
+        ibases = sorted({(getattr(b, "base", "") or "").lower()
+                         for b in (res.bindings or {}).values() if b is not None})
+        print("   cone bindings 输入基名(%d): %s" % (len(ibases), ", ".join(ibases) or "(无)"))
+        if res.meta.get("iddq_skipped"):
+            print("   [!] meta.iddq_skipped = %s" % res.meta["iddq_skipped"])
+
+        # ── ⑥b dft 门(iddq)钉入实情：精确定位「为什么 iddq 门漏了」 ──
+        print("\n=== ⑥b dft 门(iddq)钉入实情（排查漏门：dft_obs_name / wb.dft / 门 resolve / 向量 force）===")
+        obs = getattr(root, "dft_obs_name", None)
+        print("   root.dft_obs_name = %r   (None → 不会调 pin_dft_gate → iddq 必漏)" % obs)
+        dft = getattr(wb, "dft", None) or {}
+        print("   wb.dft 共 %d 个被门控观测输出；以下逐个核对【dft_obs_name + 改名链每跳】是否门控:" % len(dft))
+        to_check = []
+        if obs:
+            to_check.append(obs.lower())
+        for h in chain:
+            if h not in to_check:
+                to_check.append(h)
+        for h in to_check:
+            g = dft.get(h)
+            if g is None:
+                print("     · wb.dft[%r] = None（此名在 dft 页不是被 iddq 门控的观测输出）" % h)
+                continue
+            gb = g.get("gate_base")
+            print("     · wb.dft[%r]: gate_base=%r gate_raw=%r transparent=%r"
+                  % (h, gb, g.get("gate_raw"), g.get("transparent")))
+            info = {"raw": gb, "base": gb, "width": 1, "msb": None, "lsb": None}
+            try:
+                gbnd = resolver.resolve("dft_gate_" + str(gb), info)
+                print("       门 %r resolve → resolved=%s kind=%s (需 RO 才能 pin)  note=%s"
+                      % (gb, gbnd.resolved, getattr(gbnd, "kind", None), getattr(gbnd, "note", "")))
+            except Exception as ex:   # noqa: BLE001
+                print("       门 resolve 异常: %r" % ex)
+        ef = set()
+        for v in res.vectors:
+            for tup in (getattr(v, "extra_forces", None) or []):
+                ef.add(tup[0])
+        print("   向量里实际钉上的 extra_force 网（iddq 门若钉成功=在这里）: %s"
+              % (", ".join(sorted(ef)) or "(无)"))
 
     # ── ⑦ 这个信号在各结构页的所有原始行 ──
     print("\n=== ⑦ 它(及其源名/额外名)在各结构页的【原始行】===")
