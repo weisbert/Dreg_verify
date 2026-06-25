@@ -576,6 +576,23 @@ def _sel(w, name):
     return w.topout_view
 
 
+def test_form_cov_flows_through_gui_provider(topo_win):
+    """#3：SignalView._form_cov 经 provider 传到 topout API——设 select=穷举后【选路】信号清单用例数升档、
+    非 select 不变（GUI 端到端验 per-form 覆盖度生效）。"""
+    v = topo_win.topout_view
+    v._form_cov = {}
+    v.refresh()
+    base = {m["name"]: (m["form"], m["n_vectors"]) for m in v.models}
+    sel = [n for n, (f, _) in base.items() if f == "select"]
+    assert sel, "应有选路形态信号"
+    v._form_cov = {"select": "exhaustive"}
+    v.refresh()
+    after = {m["name"]: m["n_vectors"] for m in v.models}
+    assert any(after[n] > base[n][1] for n in sel)            # 至少一个 select 升档
+    nonsel = [n for n, (f, _) in base.items() if f and f != "select"]
+    assert all(after[n] == base[n][1] for n in nonsel)         # 非 select 不受影响
+
+
 def test_logic_view_input_order_matches_report_fortest(topo_win):
     """m4：GUI 可编辑真表 logic 输入行序 == report/HTML/for_test 的寄存器地址序——单一行序，不再两套
     (此前 GUI 用 Excel 原始序、导出用 for_test 序 → 人工核对/截图错位)。"""

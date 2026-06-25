@@ -494,24 +494,54 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
     return res
 
 
-def _cov_for(sig_cov, name, mode, exhaustive):
-    """单点覆盖度(R25)：sig_cov[name_low]∈{min,max,exhaustive} 命中则压全局，返回 (mode, exhaustive)；
-    不命中=跟随全局。Topout 单点档按【Topout 名】键，会话内临时档（GUI 不存盘，见 R25 教训）。"""
+def _form_cov_key(shape):
+    """覆盖度 per-form 档的【形态键】(#3)：F3/F4→'gated'(不分内层)，否则 F0/F1/F2 的 kind
+    (register/boolean/select)。shape=None→None(无法定形态、跟随全局)。"""
+    if shape is None:
+        return None
+    return "gated" if shape.kind == FORMS.GATED else shape.kind
+
+
+def _effective_cov_str(sig_cov, form_cov, shape, name):
+    """该信号的有效覆盖档字符串(min/max/exhaustive)或 None(跟随全局)。优先级(#3)：
+    单点 sig_cov[Topout名] > per-form form_cov[形态键] > 全局(返回 None)。"""
     c = (sig_cov or {}).get(str(name).lower())
     if c in ("min", "max", "exhaustive"):
+        return c
+    if form_cov and shape is not None:
+        fc = (form_cov or {}).get(_form_cov_key(shape))
+        if fc in ("min", "max", "exhaustive"):
+            return fc
+    return None
+
+
+def _cov_for(sig_cov, name, mode, exhaustive, form_cov=None, shape=None):
+    """单点/形态覆盖度(R25 + #3)：单点 sig_cov[名] > per-form form_cov[形态] > 全局。命中则压全局，
+    返回 (mode, exhaustive)；都不命中=跟随全局(mode,exhaustive)。Topout 单点档按【Topout 名】键。"""
+    c = _effective_cov_str(sig_cov, form_cov, shape, name)
+    if c:
         return G._decompose_cov(c)
     return mode, exhaustive
 
 
 def analyze_all(wb, resolver, mode="min", max_tests=256, exhaustive=False,
-                want_vectors=True, sig_cov=None):
+                want_vectors=True, sig_cov=None, form_cov=None):
     """对 wb.topout 全清单逐信号分析。返回 list[TopoutResult]（外层枚举源=Topout B 列）。
-    sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，命中则该信号压全局档（N3）。"""
+    sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，命中则该信号压全局档（N3）。
+    form_cov(#3)：per-form 覆盖度 {形态键(register/boolean/select/gated): 档}，介于单点与全局之间。
+    配了 form_cov 时先 want_vectors=False 定形态、据形态选档再出向量(opt-in 双趟；无 form_cov→单趟、逐字节不变)。"""
     logic_idx, mux_idx = build_index(wb)
     rename = _rename_map(wb)            # 合并改名表(dft+level_shift)，一次建好，逐信号复用
+    shapes = {}
+    if form_cov and want_vectors:      # 仅配了 per-form 才先定形态(无则不引入额外开销)
+        for topo in wb.topout:
+            root = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
+            r0 = analyze_signal(wb, resolver, topo, root=root, want_vectors=False)
+            shapes[topo.name.lower()] = result_form(wb, r0)
     out = []
     for topo in wb.topout:
-        m, ex = _cov_for(sig_cov, topo.name, mode, exhaustive)
+        m, ex = _cov_for(sig_cov, topo.name, mode, exhaustive,
+                         form_cov=form_cov, shape=shapes.get(topo.name.lower()))
         root = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
         out.append(analyze_signal(wb, resolver, topo, root=root, mode=m,
                                   max_tests=max_tests, exhaustive=ex,
@@ -615,7 +645,7 @@ def _topo_for(blk):
 
 
 # ───────────────────────────── 块B：Topout 报告/账目路径（只新增） ─────────────────────────────
-def compose_topout_account(wb, resolver, mode="min", max_tests=256, exhaustive=False):
+def compose_topout_account(wb, resolver, mode="min", max_tests=256, exhaustive=False, form_cov=None):
     """以 **Topout B 列为外层循环** 的报告/账目路径（块B，2026-06-23，只新增，不碰旧 generator.report）。
 
     owner 直接取 Topout A 列（免 join 回 logic/mux）。返回 {'rows':[…], 'summary':{…}}。
@@ -627,7 +657,7 @@ def compose_topout_account(wb, resolver, mode="min", max_tests=256, exhaustive=F
       ③ for_test 回填含 mux：见 topout_fortest_rows(include_mux=True)。
     """
     results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests,
-                          exhaustive=exhaustive)
+                          exhaustive=exhaustive, form_cov=form_cov)
     rows = []
     for r in results:
         rows.append({
@@ -646,7 +676,7 @@ def compose_topout_account(wb, resolver, mode="min", max_tests=256, exhaustive=F
     # 把『RW 写值截断假绿 / regmap 重名 / 补充偏离』全漏报。复用 build_for_topout 的警告通道补三独立列。
     pp = getattr(resolver, "wire_prefixes", None)
     _bs = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                           probe_prefixes=pp)["summary"]
+                           probe_prefixes=pp, form_cov=form_cov)["summary"]
     summary = {
         "n_total": len(rows),
         "n_ok": by_status.get("ok", 0),
@@ -726,7 +756,7 @@ def _register_report_table(result):
 def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
                       probe_prefixes=None, only=None, sig_cov=None,
                       neg_all=False, neg_signals=None, neg_which="first",
-                      neg_mode="invert", neg_value=None):
+                      neg_mode="invert", neg_value=None, form_cov=None):
     """生成【限定到 Topout 清单】的报告(复用 generator.report，再按 Topout B 列名过滤 tables/detail)。
 
     新模型『要验什么』只在 Topout——旧 report 枚举全 logic/mux，这里只保留 Topout 命中的表，
@@ -734,14 +764,22 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
     probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径，让 GUI 富表/for_test 回填也带前缀）。
     only：限定只保留这些 Topout 名（GUI 勾选项过滤；None=全部，与 .sv 导出 only 同口径，N6）。
     sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，映成源名键喂 generator.report（N3）。
-    neg_*(m1)：全局/批量负向——logic/mux 经 G.report、register 经 add_negatives，让报告与 .sv 同口径。"""
+    neg_*(m1)：全局/批量负向——logic/mux 经 G.report、register 经 add_negatives，让报告与 .sv 同口径。
+    form_cov(#3)：per-form 覆盖度（单点>form>全局）；配了则先 want_vectors=False 定形态再映档。"""
     from . import generator as G
     logic_idx, mux_idx = build_index(wb)
     rename = _rename_map(wb)
-    # 单点覆盖度：Topout 名 → 源对象 out_name（generator.report 按源名键 sig_cov），改名根用 resolve_root 求源。
+    # per-form 覆盖度需形态：配了 form_cov 才分析定形态(opt-in，无则不引入开销)
+    shape_of = {}
+    if form_cov:
+        for t in wb.topout:
+            rt = resolve_root(wb, t.name, logic_idx, mux_idx, rename=rename)
+            r0 = analyze_signal(wb, resolver, t, root=rt, want_vectors=False)
+            shape_of[t.name.lower()] = result_form(wb, r0)
+    # 单点 + per-form 覆盖度：映成源名键喂 generator.report，改名根用 resolve_root 求源。
     gen_sig_cov = {}
     for t in wb.topout:
-        c = (sig_cov or {}).get(t.name.lower())
+        c = _effective_cov_str(sig_cov, form_cov, shape_of.get(t.name.lower()), t.name)
         if c in ("min", "max", "exhaustive"):
             rt = resolve_root(wb, t.name, logic_idx, mux_idx, rename=rename)
             if rt.kind in (LOGIC, MUX) and getattr(rt, "obj", None) is not None:
@@ -817,7 +855,8 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
         rt = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
         if rt.kind != REGISTER:
             continue
-        m, ex = _cov_for(sig_cov, topo.name, mode, exhaustive)
+        m, ex = _cov_for(sig_cov, topo.name, mode, exhaustive,
+                         form_cov=form_cov, shape=shape_of.get(topo.name.lower()))
         r = analyze_signal(wb, resolver, topo, root=rt, mode=m, max_tests=max_tests, exhaustive=ex)
         if r.status == "ok" and r.vectors:
             if _topout_neg_enabled(topo.name, neg_all, neg_signals):    # m1：register 报告也带负向
@@ -971,18 +1010,19 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
                      edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None,
                      logic_overrides=None, neg_all=False, neg_signals=None,
-                     neg_which="first", neg_mode="invert", neg_value=None):
+                     neg_which="first", neg_mode="invert", neg_value=None, form_cov=None):
     """Topout .sv 产出（公共入口）。logic_overrides(M8)：RTL 补充逻辑 {基名: spec}，分析期临时换
     wb.logic(应用补充)再产出、退出还原（守 R32）；无 → 逐字节不变。
     neg_all/neg_signals/neg_which/neg_mode/neg_value(m1)：全局/批量负向——logic/mux 根经 GenOptions、
-    register/dft 改名根经 add_negatives 补自检负向（此前 Topout 负向只能逐信号编辑）。详见 _core。"""
+    register/dft 改名根经 add_negatives 补自检负向（此前 Topout 负向只能逐信号编辑）。
+    form_cov(#3)：per-form 覆盖度 {形态键: 档}（单点>form>全局）。详见 _core。"""
     with _with_logic_overrides(wb, logic_overrides):
         return _build_for_topout_core(
             wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive, comments=comments,
             sv_summary=sv_summary, owner_in_msg=owner_in_msg, only=only,
             edit_overrides=edit_overrides, probe_prefixes=probe_prefixes, scope=scope,
             sig_cov=sig_cov, neg_all=neg_all, neg_signals=neg_signals,
-            neg_which=neg_which, neg_mode=neg_mode, neg_value=neg_value)
+            neg_which=neg_which, neg_mode=neg_mode, neg_value=neg_value, form_cov=form_cov)
 
 
 def _topout_neg_enabled(name, neg_all, neg_signals):
@@ -1024,7 +1064,7 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
                            comments=False, sv_summary=False, owner_in_msg=False, only=None,
                            edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None,
                            neg_all=False, neg_signals=None, neg_which="first",
-                           neg_mode="invert", neg_value=None):
+                           neg_mode="invert", neg_value=None, form_cov=None):
     """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
 
     · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
@@ -1051,7 +1091,7 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
     # 但 cone 叶子的 RO readback / iddq 门若埋子模块仍需前缀，否则 force `ENV_RF.<裸名> CUVUNF。
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
     results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                          sig_cov=sig_cov)
+                          sig_cov=sig_cov, form_cov=form_cov)
     only_low = {str(n).lower() for n in only} if only is not None else None
     if only_low is not None:
         results = [r for r in results if r.topo.name.lower() in only_low]
@@ -1065,7 +1105,8 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
         if r.status == "ok" and r.root.kind in (LOGIC, MUX) and not r.root.renamed:
             want_names.add(r.root.obj.out_name.lower())
             want_names.add(r.root.obj.out_base.lower())
-            c = (sig_cov or {}).get(r.topo.name.lower())
+            # 单点 + per-form 覆盖度都映成 generator.build 的源名键(.sv 与 analyze 同档，#3)
+            c = _effective_cov_str(sig_cov, form_cov, result_form(wb, r), r.topo.name)
             if c in ("min", "max", "exhaustive"):
                 gen_sig_cov[r.root.obj.out_name.lower()] = c
     if scope == "neg":
@@ -1226,15 +1267,15 @@ def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
                      edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None,
                      logic_overrides=None, neg_all=False, neg_signals=None,
-                     neg_which="first", neg_mode="invert", neg_value=None):
+                     neg_which="first", neg_mode="invert", neg_value=None, form_cov=None):
     """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。
-    logic_overrides(M8)/neg_*(m1)：透传 build_for_topout。"""
+    logic_overrides(M8)/neg_*(m1)/form_cov(#3)：透传 build_for_topout。"""
     b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                          comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
                          only=only, edit_overrides=edit_overrides, probe_prefixes=probe_prefixes,
                          scope=scope, sig_cov=sig_cov, logic_overrides=logic_overrides,
                          neg_all=neg_all, neg_signals=neg_signals, neg_which=neg_which,
-                         neg_mode=neg_mode, neg_value=neg_value)
+                         neg_mode=neg_mode, neg_value=neg_value, form_cov=form_cov)
     text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
     return text, b
 
@@ -1269,17 +1310,18 @@ def _topout_probe_net(r):
 
 
 def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                       sig_cov=None, logic_overrides=None):
+                       sig_cov=None, logic_overrides=None, form_cov=None):
     """每信号视图模型（公共入口）。logic_overrides(M8)：分析期临时换 wb.logic(应用 RTL 补充)，
-    使 GUI 真值表显示补充【后】逻辑（否则静默假绿）；无 → 逐字节不变。详见 _topout_view_models_core。"""
+    使 GUI 真值表显示补充【后】逻辑（否则静默假绿）；无 → 逐字节不变。
+    form_cov(#3)：per-form 覆盖度。详见 _topout_view_models_core。"""
     with _with_logic_overrides(wb, logic_overrides):
         return _topout_view_models_core(wb, mode=mode, max_tests=max_tests,
                                         exhaustive=exhaustive, probe_prefixes=probe_prefixes,
-                                        sig_cov=sig_cov)
+                                        sig_cov=sig_cov, form_cov=form_cov)
 
 
 def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                             sig_cov=None):
+                             sig_cov=None, form_cov=None):
     """每个 Topout 信号一个【视图模型】（GUI / 无头测试消费），按 Topout B 列序。
 
     干净 cone 默认（Topout 视图不放级联/尾缀/top_output——那些属『排查(旧)』）。
@@ -1293,9 +1335,9 @@ def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, pr
     from . import resolver as R
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
     results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                          sig_cov=sig_cov)
+                          sig_cov=sig_cov, form_cov=form_cov)
     rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                            probe_prefixes=probe_prefixes, sig_cov=sig_cov)
+                            probe_prefixes=probe_prefixes, sig_cov=sig_cov, form_cov=form_cov)
     tbl_by_topout = {}
     for t in rep.get("tables", []):
         nm = t.get("topout_name")
@@ -1363,20 +1405,21 @@ def _account_error_text(row):
 def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
                   only=None, sig_cov=None, logic_overrides=None,
                   neg_all=False, neg_signals=None, neg_which="first",
-                  neg_mode="invert", neg_value=None):
+                  neg_mode="invert", neg_value=None, form_cov=None):
     """Topout 限定报告（公共入口）。logic_overrides(M8)：分析期换 wb.logic(应用 RTL 补充)，使
     HTML/CSV 报告与 supplement banner 反映补充后逻辑；无 → 逐字节不变。
-    neg_*(m1)：全局/批量负向，报告 tables/汇总 n_neg 与 .sv 同口径。详见 _topout_report_core。"""
+    neg_*(m1)：全局/批量负向，报告 tables/汇总 n_neg 与 .sv 同口径。form_cov(#3)：per-form 覆盖度。
+    详见 _topout_report_core。"""
     with _with_logic_overrides(wb, logic_overrides):
         return _topout_report_core(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                    probe_prefixes=probe_prefixes, only=only, sig_cov=sig_cov,
                                    neg_all=neg_all, neg_signals=neg_signals, neg_which=neg_which,
-                                   neg_mode=neg_mode, neg_value=neg_value)
+                                   neg_mode=neg_mode, neg_value=neg_value, form_cov=form_cov)
 
 
 def _topout_report_core(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
                         only=None, sig_cov=None, neg_all=False, neg_signals=None,
-                        neg_which="first", neg_mode="invert", neg_value=None):
+                        neg_which="first", neg_mode="invert", neg_value=None, form_cov=None):
     """Topout 限定报告（write_report 兼容：summary/detail/tables/verifiability），堵 3 静默陷阱：
       ① 默认不空：summary 直接来自 compose_topout_account（12 行全分类，不套 top_output_only）；
       ② 不刷 top_out=0 假警告：error 列只放真原因（RO/未解析/冲突），无 bare-probe/needs-prefix 噪声；
@@ -1391,12 +1434,13 @@ def _topout_report_core(wb, mode="min", max_tests=256, exhaustive=False, probe_p
     rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                             probe_prefixes=probe_prefixes, only=only, sig_cov=sig_cov,
                             neg_all=neg_all, neg_signals=neg_signals, neg_which=neg_which,
-                            neg_mode=neg_mode, neg_value=neg_value)
-    acc = compose_topout_account(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
+                            neg_mode=neg_mode, neg_value=neg_value, form_cov=form_cov)
+    acc = compose_topout_account(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                 form_cov=form_cov)
     if only_low is not None:                # 账目/汇总/可验证性同样限定到勾选信号
         acc = dict(acc); acc["rows"] = [r for r in acc["rows"] if r["name"].lower() in only_low]
     vms = topout_view_models(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                             probe_prefixes=probe_prefixes, sig_cov=sig_cov)
+                             probe_prefixes=probe_prefixes, sig_cov=sig_cov, form_cov=form_cov)
     if only_low is not None:
         vms = [m for m in vms if m["name"].lower() in only_low]
 

@@ -551,12 +551,12 @@ class _TopoutProvider:
     def has_page(self):
         return bool(getattr(self.wb, "topout", None))
 
-    def view_models(self, mode, max_tests, exhaustive, sig_cov=None):
+    def view_models(self, mode, max_tests, exhaustive, sig_cov=None, form_cov=None):
         from . import topout as T
         with self._supplemented():
             return T.topout_view_models(self.wb, mode=mode, max_tests=max_tests,
                                         exhaustive=exhaustive, probe_prefixes=self._pp(),
-                                        sig_cov=sig_cov)
+                                        sig_cov=sig_cov, form_cov=form_cov)
 
     def analyze(self, name, mode, max_tests, exhaustive, mux_data=None):
         from . import topout as T
@@ -570,20 +570,22 @@ class _TopoutProvider:
             return _norm_topout_result(res, self.wb)      # m4：传 wb → 输入按 for_test 行序
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
-                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None):
+                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None, form_cov=None):
         from . import topout as T
         eo = _topout_edit_overrides(edited)
         with self._supplemented():
             return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                       comments=comments, sv_summary=sv_summary,
                                       owner_in_msg=owner_in_msg, only=only, edit_overrides=eo,
-                                      probe_prefixes=self._pp(), scope=scope, sig_cov=sig_cov)
+                                      probe_prefixes=self._pp(), scope=scope, sig_cov=sig_cov,
+                                      form_cov=form_cov)
 
-    def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None):
+    def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None, form_cov=None):
         from . import topout as T
         with self._supplemented():
             return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                   probe_prefixes=self._pp(), only=only, sig_cov=sig_cov)
+                                   probe_prefixes=self._pp(), only=only, sig_cov=sig_cov,
+                                   form_cov=form_cov)
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         from . import topout as T
@@ -685,7 +687,7 @@ class _PageProvider:
 
     supports_sig_cov = False           # 子视图(logic/mux/dft/iddq)暂不放单点覆盖度（N3 仅 Topout）
 
-    def view_models(self, mode, max_tests, exhaustive, sig_cov=None):
+    def view_models(self, mode, max_tests, exhaustive, sig_cov=None, form_cov=None):
         from . import pageviews as P
         return P.page_view_models(self.wb, self.page, mode=mode, max_tests=max_tests,
                                   exhaustive=exhaustive, probe_prefixes=self._pp())
@@ -700,14 +702,14 @@ class _PageProvider:
         return _norm_page_result(res, self.wb)            # m4：传 wb → 输入按 for_test 行序
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
-                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None):
+                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None, form_cov=None):
         from . import pageviews as P
         return P.build_page_sv(self.wb, self.page, mode=mode, max_tests=max_tests,
                                exhaustive=exhaustive, edit_overrides=_page_edit_overrides(edited),
                                only=only, comments=comments, sv_summary=sv_summary,
                                owner_in_msg=owner_in_msg, probe_prefixes=self._pp(), scope=scope)
 
-    def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None):
+    def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None, form_cov=None):
         from . import pageviews as P
         return P.page_report(self.wb, self.page, mode=mode, max_tests=max_tests,
                              exhaustive=exhaustive, probe_prefixes=self._pp(), only=only)
@@ -744,6 +746,9 @@ class SignalView(QtWidgets.QWidget):
         # 单点覆盖度(N3，R25)：name_low -> 'min'/'max'/'exhaustive'；不在=跟随全局。
         # ⚠ 仅【会话内】临时档：不存盘、不导出（否则上次留的单点档静默盖全局下拉，R25 实测 bug）。
         self._sig_cov = {}
+        # #3 per-form 覆盖度：形态键(register/boolean/select/gated) -> 档；介于全局与单点之间
+        # （优先级 单点>form>全局）。会话内临时档(同 sig_cov，不存盘以免静默盖全局)。
+        self._form_cov = {}
         # mux 数据值手填(N8/B2)：cur_name_low -> {"src":mux源名低,"name":顶层名,"data":{物理基名低:int}}。
         # 会话内（改后即在编辑器/预览/导出生效）；data_overrides 经 make_mux_vectors 整表同步。
         self._mux_data = {}
@@ -908,6 +913,12 @@ class SignalView(QtWidgets.QWidget):
                                           "『跟随全局』=不单设。会话内临时档：关 GUI 即忘、不存盘/不导出(R25 教训)。")
             self.sig_cov_combo.currentIndexChanged.connect(self._on_sig_cov_changed)
             eb.addWidget(self.sig_cov_combo)
+            # #3：按【逻辑类型】(展开后形态)设覆盖度——介于全局与单点之间(优先级 单点>形态>全局)
+            b_fc = QtWidgets.QPushButton("逻辑类型覆盖度…")
+            b_fc.setToolTip("按【逻辑类型】(直连寄存器/布尔/选路/门控)分别设覆盖档，压过全局、被本信号单点压过。\n"
+                            "覆盖方案据展开后表达式形态派发(#3)。会话内临时档。")
+            b_fc.clicked.connect(self._on_form_cov_dialog)
+            eb.addWidget(b_fc)
         ttv.addWidget(eb_box)
         self.truth = QtWidgets.QTableWidget(0, 0)
         self.main._mono(self.truth)
@@ -1007,7 +1018,8 @@ class SignalView(QtWidgets.QWidget):
         mode, exh = self._mode()
         self.built_key = (mode, exh, self._maxt())
         try:
-            self.models = self.provider.view_models(mode, self._maxt(), exh, sig_cov=self._sig_cov)
+            self.models = self.provider.view_models(mode, self._maxt(), exh,
+                                                    sig_cov=self._sig_cov, form_cov=self._form_cov)
         except Exception as ex:   # noqa: BLE001 —— 护栏3：绝不崩
             self.detail.setText("分析失败（已捕获，未崩）：%s" % ex)
             self._clear_detail()
@@ -1250,6 +1262,43 @@ class SignalView(QtWidgets.QWidget):
             self._load_signal(real)
         self._refresh_row_counts()
         self._update_cov_hint()
+
+    def _on_form_cov_dialog(self, *_):
+        """#3：弹『按逻辑类型覆盖度』对话框——4 个形态各设一档(跟随全局/精简/全面/穷举)。
+        改后存进会话档 self._form_cov，全量重析(影响该形态所有信号的用例数/导出/报告)。"""
+        from PySide6 import QtWidgets as Q
+        dlg = Q.QDialog(self)
+        dlg.setWindowTitle("按逻辑类型设覆盖度（#3）")
+        lay = Q.QFormLayout(dlg)
+        lay.addRow(Q.QLabel("覆盖方案据【展开后表达式形态】派发。优先级：本信号单点 > 此处形态 > 全局下拉。"))
+        opts = [("跟随全局", ""), ("精简", "min"), ("全面", "max"), ("穷举", "exhaustive")]
+        forms = [("register", "直连寄存器(F0)"), ("boolean", "布尔/位运算(F1)"),
+                 ("select", "选路(F2)"), ("gated", "门控(F3/F4)")]
+        combos = {}
+        for key, label in forms:
+            cb = Q.QComboBox()
+            for lab, data in opts:
+                cb.addItem(lab, data)
+            cur = self._form_cov.get(key, "")
+            i = cb.findData(cur)
+            cb.setCurrentIndex(i if i >= 0 else 0)
+            combos[key] = cb
+            lay.addRow(label, cb)
+        bb = Q.QDialogButtonBox(Q.QDialogButtonBox.Ok | Q.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addRow(bb)
+        if dlg.exec() != Q.QDialog.Accepted:
+            return
+        self._form_cov = {k: cb.currentData() for k, cb in combos.items() if cb.currentData()}
+        _cur = self.cur_name                     # 重建清单会清 cur_name，先存
+        self.refresh()                           # 全量重建清单：形态覆盖影响一批信号的用例数
+        if _cur and _cur not in self.edits:      # 当前信号未编辑 → 按新形态档重载真值表
+            real = next((m["name"] for m in self.models if m["name"].lower() == _cur), None)
+            if real:
+                self._load_signal(real)
+        n = len(self._form_cov)
+        self.main.status.showMessage("已设 %d 个逻辑类型的覆盖度（#3）" % n if n
+                                     else "已清空逻辑类型覆盖度（全跟随全局）")
 
     def _cols_from_vectors(self, an):
         cols = []
@@ -1993,7 +2042,7 @@ class SignalView(QtWidgets.QWidget):
         mode, exh = self._mode()
         only = self._checked_names() or None
         text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
-                                          sig_cov=self._sig_cov)
+                                          sig_cov=self._sig_cov, form_cov=self._form_cov)
         self.sv.setPlainText(text)
         self.inner.setCurrentIndex(1)
         s = b.get("summary", {})
@@ -2017,7 +2066,7 @@ class SignalView(QtWidgets.QWidget):
         text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
                                           comments=eo["comments"], sv_summary=eo["sv_summary"],
                                           owner_in_msg=eo["owner_in_msg"], scope=eo.get("scope", "all"),
-                                          sig_cov=self._sig_cov)
+                                          sig_cov=self._sig_cov, form_cov=self._form_cov)
         if not self.main._confirm_dup_labels(b):     # 重复 assert 标号(非法 SV) → 弹确认，别静默导出(N9)
             return
         with open(path, "w", encoding="utf-8") as f:
@@ -2037,7 +2086,8 @@ class SignalView(QtWidgets.QWidget):
         from . import cli
         mode, exh = self._mode()
         only = self._checked_names() or None          # 勾选项过滤（与 .sv 导出 only 同口径，N6）
-        rep = self.provider.render_report(mode, self._maxt(), exh, only=only, sig_cov=self._sig_cov)
+        rep = self.provider.render_report(mode, self._maxt(), exh, only=only,
+                                          sig_cov=self._sig_cov, form_cov=self._form_cov)
         written = cli.write_report(path, rep, self.main._loaded_excel_path or "")
         QtWidgets.QMessageBox.information(self, "已导出", "报告已导出：\n%s" % "\n".join(written))
 

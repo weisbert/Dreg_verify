@@ -211,6 +211,44 @@ def test_view_models_carry_form_label(wb):
     assert ms["d_bt_lp_lna_itrim"]["form_label"].startswith("选路")   # F2 mux
 
 
+def test_form_cov_overrides_per_form(wb):
+    """#3：per-form 覆盖度 form_cov={形态:档} 只压【该形态】信号，非该形态跟随全局。"""
+    base = {m["name"]: (m["form"], m["n_vectors"]) for m in T.topout_view_models(wb, mode="min")}
+    fc = {m["name"]: m["n_vectors"]
+          for m in T.topout_view_models(wb, mode="min", form_cov={"select": "exhaustive"})}
+    for n, (form, nv0) in base.items():
+        if form == "select":
+            assert fc[n] >= nv0                       # select 形态升档(穷举)
+        else:
+            assert fc[n] == nv0                       # 其余不受影响
+    assert any(fc[n] > base[n][1] for n, (f, _) in base.items() if f == "select")  # 确有变化
+
+
+def test_form_cov_default_byte_identical(wb):
+    """#3：form_cov=None/空(默认)→ 与无 form_cov 完全一致(opt-in，无开销、逐字节不变)。"""
+    a = {m["name"]: m["n_vectors"] for m in T.topout_view_models(wb, mode="min")}
+    b = {m["name"]: m["n_vectors"] for m in T.topout_view_models(wb, mode="min", form_cov={})}
+    assert a == b
+
+
+def test_form_cov_precedence_sig_over_form(wb):
+    """#3：优先级 单点 sig_cov > per-form form_cov > 全局。单点 min 压过 form select=exhaustive。"""
+    target = "d_logic_bt_lp_lna_agc"                  # select 形态
+    base_min = {m["name"]: m["n_vectors"] for m in T.topout_view_models(wb, mode="min")}
+    fc = {m["name"]: m["n_vectors"] for m in T.topout_view_models(
+        wb, mode="max", form_cov={"select": "exhaustive"}, sig_cov={target.lower(): "min"})}
+    assert fc[target] == base_min[target]             # 单点 min 压过 form exhaustive
+
+
+def test_form_cov_sv_matches_view(wb):
+    """#3：.sv 与 view 同档（gen_sig_cov 映了 form_cov）——select=exhaustive 时 .sv 块向量数==view。"""
+    vm = {m["name"]: m["n_vectors"]
+          for m in T.topout_view_models(wb, mode="min", form_cov={"select": "exhaustive"})}
+    b = T.build_for_topout(wb, mode="min", form_cov={"select": "exhaustive"})
+    sv = {st.get("topout_name"): st.get("n_vectors") for ln, st in b["blocks"]}
+    assert sv["d_logic_bt_lp_lna_agc"] == vm["d_logic_bt_lp_lna_agc"]
+
+
 def test_view_models_gated_form_label(wl_wb):
     """#2：门控信号 form_label=门控·<内层>(F3/F4)。"""
     ms = {m["name"]: m for m in T.topout_view_models(wl_wb, mode="min", max_tests=8)}
