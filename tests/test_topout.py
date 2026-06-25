@@ -575,6 +575,56 @@ def test_passthrough_block_injects_block_top_warning_and_claims(wb):
     assert any(c["kind"] == "probe" and c["found_in"] == "topout" for c in claims)
 
 
+# M8：Topout 路径 logic_overrides（RTL 补充逻辑）——给 lna_agc 套一级 iddq 旁路 ECO（真表只到 DREG）。
+_M8_SUPP = {"d_logic_bt_lp_lna_agc": {
+    "enabled": True,
+    "note": "Topout M8 测试：ECO 顶层口加一级 iddq 旁路",
+    "expr": "EXTRA ? 3'b0 : (A ? C : B)",
+    "inputs": [
+        {"var": "EXTRA", "raw": "d_bt_lp_pll_dig_dft_iddq_mode"},
+        {"var": "A", "raw": "d_bt_lp_linelocal_mode_ctrl_to_logic"},
+        {"var": "B", "raw": "d_bt_lp_linectrl_lna_agc_to_logic[2:0]"},
+        {"var": "C", "raw": "d_bt_lp_local_lna_agc_to_logic[2:0]"},
+    ],
+}}
+
+
+def test_topout_logic_overrides_supplements_sv_and_view(wb):
+    """M8：Topout 路径接 logic_overrides——补充式被扫成真值表(ECO 新维度 EXTRA)、.sv 块顶 // ⚠ 手工补充、
+    summary n_supplement>0；无 override 时 n_supplement==0（防『真值表静默显示补充前旧逻辑』假绿）。"""
+    from dreg_verify import sv_writer as W
+    # 基线：无 override
+    b0 = T.build_for_topout(wb, mode="max")
+    assert b0["summary"]["n_supplement"] == 0
+    vm0 = next(m for m in T.topout_view_models(wb, mode="max")
+               if m["name"] == "d_logic_bt_lp_lna_agc")
+    labels0 = {i["label"] for i in vm0["inputs"]}
+    assert "d_bt_lp_pll_dig_dft_iddq_mode" not in labels0
+
+    # 套 RTL 补充
+    b = T.build_for_topout(wb, mode="max", logic_overrides=_M8_SUPP)
+    assert b["summary"]["n_supplement"] == 1
+    assert any(nm.startswith("d_logic_bt_lp_lna_agc") for nm, _a, _w in b["supplement_warnings"])
+    blk = next(ln for ln, st in b["blocks"]
+               if str(st.get("topout_name", "")).startswith("d_logic_bt_lp_lna_agc"))
+    assert blk[0].startswith("// ⚠") and "手工补充" in blk[0]
+    assert "iddq 旁路" in blk[0]                      # note 进块顶
+    # 视图模型：ECO 新输入 EXTRA(iddq) 进真值表维度（否则 GUI 显示补充前逻辑=静默假绿）
+    vm = next(m for m in T.topout_view_models(wb, mode="max", logic_overrides=_M8_SUPP)
+              if m["name"] == "d_logic_bt_lp_lna_agc")
+    assert "d_bt_lp_pll_dig_dft_iddq_mode" in {i["label"] for i in vm["inputs"]}
+
+
+def test_topout_logic_overrides_does_not_mutate_wb(wb):
+    """M8 守 R32：logic_overrides 用后 wb.logic 还原原对象（不原地改、不污染后续无 override 调用）。"""
+    before = list(wb.logic)
+    T.build_for_topout(wb, mode="min", logic_overrides=_M8_SUPP)
+    T.topout_view_models(wb, mode="min", logic_overrides=_M8_SUPP)
+    T.topout_report(wb, mode="min", logic_overrides=_M8_SUPP)
+    assert wb.logic is not None and list(wb.logic) == before
+    assert T.build_for_topout(wb, mode="min")["summary"]["n_supplement"] == 0
+
+
 def test_build_for_topout_ro_unresolved_accounted_not_dropped(wb):
     """护栏3：RO 回读 / 未解析在 .sv 里【优雅记账】（块顶注释 + accounted 列表），绝不静默丢、不崩。"""
     from dreg_verify import sv_writer as W

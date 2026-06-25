@@ -16,12 +16,32 @@ topout.py — 【Topout-rooted】验证引擎（新模型，2026-06-23 起，add
 不重写跨页展开；旧路径(generator 的 build/report 迭代 wb.logic/wb.mux)一字不动。
 """
 
+import contextlib
+
 from . import cone
 from . import expr as E
 from . import generator as G
 from . import mux_gen
 from . import sv_writer as W
 from . import vectors as V
+
+
+@contextlib.contextmanager
+def _with_logic_overrides(wb, logic_overrides):
+    """Topout 分析期临时把 wb.logic 换成【应用 RTL 补充后】的 logic 列表(M8)，退出还原（守 R32 不原地改）。
+
+    analyze_all/build_index/resolve_root 都据 wb.logic 建索引、定根，故 RTL 补充必须在【建索引前】换进去，
+    否则根仍指向补充前旧对象 → Topout 真值表显示补充前逻辑（静默假绿，M8 症状）。无 override →
+    yield 原 wb.logic、逐字节不变。嵌套安全：内层不传 override（读外层已换好的 wb.logic）。"""
+    if not logic_overrides:
+        yield
+        return
+    saved = wb.logic
+    wb.logic = G._logic_with_overrides(wb, G.GenOptions(logic_overrides=logic_overrides))
+    try:
+        yield
+    finally:
+        wb.logic = saved
 
 
 # ───────────────────────────── 根对象分类 ─────────────────────────────
@@ -563,6 +583,11 @@ def compose_topout_account(wb, resolver, mode="min", max_tests=256, exhaustive=F
     for x in rows:
         by_status[x["status"]] = by_status.get(x["status"], 0) + 1
         by_owner.setdefault(x["owner"], []).append(x["name"])
+    # M5：生成期三检查计数（selfaudit 假绿 / regmap 重名 / RTL 补充）——账目此前只数 cone issues，
+    # 把『RW 写值截断假绿 / regmap 重名 / 补充偏离』全漏报。复用 build_for_topout 的警告通道补三独立列。
+    pp = getattr(resolver, "wire_prefixes", None)
+    _bs = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                           probe_prefixes=pp)["summary"]
     summary = {
         "n_total": len(rows),
         "n_ok": by_status.get("ok", 0),
@@ -573,6 +598,10 @@ def compose_topout_account(wb, resolver, mode="min", max_tests=256, exhaustive=F
         "by_owner": {o: len(v) for o, v in by_owner.items()},
         # 真警告 = 有 issues 的信号（不含『top_out=0』这种新模型噪声）
         "n_with_issues": sum(1 for x in rows if x["issues"]),
+        # 生成期假绿可疑计数（M5）：独立于 cone issues，让账目把『读错对象/写值截断/重名/补充』也亮出来
+        "n_selfaudit_warnings": _bs.get("n_selfaudit_warnings", 0),
+        "n_regmap_warnings": _bs.get("n_regmap_warnings", 0),
+        "n_supplement": _bs.get("n_supplement", 0),
     }
     return {"rows": rows, "summary": summary}
 
@@ -798,7 +827,21 @@ def _probe_prefix_for_name(probe_prefixes, name):
 
 def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                     edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None):
+                     edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None,
+                     logic_overrides=None):
+    """Topout .sv 产出（公共入口）。logic_overrides(M8)：RTL 补充逻辑 {基名: spec}，分析期临时换
+    wb.logic(应用补充)再产出、退出还原（守 R32）；无 → 逐字节不变。详见 _build_for_topout_core。"""
+    with _with_logic_overrides(wb, logic_overrides):
+        return _build_for_topout_core(
+            wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive, comments=comments,
+            sv_summary=sv_summary, owner_in_msg=owner_in_msg, only=only,
+            edit_overrides=edit_overrides, probe_prefixes=probe_prefixes, scope=scope,
+            sig_cov=sig_cov)
+
+
+def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
+                           comments=False, sv_summary=False, owner_in_msg=False, only=None,
+                           edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None):
     """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
 
     · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
@@ -986,12 +1029,14 @@ def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
 
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                     edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None):
-    """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。"""
+                     edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None,
+                     logic_overrides=None):
+    """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。
+    logic_overrides(M8)：RTL 补充逻辑，透传 build_for_topout。"""
     b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                          comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
                          only=only, edit_overrides=edit_overrides, probe_prefixes=probe_prefixes,
-                         scope=scope, sig_cov=sig_cov)
+                         scope=scope, sig_cov=sig_cov, logic_overrides=logic_overrides)
     text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
     return text, b
 
@@ -1036,7 +1081,17 @@ def _topout_probe_net(r):
 
 
 def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                       sig_cov=None):
+                       sig_cov=None, logic_overrides=None):
+    """每信号视图模型（公共入口）。logic_overrides(M8)：分析期临时换 wb.logic(应用 RTL 补充)，
+    使 GUI 真值表显示补充【后】逻辑（否则静默假绿）；无 → 逐字节不变。详见 _topout_view_models_core。"""
+    with _with_logic_overrides(wb, logic_overrides):
+        return _topout_view_models_core(wb, mode=mode, max_tests=max_tests,
+                                        exhaustive=exhaustive, probe_prefixes=probe_prefixes,
+                                        sig_cov=sig_cov)
+
+
+def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
+                             sig_cov=None):
     """每个 Topout 信号一个【视图模型】（GUI / 无头测试消费），按 Topout B 列序。
 
     干净 cone 默认（Topout 视图不放级联/尾缀/top_output——那些属『排查(旧)』）。
@@ -1124,7 +1179,16 @@ def _account_error_text(row):
 
 
 def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                  only=None, sig_cov=None):
+                  only=None, sig_cov=None, logic_overrides=None):
+    """Topout 限定报告（公共入口）。logic_overrides(M8)：分析期换 wb.logic(应用 RTL 补充)，使
+    HTML/CSV 报告与 supplement banner 反映补充后逻辑；无 → 逐字节不变。详见 _topout_report_core。"""
+    with _with_logic_overrides(wb, logic_overrides):
+        return _topout_report_core(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                   probe_prefixes=probe_prefixes, only=only, sig_cov=sig_cov)
+
+
+def _topout_report_core(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
+                        only=None, sig_cov=None):
     """Topout 限定报告（write_report 兼容：summary/detail/tables/verifiability），堵 3 静默陷阱：
       ① 默认不空：summary 直接来自 compose_topout_account（12 行全分类，不套 top_output_only）；
       ② 不刷 top_out=0 假警告：error 列只放真原因（RO/未解析/冲突），无 bare-probe/needs-prefix 噪声；

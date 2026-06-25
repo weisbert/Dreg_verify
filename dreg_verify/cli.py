@@ -271,6 +271,11 @@ def cmd_topout(args, wb, opts):
         print("Topout 账目：%d 个要验信号（默认不空，不套 top_output_only）" % s["n_total"])
         print("  小结：可建 %d | 跳过(RO) %d | 未解析 %d | error %d | 有 issues %d"
               % (s["n_ok"], s["n_skip"], s["n_unresolved"], s["n_error"], s["n_with_issues"]))
+        # M5：生成期假绿可疑计数（自检/regmap 重名/RTL 补充）——账目此前漏报，非 0 才提示
+        if s.get("n_selfaudit_warnings") or s.get("n_regmap_warnings") or s.get("n_supplement"):
+            print("  ⚠ 自检 %d（假绿可疑） | regmap 重名 %d | RTL 补充 %d —— 出 .sv 看块顶 // ⚠"
+                  % (s.get("n_selfaudit_warnings", 0), s.get("n_regmap_warnings", 0),
+                     s.get("n_supplement", 0)))
         print("-" * 112)
         print("%-40s %-12s %-12s %-9s %-5s %s"
               % ("信号", "owner", "分类", "状态", "叶子", "原因/说明"))
