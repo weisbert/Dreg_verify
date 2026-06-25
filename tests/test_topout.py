@@ -188,6 +188,36 @@ def test_wl_topout_all_analyze_no_unresolved(wl_wb, wl_res):
     assert all(r.status == "ok" for r in results)
 
 
+def test_iddq_folded_into_expansion_chain(wl_wb, wl_res):
+    """#1/#4-6：门控 logic 根把 iddq 折进展开链【最外层】——跨页 cone 展开页能看到 iddq_mode 这一级
+    (此前 iddq 是 cone 出来后旁路 pin、展开链里看不见)。纯展开链显示、不入 .sv(byte-safe)。"""
+    topo = next(t for t in wl_wb.topout if t.name == "d_wl_rf_lo2g5g_bias_en")
+    r = T.analyze_signal(wl_wb, wl_res, topo, mode="max", exhaustive=True)
+    assert r.dft_gate is not None and r.chain
+    assert "iddq" in r.chain[0]["subst"].lower() and " ? 0 : " in r.chain[0]["subst"]  # 链首=门控级
+    assert len(r.chain) >= 2                                  # 门控级之上还有原 cone 展开级
+    topo2 = next(t for t in wl_wb.topout if t.name == "d_wl_rf_lp5g_gm_itrim")
+    r2 = T.analyze_signal(wl_wb, wl_res, topo2, mode="min")
+    assert not r2.chain or "iddq" not in (r2.chain[0].get("subst") or "").lower()
+
+
+def test_view_models_carry_form_label(wb):
+    """#2：视图模型带 form/form_label(展开后表达式形态 F0-F4)——信号清单『逻辑类型』列。"""
+    ms = {m["name"]: m for m in T.topout_view_models(wb, mode="max")}
+    assert ms["clk_force_on"]["form"] == "register"                  # F0 直连寄存器
+    assert ms["clk_force_on"]["form_label"] == "直连寄存器"
+    assert ms["d_logic_bt_lp_lna_agc"]["form_label"] == "选路"        # F2 (A?C:B)
+    assert ms["d_logic_bt_lp_rx_en"]["form_label"] == "布尔/位运算"   # F1 (A?C:B)&(~D)
+    assert ms["d_bt_lp_lna_itrim"]["form_label"].startswith("选路")   # F2 mux
+
+
+def test_view_models_gated_form_label(wl_wb):
+    """#2：门控信号 form_label=门控·<内层>(F3/F4)。"""
+    ms = {m["name"]: m for m in T.topout_view_models(wl_wb, mode="min", max_tests=8)}
+    assert ms["d_wl_rf_lo2g5g_mixer2g_trim"]["form_label"] == "门控·选路"     # F4 门控套选路
+    assert ms["d_wl_rf_lo2g5g_bias_en"]["form_label"] == "门控·布尔/位运算"   # F3 门控套布尔
+
+
 def test_wl_gated_mux_analyze_pins_iddq_matches_sv(wl_wb, wl_res):
     """M1（缝A 第三分支）：dft 门控的 mux 根 analyze 补 iddq DFT 拍 + dft_gate——res.vectors 与 .sv
     的 mux 块逐数对齐（此前 MUX 分支从不 pin → GUI 真表少一列、n_vectors 与 .sv 差 1）。"""

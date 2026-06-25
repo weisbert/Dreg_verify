@@ -224,13 +224,32 @@ def _mux_table(res):
             "auto_label": "auto_out%s" % slc, "exp_label": "期望(out)%s" % slc}
 
 
+def _page_form(res):
+    """页本地结果的展开后形态(F0-F4)——与 Topout 同口径(#2)：mux node=None→SELECT；门已是本式输入
+    时无外层门(页本地不跨页钉门、门以 dft_gate 显式行呈现)→不套 GATED，只看表达式本体形态。"""
+    from . import forms as FORMS
+    if res.status != "ok":
+        return None
+    try:
+        node = None if res.kind == "mux" else res.node
+        # 页本地 dft_gate(res.dft_gate)非空=本式门控→GATED 套内层；否则纯表达式形态
+        gate = ({"gate_base": res.dft_gate[0].base, "transparent": int(res.dft_gate[1])}
+                if getattr(res, "dft_gate", None) else None)
+        return FORMS.classify(node, res.bindings, gate=gate)
+    except Exception:    # noqa: BLE001
+        return None
+
+
 def result_to_model(res):
     """PageResult → GUI/测试消费的视图模型 dict（与 topout.topout_view_models 同键）。"""
+    from . import forms as FORMS
+    _shape = _page_form(res)
     m = {"name": res.name, "owner": res.owner, "width": res.out_width,
          "kind": res.kind, "status": res.status, "note": res.note,
          "issues": list(res.issues), "matched_name": res.name.lower(),
          "n_leaves": res.n_leaves, "n_vectors": len(res.vectors),
          "expr": getattr(res.sig, "expr", ""), "page": res.page,
+         "form": (_shape.kind if _shape else ""), "form_label": FORMS.form_label(_shape),
          "chain": [], "inputs": [], "tests": [], "auto_label": "", "exp_label": ""}
     if res.status == "ok":
         tbl = _mux_table(res) if res.kind == "mux" else _logic_table(res)

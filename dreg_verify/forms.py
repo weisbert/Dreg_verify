@@ -46,6 +46,21 @@ class Shape:
         return "Shape(%s%s)" % (self.kind, suf)
 
 
+# 人读『逻辑类型』列文案（#2 信号清单列 / #3 覆盖派发显示）
+_FORM_LABEL = {REGISTER: "直连寄存器", BOOLEAN: "布尔/位运算", SELECT: "选路"}
+
+
+def form_label(shape):
+    """形态 Shape → 人读『逻辑类型』：F0 直连寄存器 / F1 布尔 / F2 选路 / F3·F4 门控·<内层>。
+    宽/不可展 mux 标注 (宽/不可展)，none → 空串。"""
+    if shape is None:
+        return ""
+    if shape.kind == GATED:
+        return "门控·%s" % _FORM_LABEL.get(shape.base_kind, shape.base_kind)
+    suf = "(宽/不可展)" if (shape.kind == SELECT and shape.expandable is False) else ""
+    return _FORM_LABEL.get(shape.kind, shape.kind) + suf
+
+
 def dft_gate_info(wb, out_base):
     """该输出在 dft 页是否被 iddq 门控 → 门信息 dict 或 None（读 wb.dft，excel_model.read_dft）。"""
     if not out_base:

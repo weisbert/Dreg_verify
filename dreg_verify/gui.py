@@ -206,9 +206,10 @@ def _skipped_detail_text(skipped):
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 
 # ── 信号清单表列（Topout + 子视图共用，2026-06-24 把『负向』放到『选』旁边，醒目易点）──
-(TOPO_SEL, TOPO_NEG, TOPO_NAME, TOPO_AID, TOPO_OWNER, TOPO_KIND, TOPO_STATUS,
- TOPO_PREFIX, TOPO_NTEST) = range(9)
-TOPO_HEADERS = ["选", "负向", "信号", "断言号", "owner", "分类", "状态", "探针前缀", "用例"]
+(TOPO_SEL, TOPO_NEG, TOPO_NAME, TOPO_AID, TOPO_OWNER, TOPO_KIND, TOPO_FORM, TOPO_STATUS,
+ TOPO_PREFIX, TOPO_NTEST) = range(10)
+# 「分类」=根来自哪种页(logic/mux/寄存器…)；「逻辑类型」=展开后表达式形态(F0-F4，覆盖按它派发)
+TOPO_HEADERS = ["选", "负向", "信号", "断言号", "owner", "分类", "逻辑类型", "状态", "探针前缀", "用例"]
 TOPO_KIND_LABEL = {"logic": "选路/logic", "mux": "mux", "register": "直连寄存器",
                    "ro-readback": "RO回读(跳过)", "unresolved": "未解析"}
 TOPO_STATUS_LABEL = {"ok": "✅ 可建", "skip": "↷ 跳过(RO)",
@@ -1041,6 +1042,7 @@ class SignalView(QtWidgets.QWidget):
                            % (m.get("assert_id") or "?"))
             self._set(r, TOPO_OWNER, m["owner"] or "")
             self._set(r, TOPO_KIND, SV_KIND_LABEL.get(m["kind"], m["kind"]))
+            self._set(r, TOPO_FORM, m.get("form_label") or "")    # #2 逻辑类型(展开后形态 F0-F4)
             stt = self._set(r, TOPO_STATUS, TOPO_STATUS_LABEL.get(m["status"], m["status"]))
             stt.setForeground(QtGui.QColor(TOPO_STATUS_COLOR.get(m["status"], "#000000")))
             if m["issues"]:

@@ -20,6 +20,7 @@ import contextlib
 
 from . import cone
 from . import expr as E
+from . import forms as FORMS
 from . import generator as G
 from . import mux_gen
 from . import sv_writer as W
@@ -315,6 +316,53 @@ class TopoutResult:
         return len(self.bindings or {})
 
 
+# ───────────────────────────── 形态分类 + 门控展开链（#1/#2/#3 form-driven 接入） ─────────────────────────────
+form_label = FORMS.form_label    # 复用 forms 的人读『逻辑类型』映射（避免重复，兼容 T.form_label 引用）
+
+
+def _result_gate_info(wb, res):
+    """该 TopoutResult 是否被 iddq 门控 → forms.dft_gate_info（门键与 analyze_signal pin 同口径：
+    改名桥接途经的带门观测名 dft_obs_name 优先，否则源对象 out_base / 寄存器根用 topo 名）。"""
+    root = res.root
+    ob = (getattr(root, "dft_obs_name", None)
+          or (getattr(root.obj, "out_base", None) if root.obj is not None else None)
+          or res.topo.name)
+    return FORMS.dft_gate_info(wb, ob)
+
+
+def result_form(wb, res):
+    """分类一个【已分析的】Topout 信号的展开后表达式形态(F0-F4)——覆盖/显示按形态派发的统一口径。
+    mux 根 node=None→SELECT(expandable 取 mux 可展性)；带门→GATED 套内层。永不抛(分类失败退 None)。"""
+    try:
+        expandable = None
+        if res.root.kind == MUX:
+            exp = res.expansion or {}
+            # 可展性：expand_mux_group 标了 expandable 就用，否则 None(未知)
+            expandable = exp.get("expandable")
+        return FORMS.classify(res.node, res.bindings, gate=_result_gate_info(wb, res),
+                              expandable=expandable)
+    except Exception:    # noqa: BLE001 —— 分类绝不崩
+        return None
+
+
+def _gate_chain_entry(top_name, gate_base, inner_ref, transp):
+    """门控级展开链条目（#1/#4-6：把 iddq 折进 cone 展开链显示）：<top> = iddq ? 0 : <inner>
+    （透传值 transp 决定常量支 0 在哪支：transp=0→iddq 选 0、功能走 inner）。纯展开链【显示】用，
+    不入 .sv 向量(byte-safe)——让跨页 cone 展开页/真表上方能看到 iddq_mode 这一级。"""
+    expr = ("%s ? 0 : %s" % (gate_base, inner_ref) if int(transp) == 0
+            else "%s ? %s : 0" % (gate_base, inner_ref))
+    return {"out": top_name, "expr": expr, "subst": expr}
+
+
+def _prepend_gate_chain(res, root, inner_ref):
+    """若本结果带 iddq 门，把门控级作为【最外层】展开链条目插到链首（#1/#4-6）。"""
+    if res.dft_gate is None:
+        return
+    top = (root.probe_name if (getattr(root, "renamed", False) and root.probe_name)
+           else res.topo.name)
+    res.chain.insert(0, _gate_chain_entry(top, res.dft_gate[0].base, inner_ref, res.dft_gate[1]))
+
+
 def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                    exhaustive=False, want_vectors=True, mux_data=None):
     """分析一个 Topout 信号：解析根 → 建 cone/真值表。返回 TopoutResult（永不抛，问题进 .issues/.status）。
@@ -353,6 +401,7 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     if _skip:
                         res.meta["iddq_skipped"] = _skip
                     res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
+                    _prepend_gate_chain(res, root, sig.out_base)   # #1/#4-6：iddq 折进展开链显示
         except (cone.ConeError, E.ExprError) as ex:
             res.status = "error"
             res.issues.append("cone 展开失败: %s" % ex)
@@ -402,6 +451,7 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     if _skip:
                         res.meta["iddq_skipped"] = _skip
                     res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
+                    _prepend_gate_chain(res, root, base)   # #1/#4-6：iddq 折进展开链显示(寄存器根)
         except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛
             res.status = "error"
             res.issues.append("分析异常: %r" % ex)
@@ -1234,11 +1284,15 @@ def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, pr
     models = []
     reg_i = 0                                                # 与 build_for_topout 的 TOP<n> 计数器同口径
     for r in results:
+        _shape = result_form(wb, r) if r.status == "ok" else None
         m = {"name": r.topo.name, "disp": _topout_disp_name(r.topo, r.out_width),
              "owner": r.topo.owner, "width": r.out_width,
              "kind": r.root.kind, "status": r.status, "note": r.note,
              "issues": list(r.issues), "matched_name": r.root.matched_name,
              "n_leaves": r.n_leaves, "n_vectors": len(r.vectors),
+             # #2 逻辑类型(展开后表达式形态 F0-F4)：信号清单列 + #3 覆盖按它派发
+             "form": (_shape.kind if _shape else ""),
+             "form_label": form_label(_shape),
              "chain": [], "inputs": [], "tests": [], "auto_label": "", "exp_label": ""}
         pnet = _topout_probe_net(r)                          # assert LHS 探针网 + 配的层级前缀
         m["probe_net"] = pnet
