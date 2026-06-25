@@ -777,18 +777,23 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
             r0 = analyze_signal(wb, resolver, t, root=rt, want_vectors=False)
             shape_of[t.name.lower()] = result_form(wb, r0)
     # 单点 + per-form 覆盖度：映成源名键喂 generator.report，改名根用 resolve_root 求源。
-    gen_sig_cov = {}
+    # #7：断言标号也映成源名→Topout 行号喂 G.report，让报告 R 列(真值表标题/明细)与 .sv 标号一致
+    # (此前报告仍用源 Excel R/mux<N>，与 .sv 行序命名对不上——用户实证 GUI 61 行 vs 报告 95)。
+    row_aid = topout_row_aids(wb)
+    gen_sig_cov, aid_override = {}, {}
     for t in wb.topout:
-        c = _effective_cov_str(sig_cov, form_cov, shape_of.get(t.name.lower()), t.name)
-        if c in ("min", "max", "exhaustive"):
-            rt = resolve_root(wb, t.name, logic_idx, mux_idx, rename=rename)
-            if rt.kind in (LOGIC, MUX) and getattr(rt, "obj", None) is not None:
+        rt = resolve_root(wb, t.name, logic_idx, mux_idx, rename=rename)
+        if rt.kind in (LOGIC, MUX) and getattr(rt, "obj", None) is not None:
+            aid_override.setdefault(rt.obj.out_name.lower(), row_aid[t.name.lower()])
+            c = _effective_cov_str(sig_cov, form_cov, shape_of.get(t.name.lower()), t.name)
+            if c in ("min", "max", "exhaustive"):
                 gen_sig_cov[rt.obj.out_name.lower()] = c
     rep = G.report(wb, G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                     include_risky=True, probe_prefixes=probe_prefixes,
                                     sig_cov=gen_sig_cov or None, neg_all=neg_all,
                                     neg_signals=neg_signals, neg_which=neg_which,
-                                    neg_mode=neg_mode, neg_value=neg_value))
+                                    neg_mode=neg_mode, neg_value=neg_value,
+                                    assert_id_override=aid_override or None))
     only_low = {str(n).lower() for n in only} if only is not None else None
     want = {t.name.lower() for t in wb.topout
             if only_low is None or t.name.lower() in only_low}
@@ -861,9 +866,21 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
         if r.status == "ok" and r.vectors:
             if _topout_neg_enabled(topo.name, neg_all, neg_signals):    # m1：register 报告也带负向
                 r.vectors = _apply_passthrough_negatives(r.vectors, neg_mode, neg_which, neg_value)
-            kept_tables.append(_register_report_table(r))
+            _rt = _register_report_table(r)
+            _rt["R"] = row_aid[topo.name.lower()]      # #7：寄存器根报告 R = Topout 行号(与 .sv 标号一致)
+            kept_tables.append(_rt)
+    # #7：明细(per-test 行)的 R 也映成 Topout 行号——G.report 已对 logic/mux 表/明细套了 override，
+    # 但要确保改名根明细(按源名)也命中：源名→行号 在 aid_override 里，这里对明细兜底重映(防漏)。
+    _det = []
+    for d in rep.get("detail", []):
+        d = dict(d)
+        _ra = aid_override.get(str(d.get("signal", "")).lower())
+        if _ra:
+            d["R"] = _ra
+        _det.append(d)
     rep = dict(rep)
     rep["tables"] = kept_tables
+    rep["detail"] = _det
     return rep
 
 

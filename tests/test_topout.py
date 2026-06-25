@@ -641,6 +641,27 @@ def test_topout_assert_labels_are_row_order(wb):
     assert all(x.isdigit() for x in rlabels), rlabels
 
 
+def test_assert_number_consistent_gui_sv_html(wb):
+    """#7 收口：同一信号的断言号在【GUI 清单 / .sv 标号 / HTML 报告 R】三处一致 = Topout 行序。
+    防回归用户实证『GUI 61 行 vs 报告/sv 95』——根因=报告/sv 曾用源 Excel R 而非 Topout 行号。"""
+    import re
+    from dreg_verify import sv_writer as W
+    row = {t.name.lower(): str(i + 1) for i, t in enumerate(wb.topout)}
+    gui = {m["name"].lower(): m.get("assert_id") for m in T.topout_view_models(wb, mode="min")}
+    rep = T.topout_report(wb, mode="min")
+    html = {str(t.get("topout_name", "")).lower(): str(t.get("R", "")) for t in rep["tables"]}
+    sv = W.render_file(T.build_for_topout(wb, mode="min")["blocks"])
+    checked = 0
+    for t in wb.topout:
+        nm, rn = t.name.lower(), row[t.name.lower()]
+        if gui.get(nm):                      # 产出断言的信号(非 RO)
+            assert gui[nm] == rn, ("GUI", nm, gui[nm], rn)
+            assert html.get(nm) == rn, ("HTML", nm, html.get(nm), rn)
+            assert re.search(r"^assert_%s_T" % re.escape(rn), sv, re.M), (".sv", nm, rn)
+            checked += 1
+    assert checked >= 8
+
+
 # ───────────── S1 缝B：register/dft 改名根接回 build 的警告/claims 注入圈（M3/M4/M6） ─────────────
 def test_build_for_topout_returns_warning_channels(wb):
     """M3：build_for_topout 返回 dict 透出 selfaudit/regmap/supplement 三警告通道 + summary 计数

@@ -1687,6 +1687,17 @@ def _input_meta(g, bindings):
     }
 
 
+def _eff_aid(opts, obj):
+    """报告/产物 R 列断言号：assert_id_override 命中(Topout 行序 #7)则用它，否则源对象 assert_id。
+    默认无 override → 源 assert_id、逐字节不变。logic/mux 报告与 .sv 标号据此一致。"""
+    ov = getattr(opts, "assert_id_override", None)
+    if ov:
+        v = ov.get(str(getattr(obj, "out_name", "")).lower())
+        if v:
+            return v
+    return obj.assert_id
+
+
 def report(wb, opts):
     """
     生成"给人看"的测试用例清单（结构化），CLI 负责写成 CSV/HTML。
@@ -1723,7 +1734,7 @@ def _report_core(wb, opts):
         try:
             node, bindings, _expanded = expand_signal(wb, resolver, sig, chain_out=chain)
         except (E.ExprError, cone.ConeError) as ex:
-            summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+            summary.append({"R": _eff_aid(opts, sig), "signal": sig.out_name, "owner": sig.owner,
                             "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
                             "n_tests": 0, "n_neg": 0, "control": "", "data": "",
                             "unresolved": "", "error": "表达式解析/展开失败: %s" % ex})
@@ -1747,7 +1758,7 @@ def _report_core(wb, opts):
                                                 mode=_lmode, max_tests=opts.max_tests,
                                                 exhaustive=_lexh)
             except E.ExprError as ex:
-                summary.append({"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+                summary.append({"R": _eff_aid(opts, sig), "signal": sig.out_name, "owner": sig.owner,
                                 "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
                                 "n_tests": 0, "n_neg": 0, "control": "", "data": "",
                                 "unresolved": "", "error": "向量生成失败: %s" % ex})
@@ -1774,7 +1785,7 @@ def _report_core(wb, opts):
                         .lower()) if e[0] == "g" else _lpin[0].base.lower()),
             key_fn=lambda e: ((_lbind(e).address, _lbind(e).reg_lsb)
                               if _lbind(e) is not None else (None, None)))
-        table = {"R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+        table = {"R": _eff_aid(opts, sig), "signal": sig.out_name, "owner": sig.owner,
                  "type": sig.suffix, "expr": sig.expr,
                  # RTL 补充逻辑(Excel 缺，手工补)的告警串——非空则 HTML 报告该表挂 banner、CSV/Excel 也带
                  "supplement": (_supplement_warning(sig)
@@ -1831,7 +1842,7 @@ def _report_core(wb, opts):
                 "writes": writes,
             })
             detail.append({
-                "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+                "R": _eff_aid(opts, sig), "signal": sig.out_name, "owner": sig.owner,
                 "type": sig.suffix, "expr": sig.expr,
                 "test": W.test_label(vec),
                 "neg": "是" if vec.is_negative else "",
@@ -1849,7 +1860,7 @@ def _report_core(wb, opts):
         table["exp_label"] = "期望(out)%s" % slice_txt
         tables.append(table)
         summary.append({
-            "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+            "R": _eff_aid(opts, sig), "signal": sig.out_name, "owner": sig.owner,
             "type": sig.suffix, "top": sig.top_output, "expr": sig.expr,
             "n_tests": len(vecs), "n_neg": sum(1 for v in vecs if v.is_negative),
             "control": ",".join(meta.get("control", [])), "data": ",".join(meta.get("data", [])),
@@ -1870,7 +1881,7 @@ def _report_core(wb, opts):
         resolver.cascade_mode = opts.cascade_for(grp.out_name, is_mux=True)   # 级联模式 mux/单点
         exp = mux_gen.expand_mux_group(wb, resolver, grp)
         expr_text = _mux_expr_text(grp)
-        base_row = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
+        base_row = {"R": _eff_aid(opts, grp), "signal": grp.out_name, "owner": grp.owner,
                     "type": "mux", "top": grp.top_output, "expr": expr_text}
 
         # 与 build() 同口径的跳过判定（报告里以 error 列呈现原因，不是消失）
@@ -1967,7 +1978,7 @@ def _report_core(wb, opts):
         else:
             verif_status = "bare-probe" if row_warn else "clean"
         mux_verif_rows.append({
-            "R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
+            "R": _eff_aid(opts, grp), "signal": grp.out_name, "owner": grp.owner,
             "type": "mux", "top": grp.top_output,
             "status": verif_status,
             "detail": skip_reason or warn_full, "out_net": "`%s.%s" % (W.ENV, grp.rtl_name),
@@ -2007,7 +2018,7 @@ def _report_core(wb, opts):
                              "width": b.width, "base": b.base, "wire": b.wire,
                              "reg_lsb": b.reg_lsb, "reg_msb": b.reg_msb,
                              "slice_msb": b.slice_msb, "slice_lsb": b.slice_lsb})
-        table = {"R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
+        table = {"R": _eff_aid(opts, grp), "signal": grp.out_name, "owner": grp.owner,
                  "type": "mux", "expr": expr_text, "kind": "mux",
                  "inputs": inp_rows, "tests": []}
         for vec in vecs:
@@ -2038,7 +2049,7 @@ def _report_core(wb, opts):
                 "rfwrite": "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes),
             })
             detail.append({
-                "R": grp.assert_id, "signal": grp.out_name, "owner": grp.owner,
+                "R": _eff_aid(opts, grp), "signal": grp.out_name, "owner": grp.owner,
                 "type": "mux", "expr": expr_text,
                 "test": W.test_label(vec),
                 "neg": "是" if vec.is_negative else "",
@@ -2072,7 +2083,7 @@ def _report_core(wb, opts):
                             else "wire兜底"))
             for i in risky)
         verif["signals"].append({
-            "R": sig.assert_id, "signal": sig.out_name, "owner": sig.owner,
+            "R": _eff_aid(opts, sig), "signal": sig.out_name, "owner": sig.owner,
             "type": sig.suffix, "top": sig.top_output, "status": st,
             "detail": risky_str or a.get("error", ""), "out_net": a.get("out_net", ""),
         })
