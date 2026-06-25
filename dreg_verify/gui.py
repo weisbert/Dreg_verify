@@ -855,8 +855,17 @@ class SignalView(QtWidgets.QWidget):
             return 256
 
     def _mode_for(self, name):
-        """本信号有效覆盖度(N3)：单点档(self._sig_cov)命中则压全局，否则跟随全局。返回 (mode, exhaustive)。"""
-        c = self._sig_cov.get(str(name).lower())
+        """本信号有效覆盖度：优先级 单点档(sig_cov) > 逻辑类型档(form_cov,#3) > 全局。返回 (mode, exhaustive)。
+        ⚠ 必须与左侧清单 view_models 同口径(topout._effective_cov_str)——否则真值表用例数与清单『用例』列
+        对不上(用户实证：清单 5、真值表 32)。form 取该信号在清单里的形态(self.models 的 m['form'])。"""
+        low = str(name).lower()
+        c = self._sig_cov.get(low)
+        if c not in ("min", "max", "exhaustive"):       # 单点没命中 → 看本信号逻辑类型档
+            m = next((mm for mm in (self.models or []) if str(mm.get("name", "")).lower() == low), None)
+            fk = (m.get("form") if m else None)          # m['form']=形态键(register/boolean/select/gated)
+            fc = self._form_cov.get(fk) if fk else None
+            if fc in ("min", "max", "exhaustive"):
+                c = fc
         if c == "min":
             return "min", False
         if c == "max":

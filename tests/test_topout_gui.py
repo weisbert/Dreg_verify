@@ -577,6 +577,21 @@ def _sel(w, name):
     return w.topout_view
 
 
+def test_form_cov_applies_to_truth_table_too(topo_win):
+    """#3 修：逻辑类型覆盖度对【右侧真值表】也生效(此前 _mode_for 只认单点 sig_cov、不认 form_cov →
+    左侧清单按 form_cov 算、右侧真值表按全局算 → 用例数对不上，用户实证清单 5/真值表 32)。
+    _mode_for 现按 单点>形态>全局 算，与 view_models 同口径。"""
+    v = topo_win.topout_view
+    v.cov.setCurrentText("精简")              # 全局=精简
+    v._form_cov = {"select": "exhaustive"}    # 选路形态=穷举
+    v.refresh()
+    m = next(mm for mm in v.models if mm["form"] == "select" and mm["status"] == "ok")
+    name = m["name"]
+    assert m["n_vectors"] > 5                  # 穷举 → 清单用例数多(非精简的 2)
+    v._load_signal(name)
+    assert len(v.cur_cols) == m["n_vectors"]   # ⭐真值表列数 == 清单用例数(两边都按 form_cov)
+
+
 def test_form_cov_flows_through_gui_provider(topo_win):
     """#3：SignalView._form_cov 经 provider 传到 topout API——设 select=穷举后【选路】信号清单用例数升档、
     非 select 不变（GUI 端到端验 per-form 覆盖度生效）。"""
