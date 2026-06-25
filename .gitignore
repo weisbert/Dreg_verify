@@ -48,3 +48,4 @@ refactor_notes/
 # 测试截图产物(每次跑生成,不入库)
 tests/subview_*.png
 tests/topout_view.png
+scratchpad/
