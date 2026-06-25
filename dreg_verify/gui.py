@@ -206,9 +206,9 @@ def _skipped_detail_text(skipped):
 HEADERS = ["选", "负向", "R", "输出名(K)", "owner", "type", "top", "状态", "探针前缀", "表达式"]
 
 # ── 信号清单表列（Topout + 子视图共用，2026-06-24 把『负向』放到『选』旁边，醒目易点）──
-(TOPO_SEL, TOPO_NEG, TOPO_NAME, TOPO_OWNER, TOPO_KIND, TOPO_STATUS,
- TOPO_PREFIX, TOPO_NTEST) = range(8)
-TOPO_HEADERS = ["选", "负向", "信号", "owner", "分类", "状态", "探针前缀", "用例"]
+(TOPO_SEL, TOPO_NEG, TOPO_NAME, TOPO_AID, TOPO_OWNER, TOPO_KIND, TOPO_STATUS,
+ TOPO_PREFIX, TOPO_NTEST) = range(9)
+TOPO_HEADERS = ["选", "负向", "信号", "断言号", "owner", "分类", "状态", "探针前缀", "用例"]
 TOPO_KIND_LABEL = {"logic": "选路/logic", "mux": "mux", "register": "直连寄存器",
                    "ro-readback": "RO回读(跳过)", "unresolved": "未解析"}
 TOPO_STATUS_LABEL = {"ok": "✅ 可建", "skip": "↷ 跳过(RO)",
@@ -386,7 +386,7 @@ class _CheckableMenu(QtWidgets.QMenu):
 # provider 决定『要验什么信号、怎么分析(cone vs 页本地)、怎么出 .sv/报告』；视图层(交互/编辑)全共用。
 import re as _re
 
-SV_HEADERS = TOPO_HEADERS                      # 8 列：选/负向/信号/owner/分类/状态/探针前缀/用例
+SV_HEADERS = TOPO_HEADERS              # 9 列：选/负向/信号/断言号/owner/分类/状态/探针前缀/用例
 SV_KIND_LABEL = dict(TOPO_KIND_LABEL)         # Topout 5 分类；子视图补 logic/mux 直观标签
 SV_KIND_LABEL.setdefault("logic", "logic")    # 子视图里 kind=logic/mux 直接显原词（Topout 用『选路/logic』）
 
@@ -1002,6 +1002,10 @@ class SignalView(QtWidgets.QWidget):
             chk.setCheckState(QtCore.Qt.Checked)
             self.sig_table.setItem(r, TOPO_SEL, chk)
             self._set(r, TOPO_NAME, m.get("disp") or m["name"])   # 显示带位宽切片(name 仍是查找 key)
+            aid = self._set(r, TOPO_AID, m.get("assert_id") or "")
+            aid.setToolTip("仿真 log 里的断言号：报 assert_%s_T<n> 失败时回查到本信号。\n"
+                           "= 源 logic 行的 R 列（固定 ID，故意≠清单第几号；按它搜可定位）。"
+                           % (m.get("assert_id") or "?"))
             self._set(r, TOPO_OWNER, m["owner"] or "")
             self._set(r, TOPO_KIND, SV_KIND_LABEL.get(m["kind"], m["kind"]))
             stt = self._set(r, TOPO_STATUS, TOPO_STATUS_LABEL.get(m["status"], m["status"]))
@@ -1087,8 +1091,8 @@ class SignalView(QtWidgets.QWidget):
             elif st_sel == 2 and m["status"] == "ok" and not m["issues"]:
                 show = False
             if show and pat:
-                hay = "%s %s %s" % (m["name"], m.get("expr", ""),
-                                    " ".join(i.get("base", "") for i in m.get("inputs", [])))
+                hay = "%s %s %s %s" % (m["name"], m.get("assert_id", ""), m.get("expr", ""),
+                                       " ".join(i.get("base", "") for i in m.get("inputs", [])))
                 show = bool(rx.search(hay)) if rx else (pat.lower() in hay.lower())
             self.sig_table.setRowHidden(r, not show)
 

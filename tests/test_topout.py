@@ -393,6 +393,22 @@ def test_topout_view_models_carry_probe_prefix(wb):
     assert all(m["prefix"] == "" for m in T.topout_view_models(wb))
 
 
+def test_topout_view_models_assert_id_matches_build(wb):
+    """⭐2026-06-25：Topout 视图模型 assert_id = .sv assert 标签的 <R>（仿真报 assert_<R>_T<n>
+    失败时据此回查信号）——logic/mux 根=源 R 列/mux 号、寄存器/dft 根=TOP<n>，与 build_for_topout
+    块标签逐一对应；故意≠清单第几号(R 是设计师固定 ID、清单按 Topout B 列序)。"""
+    ms = {m["name"]: m for m in T.topout_view_models(wb)}
+    b = T.build_for_topout(wb)
+    n_checked = 0
+    for _l, st in b["blocks"]:
+        if st.get("n_vectors", 0) > 0:
+            nm = st.get("topout_name")
+            assert ms[nm]["assert_id"] == st.get("assert_id"), nm
+            n_checked += 1
+    assert n_checked >= 3
+    assert ms["pll_lock_indicator"]["assert_id"] == ""      # RO 回读无 assert
+
+
 def test_collect_page_nets_covers_dft_and_all_pages(wb):
     """⭐2026-06-25：collect_page_nets 按子模块页(logic/mux/dft/iddq)收探针+force 网，与 GUI
     各 tab 同口径——dft 页现在含【观测输出探针】(老 collect_dft_nets 只收 iddq 门网)；

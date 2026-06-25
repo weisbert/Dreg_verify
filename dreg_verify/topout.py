@@ -985,6 +985,7 @@ def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_pr
             tbl_by_topout.setdefault(nm.lower(), t)
 
     models = []
+    reg_i = 0                                                # 与 build_for_topout 的 TOP<n> 计数器同口径
     for r in results:
         m = {"name": r.topo.name, "disp": _topout_disp_name(r.topo, r.out_width),
              "owner": r.topo.owner, "width": r.out_width,
@@ -995,6 +996,20 @@ def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_pr
         pnet = _topout_probe_net(r)                          # assert LHS 探针网 + 配的层级前缀
         m["probe_net"] = pnet
         m["prefix"] = _probe_prefix_for_name(probe_prefixes, pnet)
+        # 断言号 = .sv assert 标签的 <R> 部分（仿真 log 报 assert_<R>_T<n>，据此回查信号）：
+        #   logic/mux 根 = 源对象 assert_id（logic=Excel R 列、mux=mux<id>，固定、≠清单位置）；
+        #   寄存器/dft 改名根 = TOP<n>（build 按 B 列序给可产出块顺序编号，复刻其计数器）。
+        if r.status == "ok" and r.root.renamed:
+            _emit = r.node is not None and r.bindings is not None and bool(r.vectors)
+            m["assert_id"] = ("TOP%d" % reg_i) if _emit else ""
+            reg_i += 1 if _emit else 0
+        elif r.status == "ok" and r.root.kind == REGISTER:
+            m["assert_id"] = ("TOP%d" % reg_i) if r.vectors else ""
+            reg_i += 1 if r.vectors else 0
+        elif r.status == "ok" and r.root.kind in (LOGIC, MUX) and r.root.obj is not None:
+            m["assert_id"] = str(getattr(r.root.obj, "assert_id", "") or "")
+        else:
+            m["assert_id"] = ""
         t = tbl_by_topout.get(r.topo.name.lower())
         if t is not None:
             m["chain"] = t.get("chain", [])

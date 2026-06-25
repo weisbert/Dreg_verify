@@ -342,6 +342,22 @@ def test_topout_signal_list_shows_probe_prefix_column(topo_win):
     assert w.topo_table.item(r_unset, G.TOPO_PREFIX).text() == ""                # 没配 → 空
 
 
+def test_topout_signal_list_shows_assert_id_column(topo_win):
+    """⭐2026-06-25：Topout 清单加『断言号』列——= .sv assert_<R> 的 R（仿真报 assert_95 时据此
+    回查信号，故意≠清单第几号）。搜索框也匹配断言号。"""
+    from dreg_verify import gui as G
+    w = topo_win
+    hdr = [w.topo_table.horizontalHeaderItem(c).text() for c in range(w.topo_table.columnCount())]
+    assert "断言号" in hdr
+    r = _topo_row(w, "d_logic_bt_lp_rx_en")            # 该 logic 根 R=1，但不是第1行
+    assert r is not None
+    assert w.topo_table.item(r, G.TOPO_AID).text() == "1"
+    assert r != 1                                       # 断言号≠清单位置（正是用户疑惑点）
+    # 搜索框输入断言号 → 该信号仍可见（haystack 含 assert_id）
+    w.topout_view.search.setText("d_logic_bt_lp_rx_en")
+    assert not w.topo_table.isRowHidden(r)
+
+
 def test_topout_coverage_dropdown_persists(gui_app, mirror_path, monkeypatch):
     """⭐N2：本视图全局覆盖度下拉关 GUI 不复位——改『穷举』即存盘(按 view_id) → 新开窗口恢复『穷举』。
     (pytest 下 _save_settings 默认 no-op，用内存 store 验持久化语义。)"""

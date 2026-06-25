@@ -237,6 +237,7 @@ def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False, prob
         pnet = getattr(r.sig, "rtl_base", None) or r.name
         m["probe_net"] = pnet
         m["prefix"] = _prefix_for(probe_prefixes, pnet)
+        m["assert_id"] = str(getattr(r.sig, "assert_id", "") or "")   # .sv assert_<R> 的 <R>
         models.append(m)
     return models
 
