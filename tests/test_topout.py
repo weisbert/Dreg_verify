@@ -641,6 +641,27 @@ def test_topout_assert_labels_are_row_order(wb):
     assert all(x.isdigit() for x in rlabels), rlabels
 
 
+def test_collect_topout_cone_nets_includes_force_leaves(wl_wb):
+    """⭐第一性 nets(用户拍板)：topout-cone 在探针网之外，还导出 cone 展开的所有 force 输入叶子 +
+    iddq 门网。根因=旧 collect_topout_nets 只导探针、漏 cone force 叶子(ct_band1_c 这种埋子模块的
+    force 网)→ scan_rtl 查不到 → 仿真 CUVUNF 且无提示。"""
+    probe = rtl_scan.collect_topout_nets(wl_wb)
+    cone = rtl_scan.collect_topout_cone_nets(wl_wb)
+    assert set(probe) <= set(cone)                    # cone ⊇ 探针(探针也在内)
+    assert len(cone) > len(probe)                     # 还多出 cone force 输入叶子
+    extra = set(cone) - set(probe)
+    assert any(("force 叶子" in cone[n]) or ("iddq" in cone[n]) for n in extra)
+
+
+def test_collect_nets_topout_cone_category(wl_wb):
+    """collect_nets(pages=['topout-cone']) 接通新类别 = collect_topout_cone_nets。"""
+    a = rtl_scan.collect_nets(wl_wb, pages=["topout-cone"])
+    b = rtl_scan.collect_topout_cone_nets(wl_wb)
+    assert set(a) == set(b) and len(a) > 0
+    # 'topout' 仍是仅探针(子集)，两类别不同
+    assert set(rtl_scan.collect_nets(wl_wb, pages=["topout"])) < set(a)
+
+
 def test_assert_number_consistent_gui_sv_html(wb):
     """#7 收口：同一信号的断言号在【GUI 清单 / .sv 标号 / HTML 报告 R】三处一致 = Topout 行序。
     防回归用户实证『GUI 61 行 vs 报告/sv 95』——根因=报告/sv 曾用源 Excel R 而非 Topout 行号。"""

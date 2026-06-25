@@ -3844,10 +3844,14 @@ class MainWindow(QtWidgets.QMainWindow):
     # nets.txt 导出类别 → (复选框标题, 提示)。键 = rtl_scan.collect_nets 的 page。
     # 顺序 = Topout(门面) + 四个子模块 tab 页(pageviews.PAGES)，与 GUI 顶层标签一一对应。
     _NETS_CAT_INFO = {
-        "topout": ("Topout 信号探针网（含寄存器 / dft 直连根）",
+        "topout-cone": ("⭐Topout 信号 + cone 展开输入网（第一性·推荐）",
+                        "最重要的一批：每个 Topout 信号的【探针网】+ 它 cone 展到底后所有要 force 的\n"
+                        "【输入叶子网】(RO 衔接网/回读) + iddq 门网。这才是仿真真正会 force 的全部网——\n"
+                        "scan_rtl 才能把每根都核对/配前缀。(只勾『Topout 探针』会漏掉 cone 输入叶子，\n"
+                        "如 ct_band1_c 这种埋在子模块的 force 网 → 仿真 CUVUNF 且无提示。一般勾这个就够。)"),
+        "topout": ("Topout 信号探针网（仅探针，不含 cone 输入）",
                    "每个可验证 Topout 信号的 assert 探针网。寄存器直连根(如 aac_ctf_bit_sel)和 dft\n"
-                   "改名根只在这里导得到——四个子模块页都遍历不到它们(老 nets.txt 整类漏掉=仿真\n"
-                   "CUVUNF 且无提示)。只勾这个 = 只导 Topout 那批探针网。"),
+                   "改名根只在这里导得到。⚠ 不含 cone 展开的 force 输入网——要完整请勾上面那个。"),
         "logic": ("logic 页（探针 + force 输入）",
                   "logic 行输出探针 + 两种级联(cone/force)的 force 输入网 + 页本地探针。"),
         "mux": ("mux 页（输出 / 控制 / 数据网）", "mux 组输出探针 + 控制衔接网 + case 数据网。"),
@@ -3861,7 +3865,8 @@ class MainWindow(QtWidgets.QMainWindow):
         与 GUI 顶层 tab 一一对应——空页不出现在导出框里(空页导出也是空，无意义)。"""
         cats = []
         if getattr(self.wb, "topout", None):
-            cats.append("topout")
+            cats.append("topout-cone")       # ⭐第一性推荐：探针 + cone 输入
+            cats.append("topout")            # 仅探针(降级保留)
         try:
             from . import pageviews as P
             cats += [p for p in P.PAGES if P.page_available(self.wb, p)]

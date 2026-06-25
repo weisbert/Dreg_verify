@@ -227,6 +227,55 @@ def collect_topout_nets(wb, signals=None):
     return nets
 
 
+def collect_topout_cone_nets(wb, signals=None, probe_prefixes=None):
+    """⭐⭐【第一性最重要】Topout 信号 + 其 cone 展开后的所有输入网（2026-06-25 用户拍板）。
+
+    红区 scan_rtl / 探针前缀真正需要核对的【最小完整集】= 探针(断言贴的顶层真名) + cone 展到底后
+    所有要 **force 的输入叶子网**(RO 衔接网/回读) + iddq 门网。RW 输入走 RF_WRITE(按地址写、非物理网)，
+    在 ENV_RF 不需要网，故不收。
+
+    旧 collect_topout_nets 只导【探针】(输出 assert LHS)、漏掉 cone 输入叶子 —— 用户 `ct_band1_c`
+    CUVUNF 实证：它正是 cone 的一个 force 叶子(PLL 内部 wire)，旧 nets.txt 根本没它 → scan_rtl 检查
+    不到 → 埋子模块时无声 CUVUNF。本函数把【探针 + 所有 force 输入 + iddq 门】一起导，scan_rtl 就能
+    把每根都核对/配前缀。
+
+    与 build_for_topout 的 .sv 完全同口径：analyze_signal(cone) 的 bindings 里 kind=='RO' 的 b.wire
+    = .sv 里 force 的网；res.dft_gate 的门网 = .sv 里 force 的 iddq。
+    signals(可选过滤)：只导这些 Topout 名(按基名)的网；None=全导。任何异常 → 已收的照返、绝不崩。
+    """
+    nets = dict(collect_topout_nets(wb, signals))      # ① 探针网(复用，含寄存器/dft 直连根)
+    want = _sig_filter(signals)
+    try:
+        from . import topout as T
+        from . import resolver as R
+        from .excel_model import _strip_width
+        resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
+        for t in (getattr(wb, "topout", None) or []):
+            tb = _strip_width(t.name)[0]
+            if want is not None and tb.lower() not in want:
+                continue
+            try:                                       # min 档够了：只要叶子/门网，不在乎向量值
+                res = T.analyze_signal(wb, resolver, t, mode="min", want_vectors=True)
+            except Exception:  # noqa: BLE001  单信号失败跳过，不连累整批
+                continue
+            if res.status != "ok":
+                continue
+            for b in (res.bindings or {}).values():    # ② cone force 输入叶子(RO 衔接网/回读)
+                if getattr(b, "kind", None) == "RO":
+                    base = _strip_width(str(getattr(b, "wire", "") or "").split(".")[-1])[0]
+                    if base and re.match(r"^[A-Za-z_]\w*$", base):
+                        nets.setdefault(base, "Topout %s 的 cone 输入 %s (force 叶子)"
+                                        % (t.name, getattr(b, "base", base)))
+            g = getattr(res, "dft_gate", None)         # ③ iddq 门网
+            if g and getattr(g[0], "wire", None):
+                gw = _strip_width(str(g[0].wire).split(".")[-1])[0]
+                if gw and re.match(r"^[A-Za-z_]\w*$", gw):
+                    nets.setdefault(gw, "Topout %s 的 iddq 门网" % t.name)
+    except Exception:  # noqa: BLE001  无 Topout 页 / 解析层异常 → 已收的照返
+        return nets
+    return nets
+
+
 def collect_page_nets(wb, page, signals=None):
     """某一子模块页(logic/mux/dft/iddq) → 该页【每个信号】的 assert 探针网 + force 输入网。
 
@@ -287,8 +336,9 @@ def collect_nets(wb, signals=None, pages=None, dest_suffix=None):
     """统一【可选过滤】网导出（C3 块D2，2026-06-23）：合并 logic/mux/dft 三页网，按需过滤。
 
     signals    — 只导这些信号(out_base/G 列基名/dft 输出基名/Topout 名)的网；None=全部。
-    pages      — 取这些类别：{'topout','logic','mux','dft','iddq'} 的子集；None=全取。
-                 = GUI『导出 nets.txt』里的 5 个勾选类别(Topout + 四个子模块 tab 页)。
+    pages      — 取这些类别：{'topout-cone','topout','logic','mux','dft','iddq'} 的子集；None=全取。
+                 'topout-cone'(⭐第一性推荐) = Topout 探针 + cone 展开所有 force 输入叶子 + iddq 门；
+                 'topout' = 仅 Topout 探针(不含 cone 输入)。= GUI『导出 nets.txt』里的勾选类别。
     dest_suffix— 只留以 `_<dest_suffix>` 结尾的衔接网(同源多目的地时选一页)；None=不按后缀过滤。
 
     返回 {网名: 用途}。每个子模块页(logic/mux/dft/iddq)= 该页每个信号的探针网 + force 输入；
@@ -315,7 +365,9 @@ def collect_nets(wb, signals=None, pages=None, dest_suffix=None):
         _merge(collect_page_nets(wb, "dft", signals=signals))
     if _on("iddq"):                      # iddq 页：漏电门控输出探针 + 输入网
         _merge(collect_page_nets(wb, "iddq", signals=signals))
-    if _on("topout"):                    # Topout：寄存器/dft 直连根的探针在此补齐
+    if _on("topout-cone"):               # ⭐第一性：Topout 探针 + cone 展开所有 force 输入叶子 + iddq 门
+        _merge(collect_topout_cone_nets(wb, signals=signals))
+    if _on("topout"):                    # Topout：仅探针(寄存器/dft 直连根在此补齐)；不含 cone 输入
         _merge(collect_topout_nets(wb, signals=signals))
     return filter_nets_by_dest(nets, dest_suffix)
 
