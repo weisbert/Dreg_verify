@@ -288,7 +288,10 @@ def cmd_topout(args, wb, opts):
         return 0
 
     if args.report:
-        rep = T.topout_report(wb, mode=mode, max_tests=mt, exhaustive=exh, probe_prefixes=pp)
+        rep = T.topout_report(wb, mode=mode, max_tests=mt, exhaustive=exh, probe_prefixes=pp,
+                              neg_all=opts.neg_all, neg_signals=opts.neg_signals,
+                              neg_which=opts.neg_which, neg_mode=opts.neg_mode,
+                              neg_value=opts.neg_value)
         written = write_report(args.report, rep, args.excel)
         print("Topout 报告已写出: %s" % "  ".join(written))
         print("  Topout 信号 %d 个（真值表 %d 个）" % (len(rep["summary"]), len(rep["tables"])))
@@ -305,7 +308,10 @@ def cmd_topout(args, wb, opts):
     out = args.out or "wr_rf_tc.sv"
     text, b = T.render_topout_sv(wb, mode=mode, max_tests=mt, exhaustive=exh,
                                  comments=opts.comments, sv_summary=opts.sv_summary,
-                                 owner_in_msg=opts.owner_in_msg, probe_prefixes=pp)
+                                 owner_in_msg=opts.owner_in_msg, probe_prefixes=pp,
+                                 neg_all=opts.neg_all, neg_signals=opts.neg_signals,
+                                 neg_which=opts.neg_which, neg_mode=opts.neg_mode,
+                                 neg_value=opts.neg_value)
     _write(out, text)
     s = b["summary"]
     print("已写出(Topout 路径): %s" % out)

@@ -28,7 +28,7 @@ class GenOptions:
                  mux_dropped=None, mux_cleared=None, mux_user_vecs=None,
                  suffix_override=None, append_to_mux=False,
                  logic_cascade=None, mux_cascade=None, sig_cascade=None,
-                 logic_overrides=None, on_missing=None):
+                 logic_overrides=None, on_missing=None, suppress_mux_bare_probe=False):
         self.owners = _norm_owner_set(owners)
         self.signals = _norm_set(signals)
         self.signal_regex = signal_regex
@@ -64,6 +64,9 @@ class GenOptions:
         # 末尾测试汇总：产物包进命名 begin/end 块 + 计数器 + 汇总行
         # (signals/asserts/positive/negative + 运行时 REAL FAIL / NEG broken 数)。
         self.sv_summary = bool(sv_summary)
+        # t1：抑制 mux 块顶『top_out=0 用裸名探针』噪声警告——Topout 路径置 True（账目/报告已刻意抑制、
+        # 新模型每信号都中会淹没；旧 logic-rooted 路径默认 False=保留，逐字节不变）。
+        self.suppress_mux_bare_probe = bool(suppress_mux_bare_probe)
         # 真·仅负向：每个信号只保留负向向量(保持原 T 编号便于与"全部"导出对照)，
         # 无负向的信号整个跳过。CLI --neg-file separate 的负向文件用——
         # 之前是块级过滤(负向文件里混着正例)，汇总/REAL FAIL 统计会误导。
@@ -1408,7 +1411,8 @@ def _build_core(wb, opts):
                                              counters=opts.sv_summary,
                                              used_vars=exp["used_vars"])
         # top_out=0 且没配前缀：照常生成裸名探针，但在块顶留一句警告 + 汇总到 mux_warnings
-        out_warn = mux_output_warning(grp, opts)
+        # （t1：Topout 路径 suppress_mux_bare_probe=True 时抑制——账目/报告已抑制此噪声、保持一致）
+        out_warn = "" if opts.suppress_mux_bare_probe else mux_output_warning(grp, opts)
         if out_warn:
             lines = ["// ⚠ %s" % out_warn] + lines
             mux_warnings.append((grp.out_name, grp.assert_id, out_warn))

@@ -619,15 +619,49 @@ def topout_fortest_rows(wb, resolver, mode="min", max_tests=256, exhaustive=Fals
     return fortest_writer.build_fortest_rows(rep, include_mux=True)
 
 
+def _register_report_table(result):
+    """直连寄存器根 → 完整表 dict：视图字段(inputs/tests values/auto_label) + for_test 字段(tests
+    raw/writes/exp_num，走 compute_drives 拿权威写值) + HTML 字段(is_logic 等)。M7：register 根此前不进
+    report_for_topout → for_test 回填整批丢；本表统一供 view_models / HTML / for_test 三处消费。"""
+    groups = V.input_groups(result.node, result.bindings)
+    used = E.collect_vars(result.node)
+    out_w = result.out_width or 1
+    slc = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+    tests = []
+    for vec in result.vectors:
+        bv = V.vector_to_base_values(vec, groups)
+        _forces, writes, _unres = W.compute_drives(vec, result.bindings, used)
+        tests.append({
+            "name": W.test_label(vec), "neg": vec.is_negative,
+            "values": [G._fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups],
+            "auto_out": G._fmt_cell(vec.exp_value, vec.exp_width),
+            "expected": G._fmt_cell(vec.asserted_value, vec.exp_width),
+            # for_test 回填字段(M7)：raw=逐输入整数、writes=compute_drives 权威 RF_WRITE、exp_num=断言期望
+            "raw": [bv.get(g["key"], 0) for g in groups],
+            "writes": writes, "exp_num": vec.asserted_value,
+        })
+    return {
+        "R": "", "signal": _topout_disp_name(result.topo, result.out_width),
+        "owner": result.topo.owner, "type": REGISTER, "expr": "",
+        "is_logic": True, "out_width": out_w, "chain": [], "supplement": "",
+        "inputs": [G._input_meta(g, result.bindings) for g in groups], "tests": tests,
+        "auto_label": "auto_out%s" % slc, "exp_label": "期望(out)%s" % slc,
+        "topout_name": result.topo.name,
+    }
+
+
 def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
-                      probe_prefixes=None, only=None, sig_cov=None):
+                      probe_prefixes=None, only=None, sig_cov=None,
+                      neg_all=False, neg_signals=None, neg_which="first",
+                      neg_mode="invert", neg_value=None):
     """生成【限定到 Topout 清单】的报告(复用 generator.report，再按 Topout B 列名过滤 tables/detail)。
 
     新模型『要验什么』只在 Topout——旧 report 枚举全 logic/mux，这里只保留 Topout 命中的表，
     且 owner 用 Topout A 列覆盖（块B 不 join）。旧 generator.report 一字不动。
     probe_prefixes：force 叶子 + 探针层级前缀（与 .sv 同口径，让 GUI 富表/for_test 回填也带前缀）。
     only：限定只保留这些 Topout 名（GUI 勾选项过滤；None=全部，与 .sv 导出 only 同口径，N6）。
-    sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，映成源名键喂 generator.report（N3）。"""
+    sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，映成源名键喂 generator.report（N3）。
+    neg_*(m1)：全局/批量负向——logic/mux 经 G.report、register 经 add_negatives，让报告与 .sv 同口径。"""
     from . import generator as G
     logic_idx, mux_idx = build_index(wb)
     rename = _rename_map(wb)
@@ -641,7 +675,9 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
                 gen_sig_cov[rt.obj.out_name.lower()] = c
     rep = G.report(wb, G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                     include_risky=True, probe_prefixes=probe_prefixes,
-                                    sig_cov=gen_sig_cov or None))
+                                    sig_cov=gen_sig_cov or None, neg_all=neg_all,
+                                    neg_signals=neg_signals, neg_which=neg_which,
+                                    neg_mode=neg_mode, neg_value=neg_value))
     only_low = {str(n).lower() for n in only} if only is not None else None
     want = {t.name.lower() for t in wb.topout
             if only_low is None or t.name.lower() in only_low}
@@ -681,6 +717,20 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
             t["owner"] = owner_of.get(nm, t.get("owner", ""))
             t["topout_name"] = nm                # 块B：标回 Topout B 列名（视图模型/账目 join 用，纯附加）
             kept_tables.append(t)
+    # M7：直连寄存器根 G.report 不产(只有 logic/mux) → for_test 回填/HTML 真值表整批丢。按 TopoutResult
+    # 走 compute_drives 组装 for_test schema 表补进 tables，统一供 view_models/HTML/for_test 三处消费。
+    for topo in wb.topout:
+        if only_low is not None and topo.name.lower() not in only_low:
+            continue
+        rt = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
+        if rt.kind != REGISTER:
+            continue
+        m, ex = _cov_for(sig_cov, topo.name, mode, exhaustive)
+        r = analyze_signal(wb, resolver, topo, root=rt, mode=m, max_tests=max_tests, exhaustive=ex)
+        if r.status == "ok" and r.vectors:
+            if _topout_neg_enabled(topo.name, neg_all, neg_signals):    # m1：register 报告也带负向
+                r.vectors = _apply_passthrough_negatives(r.vectors, neg_mode, neg_which, neg_value)
+            kept_tables.append(_register_report_table(r))
     rep = dict(rep)
     rep["tables"] = kept_tables
     return rep
@@ -828,20 +878,45 @@ def _probe_prefix_for_name(probe_prefixes, name):
 def build_for_topout(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
                      edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None,
-                     logic_overrides=None):
+                     logic_overrides=None, neg_all=False, neg_signals=None,
+                     neg_which="first", neg_mode="invert", neg_value=None):
     """Topout .sv 产出（公共入口）。logic_overrides(M8)：RTL 补充逻辑 {基名: spec}，分析期临时换
-    wb.logic(应用补充)再产出、退出还原（守 R32）；无 → 逐字节不变。详见 _build_for_topout_core。"""
+    wb.logic(应用补充)再产出、退出还原（守 R32）；无 → 逐字节不变。
+    neg_all/neg_signals/neg_which/neg_mode/neg_value(m1)：全局/批量负向——logic/mux 根经 GenOptions、
+    register/dft 改名根经 add_negatives 补自检负向（此前 Topout 负向只能逐信号编辑）。详见 _core。"""
     with _with_logic_overrides(wb, logic_overrides):
         return _build_for_topout_core(
             wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive, comments=comments,
             sv_summary=sv_summary, owner_in_msg=owner_in_msg, only=only,
             edit_overrides=edit_overrides, probe_prefixes=probe_prefixes, scope=scope,
-            sig_cov=sig_cov)
+            sig_cov=sig_cov, neg_all=neg_all, neg_signals=neg_signals,
+            neg_which=neg_which, neg_mode=neg_mode, neg_value=neg_value)
+
+
+def _topout_neg_enabled(name, neg_all, neg_signals):
+    """该 Topout 信号是否要补全局/批量负向（m1）：neg_all 全开 / 名字在 neg_signals 集合里。"""
+    if neg_all:
+        return True
+    ns = neg_signals or ()
+    return str(name).lower() in {str(s).strip().lower() for s in ns if s}
+
+
+def _apply_passthrough_negatives(vecs, neg_mode, neg_which, neg_value):
+    """register/dft 改名 passthrough 根补全局自检负向（m1）：只对功能正向加负向、DFT 拍(iddq=1 压0)
+    不补(它本身是常量支自检)，与 build 的 logic/mux 同口径([pos,neg,pitch] 排序)，再重排 T 编号。"""
+    pitch = [v for v in vecs if getattr(v, "dft_pitch", False)]
+    func = [v for v in vecs if not getattr(v, "dft_pitch", False)]
+    out = V.add_negatives(func, mode=neg_mode, which=neg_which, fixed_value=neg_value) + pitch
+    for i, v in enumerate(out):
+        v.index = i
+    return out
 
 
 def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
                            comments=False, sv_summary=False, owner_in_msg=False, only=None,
-                           edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None):
+                           edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None,
+                           neg_all=False, neg_signals=None, neg_which="first",
+                           neg_mode="invert", neg_value=None):
     """以 **Topout B 列为外层** 产出 .sv 块清单（块B，report_for_topout 的 .sv 孪生，只新增）。
 
     · logic/mux 根：复用 generator.build（按 Topout 源 out_name 过滤 + 按 B 列序重排 +
@@ -892,6 +967,9 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
     opts = G.GenOptions(mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                         include_risky=True, comments=comments, sv_summary=sv_summary,
                         owner_in_msg=owner_in_msg, signals=want_names,
+                        suppress_mux_bare_probe=True,           # t1：Topout .sv 抑制 mux 裸名探针噪声
+                        neg_all=neg_all, neg_signals=neg_signals,    # m1：logic/mux 根全局/批量负向
+                        neg_which=neg_which, neg_mode=neg_mode, neg_value=neg_value,
                         probe_prefixes=probe_prefixes, sig_cov=gen_sig_cov or None,
                         vector_overrides=eo.get("vector_overrides") or None,
                         mux_user_vecs=eo.get("mux_user_vecs"),
@@ -927,6 +1005,8 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
                     continue
                 if ov is not None:
                     r.vectors = list(ov)
+                elif _topout_neg_enabled(name, neg_all, neg_signals):    # m1：全局/批量负向
+                    r.vectors = _apply_passthrough_negatives(r.vectors, neg_mode, neg_which, neg_value)
                 r.vectors = G.scope_filter_vectors(r.vectors, scope)
                 if not r.vectors:                          # 仅正向/仅负向过滤后无用例 → 记账
                     _why = _scope_empty_reason(scope)
@@ -986,6 +1066,8 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
                 continue
             if ov is not None:                     # 用户编辑过该直连寄存器的真值表 → 用编辑后的向量
                 r.vectors = list(ov)
+            elif _topout_neg_enabled(name, neg_all, neg_signals):    # m1：全局/批量负向
+                r.vectors = _apply_passthrough_negatives(r.vectors, neg_mode, neg_which, neg_value)
             r.vectors = G.scope_filter_vectors(r.vectors, scope)
             if not r.vectors:                      # 仅正向/仅负向过滤后无用例 → 记账
                 _why = _scope_empty_reason(scope)
@@ -1030,37 +1112,30 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
 def render_topout_sv(wb, mode="min", max_tests=256, exhaustive=False,
                      comments=False, sv_summary=False, owner_in_msg=False, only=None,
                      edit_overrides=None, probe_prefixes=None, scope="all", sig_cov=None,
-                     logic_overrides=None):
+                     logic_overrides=None, neg_all=False, neg_signals=None,
+                     neg_which="first", neg_mode="invert", neg_value=None):
     """便捷封装：build_for_topout → sv_writer.render_file → (text, build_dict)。
-    logic_overrides(M8)：RTL 补充逻辑，透传 build_for_topout。"""
+    logic_overrides(M8)/neg_*(m1)：透传 build_for_topout。"""
     b = build_for_topout(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                          comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
                          only=only, edit_overrides=edit_overrides, probe_prefixes=probe_prefixes,
-                         scope=scope, sig_cov=sig_cov, logic_overrides=logic_overrides)
+                         scope=scope, sig_cov=sig_cov, logic_overrides=logic_overrides,
+                         neg_all=neg_all, neg_signals=neg_signals, neg_which=neg_which,
+                         neg_mode=neg_mode, neg_value=neg_value)
     text = W.render_file(b["blocks"], comments=comments, summary=sv_summary)
     return text, b
 
 
 # ═════════════════════════ 块B（续）：Topout GUI 视图模型（每信号一个，按 B 列序） ═════════════════════════
 def _fill_register_model(m, result):
-    """直连寄存器根的真值表视图（与 report 表同形：inputs/tests/auto_label/exp_label）。"""
-    groups = V.input_groups(result.node, result.bindings)
-    m["inputs"] = [G._input_meta(g, result.bindings) for g in groups]
-    out_w = result.out_width or 1
-    slc = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
-    m["auto_label"] = "auto_out%s" % slc
-    m["exp_label"] = "期望(out)%s" % slc
-    tests = []
-    for vec in result.vectors:
-        bv = V.vector_to_base_values(vec, groups)
-        tests.append({
-            "name": W.test_label(vec), "neg": vec.is_negative,
-            "values": [G._fmt_cell(bv.get(g["key"], 0), g["width"]) for g in groups],
-            "auto_out": G._fmt_cell(vec.exp_value, vec.exp_width),
-            "expected": G._fmt_cell(vec.asserted_value, vec.exp_width),
-        })
-    m["tests"] = tests
-    m["n_vectors"] = len(tests)
+    """直连寄存器根的真值表视图（与 report 表同形：inputs/tests/auto_label/exp_label）。
+    委托 _register_report_table 单一构造器（M7 后 view_models 多走 report_for_topout 表，本函数为兜底）。"""
+    t = _register_report_table(result)
+    m["inputs"] = t["inputs"]
+    m["tests"] = t["tests"]
+    m["auto_label"] = t["auto_label"]
+    m["exp_label"] = t["exp_label"]
+    m["n_vectors"] = len(t["tests"])
 
 
 def _topout_disp_name(topo, out_width):
@@ -1158,15 +1233,6 @@ def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, pr
 _VERIF_OF = {"ok": "clean", "unresolved": "unresolved", "error": "parse-err"}
 
 
-def _vm_to_report_table(vm):
-    """register 平凡视图模型 → report 表 dict（HTML/CSV 真值表 tab 消费）。"""
-    return {"R": "", "signal": vm["name"], "owner": vm["owner"], "type": vm["kind"],
-            "expr": "", "is_logic": True, "out_width": vm["width"] or 1,
-            "chain": vm["chain"], "supplement": "", "inputs": vm["inputs"],
-            "tests": vm["tests"], "auto_label": vm["auto_label"], "exp_label": vm["exp_label"],
-            "topout_name": vm["name"]}
-
-
 def _account_error_text(row):
     """账目行 → 报告 summary 的『错误/原因』列文案（RO 回读/未解析/error 不空，ok 留空）。"""
     if row["status"] == "ok":
@@ -1179,16 +1245,22 @@ def _account_error_text(row):
 
 
 def topout_report(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                  only=None, sig_cov=None, logic_overrides=None):
+                  only=None, sig_cov=None, logic_overrides=None,
+                  neg_all=False, neg_signals=None, neg_which="first",
+                  neg_mode="invert", neg_value=None):
     """Topout 限定报告（公共入口）。logic_overrides(M8)：分析期换 wb.logic(应用 RTL 补充)，使
-    HTML/CSV 报告与 supplement banner 反映补充后逻辑；无 → 逐字节不变。详见 _topout_report_core。"""
+    HTML/CSV 报告与 supplement banner 反映补充后逻辑；无 → 逐字节不变。
+    neg_*(m1)：全局/批量负向，报告 tables/汇总 n_neg 与 .sv 同口径。详见 _topout_report_core。"""
     with _with_logic_overrides(wb, logic_overrides):
         return _topout_report_core(wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                   probe_prefixes=probe_prefixes, only=only, sig_cov=sig_cov)
+                                   probe_prefixes=probe_prefixes, only=only, sig_cov=sig_cov,
+                                   neg_all=neg_all, neg_signals=neg_signals, neg_which=neg_which,
+                                   neg_mode=neg_mode, neg_value=neg_value)
 
 
 def _topout_report_core(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                        only=None, sig_cov=None):
+                        only=None, sig_cov=None, neg_all=False, neg_signals=None,
+                        neg_which="first", neg_mode="invert", neg_value=None):
     """Topout 限定报告（write_report 兼容：summary/detail/tables/verifiability），堵 3 静默陷阱：
       ① 默认不空：summary 直接来自 compose_topout_account（12 行全分类，不套 top_output_only）；
       ② 不刷 top_out=0 假警告：error 列只放真原因（RO/未解析/冲突），无 bare-probe/needs-prefix 噪声；
@@ -1201,7 +1273,9 @@ def _topout_report_core(wb, mode="min", max_tests=256, exhaustive=False, probe_p
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes)
     only_low = {str(n).lower() for n in only} if only is not None else None
     rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                            probe_prefixes=probe_prefixes, only=only, sig_cov=sig_cov)
+                            probe_prefixes=probe_prefixes, only=only, sig_cov=sig_cov,
+                            neg_all=neg_all, neg_signals=neg_signals, neg_which=neg_which,
+                            neg_mode=neg_mode, neg_value=neg_value)
     acc = compose_topout_account(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive)
     if only_low is not None:                # 账目/汇总/可验证性同样限定到勾选信号
         acc = dict(acc); acc["rows"] = [r for r in acc["rows"] if r["name"].lower() in only_low]
@@ -1210,23 +1284,34 @@ def _topout_report_core(wb, mode="min", max_tests=256, exhaustive=False, probe_p
     if only_low is not None:
         vms = [m for m in vms if m["name"].lower() in only_low]
 
-    # tables：logic/mux 富表（report_for_topout）+ register 平凡表（视图模型）
+    # tables：logic/mux 富表 + register 平凡表，均来自 report_for_topout（M7 后 register 也在其中，
+    # 不再从 vms 二次拼装 → 杜绝 register 表重复 + 统一构造器）。
     tables = list(rep.get("tables", []))
-    for vm in vms:
-        if vm["kind"] == REGISTER and vm["tests"]:
-            tables.append(_vm_to_report_table(vm))
     # detail：限定到存活 logic/mux 表的源信号（per-test 行；register/RO 无 per-test）
     kept_src = {str(t["signal"]).lower() for t in rep.get("tables", [])}
     detail = [d for d in rep.get("detail", []) if str(d.get("signal", "")).lower() in kept_src]
 
+    # m7：汇总 tab 的 supplement 列此前恒空（真值表 tab suppbar 在、汇总不见）——从 tables 取 RTL 补充串
+    # 按 Topout 名回填，让汇总/CSV/Excel 也能筛出补充信号（与真值表 banner 一致）。
+    supp_by_name = {str(t.get("topout_name", "")).lower(): t.get("supplement", "")
+                    for t in tables if t.get("supplement")}
+    # m1：汇总 n_neg 此前硬编码 0——从 tables 数每信号负向 test，与 .sv/报告同口径（neg_all 才非 0）。
+    neg_by_name = {}
+    for t in tables:
+        nm = str(t.get("topout_name", "")).lower()
+        if nm:
+            neg_by_name[nm] = neg_by_name.get(nm, 0) + sum(1 for x in t.get("tests", [])
+                                                           if x.get("neg"))
     # summary + verifiability：以 Topout 账目为准（覆盖全 12，含 RO/未解析）
     summary, verif_signals, counts = [], [], {}
     for row in acc["rows"]:
         summary.append({
             "R": "", "signal": row["name"], "owner": row["owner"], "type": row["kind"],
-            "top": "", "expr": "", "n_tests": row["n_vectors"], "n_neg": 0,
+            "top": "", "expr": "", "n_tests": row["n_vectors"],
+            "n_neg": neg_by_name.get(row["name"].lower(), 0),
             "control": "", "data": "", "unresolved": "; ".join(row["issues"]),
-            "supplement": "", "error": _account_error_text(row)})
+            "supplement": supp_by_name.get(row["name"].lower(), ""),
+            "error": _account_error_text(row)})
         vst = _VERIF_OF.get(row["status"], row["status"])     # ok→clean / skip 原样(RO 回读)
         counts[vst] = counts.get(vst, 0) + 1
         verif_signals.append({

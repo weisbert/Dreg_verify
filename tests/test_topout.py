@@ -562,6 +562,28 @@ def test_build_for_topout_emits_claims_for_register_root(wb):
     assert c["found_in"] == "topout" and c["identity"] == "output"
 
 
+def test_report_for_topout_includes_register_tables_for_fortest(wb, res):
+    """M7：直连寄存器根进 report_for_topout 的 tables（for_test schema：raw/writes/exp_num）——
+    此前只过滤 logic/mux、register 整批丢 → GUI『回填 for_test』对 clk_force_on 空白。"""
+    rep = T.report_for_topout(wb, res, mode="max")
+    reg = [t for t in rep["tables"] if str(t.get("topout_name", "")) == "clk_force_on"]
+    assert reg, "register 根应在 report tables 里"
+    t = reg[0]
+    assert t["is_logic"] and t["type"] == T.REGISTER
+    assert t["tests"] and all(("raw" in x and "writes" in x and "exp_num" in x) for x in t["tests"])
+
+
+def test_topout_fortest_rows_backfills_register_root(wb, res):
+    """M7：topout_fortest_rows（→ build_fortest_rows）对寄存器根产出 for_test 组（D 行=顶层口、
+    有 RF_WRITE 写值），不再空白。"""
+    groups = T.topout_fortest_rows(wb, res, mode="max")
+    names = {g["name"] for g in groups}
+    assert any(n.startswith("clk_force_on") for n in names), "寄存器根应有 for_test 组"
+    grp = next(g for g in groups if g["name"].startswith("clk_force_on"))
+    out_rows = [r for r in grp["rows"] if r.get("kind") == "output"]
+    assert out_rows and str(out_rows[0]["d"]).startswith("clk_force_on")
+
+
 def test_passthrough_block_injects_block_top_warning_and_claims(wb):
     """M6：register/改名根 .sv 块顶补 // ⚠（此前裸渲染绕过 build 后处理）。手工把 iddq_skipped 塞进
     meta，验证 _passthrough_block 注入块顶 ⚠ + claims 走 is_topout 注入圈。"""
@@ -623,6 +645,59 @@ def test_topout_logic_overrides_does_not_mutate_wb(wb):
     T.topout_report(wb, mode="min", logic_overrides=_M8_SUPP)
     assert wb.logic is not None and list(wb.logic) == before
     assert T.build_for_topout(wb, mode="min")["summary"]["n_supplement"] == 0
+
+
+def test_topout_neg_all_adds_negatives_logic_and_register(wb):
+    """m1：Topout .sv 全局负向(neg_all)——logic 根与 register 根都补自检负向（此前只能逐信号编辑）。"""
+    from dreg_verify import sv_writer as W
+    b0 = T.build_for_topout(wb, mode="min")
+    assert b0["summary"]["n_negative"] == 0          # 默认无全局负向
+    b = T.build_for_topout(wb, mode="min", neg_all=True)
+    assert b["summary"]["n_negative"] > 0
+    # register 根(clk_force_on)也补了负向（passthrough 经 add_negatives）
+    reg = next(st for ln, st in b["blocks"] if st.get("topout_name") == "clk_force_on")
+    assert reg["n_negative"] > 0
+
+
+def test_topout_neg_signals_subset(wb):
+    """m1：neg_signals 只给指定信号补负向（批量子集，非全开）。"""
+    b = T.build_for_topout(wb, mode="min", neg_signals=["clk_force_on"])
+    reg = next(st for ln, st in b["blocks"] if st.get("topout_name") == "clk_force_on")
+    assert reg["n_negative"] > 0
+    others = [st for ln, st in b["blocks"]
+              if st.get("topout_name") not in ("clk_force_on",) and st.get("n_vectors", 0)]
+    assert all(st.get("n_negative", 0) == 0 for st in others)
+
+
+def test_topout_report_n_neg_reflects_global_negatives(wb):
+    """m1：topout_report 汇总 n_neg 不再硬编码 0——neg_all 时反映实际负向（与 .sv 同口径）。"""
+    rep0 = T.topout_report(wb, mode="min")
+    assert all(r["n_neg"] == 0 for r in rep0["summary"])
+    rep = T.topout_report(wb, mode="min", neg_all=True)
+    assert sum(r["n_neg"] for r in rep["summary"]) > 0
+    cf = next(r for r in rep["summary"] if r["signal"] == "clk_force_on")
+    assert cf["n_neg"] > 0                              # register 根报告也带负向
+
+
+def test_topout_report_summary_supplement_column(wb):
+    """m7：套 RTL 补充后，topout_report 汇总 tab 的 supplement 列不再恒空（与真值表 banner 一致）。"""
+    rep = T.topout_report(wb, mode="max", logic_overrides=_M8_SUPP)
+    row = next(r for r in rep["summary"] if r["signal"] == "d_logic_bt_lp_lna_agc")
+    assert row["supplement"] and "手工补充" in row["supplement"]
+    # 无补充信号 supplement 仍空
+    other = next(r for r in rep["summary"] if r["signal"] == "clk_force_on")
+    assert other["supplement"] == ""
+
+
+def test_topout_sv_suppresses_mux_bare_probe_noise(wb):
+    """t1：Topout .sv 抑制 mux 块顶『top_out=0 用裸名探针』噪声（账目/报告已抑制、保持一致）；
+    旧 logic-rooted 路径(generator.build 默认)仍保留该提示，二者刻意分开。"""
+    from dreg_verify import generator as G
+    from dreg_verify import sv_writer as W
+    txt, _ = T.render_topout_sv(wb, mode="max", exhaustive=True)
+    assert "top_out=0" not in txt                      # Topout .sv 已抑制
+    old = G.build(wb, G.GenOptions(mode="max", exhaustive=True, include_risky=True))
+    assert "top_out=0" in W.render_file(old["blocks"])  # 旧路径(默认 False)仍保留
 
 
 def test_build_for_topout_ro_unresolved_accounted_not_dropped(wb):
