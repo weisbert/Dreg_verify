@@ -663,7 +663,8 @@ def _register_report_table(result):
         })
     disp = _topout_disp_name(result.topo, result.out_width)
     return {
-        "R": "", "signal": disp, "sv_net": disp,       # m3：寄存器根顶层口名即 .sv 真名
+        # sv_net=寄存器根顶层口真名(裸名，不含测试台前缀——见 _sv_net_for 注，对抗 review F1)
+        "R": "", "signal": disp, "sv_net": disp,
         "owner": result.topo.owner, "type": REGISTER, "expr": "",
         "is_logic": True, "out_width": out_w, "chain": [], "supplement": "",
         "inputs": inputs, "tests": tests,
@@ -733,10 +734,14 @@ def report_for_topout(wb, resolver, mode="min", max_tests=256, exhaustive=False,
         return None
 
     def _sv_net_for(nm, out_width):
-        """该 Topout 信号 .sv 断言 LHS 的真名（m3：for_test D 列/真表标题应与之一致，非源内部名）：
+        """该 Topout 信号的【顶层网真名】(for_test D 列/真表标题用，m3：取代源内部名)：
         改名根=probe_name+slice(passthrough 贴顶层真名)；普通/_ls logic/mux 根=源对象 rtl_name(含
-        _ls/尾缀，与 build 出的 .sv 一致)。否则 designer 对不上 / CUVUNF(d_en_vco_fc_fsm vs 顶层
-        d_en_vco_fc_ls)。仅作 sv_net 附加字段，不动 t['signal']（保 report join/detail 用源名）。"""
+        _ls/尾缀)。修的是【源内部名 vs 顶层真名】维度(d_en_vco_fc_fsm vs 顶层 d_en_vco_fc_ls)，否则
+        designer 对不上。
+        ⚠ 不含【测试台层级前缀】(ENV_RF.<probe_prefix>)——那是 .sv emit 时按 probe_prefixes 单独加的；
+        for_test 页输入/输出网名【统一用裸名】(与输入 force 网名同口径，实证：未配前缀的输入行也裸名)，
+        前缀维度与本字段正交(对抗 review F1：sv_net 非完整 .sv LHS、是顶层网名分量)。仅作附加字段，
+        不动 t['signal']（保 report join/detail 用源名）。"""
         rt = resolve_root(wb, nm, logic_idx, mux_idx, rename=rename)
         topo = topo_by_name.get(nm)
         if rt.renamed and rt.probe_name and topo is not None:
