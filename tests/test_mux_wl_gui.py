@@ -150,6 +150,9 @@ def test_export_nets_gui(gui_app, tmp_path, monkeypatch):
                             staticmethod(lambda *a, **k: (str(out), "")))
         monkeypatch.setattr(QtWidgets.QMessageBox, "information",
                             staticmethod(lambda *a, **k: None))
+        # 导出按类别勾选（2026-06-25）→ 测试里直接给全类别，绕过模态对话框（否则 offscreen 下 exec() 死等）
+        monkeypatch.setattr(w, "_ask_nets_pages",
+                            lambda: {"topout", "logic", "mux", "dft", "iddq"})
         # 关『logic 加尾缀』→ pll_n1 探基名；导出后应仍是基名（污染已被 _reanalyze_all 还原）
         w.append_to_logic_chk.setChecked(False)
         sig = next(s for s in w.signals if getattr(s, "out_base", "") == "pll_n1")
