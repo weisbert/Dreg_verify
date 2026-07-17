@@ -72,6 +72,12 @@ class TopoutRoot:
         # 但断言探针必须贴顶层真名 probe_name(=A，不是 A_sm)。两者都 None = 普通信号(名字没变)。
         self.probe_name = probe_name     # 断言探针贴的顶层真名（None=用源对象自身名）
         self.source_name = source_name   # 实际提供逻辑/驱动的源名（寄存器根用它定字段；None=用 topo 名）
+        # 改名链是否途经【dft 改名边】（2026-07-17）：True=本支的 dft 观测层已由链自身记账
+        # （带门→dft_obs_name / 门后网消费→同左；透传边→本支【绕过】兄弟行的门）。analyze/_result_gate_info
+        # 据它抑制『out_base 兜底门』——否则同一 logic 源扇出成两条 dft 行（一带门一透传，如
+        # d_en_cnt→d_en_cnt(iddq门) 与 d_en_cnt→d_en_cnt_to_crg(透传)）时，透传支会串上兄弟行的
+        # iddq 门（假门：真值表多一行 iddq + 假 DFT 拍）。
+        self.dft_bridged = False
 
     @property
     def renamed(self):
@@ -83,13 +89,15 @@ class TopoutRoot:
             (" →probe %s" % self.probe_name) if self.probe_name else "")
 
 
-def _dft_rename_map(wb):
-    """从 dft 页（read 成 wb.dft_rows）建【改名表】{顶层输出名low → 功能源名low}。
+def _dft_rename_edges(wb):
+    """从 dft 页（read 成 wb.dft_rows）建【改名边】{顶层输出名low → (功能源基名low, 源引用原文low)}。
 
     dft 行 = 一个被观测输出 D + 表达式 E（透传 A / 门控 B?0:A）+ 输入 A/B/C。
     『改名』判据：该行**唯一的功能输入**（剥 _to_dft + 去掉门控位后）基名 ≠ 输出基名
     （如 D=A、输入=A_sm_to_dft → A_sm ≠ A ⟹ 改名 A_sm→A）。
-    透传到同名（mirror 的 clk_force_on=clk_force_on_to_dft）= 恒等、非改名 → 不入表（旧表零影响）。"""
+    透传到同名（mirror 的 clk_force_on=clk_force_on_to_dft）= 恒等、非改名 → 不入表（旧表零影响）。
+    源引用原文（只剥位宽、保留 _to_dft 后缀）供 resolve_root 区分本支读的是【门前网】(*_to_dft，
+    dft 页常态) 还是【门后网】(裸名=另一条带门 dft 行的输出)——后者途经那个门。"""
     from .excel_model import _strip_width, _dft_strip
     out = {}
     gates = wb.dft or {}
@@ -98,13 +106,19 @@ def _dft_rename_map(wb):
         gate_base = (gates.get(ob) or {}).get("gate_base")
         funcs = []
         for info in d.inputs.values():
-            b = _dft_strip(info.get("raw", "")).lower()    # 剥位宽 + _to_dft
+            raw = info.get("raw", "")
+            b = _dft_strip(raw).lower()                    # 剥位宽 + _to_dft
             if not b or b == ob or (gate_base and b == gate_base):
                 continue                                   # 恒等 / 门控位 → 不是功能源
-            funcs.append(b)
+            funcs.append((b, _strip_width(raw)[0].lower()))
         if len(funcs) == 1:                                # 唯一功能源且与输出异名 = 改名
             out.setdefault(ob, funcs[0])
     return out
+
+
+def _dft_rename_map(wb):
+    """dft 改名【表】{顶层输出名low → 功能源名low}（_dft_rename_edges 的名字视图）。"""
+    return {o: s for o, (s, _ref) in _dft_rename_edges(wb).items()}
 
 
 def _ls_rename_map(wb):
@@ -222,20 +236,30 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
     if rename is None:
         rename = _rename_map(wb)
     dft_gates = getattr(wb, "dft", None) or {}   # {dft 观测输出名: 门控} —— 途经它=带 iddq 门的观测层
+    dft_edges = _dft_rename_edges(wb)    # {dft 改名边}：判本跳是 dft 边还是 level_shift 边
     seen, cur, hops = {low}, low, 0
     reg_fallback = None                  # 链上撞到的同名寄存器（链尾够不到 logic/mux 才退回它，绝不静默丢）
     dft_obs = None                       # 途经的带门 dft 观测名（供 pin_dft_gate 叠 iddq）
+    dft_bridged = False                  # 链上是否途经 dft 改名边（True→analyze 抑制 out_base 兜底门）
     while hops < 8:
         nxt = rename.get(cur)
         if nxt is None or nxt in seen:
             break
         gated_here = cur in dft_gates    # cur 是被 iddq 门控的 dft 观测输出（门控那层在此跳）
+        edge = dft_edges.get(cur)        # 非 None = 本跳是 dft 改名边（_rename_map 里 dft 优先，边一致）
+        if edge is not None:
+            dft_bridged = True
+            # 门后网消费：本行源引用【不带 _to_dft】且恰是另一条带门观测的输出名 → 本支读的是
+            # 门后网，途经那个门（源引用带 _to_dft = 门前网 = 常态，不途经兄弟行的门）。
+            if dft_obs is None and nxt in dft_gates and not edge[1].endswith("_to_dft"):
+                dft_obs = nxt
         seen.add(nxt); hops += 1
         sub = _resolve_direct(wb, nxt, logic_idx, mux_idx)
         if sub is not None and sub.kind in (LOGIC, MUX):
             sub.probe_name = name        # 顶层真名（断言探针贴它，原大小写）
             sub.source_name = nxt        # 最终 logic/mux 源名
             sub.matched_name = low
+            sub.dft_bridged = dft_bridged
             sub.dft_obs_name = dft_obs or (cur if gated_here else None)
             sub.note = ("改名桥接：Topout 名 %s ← 源 %s（%s 根，经 %d 跳改名%s）；逻辑/驱动来自源，"
                         "断言探针贴顶层真名 %s"
@@ -257,7 +281,9 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
             sub.probe_name = name
             sub.source_name = nxt
             sub.matched_name = low
-            sub.dft_obs_name = dft_obs or (cur if gated_here else (nxt if nxt in dft_gates else None))
+            sub.dft_bridged = dft_bridged
+            sub.dft_obs_name = dft_obs or (cur if gated_here else
+                                           (nxt if (nxt in dft_gates and not dft_bridged) else None))
             sub.note = ("改名桥接：Topout 名 %s ← 源 %s（register 根，经 %d 跳改名%s）；逻辑/驱动来自源，"
                         "断言探针贴顶层真名 %s"
                         % (name, nxt, hops,
@@ -271,7 +297,8 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
         sub.probe_name = name
         sub.source_name = nxt
         sub.matched_name = low
-        sub.dft_obs_name = dft_obs or (nxt if nxt in dft_gates else None)
+        sub.dft_bridged = dft_bridged
+        sub.dft_obs_name = dft_obs or (nxt if (nxt in dft_gates and not dft_bridged) else None)
         sub.note = ("改名桥接：Topout 名 %s ← 源 %s（register 根，改名链上无 logic/mux 源%s）；"
                     "逻辑/驱动来自源，断言探针贴顶层真名 %s"
                     % (name, nxt, ("，含 dft 门 %s 作输入" % sub.dft_obs_name) if sub.dft_obs_name else "",
@@ -322,11 +349,13 @@ form_label = FORMS.form_label    # 复用 forms 的人读『逻辑类型』映�
 
 def _result_gate_info(wb, res):
     """该 TopoutResult 是否被 iddq 门控 → forms.dft_gate_info（门键与 analyze_signal pin 同口径：
-    改名桥接途经的带门观测名 dft_obs_name 优先，否则源对象 out_base / 寄存器根用 topo 名）。"""
+    改名桥接途经的带门观测名 dft_obs_name 优先，否则源对象 out_base / 寄存器根用 topo 名；
+    dft_bridged 且无 dft_obs_name → 本支绕过门，不兜底——同 analyze，防同源扇出兄弟行的假门）。"""
     root = res.root
-    ob = (getattr(root, "dft_obs_name", None)
-          or (getattr(root.obj, "out_base", None) if root.obj is not None else None)
-          or res.topo.name)
+    ob = getattr(root, "dft_obs_name", None)
+    if ob is None and not getattr(root, "dft_bridged", False):
+        ob = ((getattr(root.obj, "out_base", None) if root.obj is not None else None)
+              or res.topo.name)
     return FORMS.dft_gate_info(wb, ob)
 
 
@@ -393,7 +422,11 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                 # ——后者修『_ls 经 level_shift 直接命中 logic 行(不走桥)→dft_obs_name=None，而该 logic
                 # out_base 本身就是 dft 页门控观测(d_en_vco_fc 类)→analyze 漏门、与 generator.build/report
                 # (按 out_base 钉门)不一致』(2026-06-25 实证 d_en_vco_fc_ls)。无门时 pin/append 均 no-op。
-                obs = getattr(root, "dft_obs_name", None) or sig.out_base.lower()
+                # ⭐dft_bridged 时【不】兜底(2026-07-17 d_en_cnt_to_crg)：链途经 dft 改名边=该支的 dft
+                # 观测层已由链记账（带门→dft_obs_name）；透传边=本支绕过门。再按源 out_base 兜底会串上
+                # 【同源扇出的兄弟带门行】(d_en_cnt 行的 iddq 门套到 d_en_cnt_to_crg 支=假门+假 DFT 拍)。
+                obs = (getattr(root, "dft_obs_name", None)
+                       or (None if getattr(root, "dft_bridged", False) else sig.out_base.lower()))
                 if obs:
                     _ib = {b.base.lower() for b in bindings.values()
                            if b is not None and getattr(b, "base", None)}
@@ -476,7 +509,9 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                 # 循环(generator.build:1380/1383)【完全同口径】(同 obs 键、不传 input_bases)，使 res.vectors
                 # ==.sv 的 mux 块向量。此前 MUX 分支从不调 → GUI 真表少一列、n_vectors 与 .sv 差 1(刚修
                 # iddq bug 的第三个未修分支，logic/register 早已补)。无门时两调用均 no-op。
-                obs = getattr(root, "dft_obs_name", None) or grp.out_base.lower()
+                # dft_bridged 时不按 out_base 兜底（同 logic 分支，防同源扇出兄弟行的假门）。
+                obs = (getattr(root, "dft_obs_name", None)
+                       or (None if getattr(root, "dft_bridged", False) else grp.out_base.lower()))
                 _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver)
                 if _skip:
                     res.meta["iddq_skipped"] = _skip

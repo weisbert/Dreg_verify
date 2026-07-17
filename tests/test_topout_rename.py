@@ -289,6 +289,100 @@ def test_topout_force_leaves_and_probe_take_prefix(collision_path):
     assert "`ENV_RF.fll_active" in bare and "U_BT_LP_PLL_DIG" not in bare
 
 
+@pytest.fixture(scope="module")
+def fanout_path(tmp_path_factory):
+    """真表 d_en_cnt 实况(2026-07-17)：同一 logic 源在 dft 页【扇出成两行】——
+        row1: d_en_cnt        = iddq ? 0 : d_en_cnt_to_dft   （带门，→to_ls→顶层 d_en_cnt_ls）
+        row2: d_en_cnt_to_crg = d_en_cnt_to_dft              （透传，**不过 iddq 门**）
+    旧版 analyze 对 row2 支走改名桥接后 dft_obs_name=None，再按源 out_base(d_en_cnt) 兜底
+    → 串上兄弟行的 iddq 门（真值表多一行假 iddq + 假 DFT 拍）。"""
+    p = str(tmp_path_factory.mktemp("fo") / "fanout.xlsx")
+    make_mirror_btlp.build(p)
+    wb = openpyxl.load_workbook(p)
+    lg, dft, ls, top = wb["logic"], wb["dft"], wb["level_shift"], wb["Topout"]
+    # logic: d_en_cnt = A?B:C
+    r = lg.max_row + 1
+    for c, v in [(1, "d_bt_lp_linelocal_mode_ctrl_to_logic"),
+                 (2, "d_bt_lp_linectrl_rx_en_to_logic"),
+                 (3, "d_bt_lp_rx_en_local_to_logic"),
+                 (11, "d_en_cnt"), (12, "A?B:C"), (13, "to_dft"), (16, "Yao Wang")]:
+        lg.cell(r, c, v)
+    # dft row1（带门·恒等）：d_en_cnt = B?0:A（A=门前网 _to_dft、B=iddq）→ to_ls
+    r = dft.max_row + 1
+    for c, v in [(1, "d_en_cnt_to_dft"), (2, "d_bt_lp_pll_dig_dft_iddq_mode_to_dft"),
+                 (4, "d_en_cnt"), (5, "B?0:A"), (6, "16"), (7, "to_ls"), (8, "Yao Wang")]:
+        dft.cell(r, c, v)
+    # dft row2（透传·改名）：d_en_cnt_to_crg = A（A=同一门前网 → 本支绕过 iddq 门）
+    r = dft.max_row + 1
+    for c, v in [(1, "d_en_cnt_to_dft"), (4, "d_en_cnt_to_crg"), (5, "A"),
+                 (6, "16"), (8, "Yao Wang")]:
+        dft.cell(r, c, v)
+    # dft row3（门后网消费·对照）：d_en_cnt_post = A，A=**裸名 d_en_cnt**(=row1 门后输出) → 途经门
+    r = dft.max_row + 1
+    for c, v in [(1, "d_en_cnt"), (4, "d_en_cnt_post"), (5, "A"),
+                 (6, "16"), (8, "Yao Wang")]:
+        dft.cell(r, c, v)
+    # level_shift: row1 的 to_ls 去向 → 顶层口 d_en_cnt_ls
+    r = ls.max_row + 1
+    for c, v in [(1, "d_en_cnt_to_ls"), (2, "STD_SR_L2H"), (3, "d_en_cnt_ls"),
+                 (5, 1), (6, "Yao Wang")]:
+        ls.cell(r, c, v)
+    for nm in ("d_en_cnt_to_crg", "d_en_cnt_ls", "d_en_cnt_post"):
+        r = top.max_row + 1
+        top.cell(r, 1, "Yao Wang"); top.cell(r, 2, nm)
+    wb.save(p)
+    return p
+
+
+def _iddq_evidence(res):
+    """(dft_gate 非空?, extra_forces 里有 iddq?, DFT 拍数)"""
+    forced = {wl.lower() for v in res.vectors
+              for (wl, _x, _w) in (getattr(v, "extra_forces", None) or [])}
+    return (res.dft_gate is not None, any("iddq" in f for f in forced),
+            sum(1 for v in res.vectors if getattr(v, "dft_pitch", False)))
+
+
+def test_dft_fanout_passthrough_branch_not_gated(fanout_path):
+    """⭐核心修复(2026-07-17)：dft 透传支(d_en_cnt_to_crg)不串同源兄弟带门行的 iddq 门。"""
+    from dreg_verify import resolver as R
+    wb = M.load_workbook(fanout_path)
+    root = T.resolve_root(wb, "d_en_cnt_to_crg")
+    assert root.kind == T.LOGIC and root.renamed
+    assert root.source_name == "d_en_cnt"
+    assert root.dft_bridged is True
+    assert root.dft_obs_name is None                     # 本支不过门
+    topo = next(t for t in wb.topout if t.name == "d_en_cnt_to_crg")
+    res = T.analyze_signal(wb, R.Resolver(wb), topo, mode="max", max_tests=64)
+    assert res.status == "ok"
+    assert _iddq_evidence(res) == (False, False, 0)      # 修前=(True, True, 1) 假门
+    text, _ = T.render_topout_sv(wb, mode="max", max_tests=64, only=["d_en_cnt_to_crg"])
+    assert "`ENV_RF.d_en_cnt_to_crg==" in text
+    assert "iddq" not in text.lower()                    # .sv 块里也没有假 iddq
+
+
+def test_dft_fanout_gated_sibling_still_gated(fanout_path):
+    """对照：带门支(d_en_cnt → ls → d_en_cnt_ls)仍走 out_base 兜底、iddq 门不丢(d_en_vco_fc 类不回归)。"""
+    from dreg_verify import resolver as R
+    wb = M.load_workbook(fanout_path)
+    topo = next(t for t in wb.topout if t.name == "d_en_cnt_ls")
+    res = T.analyze_signal(wb, R.Resolver(wb), topo, mode="max", max_tests=64)
+    assert res.status == "ok"
+    assert _iddq_evidence(res) == (True, True, 1)
+
+
+def test_dft_fanout_post_gate_consumer_is_gated(fanout_path):
+    """对照：门后网消费支(d_en_cnt_post = 裸名 d_en_cnt = row1 门后输出)途经门 → 保留 iddq。"""
+    from dreg_verify import resolver as R
+    wb = M.load_workbook(fanout_path)
+    root = T.resolve_root(wb, "d_en_cnt_post")
+    assert root.kind == T.LOGIC and root.dft_bridged is True
+    assert root.dft_obs_name == "d_en_cnt"               # 门后网消费 → 记账到途经的门
+    topo = next(t for t in wb.topout if t.name == "d_en_cnt_post")
+    res = T.analyze_signal(wb, R.Resolver(wb), topo, mode="max", max_tests=64)
+    assert res.status == "ok"
+    assert _iddq_evidence(res) == (True, True, 1)
+
+
 def test_renamed_signal_gui_edit_threads_to_export(renamed_path):
     """GUI 编辑改名信号 → 走 reg 路按顶层名键回流（否则编辑落源名键被改名路忽略=静默不生效）。"""
     import os
