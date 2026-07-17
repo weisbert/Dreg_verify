@@ -17,6 +17,7 @@ topout.py — 【Topout-rooted】验证引擎（新模型，2026-06-23 起，add
 """
 
 import contextlib
+from collections import Counter as _Counter
 
 from . import cone
 from . import expr as E
@@ -78,6 +79,9 @@ class TopoutRoot:
         # d_en_cnt→d_en_cnt(iddq门) 与 d_en_cnt→d_en_cnt_to_crg(透传)）时，透传支会串上兄弟行的
         # iddq 门（假门：真值表多一行 iddq + 假 DFT 拍）。
         self.dft_bridged = False
+        # A7/A8（2026-07-17）：解析期记账（撞名候选/直接命中撞 dft 改名边=双源）——analyze_signal
+        # 解析后并入 res.issues（loud，不静默）。干净表恒空 → 零影响。
+        self.warnings = []
 
     @property
     def renamed(self):
@@ -167,9 +171,39 @@ def _mux_candidates(g):
     return names
 
 
+def _index_collisions(wb):
+    """A7：候选名 → 认领它的多个【不同】源对象（build_index setdefault 静默丢的败者）。
+    每个 logic/mux 对象贡献 out_base/_ls_name/rtl_base/rtl_base_full 多个候选名；同一对象贡献
+    同名不算冲突（按 id 去重）。只返回真冲突(≥2 个不同对象争同一候选名)，值=[(kind, out_base), ...]
+    供告警文案。干净表(无字面 _ls/_to_logic 撞名) → {}（零影响）。E5：字面 K=x_ls 行 vs x 经
+    level_shift 的 _ls_name=x_ls——build_index 按行序取首个，另一行的逻辑无人验、Topout 行仍显 ok。"""
+    claim = {}
+    for s in wb.logic:
+        for nm in _logic_candidates(s):
+            claim.setdefault(nm, []).append(("logic", s))
+    for g in (getattr(wb, "mux", None) or []):
+        for nm in _mux_candidates(g):
+            claim.setdefault(nm, []).append(("mux", g))
+    out = {}
+    for nm, owners in claim.items():
+        uniq, seen = [], set()
+        for kind, obj in owners:
+            if id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            uniq.append((kind, str(getattr(obj, "out_base", "?"))))
+        if len(uniq) > 1:
+            out[nm] = uniq
+    return out
+
+
 def build_index(wb):
     """建 Topout 名 → 源对象索引。返回 (logic_idx, mux_idx)，值=对象。
-    同名冲突保留首个（与表内 VLOOKUP/regmap 取首个一致）。"""
+    同名冲突保留首个（与表内 VLOOKUP/regmap 取首个一致）。
+
+    副作用（A7/A8 记账，2026-07-17）：把撞名冲突表 + dft 改名边名集缓存到 wb——resolve_root
+    据它给 root.warnings 加告警（analyze 并入 res.issues，loud）。每次建索引都刷新、与本次索引
+    一致；干净表两者皆空 → 零影响。"""
     logic_idx, mux_idx = {}, {}
     for s in wb.logic:
         for nm in _logic_candidates(s):
@@ -177,6 +211,8 @@ def build_index(wb):
     for g in (getattr(wb, "mux", None) or []):
         for nm in _mux_candidates(g):
             mux_idx.setdefault(nm, g)
+    wb._index_collisions = _index_collisions(wb)                    # A7
+    wb._dft_edge_names = frozenset(_dft_rename_edges(wb).keys())    # A8
     return logic_idx, mux_idx
 
 
@@ -207,8 +243,27 @@ def _resolve_direct(wb, low, logic_idx, mux_idx):
     return None
 
 
+def _attach_resolve_warnings(wb, name, root):
+    """A7/A8：把撞名冲突 + 双源（直接命中撞 dft 改名边）记进 root.warnings（analyze 并入 res.issues）。
+    干净表 collisions/dft_edge_names 皆空 → 不加任何 issue → 逐字节不变。"""
+    low = str(name).strip().lower()
+    coll = (getattr(wb, "_index_collisions", None) or {}).get(low)
+    if coll:                                                        # A7：候选名被多个源对象认领
+        others = "、".join("%s:%s" % (k, d) for k, d in coll)
+        root.warnings.append(
+            "⚠ 候选名 %r 被多个源对象认领(%s)——build_index 按行序取首个，其余同名对象未经本名验证；"
+            "验错行=假绿，若非有意撞名请核对谁是真源(A7)" % (low, others))
+    # A8：直接命中(非改名桥接)且本名又是 dft 改名输出 → 双源（direct 赢、dft 改名边零消费零告警）
+    if (low in (getattr(wb, "_dft_edge_names", None) or frozenset())
+            and not getattr(root, "renamed", False) and root.kind != UNRESOLVED):
+        root.warnings.append(
+            "⚠ 顶层名 %r 直接命中 %s 源，但它同时是 dft 改名输出——存在双源：直接命中被采纳、"
+            "dft 改名边未消费；请核对哪个才是真源(A8，补齐 R-vco-faston 未覆盖的 logic/mux 侧)"
+            % (low, root.kind))
+
+
 def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
-    """把一个 Topout 信号名解析到它的源对象+分类。
+    """把一个 Topout 信号名解析到它的源对象+分类（薄封装：解析后并入 A7/A8 撞名/双源告警）。
 
     优先级：logic 行 > mux 组 > 直连寄存器(RW=可验 / RO=回读跳过) > **dft 改名桥接** > 未解析。
     logic/mux 命中靠 out_base / _ls_name / rtl_base 三套候选（Topout 名是剥后缀的顶层真名，
@@ -219,7 +274,14 @@ def resolve_root(wb, name, logic_idx=None, mux_idx=None, rename=None):
     但断言探针贴顶层真名（不是源名）。例：d_vco_en_faston_ls ←(level_shift) d_vco_en_faston
     ←(dft) d_vco_en_faston_fsm(logic)。"""
     if logic_idx is None or mux_idx is None:
-        logic_idx, mux_idx = build_index(wb)
+        logic_idx, mux_idx = build_index(wb)      # 顺带刷新 wb._index_collisions / _dft_edge_names
+    root = _resolve_root_impl(wb, name, logic_idx, mux_idx, rename)
+    _attach_resolve_warnings(wb, name, root)
+    return root
+
+
+def _resolve_root_impl(wb, name, logic_idx, mux_idx, rename=None):
+    """resolve_root 主体（见其 docstring）——logic_idx/mux_idx 由封装保证非空。"""
     low = str(name).strip().lower()
     _gates = getattr(wb, "dft", None) or {}      # {dft 观测输出名: 门控}（带 iddq 门=非恒等观测）
     direct = _resolve_direct(wb, low, logic_idx, mux_idx)
@@ -469,6 +531,7 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
     if root is None:
         root = resolve_root(wb, topo.name)
     res = TopoutResult(topo, root)
+    res.issues.extend(getattr(root, "warnings", None) or [])   # A7/A8：撞名/双源告警并入（loud）
 
     if root.kind == UNRESOLVED:
         res.status = "unresolved"
@@ -1259,7 +1322,8 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
     reg_ov = {str(k).lower(): v for k, v in (eo.get("reg_overrides") or {}).items()}
 
     blocks, accounted, seen_src = [], [], set()
-    reg_i = 0
+    seen_name = set()            # A11：register/dft 改名根按 Topout 名去重（logic/mux 走 seen_src）——
+    reg_i = 0                    # 同名重复行会拿同一 row_aid → 重复 assert id = 非法 SV（elaboration 才炸）。
     # S1 警告通道 + claims 聚合(M3/M4)：logic/mux 根来自 built（G.build 已算好 selfaudit/regmap/
     # supplement/claims）；register/dft 改名根来自 _passthrough_block 的注入圈（M6，与 logic 根同一层）。
     regmap_warnings = list(built.get("regmap_warnings") or [])
@@ -1273,6 +1337,11 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
         name, owner = r.topo.name, r.topo.owner
         if r.status == "ok" and r.root.renamed:
             # dft 改名信号：逻辑/驱动来自源(node/bindings/vectors 已是源的)，断言探针贴顶层名 probe_name。
+            if name.lower() in seen_name:              # A11：同名重复行 → 复用断言标号=非法 SV，记账不产出
+                _why = "Topout 页同名重复行——与已产出的同名信号共用 row_aid，重复产出会撞 assert 标号(非法 SV)"
+                blocks.append(_account_block(name, r.root.kind, "dup-name", _why, owner))
+                accounted.append({"name": name, "kind": r.root.kind, "status": "dup-name", "reason": _why})
+                continue
             ov = reg_ov.get(name.lower())
             if r.node is not None and r.bindings is not None:
                 if ov is not None and len(ov) == 0:        # GUI 清零 → 记账
@@ -1295,6 +1364,7 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
                     comments=comments, counters=sv_summary,
                     probe_prefix=_probe_prefix_for_name(probe_prefixes, r.root.probe_name))
                 reg_i += 1
+                seen_name.add(name.lower())            # A11：本名已产出块 → 后续同名行走 dup-name
                 blocks.append((ln, st))
                 regmap_warnings.extend(_w["regmap"]); supplement_warnings.extend(_w["supplement"])
                 selfaudit_warnings.extend(_w["selfaudit"]); claims.extend(_c)
@@ -1335,6 +1405,11 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
             st["topout_kind"] = r.root.kind; st["topout_status"] = "ok"
             blocks.append((list(ln), st))
         elif r.status == "ok" and r.root.kind == REGISTER:
+            if name.lower() in seen_name:              # A11：同名重复行 → 复用断言标号=非法 SV，记账不产出
+                _why = "Topout 页同名重复行——与已产出的同名信号共用 row_aid，重复产出会撞 assert 标号(非法 SV)"
+                blocks.append(_account_block(name, REGISTER, "dup-name", _why, owner))
+                accounted.append({"name": name, "kind": REGISTER, "status": "dup-name", "reason": _why})
+                continue
             ov = reg_ov.get(name.lower())
             if ov is not None and len(ov) == 0:    # 用户清零该直连寄存器 → 记账（零用例，不静默丢）
                 _why = "用户已清空(零用例，本信号不产出测试)"
@@ -1356,6 +1431,7 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
                 comments=comments, counters=sv_summary,
                 probe_prefix=_probe_prefix_for_name(probe_prefixes, r.topo.name))
             reg_i += 1
+            seen_name.add(name.lower())                # A11：本名已产出块 → 后续同名行走 dup-name
             blocks.append((ln, st))
             regmap_warnings.extend(_w["regmap"]); supplement_warnings.extend(_w["supplement"])
             selfaudit_warnings.extend(_w["selfaudit"]); claims.extend(_c)
@@ -1365,6 +1441,10 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
             accounted.append({"name": name, "kind": r.root.kind, "status": r.status, "reason": reason})
 
     n_emitted = sum(1 for _l, s in blocks if s.get("n_vectors", 0) > 0)
+    # A11：Topout 页同名重复行清单（撞键告警）——上面按 seen_name 去重已防非法 SV，这里 loud 出去
+    # 供 CLI/GUI 账目提示 SE 核对（复制粘贴行/两页同名）。干净表无重复 → 空 → 零影响。
+    _name_counts = _Counter(t.name.lower() for t in wb.topout)
+    dup_topout_names = sorted(n for n, c in _name_counts.items() if c > 1)
     summary = {
         "n_total": len(results),
         "n_emitted": n_emitted,
@@ -1376,12 +1456,13 @@ def _build_for_topout_core(wb, mode="min", max_tests=256, exhaustive=False,
         "n_selfaudit_warnings": len(selfaudit_warnings),
         "n_regmap_warnings": len(regmap_warnings),
         "n_supplement": len(supplement_warnings),
+        "n_dup_topout_names": len(dup_topout_names),      # A11
     }
     # 重复 assert 标号(非法 SV)：generator.build 已算好(logic/mux 共用同一 R 时)，原样透出供导出前确认，
     # 别像旧 Topout 路径那样丢弃 → 静默导出会 elaboration 失败的 .sv（N9）。
     # 警告通道 + claims 透出（S1 M3/M4）：让 CLI/GUI 账目看到假绿/重名/补充，并能 --export-claims。
     return {"blocks": blocks, "results": results, "accounted": accounted, "summary": summary,
-            "dup_labels": built.get("dup_labels") or [],
+            "dup_labels": built.get("dup_labels") or [], "dup_topout_names": dup_topout_names,
             "regmap_warnings": regmap_warnings, "supplement_warnings": supplement_warnings,
             "selfaudit_warnings": selfaudit_warnings, "claims": claims}
 

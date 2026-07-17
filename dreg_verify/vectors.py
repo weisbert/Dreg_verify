@@ -290,13 +290,20 @@ def make_negative(vec, mode="invert", fixed_value=None):
             if cand != correct and cand != (de & m):
                 wrong = cand
                 break
-    return TestVector(
+    nv = TestVector(
         index=vec.index, assignments=dict(vec.assignments),
         exp_value=correct, exp_width=w,
         is_negative=True, neg_value=wrong, neg_mode=mode,
         note="故意填错期望值(%s)，此断言预期应 FAIL，用于自检 checker 能否抓错" % mode,
         case_index=vec.case_index,    # 保留路由 case：负向列/由负向再转正向(加正向列)时 auto_out 仍可重算
     )
+    # A12（2026-07-17）：继承源向量的门 pin / release（与 clone_vector 对齐）。带门 register/dft 改名
+    # 根走 _apply_passthrough_negatives——analyze 已 pin 好 iddq 门再造负向，不拷则负向拍 extra_forces=[]
+    # 丢门 pin（GUI 重排向量/未来加 release 即爆）。logic 路径负向加在 pin_dft_gate 之前、源此刻 forces
+    # 为空 → 拷空=逐字节不变；且 pin 幂等，即便顺序变也不会双 force。
+    nv.extra_forces = list(getattr(vec, "extra_forces", None) or [])
+    nv.release_nets = list(getattr(vec, "release_nets", None) or [])
+    return nv
 
 
 def add_negatives(vectors, mode="invert", which="first", fixed_value=None):
