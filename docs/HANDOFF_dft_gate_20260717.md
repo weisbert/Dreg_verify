@@ -1,6 +1,8 @@
 # 交接 · dft 门控去猜化轮（2026-07-17）
 
-**当前 HEAD = `8969010`；工作树干净；873 过 + 1 xfail（`.venv/Scripts/python.exe -m pytest tests -q`）。**
+> **续（第二轮，`db8f4a0`）：评审剩 5 条 🟡 全收口——见文末「## 续」。当前 HEAD=`db8f4a0`，880 过 + 1 xfail。**
+
+**（第一轮）HEAD = `8969010`；工作树干净；873 过 + 1 xfail（`.venv/Scripts/python.exe -m pytest tests -q`）。**
 
 ## 这一轮做了什么（都已 push）
 
@@ -51,3 +53,25 @@ designer main 页行25 规则「从 regmap 到小数字的信号去 iddq 钳位�
 
 ## memory（下轮自动加载）
 `r-dft-fanout-false-gate.md`（起因 bug + 真表验证）、`r-dft-gate-deguess.md`（评审 8🔴 修复）、`goal-redzone-binder.md`（红区降级定调）。
+
+---
+
+## 续（第二轮，2026-07-17，`db8f4a0`）：评审剩 5 条 🟡 全收口
+
+**880 过 + 1 xfail。逐条先端到端复现（scratchpad repro 坐实 buggy）再修，byte-safe 实证（clean mirror 零告警）。**
+
+| 条 | 修法（文件） | 复现 |
+|---|---|---|
+| **A7** 撞名可见 | `_index_collisions` 检测同一候选名被 ≥2 个不同对象认领 → `build_index` 缓存到 wb；`resolve_root` 命中即 `root.warnings` ⚠，analyze 并入 `res.issues`。**不改胜负（仍取首个）**，先可见。 | 字面 K=`x_ls` vs `x` 经 ls 的 `_ls_name=x_ls` |
+| **A8** 双源告警 | `build_index` 缓存 dft 改名边名集；`resolve_root` 拆成薄封装 + `_resolve_root_impl`，封装里对**非改名直接命中且本名 ∈ dft 改名边**的 ⚠双源（补 R-vco-faston 未覆盖的 logic/mux 侧）。 | logic 行 `shadow_top` + dft 改名 `shadow_src→shadow_top` |
+| **A11** 重复行去重 | `register`/`dft 改名`根按 Topout 名 `seen_name` 去重（logic/mux 本走 `seen_src`），重复行记 `dup-name` 账目；summary 出 `n_dup_topout_names` + 返回 `dup_topout_names` 撞键告警。**堵非法 SV（重复 assert 标号）**。 | Topout 页 `clk_force_on` ×3 |
+| **A12** 负向拍拷门 pin | `make_negative` 与 `clone_vector` 对齐拷贝 `extra_forces`+`release_nets`。logic 路径 pin 在负向之后、拷时为空 → 逐字节不变；pin 幂等，顺序变也不双 force。 | 带门 register/改名根 `_apply_passthrough_negatives` |
+| **A9** ~~pin 非 RO 静默~~ | **証伪**：每个 `pin_dft_gate` 调用点 `_append_dft_vectors` 先跑并置 `meta['iddq_skipped']`（→块顶 ⚠），非静默。不改生产码，加回归锁定 loud 行为防将来拆掉 append 兄弟。 | RW 门（非 RO）→ iddq_skipped 已置 |
+
+产物：`+7 tests/test_dft_gate.py`（含干净表零告警对照）。评审报告 A 节 A7/A8/A11/A12 已闭环、A9 降级 証伪。
+
+### 仍开（下轮从这挑）
+1. **B 节语义清单转 SE 确认**（把猜变成问，评审报告 B 节）：门判据三条 / dft G 列确切语义 / 那批 `E=A` 恒等行(~65 个)是否有意不门控（R37 旧账）。**这条是纯"问 SE"，不改码。**
+2. **A10 🟡（renamed-mux，评审报告 A10）**：dft 改名指向 mux 源 → 记账可见但整信号无测试（`topout.py:1301` renamed-mux 分支）。真表一旦出现即漏生成，属"改名 mux 探针名覆盖暂未支持"。
+3. **2 个 heads-up（非 bug，第一轮遗留）**：`d_ndiv_cnt_div_sel_ls[1:0]` 2bit 只测 3 码（缺 `10`，CONE-2 覆盖度）；`datapath_clk_en_ls`/`d_ndiv_cnt_div_sel_ls` 的 `_ls` 名取自 dft 透传行 D 列（非 level_shift 页）——仿真确认 RTL 有该网。
+4. **A15 继承债**（评审报告 A15，红区降级后暂缓）：resolver:365 prefixed-wire 无条件信任 / GATE-1 真 nets 生成期零消费 / CONE-2 宽控制只测两端 / GATE-2 stale 文件无指纹。走 D 节"阶段一存在性裁判"最小可行版，但**已定调红区非主线、暂不做进主线**。
