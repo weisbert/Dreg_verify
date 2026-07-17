@@ -1391,10 +1391,17 @@ def _build_core(wb, opts):
                 v.index = i
 
         # item③ iddq DFT 态拍（mux 被门控输出，如 mixer2g_trim）：所有档都补；放负向之后。
-        _dft_skip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver)
+        # ⭐input_bases（修 A6，2026-07-17）：iddq 若已是本 mux 的显式控制/数据输入，再 pin 会
+        # 同拍对同一网 force 两次（extra_forces 排后=pin 赢）→"iddq=1 选 case1"的向量实际走
+        # case0=断言必假红。与 logic 循环同口径去重（topout.analyze mux 分支同步修）。
+        _mbases = {b.base.lower() for b in (exp.get("bindings") or {}).values()
+                   if b is not None and getattr(b, "base", None)}
+        _dft_skip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
+                                        input_bases=_mbases)
         if _dft_skip:
             meta["iddq_skipped"] = _dft_skip
-        pin_dft_gate(grp.out_base.lower(), vecs, wb, resolver)   # iddq 门=显式输入(每条向量驱透传)
+        pin_dft_gate(grp.out_base.lower(), vecs, wb, resolver,   # iddq 门=显式输入(每条向量驱透传)
+                     input_bases=_mbases)
         vecs = _dedup_negatives(vecs)        # 全局负向 vs 用户逐 case 负向去重（无用户负向时恒等）
         for i, v in enumerate(vecs):
             v.index = i
@@ -1880,6 +1887,8 @@ def _report_core(wb, opts):
     for grp in mux_groups:
         resolver.cascade_mode = opts.cascade_for(grp.out_name, is_mux=True)   # 级联模式 mux/单点
         exp = mux_gen.expand_mux_group(wb, resolver, grp)
+        _rmbases = {b.base.lower() for b in (exp.get("bindings") or {}).values()
+                    if b is not None and getattr(b, "base", None)}   # A6：显式输入基名(门去重用)
         expr_text = _mux_expr_text(grp)
         base_row = {"R": _eff_aid(opts, grp), "signal": grp.out_name, "owner": grp.owner,
                     "type": "mux", "top": grp.top_output, "expr": expr_text}
@@ -1928,14 +1937,16 @@ def _report_core(wb, opts):
                         for i, v in enumerate(vecs):
                             v.index = i
                     # item③ DFT 拍：报告与 .sv 双轨一致（同 build 的 mux 挂点）；skip 原因进 meta 供透出
-                    _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver)
+                    # input_bases 去重与 build 同口径（修 A6：iddq 是显式 mux 输入时不再 pin/补拍）
+                    _rskip = _append_dft_vectors(grp.out_base.lower(), vecs, wb, resolver,
+                                                 input_bases=_rmbases)
                     if _rskip:
                         meta["iddq_skipped"] = _rskip
                     vecs = _dedup_negatives(vecs)          # 与 build 同口径：全局/逐 case 负向去重
                     for i, v in enumerate(vecs):
                         v.index = i
         # iddq 门=显式输入（与 build 同口径，skip 路径 vecs 为空时无害）
-        _mpin = pin_dft_gate(grp.out_base.lower(), vecs, wb, resolver)
+        _mpin = pin_dft_gate(grp.out_base.lower(), vecs, wb, resolver, input_bases=_rmbases)
 
         # 警告只在【真生成】时显示（被跳过的组用 error 列说明，警告无意义）
         row_warn = out_warn if not skip_reason else ""

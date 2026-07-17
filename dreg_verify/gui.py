@@ -4668,7 +4668,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # 门网，每条测试取透传值（.sv 每条向量显式 force，generator.pin_dft_gate 同口径）。
         # 输入行次序按 designer for_test 同组行序排（门也参与；无 for_test=原序+门殿后）；
         # auto_out/期望 行号统一经 _ti_mux_exp_row 透出给各处理器。
-        self._ti_mux_dft_pin = self._dft_pin_display(grp.out_base)
+        # input_bases 去重与 build/report 同口径（修 A6：iddq 已是 mux 显式输入 → 不再单列门行）。
+        _mux_ibases = {(b.base or "").lower() for b in exp["bindings"].values()
+                       if b is not None and getattr(b, "base", None)}
+        self._ti_mux_dft_pin = self._dft_pin_display(grp.out_base, input_bases=_mux_ibases)
         pin = self._ti_mux_dft_pin
         disp = [("key", k) for k in used] + ([("gate", None)] if pin else [])
         self._ti_mux_disp = generator.fortest_order_entries(

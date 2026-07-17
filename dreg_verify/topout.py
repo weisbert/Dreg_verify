@@ -97,19 +97,23 @@ def _dft_rename_edges(wb):
     （如 D=A、输入=A_sm_to_dft → A_sm ≠ A ⟹ 改名 A_sm→A）。
     透传到同名（mirror 的 clk_force_on=clk_force_on_to_dft）= 恒等、非改名 → 不入表（旧表零影响）。
     源引用原文（只剥位宽、保留 _to_dft 后缀）供 resolve_root 区分本支读的是【门前网】(*_to_dft，
-    dft 页常态) 还是【门后网】(裸名=另一条带门 dft 行的输出)——后者途经那个门。"""
-    from .excel_model import _strip_width, _dft_strip
+    dft 页常态) 还是【门后网】(裸名=另一条带门 dft 行的输出)——后者途经那个门。
+    门控位排除按【本行自己的 E 表达式条件字母】（修 A4，2026-07-17：此前查全局 wb.dft 的
+    gate_base——同名重复带门行时用错行的门做排除，功能数虚高/边错建，互相污染）。"""
+    from .excel_model import _strip_width, _dft_strip, _parse_dft_gate_expr
     out = {}
-    gates = wb.dft or {}
     for d in (getattr(wb, "dft_rows", None) or []):
         ob = _strip_width(d.out_name)[0].lower()
-        gate_base = (gates.get(ob) or {}).get("gate_base")
+        parsed = _parse_dft_gate_expr(d.expr)
+        gate_letter = str(parsed[0]).upper() if parsed else None
         funcs = []
-        for info in d.inputs.values():
+        for letter, info in d.inputs.items():
+            if gate_letter and str(letter).upper() == gate_letter:
+                continue                                   # 本行自己的门控列 → 不是功能源
             raw = info.get("raw", "")
             b = _dft_strip(raw).lower()                    # 剥位宽 + _to_dft
-            if not b or b == ob or (gate_base and b == gate_base):
-                continue                                   # 恒等 / 门控位 → 不是功能源
+            if not b or b == ob:
+                continue                                   # 恒等 → 不是功能源
             funcs.append((b, _strip_width(raw)[0].lower()))
         if len(funcs) == 1:                                # 唯一功能源且与输出异名 = 改名
             out.setdefault(ob, funcs[0])
@@ -347,16 +351,82 @@ class TopoutResult:
 form_label = FORMS.form_label    # 复用 forms 的人读『逻辑类型』映射（避免重复，兼容 T.form_label 引用）
 
 
+_DEST_LS = {"ls", "to_ls"}     # dft 行 G 列（去向）里指向 level_shift 级的写法
+
+
+def _root_via_ls(wb, root, src_obj=None):
+    """本支是否经 level_shift 到顶（G 列交叉核对用）：命中名=源对象的 _ls 顶层口名，
+    或本身是 level_shift 页的某个输出口名（ls-only 改名桥的情形）。"""
+    m = str(getattr(root, "matched_name", "") or "").lower()
+    if not m:
+        return False
+    if src_obj is not None:
+        lsn = str(getattr(src_obj, "_ls_name", "") or "").lower()
+        if lsn and m == lsn:
+            return True
+    for info in (getattr(wb, "level_shift", None) or {}).values():
+        if str((info or {}).get("out", "")).strip().lower() == m:
+            return True
+    return False
+
+
+def _gate_obs_for(wb, root, src_obj=None, fallback_base=None):
+    """【门键政策唯一出口】（A13 收口，2026-07-17）：这一支到底有没有 iddq 门、门键是谁。
+    analyze_signal 三分支与 _result_gate_info 都只走这里——防"改一处忘五处"口径漂移。
+    返回 (obs_key 或 None, issues)。issues=必须贴到该信号的 ⚠ 记账（loud，不静默）。
+
+    政策（判据全部来自路径/表内一手信息，兜底不猜）：
+    1) 改名链记账的带门观测名 dft_obs_name 最优先（resolve_root 途经门那层）。
+    2) 链途经 dft 改名边(dft_bridged)而无 dft_obs_name → 本支明确绕过门，不兜底
+       （3bde25d：同源扇出的兄弟带门行不得串到本支，d_en_cnt_to_crg 类）。
+    3) 其余（直接命中/_ls 命中/ls-only 桥）按 fallback_base 兜底查门（d_en_vco_fc 类：
+       恒等门控行对改名链不可见，只能按源名兜）——但兜底前做【G 列去向交叉核对】(A1)：
+       带门行 dest 非空时须与本支去向一致（本支经 level_shift ⇔ dest∈{to_ls,ls}；
+       dest 非空且不一致 = 带门行的输出去了别的支）→ 不套门 + ⚠ 门归属存疑。
+       dest 为空（老表/未填）→ 维持旧行为（套门）。
+    另附 loud 通道（A3/A4）：门键命中 dft 页同名重复(dft_dups)、或该输出存在认不出
+    形态的行(dft_unrecognized) → 追加 ⚠。
+    """
+    issues = []
+    fb = str(fallback_base or "").strip().lower() or None
+    obs = getattr(root, "dft_obs_name", None)
+    if not obs and not getattr(root, "dft_bridged", False) and fb:
+        obs = fb
+        g = (getattr(wb, "dft", None) or {}).get(fb)
+        dest = str((g or {}).get("dest", "") or "").strip().lower()
+        if g and dest:
+            via_ls = _root_via_ls(wb, root, src_obj)
+            if not (via_ls and dest in _DEST_LS):
+                issues.append(
+                    "⚠ dft 门归属存疑，未套门：带门行(dft 第%s行)去向 G=%r 与本支"
+                    "(命中 %s%s)不一致——该门属于同源另一支；若本支确应门控请核对 dft 页 G 列"
+                    % (g.get("row", "?"), g.get("dest"),
+                       getattr(root, "matched_name", "") or "?",
+                       "，经 level_shift" if via_ls else ""))
+                obs = None
+    if obs:
+        dups = (getattr(wb, "dft_dups", None) or {}).get(obs)
+        if dups:
+            issues.append("⚠ dft 页输出 %s 有 %d 条带门行，已按首行采纳(first-wins)——"
+                          "多行门定义需 SE 消重(同 regmap 重名口径)" % (obs, len(dups) + 1))
+    chk = obs or fb
+    if chk:
+        for u in (getattr(wb, "dft_unrecognized", None) or []):
+            if u.get("out") == chk:
+                issues.append("⚠ dft 第%s行输出 %s 的表达式 %r 认不出门形态——若为门控则已漏门"
+                              "(支持 cond?0:x / cond?x:0)，请核对写法或找 SE 确认语义"
+                              % (u.get("row", "?"), chk, u.get("expr")))
+    return obs, issues
+
+
 def _result_gate_info(wb, res):
-    """该 TopoutResult 是否被 iddq 门控 → forms.dft_gate_info（门键与 analyze_signal pin 同口径：
-    改名桥接途经的带门观测名 dft_obs_name 优先，否则源对象 out_base / 寄存器根用 topo 名；
-    dft_bridged 且无 dft_obs_name → 本支绕过门，不兜底——同 analyze，防同源扇出兄弟行的假门）。"""
+    """该 TopoutResult 是否被 iddq 门控 → forms.dft_gate_info。门键与 analyze_signal 完全同源
+    （同一 _gate_obs_for），⚠ 已由 analyze 贴过、此处只取键。寄存器根兜底用 topo 名。"""
     root = res.root
-    ob = getattr(root, "dft_obs_name", None)
-    if ob is None and not getattr(root, "dft_bridged", False):
-        ob = ((getattr(root.obj, "out_base", None) if root.obj is not None else None)
-              or res.topo.name)
-    return FORMS.dft_gate_info(wb, ob)
+    fb = ((getattr(root.obj, "out_base", None) if root.obj is not None else None)
+          or res.topo.name)
+    obs, _ = _gate_obs_for(wb, root, src_obj=root.obj, fallback_base=fb)
+    return FORMS.dft_gate_info(wb, obs)
 
 
 def result_form(wb, res):
@@ -418,15 +488,10 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     node, bindings, sig.out_width, mode=mode, max_tests=max_tests,
                     exhaustive=exhaustive)
                 # dft 门控的 logic 输出：把门(iddq)叠成显式输入(每条向量 force 透传值)+补 DFT 拍。
-                # 门键 = dft_obs_name(改名桥接途经的带门观测层) **或** 本 logic 行自己的 out_base
-                # ——后者修『_ls 经 level_shift 直接命中 logic 行(不走桥)→dft_obs_name=None，而该 logic
-                # out_base 本身就是 dft 页门控观测(d_en_vco_fc 类)→analyze 漏门、与 generator.build/report
-                # (按 out_base 钉门)不一致』(2026-06-25 实证 d_en_vco_fc_ls)。无门时 pin/append 均 no-op。
-                # ⭐dft_bridged 时【不】兜底(2026-07-17 d_en_cnt_to_crg)：链途经 dft 改名边=该支的 dft
-                # 观测层已由链记账（带门→dft_obs_name）；透传边=本支绕过门。再按源 out_base 兜底会串上
-                # 【同源扇出的兄弟带门行】(d_en_cnt 行的 iddq 门套到 d_en_cnt_to_crg 支=假门+假 DFT 拍)。
-                obs = (getattr(root, "dft_obs_name", None)
-                       or (None if getattr(root, "dft_bridged", False) else sig.out_base.lower()))
+                # 门键政策（dft_obs_name 优先 / dft_bridged 不兜底 / 兜底带 G 列交叉核对+loud）
+                # 全部收口在 _gate_obs_for（A13，2026-07-17）——历史演化见该函数 docstring。
+                obs, _gw = _gate_obs_for(wb, root, src_obj=sig, fallback_base=sig.out_base)
+                res.issues.extend(_gw)
                 if obs:
                     _ib = {b.base.lower() for b in bindings.values()
                            if b is not None and getattr(b, "base", None)}
@@ -477,7 +542,10 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     exhaustive=exhaustive)
                 # 同名【带门】dft 观测撞同名寄存器(d_bt_lp_pmu_test_en 类)：顶层=iddq?0:寄存器，
                 # 给寄存器透传也叠 iddq 门(force 透传值)+DFT 拍——否则漏 iddq=假绿(同 d_vco_en_faston)。
-                obs = getattr(root, "dft_obs_name", None)
+                # 寄存器根【无 out_base 兜底】(直接命中时门已在 resolve_root:212 记进 dft_obs_name)，
+                # 但仍走 _gate_obs_for 统一口径拿 dup/unrecognized 的 ⚠。
+                obs, _gw = _gate_obs_for(wb, root)
+                res.issues.extend(_gw)
                 if obs:
                     _ib = {b.base.lower()} if getattr(b, "base", None) else set()
                     _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
@@ -506,16 +574,19 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     max_tests=max_tests, data_overrides=(mux_data or None))
                 res.bindings = expansion.get("bindings", {})
                 # M1（缝A 第三分支）：dft 门控的 mux 输出补 iddq DFT 拍 + 把门当显式输入——与 build mux
-                # 循环(generator.build:1380/1383)【完全同口径】(同 obs 键、不传 input_bases)，使 res.vectors
-                # ==.sv 的 mux 块向量。此前 MUX 分支从不调 → GUI 真表少一列、n_vectors 与 .sv 差 1(刚修
-                # iddq bug 的第三个未修分支，logic/register 早已补)。无门时两调用均 no-op。
-                # dft_bridged 时不按 out_base 兜底（同 logic 分支，防同源扇出兄弟行的假门）。
-                obs = (getattr(root, "dft_obs_name", None)
-                       or (None if getattr(root, "dft_bridged", False) else grp.out_base.lower()))
-                _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver)
+                # 循环(generator.build)【完全同口径】(同 obs 键、同 input_bases)，使 res.vectors
+                # ==.sv 的 mux 块向量。门键政策统一走 _gate_obs_for（A13）。
+                # ⭐input_bases（修 A6，2026-07-17，build/report 同步修）：iddq 若已是 mux 的显式
+                # 控制/数据输入，再 pin 会同拍对同一网 force 两次（pin 排后面赢）→"iddq=1 选 case1"
+                # 的向量实际走 case0=断言必假红；与 logic/register 分支同口径去重。
+                obs, _gw = _gate_obs_for(wb, root, src_obj=grp, fallback_base=grp.out_base)
+                res.issues.extend(_gw)
+                _ib = {b.base.lower() for b in (expansion.get("bindings") or {}).values()
+                       if b is not None and getattr(b, "base", None)}
+                _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
                 if _skip:
                     res.meta["iddq_skipped"] = _skip
-                res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver)
+                res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
         except cone.ConeError as ex:
             res.status = "error"
             res.issues.append("mux 展开失败: %s" % ex)

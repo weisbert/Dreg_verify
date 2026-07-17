@@ -868,7 +868,8 @@ def _normalize_type(v):
 class DregWorkbook:
     def __init__(self, logic, regmap, tmm, sheet_names, mux=None, dft=None,
                  fortest_order=None, regmap_dups=None, topout=None,
-                 dft_rows=None, iddq_rows=None, level_shift=None):
+                 dft_rows=None, iddq_rows=None, level_shift=None,
+                 dft_dups=None, dft_unrecognized=None):
         self.logic = logic              # list[LogicSignal]
         self.regmap = regmap            # dict
         self.tmm = tmm                  # dict
@@ -888,6 +889,10 @@ class DregWorkbook:
         self.regmap_dups = regmap_dups if regmap_dups is not None else {}
         # {输出基名low: 门控信息}（dft 页；无 dft 页=空）。iddq DFT 拍 / pin_dft_gate 用，见 read_dft。
         self.dft = dft if dft is not None else {}
+        # dft 页同名重复带门行(已按首行采纳) / E 含 '?' 但认不出门形态的行——read_dft 的
+        # loud 通道(2026-07-17 A3/A4)，topout._gate_obs_for 据此给受影响信号贴 ⚠。手构 wb 默认空。
+        self.dft_dups = dft_dups if dft_dups is not None else {}
+        self.dft_unrecognized = dft_unrecognized if dft_unrecognized is not None else []
         # {输出基名low: [输入基名low顺序]}（for_test 页；无/空页=空）。真值表输入行排序对照用。
         self.fortest_order = fortest_order if fortest_order is not None else {}
         # list[TopoutSignal]（Topout 页；无/空页=空）。新模型『要验信号清单』锚点，2026-06-23。
@@ -939,39 +944,91 @@ def _dft_strip(name):
     return s
 
 
-_DFT_GATE_LO = re.compile(r"^\s*\w+\s*\?\s*0\s*:\s*\w+\s*$")    # cond?0:A → 门=0 时透传(取功能值 A)
-_DFT_GATE_HI = re.compile(r"^\s*\w+\s*\?\s*\w+\s*:\s*0\s*$")    # cond?A:0 → 门=1 时透传
+# dft 门控表达式 token：可选取反(!/~) + 括号 + 字母/定宽字面量/十进制 + 可选位切片。
+_DFT_TOK = (r"([!~]?)\s*\(?\s*([A-Za-z_]\w*|\d+'[bBhHdD][0-9a-fA-FxXzZ_]+|\d+)"
+            r"(?:\s*\[[^\]]+\])?\s*\)?")
+_DFT_TERN = re.compile(r"^\s*%s\s*\?\s*%s\s*:\s*%s\s*$" % (_DFT_TOK, _DFT_TOK, _DFT_TOK))
+_DFT_ZERO = re.compile(r"^(?:0|\d+'[bBhHdD]0+)$")
+
+
+def _parse_dft_gate_expr(expr):
+    """dft 页 E 列门控表达式 → (门条件字母, transparent) 或 None(非可识别门形态)。
+
+    认『单条件门』两形态：cond?0:x（transparent=0，门=0 透传）/ cond?x:0（transparent=1）。
+    容差（2026-07-17 A3：此前白名单太窄→变体拼法静默漏门）：cond 可带 !/~ 取反(=两支互换)、
+    括号、位切片(B[0])；常量支认 0/1'b0/16'h0 等定宽零。cond 是常量、两支都(非)常量
+    （含 B?1:A——压 1 语义未与 SE 确认，不猜）、分支带取反 → 返回 None，由调用方 loud 记账。
+    这里只管形态；cond 字母是否对应非空列由 read_dft 核对。"""
+    m = _DFT_TERN.match(expr or "")
+    if not m:
+        return None
+    cneg, cond, n1, t1, n2, t2 = m.groups()
+    if n1 or n2 or _DFT_ZERO.match(cond):
+        return None                    # 分支带取反 / 条件是常量 → 不是单条件门
+    if cneg:
+        t1, t2 = t2, t1                # !B?X:Y ≡ B?Y:X
+    z1, z2 = bool(_DFT_ZERO.match(t1)), bool(_DFT_ZERO.match(t2))
+    if z1 and not z2:
+        return cond, 0                 # cond?0:x：门=1 压 0，门=0 透传
+    if z2 and not z1:
+        return cond, 1                 # cond?x:0：门=1 透传
+    return None
 
 
 def read_dft(ws, header_row=2):
-    """读 dft 页：被 DFT mux 门控的输出 + 其门控（Hi1108 实证，全表一致）。
+    """读 dft 页：被 DFT mux 门控的输出 + 其门控（Hi1108 实证）。
 
-    列：B=门信号(to_dft，恒=iddq_mode)、D=被观测输出(=mux/logic 的 G/K 基名)、E=门控表达式 B?0:A。
+    列：A/B/C=输入、D=被观测输出(=mux/logic 的 G/K 基名)、E=门控表达式(单条件门，
+    cond=A/B/C 列引用字母)、G=本行输出去向 suffix(to_ls 等；扇出消歧用，2026-07-17)。
     `B?0:A` 含义：门 B=0 → 输出取功能值 A(透传)；B=1 → 输出强制 0(IDDQ 漏电测试)。
-    返回 {输出基名low: {"gate_base": 门基名low, "gate_raw": 门原文, "transparent": 0/1}}。
-    只收能识别成"单条件门 cond?0:x / cond?x:0"的行（其余跳过，不乱猜）。
-    用途：iddq DFT 拍把门 force 到非透传支(=1，输出压常量 0)、pin_dft_gate 把门当显式输入 force 到
-    透传值，对照 designer 的 for_test（iddq=0 做法）。
+
+    ⭐门原文取 E 条件字母对应的那一列（修 A2：此前盲取物理 B 列——若 SE 写 E="A?0:B"
+    （门在 A 列）则门/功能对调，真源整个不验、生成期全绿）。
+    返回 (gates, dups, unrecognized)：
+      gates: {输出基名low: {gate_base, gate_raw, transparent, gate_letter, dest, row}}
+             同名多条带门行【保留首个】(与 regmap R35 first-wins 同口径)；
+      dups:  {输出基名low: [被丢弃的后续行 dict,…]}（非空 → 生成侧 ⚠，SE 需消重；修 A4：
+             此前 last-wins 无告警，且第一行静默不验）；
+      unrecognized: [{out, out_raw, expr, row, why}] —— E 含 '?' 但认不出门形态/门列
+             为空的行（修 A3：此前静默跳过=漏门不可见，现在 loud 记账）。
+    纯透传行(E 无 '?'，如 E=A)不属门控、照旧跳过不记。
+    用途：iddq DFT 拍把门 force 到非透传支(=1，输出压常量 0)、pin_dft_gate 把门当显式
+    输入 force 到透传值，对照 designer 的 for_test（iddq=0 做法）。
     """
-    out = {}
+    out, dups, unrec = {}, {}, []
     if ws is None:
-        return out
-    for r in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        return out, dups, unrec
+    letter_col = {"A": 0, "B": 1, "C": 2}
+    for ri, r in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True),
+                           start=header_row + 1):
         out_raw = _s(r[3]) if len(r) > 3 else ""       # D 列：被观测输出
-        gate_raw = _s(r[1]) if len(r) > 1 else ""      # B 列：门信号(iddq_mode)
         expr = _s(r[4]) if len(r) > 4 else ""          # E 列：门控表达式
-        if not out_raw or not gate_raw or not expr:
+        if not out_raw or not expr:
             continue
-        if _DFT_GATE_LO.match(expr):
-            transparent = 0
-        elif _DFT_GATE_HI.match(expr):
-            transparent = 1
-        else:
-            continue                                   # 非"单条件门"形态：不处理
         ob = _strip_width(out_raw)[0].lower()
-        out[ob] = {"gate_base": _dft_strip(gate_raw).lower(),
-                   "gate_raw": gate_raw, "transparent": transparent}
-    return out
+        parsed = _parse_dft_gate_expr(expr)
+        if parsed is None:
+            if "?" in expr:                            # 像门但认不出 → loud，不再静默漏门
+                unrec.append({"out": ob, "out_raw": out_raw, "expr": expr, "row": ri,
+                              "why": "表达式含 '?' 但不是可识别的单条件门形态"
+                                     "(支持 cond?0:x / cond?x:0)"})
+            continue
+        letter, transparent = parsed
+        col = letter_col.get(str(letter).upper())
+        gate_raw = _s(r[col]) if (col is not None and len(r) > col) else ""
+        if not gate_raw:
+            unrec.append({"out": ob, "out_raw": out_raw, "expr": expr, "row": ri,
+                          "why": "门条件 %r 不是 A/B/C 列引用或对应列为空——不猜门" % letter})
+            continue
+        info = {"gate_base": _dft_strip(gate_raw).lower(), "gate_raw": gate_raw,
+                "transparent": transparent, "gate_letter": str(letter).upper(),
+                "dest": _s(r[6]) if len(r) > 6 else "",   # G 列：本行输出去向
+                "row": ri}
+        if ob in out:                                  # 同名多条带门行：首个采纳 + 记重
+            dups.setdefault(ob, []).append(info)
+            continue
+        out[ob] = info
+    return out, dups, unrec
 
 
 _FT_WIRE_SUFFIXES = ("_to_dft", "_to_logic", "_to_mux")
@@ -1282,7 +1339,8 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     # 跨页：level_shift 页声明的顶层电平移位口 → 把 logic/mux 输出探针定到 _ls 顶层口(_ls_name 最优先)
     ls_map = read_level_shift(ws_ls) if ws_ls is not None else {}
     _apply_level_shift(logic, mux, ls_map)   # 给能对上的 logic/mux 设 _ls_name；存一份 ls_map 供改名桥接
-    dft = read_dft(ws_dft) if ws_dft is not None else {}
+    dft, dft_dups, dft_unrec = (read_dft(ws_dft) if ws_dft is not None
+                                else ({}, {}, []))
     # dft / iddq 页【按行】读成 LogicSignal（子视图模型用，additive；旧路径不读 → 逐字节不变）。
     # dft/iddq 列位：D=输出名 E=表达式 A/B/C=输入 H=owner（mirror/真表 inspect 实证）。
     dft_rows = (read_logiclike_page(ws_dft, suffix_tag="dft", id_prefix="D")
@@ -1296,4 +1354,5 @@ def load_workbook(path, logic_header_row=2, regmap_header_row=2):
     return DregWorkbook(logic, regmap, tmm, names, mux=mux, dft=dft,
                         fortest_order=fortest_order, regmap_dups=regmap_dups,
                         topout=topout, dft_rows=dft_rows, iddq_rows=iddq_rows,
-                        level_shift=ls_map)
+                        level_shift=ls_map, dft_dups=dft_dups,
+                        dft_unrecognized=dft_unrec)
