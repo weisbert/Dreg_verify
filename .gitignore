@@ -49,3 +49,6 @@ refactor_notes/
 tests/subview_*.png
 tests/topout_view.png
 scratchpad/
+
+# Claude Code 本地设置(含机器专属绝对路径的 memory hook，勿push)
+.claude/settings.local.json
