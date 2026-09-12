@@ -428,8 +428,11 @@ def test_c185_c186_c187_c188_c189_nets_purpose_and_pages(st, rec, qapp, tmp_path
     assert "iddq" not in cats, "这张镜像表没有 iddq 页，类别里不该出现"   # C-187
     for page in cats:
         assert H.find(d.options_pop, EC.fmt_export_nets_page(page)) is not None
-    # C-188 / C-232：勾一页 → 记进 settings 的 nets_pages
-    H.find(d.options_pop, EC.fmt_export_nets_page("logic")).setChecked(True)
+    # C-188 / C-232：从没存过 = 默认全勾（P-06 按 v1 对齐）→ 取消其余页，只留 logic → 记进 settings
+    assert list(row.options["pages"]) == list(cats)
+    for page in cats:
+        if page != "logic":
+            H.find(d.options_pop, EC.fmt_export_nets_page(page)).setChecked(False)
     assert st.settings()["nets_pages"] == ["logic"]
     d.options_pop.close_popover()
 

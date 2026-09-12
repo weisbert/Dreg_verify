@@ -65,3 +65,54 @@ def test_p22_no_persist_env_does_not_disturb_isolated_paths(monkeypatch, tmp_pat
     monkeypatch.setenv(P.NO_PERSIST_ENV, "1")
     assert P.save_settings({"k": 1}) is True
     assert P.load_settings().get("k") == 1
+
+
+# ═════════════════════ P-06：nets.txt 按页类别「从没存过」= 全勾 ═════════════════════
+def test_p06_nets_pages_default_to_every_category(tmp_path, monkeypatch):
+    """`settings["nets_pages"]` 从没存过时 v2 给的是 `[]`（一个类别都不勾）→ 默认导出的
+    nets.txt 只剩 52 根网，比 v1 的 195 根少 143 根**缺前缀的**衔接网（P-06，BLOCKER）。
+    C-188 写的就是「默认全勾」，裁决也是「超集宁多勿漏」。"""
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    st = ST.WorkbenchState()
+    st.load(H.mirror_path("btlp"))
+    cats = EC.nets_categories(st)
+    assert cats, "镜像表至少要有一个真有内容的类别，否则这条测试验不到东西"
+    assert EC.NETS_PAGES_KEY not in st.settings()
+    row = next(r for r in EC.default_rows(st) if r.kind == "nets")
+    assert row.options["pages"] == list(cats)
+
+    # 第二次、且不同：存过空列表 = 用户真的一个都不要 → 尊重它，别又给他全勾回来
+    P.patch_settings({EC.NETS_PAGES_KEY: []})
+    row2 = next(r for r in EC.default_rows(st) if r.kind == "nets")
+    assert row2.options["pages"] == []
+
+    # 第三次：存过一部分 → 只留本表真有的那些（C-187 原样，不因为这次改动放宽）
+    P.patch_settings({EC.NETS_PAGES_KEY: [cats[0], "这个页名根本不存在"]})
+    row3 = next(r for r in EC.default_rows(st) if r.kind == "nets")
+    assert row3.options["pages"] == [cats[0]]
+
+
+def test_p06_default_nets_export_covers_every_category(tmp_path, monkeypatch):
+    """默认那一份 nets.txt 与「全类别」逐字节相同 —— 少一根网就是仿真时一根 force 不到的网。"""
+    from dreg_verify import exports as X                   # noqa: PLC0415
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    st = ST.WorkbenchState()
+    st.load(H.mirror_path("btlp"))
+    row = next(r for r in EC.default_rows(st) if r.kind == "nets")
+    got, want = str(tmp_path / "a.txt"), str(tmp_path / "b.txt")
+    X.export_nets_by_purpose(st.wb, got, list(row.options["purposes"]),
+                             pages=list(row.options["pages"]) or None)
+    X.export_nets_by_purpose(st.wb, want, list(row.options["purposes"]),
+                             pages=list(EC.nets_categories(st)))
+    a = open(got, "rb").read()
+    b = open(want, "rb").read()
+    assert a == b and len(a) > 0
+
+    # 只按用途（= 旧的「一个页类别都不勾」）真的更少 —— 证明上面那条不是在比两个空文件
+    only_purpose = str(tmp_path / "c.txt")
+    X.export_nets_by_purpose(st.wb, only_purpose, list(row.options["purposes"]), pages=None)
+    assert len(open(only_purpose, "rb").read()) < len(a)

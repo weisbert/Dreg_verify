@@ -229,11 +229,21 @@ def default_rows(state):
     · .sv 的四个选项从 `persist.load_export_options()` 预填（C-162 / C-231 / I-03）；
     · nets 三用途默认全勾（拍板 #9）、按页类别从 settings `nets_pages` 预填（C-187/C-188/C-232）；
     · 每行的「上次导出到哪」= `state.last_export(kind)`（C-198 / N5）。
+
+    ⚠ nets 按页类别「**从没存过**」= 全勾（C-188 的「默认全勾」，P-06）：以前这里退化成 `[]`，
+      默认导出的 nets.txt 只剩 52 根网、比 v1 少 143 根**缺前缀的**衔接网 —— 少的那些恰恰是
+      要拿去 scan_rtl 配前缀的，红区扫完还以为都齐了。存过空列表是另一回事（用户真的一个都
+      不要，照他说的办），判据因此是「键在不在」而不是「值真不真」。
     """
     opt = persist.load_export_options()          # I-03：四个 export_* 键只有这一个入口
-    pages_saved = state.settings().get(NETS_PAGES_KEY)
-    have = set(nets_categories(state))
-    pages = [p for p in (pages_saved or ()) if p in have] if isinstance(pages_saved, list) else []
+    st = state.settings()
+    cats = nets_categories(state)
+    have = set(cats)
+    pages_saved = st.get(NETS_PAGES_KEY)
+    if NETS_PAGES_KEY not in st or not isinstance(pages_saved, list):
+        pages = list(cats)                       # 从没存过 / 存成了别的类型 → 全勾（超集宁多勿漏）
+    else:
+        pages = [p for p in pages_saved if p in have]
     rows = []
     for kind in ROW_ORDER:
         row = contracts.ExportRowSpec(kind=kind, enabled=(kind in DEFAULT_ENABLED))
