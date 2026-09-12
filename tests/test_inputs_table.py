@@ -169,10 +169,26 @@ def test_input_rows_mux_covers_ctrl_and_data_ports(btlp):
 
 
 def test_input_rows_mux_cascade_lists_upstream_recipe(wl):
-    """mux 控制由上游 mux 驱动时：本控制行 + 上游『配方』行（载体寄存器 + 上游控制）都要列。"""
-    rows = IT.input_rows(_an(wl, "d_wl_rf_lpf_cmain"))
-    head = rows[0]
-    assert head["rw"] == "mux" and "上游mux" in head["role"]
+    """mux 控制由上游 mux 驱动时：本控制行 + 上游『配方』行（载体寄存器 + 上游控制）都要列。
+
+    §7-3 给了 binding 之后，本控制行的**唯一写法**是照那根衔接网写：『信号』列 = 上游 mux
+    的输出网名、『类型』RO、『驱动』`force ENV_RF.<衔接网>`——.sv 里真正会 force 的就是它
+    （此前是占位文案「经上游 muxN 输出选路」，用户看不出这一口到底是什么网、也无从核对）。
+    「经上游 muxN 选路」退到 note 里保留，别让人以为这一口自己有个寄存器可写。"""
+    an = _an(wl, "d_wl_rf_lpf_cmain")
+    rows = IT.input_rows(an)
+    head, drv = rows[0], an["expansion"]["ctrl_drivers"][0]
+    assert drv["source"] == "mux"
+    b = drv["binding"]                            # C0-a §7-3 补的上游输出衔接网绑定
+    assert "上游mux" in head["role"] and head["is_control"] and head["bold"]
+    assert head["name"] == IT.mux_label(b)        # 信号列 = 上游 mux 输出网名（带位宽）
+    assert head["rw"] == "RO"
+    assert head["drive"].startswith("force ENV_RF.%s" % b.wire_lhs)
+    assert "需探针前缀" in head["drive"]
+    assert head["found_in"] == "mux-output"
+    assert head["needs_prefix"] is True and head["guessed"] is False
+    assert "经上游 mux%s 选路" % drv["upstream"].group_no in head["note"]
+    assert b.note in head["note"]                 # 解析器的原话也不许丢
     recipe = [r for r in rows if r["role"].startswith("上游mux配方")]
     assert len(recipe) >= 2                       # 载体寄存器 + 至少一个上游控制
     assert any("载体寄存器" in r["role"] for r in recipe)
@@ -293,12 +309,16 @@ def test_c060_mux_ctrl_binding_and_missing_keys():
     assert old[0]["rw"] == "mux" and old[0]["drive"] == "经上游 mux7 输出选路"
     assert old[0]["name"] == "d_up_out" and old[0]["needs_prefix"] is False
 
-    drv = dict(drv_no_binding, binding=_FakeBinding("mux-output"), key="m7.B")
+    drv = dict(drv_no_binding, binding=_FakeBinding("mux-output", note="上游 mux 输出"), key="m7.B")
     new = IT.mux_ctrl_rows(drv, {"bindings": exp_bindings})
     assert new[0]["role"] == old[0]["role"] == "控制(经上游mux7驱动)"      # 角色文案不变
     assert new[0]["rw"] == "RO" and new[0]["drive"].startswith("force ENV_RF.")
     assert "需探针前缀" in new[0]["drive"] and new[0]["needs_prefix"] is True
     assert new[0]["key"] == "m7.B" and new[0]["is_control"] and new[0]["bold"]
+    # 占位文案让位给真网名之后，「经上游 muxN 选路」退到 note 里保留（解析器原话接在后面）
+    assert new[0]["note"] == "经上游 mux7 选路；上游 mux 输出"
+    assert IT.mux_ctrl_rows(dict(drv, binding=_FakeBinding("mux-output")),
+                            {"bindings": exp_bindings})[0]["note"] == "经上游 mux7 选路"
 
     # §7-4：an["ctrl_keys_missing"] 的键殿后补行（角色「控制(line 路径，未展开)」）
     class _Grp(object):
@@ -438,11 +458,40 @@ def test_resolve_detail_handles_a_signal_with_no_inputs(btlp):
     assert IT.resolve_detail(None) == ""
 
 
-def test_resolve_detail_does_not_blame_a_port_that_has_no_net(wl):
-    """上游 mux 驱动的那一口本来就没有单独的网可 force——不能把它列进『最可疑』。"""
-    txt = IT.resolve_detail(_an(wl, "d_wl_rf_lpf_cmain"))
+def test_resolve_detail_names_the_upstream_mux_net_instead_of_blaming_the_port(wl):
+    """上游 mux 驱动的那一口，§7-3 之后**有网了**（上游 mux 的输出衔接网）：
+
+    明细要把那根网的名字亮出来、标成『⚠ 要配层级前缀』，并单独列一行告诉用户「配好前缀就
+    force 得到」。它【不】算『最可疑』——名字不是猜的，只是埋在子模块里（N10 把「猜名」与
+    「缺前缀」拆成了两件事，明细不许再合回去把用户支去改 Excel 名字）。"""
+    an = _an(wl, "d_wl_rf_lpf_cmain")
+    txt = IT.resolve_detail(an)
+    head = IT.input_rows(an)[0]
+    assert head["drive"] in txt                              # force ENV_RF.<衔接网>
+    assert "来源: ⚠ 要配层级前缀" in txt
+    assert "⚠ 猜的" not in txt
+    assert "经上游 mux%s 选路" % an["expansion"]["ctrl_drivers"][0]["upstream"].group_no in txt
+    assert "埋在子模块里的衔接网" in txt and head["name"] in txt
+    assert "最可疑" not in txt                                # 名字不是猜的 → 不进嫌疑名单
+    assert "输入全是从寄存器表里查到的" not in txt              # 但也绝不能说「全查到了」
+
+
+def test_resolve_detail_still_explains_a_port_with_no_net_at_all():
+    """真·连网都没有的那一口（旧展开数据没有 §7-3 binding）：仍要说清「这一口由上游 mux 选路
+    决定、本身没有单独的网可 force」，并且照样不算『最可疑』——别让用户以为是漏显示。"""
+    class _Up(object):
+        group_no = 7
+
+    an = {"kind": "mux", "status": "ok", "issues": [], "note": "", "name": "d_x", "sig": None,
+          "dft_gate": None, "vectors": [], "out_width": 1,
+          "expansion": {"bindings": {}, "used_vars": [], "data_keys": [],
+                        "ctrl_drivers": [{"source": "mux", "letter": "B", "base": "d_up_out",
+                                          "upstream": _Up(), "recipe": {}}]}}
+    row = IT.input_rows(an)[0]
+    assert row["rw"] == "mux" and row["drive"] == "经上游 mux7 输出选路"
+    txt = IT.resolve_detail(an)
     assert "由上游 mux 选路决定" in txt
-    assert "最可疑" not in txt
+    assert "最可疑" not in txt and "埋在子模块里的衔接网" not in txt
 
 
 @pytest.mark.parametrize("fixture_name", ["btlp", "wl"])

@@ -223,8 +223,9 @@ def mux_label(b):
 
 # ─────────────────────────── 行构造 ───────────────────────────
 def _row(letter, name, role, b, width=None, bold=False, key=None,
-         is_control=False, is_dft_gate=False, kind=None, drive=None):
-    """统一的输入行 dict。`b` 是绑定(可 None)；kind/drive 可显式覆盖(mux 级联控制行没有绑定)。"""
+         is_control=False, is_dft_gate=False, kind=None, drive=None, note=None):
+    """统一的输入行 dict。`b` 是绑定(可 None)；kind/drive/note 可显式覆盖
+    (mux 级联控制行没有绑定时给占位文案；有绑定时 note 要补上「经上游 muxN 选路」)。"""
     bk, bd = binding_meta(b)
     k = bk if kind is None else kind
     d = bd if drive is None else drive
@@ -248,7 +249,7 @@ def _row(letter, name, role, b, width=None, bold=False, key=None,
         "needs_prefix": found_in in ("needs-prefix", "mux-output"),
         "guessed": bool(found_in) and found_in not in TRUSTED_FOUND_IN
                    and found_in not in ("needs-prefix", "mux-output"),
-        "note": (getattr(b, "note", "") or ""),
+        "note": (getattr(b, "note", "") or "") if note is None else note,
         "resolved": bool(getattr(b, "resolved", True)) if b is not None else False,
         "base": getattr(b, "base", None),
         "key": key,
@@ -292,6 +293,17 @@ def gate_pin(an):
             getattr(b, "address", None), getattr(b, "reg_lsb", None))
 
 
+def _cascade_ctrl_note(up_no, b):
+    """mux 级联控制行的 note：先点明「经上游 muxN 选路」，再接解析器留下的原话。
+
+    §7-3 之前这一行的**驱动**列写的就是占位文案「经上游 muxN 输出选路」；现在驱动列让位给
+    .sv 里真正会 force 的那根衔接网，选路这件事就落到 note 上——它不能丢：用户要知道这一口
+    不是自己有个寄存器可写，而是被上游那个 mux 选出来的（要驱它得照『上游mux配方』那几行做）。"""
+    head = "经上游 mux%s 选路" % up_no
+    tail = (getattr(b, "note", "") or "").strip()
+    return "%s；%s" % (head, tail) if tail else head
+
+
 def mux_ctrl_rows(drv, exp):
     """一个控制信号的驱动器 → 『输入信号』表的若干行（按三来源给角色文案）。"""
     out = []
@@ -324,13 +336,16 @@ def mux_ctrl_rows(drv, exp):
         upstream = drv.get("upstream")
         up_no = getattr(upstream, "group_no", "?")
         # §7-3：上游 mux 输出网的 Binding（C0-a 在 mux_gen.expand_mux_group 里补的 additive 键）——
-        # 有它才能给出这一行真正的『类型』与『驱动』（RO + force ENV_RF.<衔接网> ⚠需探针前缀），
-        # 并让 N10 的 needs_prefix 标上；没有（旧数据/未合并）→ 原样走下面那行写死的占位文案。
+        # 有它就**照它写**（唯一写法）：『信号』列给上游 mux 的输出网名、『类型』RO、
+        # 『驱动』`force ENV_RF.<衔接网>` —— 这才是 .sv 里真正会 force 的那根网，也让 N10 的
+        # needs_prefix 标得上。「经上游 muxN 选路」这件事不丢，退到 note 里（见 _cascade_ctrl_note）。
+        # 没有 binding（旧展开数据）→ 原样走下面那行写死的占位文案，不编一个网名出来。
         cb = drv.get("binding")
         if cb is not None:
             out.append(_row(letter=drv.get("letter") or "?", name=mux_label(cb),
                             role="控制(经上游mux%s驱动)" % up_no, b=cb, bold=True,
-                            key=drv.get("key"), is_control=True))
+                            key=drv.get("key"), is_control=True,
+                            note=_cascade_ctrl_note(up_no, cb)))
         else:
             out.append(_row(letter=drv.get("letter") or "?", name=drv.get("base") or "?",
                             role="控制(经上游mux%s驱动)" % up_no, b=None, width=1, bold=True,
@@ -554,13 +569,30 @@ def _probe_net(an):
 
 
 def _shaky_rows(rows):
-    """名字靠不住的输入：来源不是从寄存器表里查到的，或者压根没解析出网 —— 报『找不到网』时先看这几行。
-    没有绑定的口（控制由上游 mux 选路决定）不算——它本来就没有单独的网可 force。"""
-    return [r for r in rows if r["found_in"] and (not r["trusted"] or not r["resolved"])]
+    """**名字本身靠不住**的输入：按命名约定猜出来的名，或者压根没解析出网 —— 报『找不到这根网』
+    时先看这几行。两类【不】算在内：
+      · 埋在子模块、只差一层层级前缀的衔接网（名字是对的，另起一行说，见 `_needs_prefix_rows`）——
+        N10 已把「猜名」和「缺前缀」拆成两件事，这里不许再合回去；
+      · 没有绑定的口（控制由上游 mux 选路决定）——它本来就没有单独的网可 force。"""
+    return [r for r in rows if r.get("guessed") or (r["found_in"] and not r["resolved"])]
+
+
+def _needs_prefix_rows(rows):
+    """网名对、但**埋在子模块里**的输入（上游 mux 输出衔接网 / 级联内部网）：只差跑 scan_rtl
+    配一层层级前缀就 force 得到；没配则整组跳过。名字不是猜的，所以不进『最可疑』那一行。"""
+    return [r for r in rows if r.get("needs_prefix") and r["resolved"]]
+
+
+def _source_mark(row):
+    """来源标记（三档，与 N10 的 trusted / needs_prefix / guessed 一一对应）：
+    表里真查到的 → ✔；名字对但埋子模块、缺层级前缀 → ⚠ 要配层级前缀；其余 → ⚠ 猜的。"""
+    if row["trusted"]:
+        return "✔ 查到的"
+    return "⚠ 要配层级前缀" if row.get("needs_prefix") else "⚠ 猜的"
 
 
 def _input_detail_lines(rows):
-    """逐输入解析明细：每条输入 2~3 行（谁 → 怎么驱动 → 名字是查到的还是猜的）。"""
+    """逐输入解析明细：每条输入 2~3 行（谁 → 怎么驱动 → 名字是查到的、缺前缀的、还是猜的）。"""
     lines = []
     pad = max([len(r["letter"] or "-") for r in rows] or [1])
     for r in rows:
@@ -569,8 +601,7 @@ def _input_detail_lines(rows):
         lines.append("       驱动: %s" % (r["drive"] or "(无)"))
         src = r.get("found_in_text") or r.get("found_in") or ""
         if src:
-            mark = "✔ 查到的" if r["trusted"] else "⚠ 猜的"
-            lines.append("       来源: %s —— %s" % (mark, src))
+            lines.append("       来源: %s —— %s" % (_source_mark(r), src))
         elif r["rw"] == "mux":
             lines.append("       来源: 这一口由上游 mux 选路决定，本身没有单独的网可 force；"
                          "要驱它看下面『上游mux配方』那几行")
@@ -645,6 +676,7 @@ def resolve_detail(an):
         lines.append("  （这个信号没有可驱动的输入——多半是只读回读，或者表达式没解析出来）")
 
     shaky = _shaky_rows(rows)
+    needs_prefix = _needs_prefix_rows(rows)
     lines.append("")
     lines.append("%s时，按这三步查：" % CUVUNF_FIRST)
     lines.append("  1. 把上面的探针名 / force 名，拿去 nets.txt（工具可导出）里搜一下真有没有这根网；")
@@ -654,11 +686,22 @@ def resolve_detail(an):
                  "改表，或者用『强制 force 信号』指定真名。")
     if shaky:
         lines.append("  最可疑的是上面标了『⚠ 猜的』或驱动写着『✗未解析』的那 %d 行：%s"
-                     % (len(shaky), "、".join(r["name"] for r in shaky[:6])
-                        + ("…" if len(shaky) > 6 else "")))
-    elif rows:
-        lines.append("  这个信号的输入全是从寄存器表里查到的，名字不是猜的——"
-                     "真报找不到，优先怀疑输出探针那一侧。")
-    else:
-        lines.append("  这个信号没有要 force 的输入，真报找不到就是输出探针那根网的名字或层级不对。")
+                     % (len(shaky), _name_list(shaky)))
+    if needs_prefix:
+        # 与上一行是两回事：这几根网**名字没问题**，只是不在顶层——第 2 步（配前缀）直接对症，
+        # 不必回头怀疑 Excel 里的名字写错了。
+        lines.append("  另有 %d 行是埋在子模块里的衔接网（名字没问题，按上面第 2 步配好层级前缀"
+                     "就 force 得到；没配则整组跳过）：%s"
+                     % (len(needs_prefix), _name_list(needs_prefix)))
+    if not shaky and not needs_prefix:
+        if rows:
+            lines.append("  这个信号的输入全是从寄存器表里查到的，名字不是猜的——"
+                         "真报找不到，优先怀疑输出探针那一侧。")
+        else:
+            lines.append("  这个信号没有要 force 的输入，真报找不到就是输出探针那根网的名字或层级不对。")
     return "\n".join(lines)
+
+
+def _name_list(rows, cap=6):
+    """挑头几行的信号名列成一串（超出就省略号，别把整张表抄进一行里）。"""
+    return "、".join(r["name"] for r in rows[:cap]) + ("…" if len(rows) > cap else "")
