@@ -468,6 +468,29 @@ def report_kind(path):
     return "report_csv"
 
 
+def attach_report_graphs(wb, rep, probe_prefixes=None, mode="min", max_tests=256,
+                         exhaustive=False, only=None, resolver=None):
+    """C-285：把每个信号的电路图内联进 HTML 报告的 `rep['tables']`（键 `sigflow_svg`）。返回张数。
+
+    与 CLI 主路径（`cli.cmd_topout` 里 `--no-sigflow-svg` **不给**时那一条）同一个写出器
+    `sigflow.attach_report_svgs`，所以两边的报告 HTML 结构一致。
+
+    为什么这层薄封装必须在 `exports` 而不是在 GUI 里：`ui/` 的分层规则（架构 §1.2 / I-19）
+    禁止视图 import `sigflow`；而「报告要不要内联图」是导出编排的事，不是渲染器的事。
+    **只碰报告 HTML**：`rep['tables']` 多一个键，`.sv` / 向量 / 账目一个字节都不动
+    （byte-gate 的 6 个 sha 与这条路径无关）。
+
+    永不抛：装不上图只是这份报告没有图，报告照常写出（与 `attach_report_svgs` 的容错口径一致）。
+    """
+    try:
+        from . import sigflow as SF
+        return SF.attach_report_svgs(wb, rep, probe_prefixes=probe_prefixes, resolver=resolver,
+                                     mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                                     only=only)
+    except Exception:                      # noqa: BLE001 —— 没有图 < 没有报告
+        return 0
+
+
 def export_report(path, rep, excel, selected_filter=None):
     """导出『给人看』的报告：按扩展名分派 HTML / Excel / CSV（复用 cli.write_report 的写出器）。
 
