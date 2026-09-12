@@ -210,9 +210,10 @@ class FlowCanvas(QtWidgets.QGraphicsView):
         self.graph = None
         self.layout = None
         self.svg_text = ""
-        self._key = ""                      # 当前高亮的**总线比对键**（剥位宽 + 小写）
-        self._net = ""                      # 交给 render_svg 的那个原写法（见 _graph_spelling）
-        self._clicked = ""                  # 用户刚点中那根线的原写法
+        #: 当前高亮的比对键。C2-int 起它直接递给 `render_svg(highlight_net=)`：
+        #: `sigflow._hl_key` 已改成与 `bus.net_key` 同一把钥匙（小写 + 剥位宽），
+        #: 不必再在 GUI 侧猜「图上那根线的原写法」（旧的 `_graph_spelling` 已删）。
+        self._key = ""
         self._renderer = QSvgRenderer(self)
         self._svg_item = None
         self._hits = []                     # 命中层 item（边在前、节点在后 = 节点压线）
@@ -226,14 +227,11 @@ class FlowCanvas(QtWidgets.QGraphicsView):
         self._clear_scene()
         self.graph = graph
         self._key = net_key(highlight_net)
-        self._net = ""
-        self._clicked = ""
         if graph is None:
             self.layout = None
             self.svg_text = ""
             self._scene.setSceneRect(QtCore.QRectF(0, 0, 1, 1))
             return
-        self._net = self._graph_spelling(self._key)
         self.layout = sigflow.layout_graph(graph)
         self._scene.setSceneRect(QtCore.QRectF(0, 0, float(self.layout.size[0]),
                                                float(self.layout.size[1])))
@@ -255,15 +253,12 @@ class FlowCanvas(QtWidgets.QGraphicsView):
         ≤60 节点 ≈ 2ms（架构 §1.3② 实测口径），换来的是「GUI 与报告 HTML 是同一份画法」——
         另写一套 Qt 描边样式必然与 `render_svg` 漂开。命中层不动（坐标没变）。
 
-        `origin` 不是 flow（真值表行 / 展开链 / 输入表选的）→ 先忘掉上次在图上点的那条位切片：
-        那是「上一次选的第几位」，拿它当这次的选择亮起来就是在骗人。"""
-        if str(origin) != "flow":
-            self._clicked = ""
+        `origin` 是谁发的在这里不影响画面：「当前线网」就是一根网（不分第几位），
+        同一根网的各位切片一起亮 —— `sigflow._hl_key` 与 `bus.net_key` 同一把钥匙后自然如此。"""
         key = net_key(net)
         if key == self._key:
             return False
         self._key = key
-        self._net = self._graph_spelling(key)
         if self.graph is None:
             return False
         self._render()
@@ -278,30 +273,12 @@ class FlowCanvas(QtWidgets.QGraphicsView):
         """当前高亮的线网 —— 与总线同一把钥匙（剥位宽 + 小写）。"""
         return self._key
 
-    def _graph_spelling(self, key):
-        """总线比对键 → **图上那根线的原写法**。
-
-        两把钥匙对不上是真会亮错线的：总线的键剥了位宽（`d_x[1]` → `d_x`，`bus.net_key` =
-        `excel_model._strip_width`），而 `sigflow.render_svg` 的 `highlight_net` 只做小写比对
-        （`sigflow._hl_key`）。图上真有 `d_wl_rf_freq_sel[1]` / `[0]` 这样的位切片线（mirror wl
-        的 tx_epa 里三条），直接把总线的键递进去：**用户点的那一根不亮，亮的是同名的另外两根**
-        —— 比不亮还糟。等 `sigflow._hl_key` 改成同一把钥匙（见 HOST_REQUIREMENTS）这一段就能删。
-
-        一个键对多条位切片时的取舍：① 用户刚点中的那条（他要看的就是它）→ ② 与键一模一样的
-        那条（不带切片的整根网，节点盒也叫这个名）→ ③ 字典序第一条（稳定可复现，不随机）。"""
-        if not key or self.graph is None:
-            return ""
-        if self._clicked and net_key(self._clicked) == key:
-            return self._clicked
-        cands = {str(e.net) for e in self.graph.edges if e.net and net_key(e.net) == key}
-        cands |= {node_net(n) for n in self.graph.nodes if net_key(node_net(n)) == key}
-        if not cands:
-            return key
-        return key if key in cands else sorted(cands)[0]
-
     def _render(self):
+        """画面 = `render_svg`。**图例不内嵌**（`legend=False`）：GUI 的图例是钉在画布下方的
+        `FlowLegend` 控件，内嵌那份会跟着缩放平移滚出视野（C0-c 备注 ⑤），同时留着就是两份。
+        报告 HTML / ppt 那边不传 `legend`，字节照旧。"""
         self.svg_text = sigflow.render_svg(self.graph, layout=self.layout,
-                                           highlight_net=self._net or None)
+                                           highlight_net=self._key or None, legend=False)
         self._renderer.load(QtCore.QByteArray(self.svg_text.encode("utf-8")))
 
     def _clear_scene(self):
@@ -437,6 +414,7 @@ class FlowCanvas(QtWidgets.QGraphicsView):
         """导出 SVG：**不带高亮**（交付物不该记录「我当时点中了哪根线」），复用同一份 layout。"""
         if self.graph is None:
             return ""
+        # 交付物里图例**要内嵌**（收图的人手里只有这一个文件，控件版的图例跟不出去）
         text = sigflow.render_svg(self.graph, layout=self.layout, highlight_net=None)
         with open(str(path), "w", encoding="utf-8") as fh:
             fh.write(text)
@@ -446,6 +424,7 @@ class FlowCanvas(QtWidgets.QGraphicsView):
         """导出 PNG：走 `sigflow.render_png`（与 ppt / 邮件贴图同一条路），2× 便于贴幻灯片。"""
         if self.graph is None:
             return ""
+        # 交付物里图例**要内嵌**（收图的人手里只有这一个文件，控件版的图例跟不出去）
         text = sigflow.render_svg(self.graph, layout=self.layout, highlight_net=None)
         return sigflow.render_png(text, str(path), scale=float(scale))
 
@@ -472,8 +451,6 @@ class FlowCanvas(QtWidgets.QGraphicsView):
         if btn == Qt.LeftButton and self.graph is not None:
             it = self.hit_at(self.mapToScene(event.position().toPoint()))
             hit_net = str(it.data(ROLE_NET) or "") if it is not None else ""
-            # 记下原写法：总线只广播剥了位宽的键，靠它才能把高亮落回**用户点的那一条**位切片
-            self._clicked = hit_net
             self.netClicked.emit(hit_net)
             event.accept()
             return
@@ -817,16 +794,14 @@ HOST_REQUIREMENTS = (
     ("bus.netSelected / bus.select(net, 'flow') / bus.clear('flow')",
      "C-282 的唯一通道；本模块收到广播只重渲染样式，绝不回写选择（I-18）"),
     ("main_view.set_flow_fullscreen(on)", "接 `fullscreenToggled(bool)`；反向用 set_fullscreen(on)"),
-    ("★ sigflow.render_svg(..., legend=False)",
-     "C0-c 备注 ⑤：SVG 自带的底部图例会随缩放滚出视野。本模块已另起 FLOW_LEGEND 控件版，"
-     "但 sigflow 目前没有这个形参（不在 C2-b 的文件集），所以画布底部**仍有一份内嵌图例**。"
-     "补上 legend=False 后，`FlowCanvas._render` / `export_svg` 传 legend=False 即可（报告 HTML 照旧内嵌）"),
-    ("★ sigflow._hl_key 用总线同一把钥匙",
-     "`bus.net_key` 剥位宽（`d_x[1]`→`d_x`，= `excel_model._strip_width`），而 `_hl_key` 只小写 —— "
-     "图上真有 `d_wl_rf_freq_sel[1]`/`[0]` 这种位切片线，直接把总线键递进 render_svg，"
-     "**点中的那根不亮、亮的是同名的另外两根**。现由 `FlowCanvas._graph_spelling` 在 GUI 侧兜住；"
-     "`_hl_key` 改成 `_strip_width` 后即可删掉那段（回归测试："
-     "`test_c282_bit_sliced_net_still_highlights_after_bus_strips_width`）"),
+    ("sigflow.render_svg(..., legend=False)",
+     "✔ C2-int 已加：`FlowCanvas._render` 传 `legend=False`（画面用控件版 FLOW_LEGEND，"
+     "内嵌那份会随缩放滚出视野）；`export_svg` / `export_png` **不传**，交付物照旧内嵌；"
+     "默认 True，报告 HTML 与 ppt 的字节一个都没变"),
+    ("sigflow._hl_key 用总线同一把钥匙",
+     "✔ C2-int 已改成 `excel_model._strip_width`（= `bus.net_key`）：选中一根位切片 = 整根网"
+     "各位一起亮，这正是「当前线网」该有的语义。GUI 侧兜底的 `FlowCanvas._graph_spelling` 随之删掉"
+     "（回归测试：`test_c282_bit_sliced_net_still_highlights_after_bus_strips_width`）"),
     ("names.py 的 5 个 objectName", "✔ C2-int 已并进 names.py：FLOW_SUBTITLE / FLOW_BODY / FLOW_EMPTY / "
                                    "FLOW_VIEWPORT / fmt_flow_legend_item(i)"),
     ("terms.py 的两条文案", "✔ C2-int 已补：`FLOW_PENDING`（分析中）、`FLOW_BUILD_FAILED`（构图失败的抬头，"

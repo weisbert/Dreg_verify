@@ -22,6 +22,7 @@ render_png 才惰性 import QtSvg）。GUI / HTML 报告 / ppt 三处复用同�
 from dataclasses import dataclass, field
 
 from . import cone
+from . import excel_model
 from . import expr as E
 from . import mux_gen
 
@@ -1138,21 +1139,37 @@ def layout_graph(graph):
 
 
 def _hl_key(net):
-    """高亮比对键：网名一律小写去空白（Excel 里同一根网大小写并不统一，别让选中漏命中）。"""
-    s = str(net or "").strip().lower()
+    """高亮比对键：小写去空白 + **剥掉位宽切片**（`d_x[1]` → `d_x`）。
+
+    剥位宽这一步是 C2-int 补的，为的是与 `ui/bus.net_key` 用**同一把钥匙**：总线广播的键
+    早就剥过位宽（`excel_model._strip_width`），而这里原来只做小写比对。图上真有
+    `d_wl_rf_freq_sel[1]` / `[0]` 这种位切片线（mirror wl 的 tx_epa 里三条），两把钥匙对不上时
+    把总线的键递进来 —— **一根都不亮**。同一把钥匙之后，选中一根位切片 = 整根网的各位一起亮，
+    这正是「当前线网」该有的语义（点的是网，不是第几位）。
+
+    ⚠ 只影响**带 highlight_net** 的那一次渲染；不传高亮时字节一个都不变
+    （`tests/test_sigflow_c0.py` 的 21 条 SVG sha 快照录的就是不传高亮那一份）。"""
+    s = excel_model._strip_width(str(net or ""))[0].strip().lower()
     return s or None
 
 
-def render_svg(graph, title=None, layout=None, highlight_net=None):
+def render_svg(graph, title=None, layout=None, highlight_net=None, legend=True):
     """Graph → SVG 文本（源在左、Topout 在右）。三处复用：GUI / HTML 报告内联 / ppt 转 PNG。
 
     布局全部来自 `layout_graph`（传 layout 可复用已算好的一份，GUI 的命中层就靠它对齐）。
     标注：每条线的 net 名 + [msb:lsb]（1bit 不标）；宽总线粗线；REG 盒两行；不可信 PIN 虚线 + 角标。
     每个图元和每条线都挂 data-net（点选高亮同名网直接用）。
 
-    highlight_net — 当前选中的线网名（小写比对）。命中的线与盒套 `hl` 样式（HL 蓝、线加粗到
-    2.2px、盒 2px 边框 + 浅蓝底、REG 左色条转蓝），并额外挂 `data-hl="1"` 方便测试与二次加工。
-    GUI 每次选中变化就带新的 highlight_net 重渲一遍（≤60 节点 ≈ 2ms，架构 §1.3② 路线 C）。
+    highlight_net — 当前选中的线网名（比对键见 `_hl_key`：小写 + 剥位宽）。命中的线与盒套 `hl`
+    样式（HL 蓝、线加粗到 2.2px、盒 2px 边框 + 浅蓝底、REG 左色条转蓝），并额外挂 `data-hl="1"`
+    方便测试与二次加工。GUI 每次选中变化就带新的 highlight_net 重渲一遍
+    （≤60 节点 ≈ 2ms，架构 §1.3② 路线 C）。
+
+    legend — 底部那行图例画不画。**默认 True，报告 HTML / ppt 的字节一个都不变**；
+    GUI 传 `False`：它把图例做成了钉在画布下方的控件（`ui/sigflow_view.FlowLegend`），
+    内嵌那份会随缩放平移一起滚出视野（C0-c 备注 ⑤），同时留着就是两份图例。
+    ⚠ 版面高度**不随之收缩**（`layout_graph` 里那 `_LEGEND_H` 照留）：GUI 的命中层是按
+    同一份 `Layout` 的坐标铺的，画布高度一变命中层就对不上画面了。
     """
     title = title or graph.title
     if not graph.nodes:
@@ -1291,7 +1308,8 @@ def render_svg(graph, title=None, layout=None, highlight_net=None):
                            % (bx + 6, py + 3, col, _esc(lab), _esc(_clip(lab, bw - 12))))
         out.append("</g>")
     out.append("</g>")
-    _draw_legend(out, total_w, total_h)
+    if legend:
+        _draw_legend(out, total_w, total_h)
     out.append("</svg>")
     return "\n".join(out)
 

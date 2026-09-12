@@ -343,32 +343,37 @@ def test_c282_bus_select_from_outside_rerenders_and_does_not_write_back():
 
 
 def test_c282_bit_sliced_net_still_highlights_after_bus_strips_width():
-    """位切片线（`d_wl_rf_freq_sel[1]`）：总线的键剥了位宽，画面仍要亮起用户点的那一条。
+    """位切片线（`d_wl_rf_freq_sel[1]`）：点它 → **同一根网的各位一起亮**。
 
-    这是两把钥匙对不上的原地复现 —— `bus.net_key` 剥位宽、`sigflow._hl_key` 只小写。
-    不在 GUI 侧兜住的话，点这类线一片都不亮（mirror wl 的 tx_epa 里有 3 条）。"""
+    C2-int 之前 `sigflow._hl_key` 只做小写、`bus.net_key` 剥位宽，两把钥匙对不上：
+    把总线的键递进 `render_svg` 时这类线一条都不亮（mirror wl 的 tx_epa 里有 3 条），
+    GUI 侧只好自己猜「图上那根线的原写法」。现在 `_hl_key` 也走 `excel_model._strip_width`，
+    钥匙只有一把 —— 「当前线网」本来就是一根**网**（不分第几位），各位切片一起亮才是对的。"""
     v, bus, an = make_view(SLICED)
     c = v.canvas
     edge = next(e for e in an["graph"].edges if e.net and "[" in e.net)
-    assert BUS.net_key(edge.net) != edge.net.lower(), "选的这条线没有位切片，验不到东西"
+    key = BUS.net_key(edge.net)
+    assert key != edge.net.lower(), "选的这条线没有位切片，验不到东西"
+    same = sorted({str(e.net) for e in an["graph"].edges if e.net and BUS.net_key(e.net) == key})
+    assert len(same) > 1, "这根网在图上只有一条线，验不到「各位一起亮」"
 
     item = c.hit_for_net(edge.net)
     QTest.mouseClick(c.viewport(), Qt.LeftButton, Qt.NoModifier, point_on(c, item))
     H.app().processEvents()
 
-    assert bus.current_net == BUS.net_key(edge.net)
-    assert c.current_net == BUS.net_key(edge.net)
-    hl = [net for net, _p, is_hl in svg_polylines(c.svg_text) if is_hl]
-    assert hl == [edge.net], "点了位切片线没亮：%r" % hl
+    assert bus.current_net == key
+    assert c.current_net == key
+    hl = sorted({net for net, _p, is_hl in svg_polylines(c.svg_text) if is_hl})
+    assert hl == same, "同一根网的各位没有一起亮：%r != %r" % (hl, same)
 
-    # 外部（真值表行 = 剥了位宽的整根网）选中：不许把「用户上次点的是第几位」当成这次的选择
+    # 外部（真值表行 = 剥了位宽的整根网）选中：结果必须一模一样（同一把钥匙，没有「第几位」之分）
     bus.clear("truth")
-    bus.select(BUS.net_key(edge.net), "truth")
+    bus.select(key, "truth")
     H.app().processEvents()
-    hl2 = [net for net, _p, is_hl in svg_polylines(c.svg_text) if is_hl]
-    assert hl2 and all(BUS.net_key(x) == BUS.net_key(edge.net) for x in hl2)
-    assert hl2 != [edge.net] or edge.net == BUS.net_key(edge.net), \
-        "外部选整根网却只亮上次点的那一位：%r" % hl2
+    hl2 = sorted({net for net, _p, is_hl in svg_polylines(c.svg_text) if is_hl})
+    assert hl2 == same, "外部选整根网与在图上点一位，亮的不是同一批：%r" % hl2
+    # 别的网一条都没被误伤
+    assert all(BUS.net_key(x) == key for x in hl2)
     v.close()
 
 
