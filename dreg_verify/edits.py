@@ -207,13 +207,23 @@ def deserialize_mux_vecs(lst):
 
 def serialize_view_edits(edits):
     """SignalView.edits（{信号名low: {kind,src_out_name,name,renamed,cols,an}}）→ 可 JSON 化子桶。
-    序列化只留可重算/用户意图字段(vals/exp/neg/name/user，auto 作兜底)；an 不落盘。"""
+    序列化只留可重算/用户意图字段(vals/exp/neg/name/user，auto 作兜底)；an 不落盘。
+
+    ⚠ mux 列多存一段 `assign`（R2-02，**additive**，旧文件没有这段照常读）：屏幕上那份
+    `vals` 的键集 = 真值表【输入行】的键集（`expansion["used_vars"]` + iddq 门那一行），
+    而向量自己的 `vec.assignments` 是**另一个键集**（没有 `__dft_gate__`，却有死分支的
+    `d:5…d:9`、少了没绑定的 `m57.d:0`）。生成器认的键是
+    `generator.mux_assign_key(vec.assignments)` —— 按 `vals` 重建向量，重开后每一条
+    手填期望都对不上号（实证：wl 七条 mux 信号 7/7 键集不符，.sv 104 行 → 71 行）。
+    所以存的是**向量自己那份取值**，恢复时原样喂回去。
+    """
     out = {}
     for name_low, ed in (edits or {}).items():
         cols = []
+        is_mux = (ed.get("kind") == "mux")
         for c in (ed.get("cols") or []):
             vec = c.get("vec")
-            cols.append({
+            cs = {
                 "name": c.get("name"), "neg": bool(c.get("neg")),
                 "vals": {str(k): int(v) for k, v in (c.get("vals") or {}).items()},
                 "exp": None if c.get("exp") is None else int(c["exp"]),
@@ -221,7 +231,21 @@ def serialize_view_edits(edits):
                 "user": bool(c.get("user")), "dft": bool(c.get("dft")),
                 "case_index": (int(vec.case_index) if vec is not None
                                and getattr(vec, "case_index", None) is not None else None),
-            })
+            }
+            if is_mux and vec is not None:
+                cs["assign"] = {str(k): int(v)
+                                for k, v in (getattr(vec, "assignments", None) or {}).items()}
+                # iddq 漏电态自检拍（与复制它得到的手编列）：门是 force 出来的，不在
+                # assignments 里 —— 不存的话重开后那一拍的 `force …=1` 变成 `=0`，
+                # 断言照旧写着 DFT 常量支的期望 → 仿真必 FAIL，而屏幕上完全看不出。
+                ef = [[str(a), int(b), int(c)]
+                      for (a, b, c) in (getattr(vec, "extra_forces", None) or [])]
+                if ef:
+                    cs["forces"] = ef
+                rn = [str(x) for x in (getattr(vec, "release_nets", None) or [])]
+                if rn:
+                    cs["release"] = rn
+            cols.append(cs)
         out[name_low] = {"kind": ed["kind"], "src_out_name": ed["src_out_name"],
                          "name": ed["name"], "renamed": bool(ed.get("renamed")), "cols": cols}
     return out
@@ -229,7 +253,7 @@ def serialize_view_edits(edits):
 
 def restore_cols(an, specs):
     """存盘的列 spec → 列模型。logic 列重算 auto（改表后不陈旧；DFT 拍跳过），
-    mux 列据 vals + case_index 重建 TestVector。损坏项跳过，不崩。"""
+    mux 列据 `assign`（没有就退回 vals）+ case_index 重建 TestVector。损坏项跳过，不崩。"""
     cols, ow = [], (an.get("out_width") or 1)
     for cs in (specs or []):
         if not isinstance(cs, dict):
@@ -247,12 +271,41 @@ def restore_cols(an, specs):
             recompute_col_an(an, col)                    # 权威重算 auto（改表后不陈旧；DFT 拍跳过）
         elif an["editable"] == "mux":
             ci = cs.get("case_index")
-            col["vec"] = V.TestVector(0, dict(vals), col["auto"], col["auto_w"],
-                                      is_negative=bool(col["neg"]),
-                                      name=(col["name"] if col["user"] else None),
-                                      case_index=None if ci is None else int(ci))
+            vec = V.TestVector(0, _restore_assign(cs, vals), col["auto"], col["auto_w"],
+                               is_negative=bool(col["neg"]),
+                               name=(col["name"] if col["user"] else None),
+                               case_index=None if ci is None else int(ci))
+            vec.dft_pitch = bool(col["dft"])
+            vec.extra_forces = _restore_forces(cs)
+            vec.release_nets = [str(x) for x in (cs.get("release") or [])]
+            col["vec"] = vec
         cols.append(col)
     return cols
+
+
+def _restore_assign(spec, vals):
+    """mux 列 spec → 重建 TestVector 用的 assignments（R2-02）。
+
+    新文件带 `assign`（= 落盘时那条向量自己的取值，键集与生成器一致）就用它；
+    v1 时代 / v2 早期写的旧文件没有这段 → 退回按 `vals` 重建，行为与从前逐字节相同。"""
+    asg = spec.get("assign")
+    if isinstance(asg, dict):
+        try:
+            return {str(k): int(v) for k, v in asg.items()}
+        except (ValueError, TypeError):
+            pass                                        # 手改坏了 → 按 vals 兜底，不整列丢掉
+    return dict(vals)
+
+
+def _restore_forces(spec):
+    """mux 列 spec 的 `forces` 段 → `TestVector.extra_forces`（旧文件没有这段 = 空）。"""
+    out = []
+    for it in (spec.get("forces") or []):
+        try:
+            out.append((str(it[0]), int(it[1]), int(it[2])))
+        except (IndexError, TypeError, ValueError, KeyError):
+            continue                                    # 坏一条跳一条，不连累整列
+    return out
 
 
 def restore_view_edits(view_bucket, models, analyze):
@@ -336,7 +389,12 @@ def cols_to_vectors(an, cols):
 
 
 def mux_derive(an, cols):
-    """mux 列模型 → {cleared, dropped, expected, user_vecs}（mux 路的 edit_overrides 原料）。"""
+    """mux 列模型 → {cleared, dropped, expected, user_vecs}（mux 路的 edit_overrides 原料）。
+
+    ⚠ 用户列的 `uv.name` 必须按**列名**贴（R2-03）：`clone_vector` 复制的是它被复制那一刻的
+    源向量，源是自动列时 `name is None`（.sv 里退回自动 T<n> 标号）、源是别的用户列时带的是
+    **那一列**的名字。屏幕表头写 U0、.sv 里却写 T25，改名成 MY_CASE 更是整个搜不到——
+    三处标号必须是同一个。`cols_to_vectors`（logic 路）与 `restore_cols` 本来就是这个口径。"""
     auto_keys = {generator.mux_assign_key(v.assignments) for v in an["vectors"]}
     cur_auto_keys, expected, user_vecs = set(), {}, []
     for c in cols:
@@ -346,6 +404,7 @@ def mux_derive(an, cols):
         key = generator.mux_assign_key(vec.assignments)
         if c["user"]:
             uv = V.clone_vector(vec)
+            uv.name = c["name"]                  # R2-03：标号以【列名】为准（自动列 name=None）
             if c["neg"]:
                 uv.is_negative = True; uv.neg_value = c["exp"]; uv.neg_mode = "value"
             elif c["exp"] is not None:
@@ -529,18 +588,31 @@ def add_col(an, cols, e_inputs):
 
 
 def copy_cols(cols, sel):
-    """复制选中列（未选=复制最后一列）。返回新造的列列表（未挂进 cols）。"""
+    """复制选中列（未选=复制最后一列）。返回新造的列列表（未挂进 cols）。
+
+    克隆出来的向量要跟着改名（R2-03 同口径）：不然 .sv 里新列顶着**源列**的标号。"""
     out = []
     sel = sel or [len(cols) - 1]
     for j in sel:
         if j < 0 or j >= len(cols):
             continue
         src = cols[j]
-        out.append({"name": new_col_name(list(cols) + out), "neg": src["neg"],
+        nm = new_col_name(list(cols) + out)
+        out.append({"name": nm, "neg": src["neg"],
                     "vals": dict(src["vals"]), "exp": src["exp"],
                     "auto": src["auto"], "auto_w": src["auto_w"], "user": True,
-                    "vec": (V.clone_vector(src["vec"]) if src["vec"] is not None else None)})
+                    "dft": bool(src.get("dft")),      # R2-02：DFT 拍的复制品还是 DFT 拍
+                    "vec": _clone_named(src["vec"], nm)})
     return out
+
+
+def _clone_named(vec, name):
+    """克隆一条向量并把标号贴成 `name`（R2-03：列名 = .sv 标号，两边只有一个口径）。"""
+    if vec is None:
+        return None
+    uv = V.clone_vector(vec)
+    uv.name = name
+    return uv
 
 
 def del_cols(cols, sel):
@@ -579,10 +651,12 @@ def add_negatives(cols, sel, all_positive):
         # 逻辑(避 correct + designer)，不再裸 ~auto。src['exp']=None(无手填)时退化成 ~auto、行为不变。
         _tmpv = V.TestVector(0, {}, src["auto"], src["auto_w"], designer_expected=src["exp"])
         wrong = V.make_negative(_tmpv, mode="invert").neg_value
-        out.append({"name": new_col_name(list(cols) + out, "_NEG"), "neg": True,
+        nm = new_col_name(list(cols) + out, "_NEG")
+        out.append({"name": nm, "neg": True,
                     "vals": dict(src["vals"]), "exp": wrong,
                     "auto": src["auto"], "auto_w": src["auto_w"], "user": True,
-                    "vec": (V.clone_vector(src["vec"]) if src["vec"] is not None else None)})
+                    "dft": bool(src.get("dft")),              # R2-02：向量身份跟着列走
+                    "vec": _clone_named(src["vec"], nm)})     # R2-03：标号跟列名走
     return out, skipped
 
 

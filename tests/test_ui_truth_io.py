@@ -584,9 +584,13 @@ def _sv_labels(text, aid):
 def test_c139_mux_csv_matches_sv_vectors(btlp, wl, tmp_path):
     """mux CSV 的列集与取值 = **同一次 build** 的 .sv 向量，一一对应。
 
-    关键差别点：清单勾了「负向」之后，编辑器手上那条列叫 `U0_NEG`（手编列），而产物里
-    它被重排成 `T<n>_NEG` —— 照 model 的 cols 导出的 CSV 与 .sv 对不上，designer 拿去
-    核对就会以为多/少了一条。
+    关键差别点：产物里自动列会按最终顺序重新编号（手编反例插在它的正向源后面，后面的
+    `T<n>` 整体后移），编辑器手上那份不动 —— 照 model 的 cols 导出的 CSV 与 .sv 对不上，
+    designer 拿去核对就会以为多/少了一条。所以 CSV 一律照【产物】出（断言 ①）。
+
+    ⚠ R2-03 之后这里多钉一条：**手编列的标号两边必须是同一个**。此前 `mux_derive` 的
+    `clone_vector` 不贴列名，编辑器写 `U0_NEG`、.sv 里写 `T<n>_NEG`，改名成 `MY_CASE`
+    更是整个 .sv 搜不到 —— 那不是「产物重排」，那是丢了用户给的标号。
     """
     for wb, sig in ((btlp, MUX_SIG), (wl, MUX_GATED_SIG)):
         m, an, prov = _fresh(wb, sig)
@@ -612,12 +616,12 @@ def test_c139_mux_csv_matches_sv_vectors(btlp, wl, tmp_path):
         names = rows[0][1:]
         # ① 列名 = .sv 里的测试名，顺序一致
         assert names == _sv_labels(text, aid), sig
-        # ② 与 model 手上那份**确实不同**（不是恰好一样所以测不出）：
-        #    编辑器那条反例叫 U<n>_NEG（手编列），产物里被重排成 T<n>_NEG
-        assert names != m2.all_names(), sig
+        # ② R2-03：手编列的标号两边同名（产物只重排/重编自动 T<n>，不许改用户给的名字）
         assert any(x.endswith("_NEG") for x in names), sig
+        user_names = [c["name"] for c in cols if c["user"]]
+        assert user_names, "这一版没有手编列，②③ 就成了空断言"
         assert [x for x in names if x.endswith("_NEG")] \
-            != [x for x in m2.all_names() if x.endswith("_NEG")], sig
+            == [x for x in m2.all_names() if x.endswith("_NEG")] == user_names, sig
         # ③ 期望(bin) 与 .sv 断言里写的对比值逐条相同
         by = {r[0].split("[")[0]: r[1:] for r in rows}
         sv_exp = re.findall(r"assert \(`\S+==(\S+)\)begin", text)
