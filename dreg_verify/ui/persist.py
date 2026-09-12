@@ -54,6 +54,11 @@ LEGACY_SEGMENTS = ("edits", "neg_only", "mux_expected", "mux_neg", "mux_data",
 #: 段但多一层 view_id：`{view_id: {信号名low: {物理基名low: int}}}`）
 V2_SEGMENTS = ("view_edits", "view_checks", "view_mux_data")
 
+#: 这两段**按信号逐条合并**（I-05 / R2-04 / R2-06）：同一个 view_id 的子桶里同时住着
+#: 「本会话改过的信号」「本会话恢复不出来的信号」「另一个窗口刚存进去的信号」——
+#: 整段替换会把后两类静默抹掉。`view_checks` 不在此列：勾选集是**整个视图**一个值。
+PER_SIGNAL_SEGMENTS = ("view_edits", "view_mux_data")
+
 #: settings 里 v2 新增的两个键（清单列设置 / 筛选预设），其余键名一律沿用 A3 §3.1 的旧名
 PRESETS_KEY = contracts.SETTINGS_PRESETS
 INCLUDE_RISKY_KEY = "include_risky"
@@ -225,7 +230,8 @@ def load_edits_bucket(excel_path):
 
 
 def write_edits_bucket(excel_path, patch):
-    """**桶合并写**（I-05 / C-300）——v2 写 edits 文件的唯一出口。返回是否真落了盘。
+    """**桶合并写**（I-05 / C-300 / R2-04 / R2-06）——v2 写 edits 文件的唯一出口。
+    返回是否真落了盘。
 
     为什么不能整桶重建：一个桶里同时住着
       · legacy 九段（『排查(旧)』门面的劳动成果，C-235 规定 v2 不读不删）；
@@ -233,16 +239,27 @@ def write_edits_bucket(excel_path, patch):
     v2 只认识自己那几格，整桶重建 = 把上面两类静默抹掉。手填期望没了、而且没有任何报错，
     这类丢失要等到下次导出时才被发现——所以写入一律是「先读旧桶，再只覆盖自己那几格」。
 
-    patch 形状（三段都可选，按 **view_id 逐格**合并）：
-        {"view_edits":    {view_id: 序列化子桶（空 dict = 这个范围没有编辑）},
-         "view_checks":   {view_id: [勾选名] 或 None（None = 全勾 = 默认态）},
-         "view_mux_data": {view_id: {信号名low: {物理基名low: int}}（R2-01）}}
-    **patch 里没提到的 view_id 一格都不动**。段空了就把段删掉；整个桶空了就把桶删掉
-    （与 v1 `_persist_edits` 的「啥都没有 → 桶也删掉」同语义）。
+    **为什么 `view_edits` 还要再细到逐信号**（R2-04 / R2-06）：同一个 view_id 的子桶里
+    还混着两类本会话**根本不该动**的信号——
+      · 这一趟恢复不出来的（引擎瞬时异常 / 名字暂时不在清单 / `editable == ""`）：
+        整段替换之后，用户接下来随便改一格，这些信号存在文件里的手填期望就被永久抹掉；
+      · 另一个窗口开着同一张表刚存进去的：后写的整段盖掉先写的，零提示。
+    所以这两段（`PER_SIGNAL_SEGMENTS`）按**信号名**逐条合并，删要显式走 `drop`。
 
-    ⚠ 删这一格的判据是 `None` 或**空 dict**，不是「假值」：`view_checks` 的 `[]` 是
-    「一个都没勾」——那是用户真实的选择，得照写；当成空丢掉的话下次开工具会变回全勾，
-    然后他一导出就是整表都出来了。`None` 才是「全勾 = 默认态」（C-243 不写桶）。
+    patch 形状（三段都可选，按 **view_id 逐格**）：
+        {"view_edits":    {view_id: {信号名low: 序列化记录 或 None（删这一条）}}  ← 逐信号合并
+         "view_checks":   {view_id: [勾选名] 或 None（None = 全勾 = 默认态）},
+         "view_mux_data": {view_id: {信号名low: {基名low: int} 或 None}}}        ← 逐信号合并
+
+    **patch 里没提到的 view_id、以及逐信号段里没提到的信号，一个字节都不动。**
+    段空了就把段删掉；整个桶空了就把桶删掉（与 v1 `_persist_edits` 同语义）。
+
+    ⚠ 三种「空」语义各不相同，别混：
+      · 逐信号段的 `{}` = 「这一趟没有要写的信号」= **什么都不做**（此前是「删掉这一格」，
+        那正是 R2-04 的洞：恢复了 0 个信号就把整段清了）；**某个信号写成 `None`** 才是
+        「把文件里那一条删掉」；整个 view_id 写成 `None` 才是「整格删掉」。
+      · `view_checks` 的 `[]` 是「一个都没勾」——用户真实的选择，得照写；当成空丢掉的话
+        下次开工具会变回全勾，他一导出就是整表都出来了。`None` 才是「全勾 = 默认态」（C-243）。
     """
     allb = load_edits_all()
     bucket = dict(allb.get(excel_path) or {})
@@ -250,11 +267,27 @@ def write_edits_bucket(excel_path, patch):
         if seg not in (patch or {}):
             continue                                  # 没提这一段 → 一个字节都不碰
         cur = dict(bucket.get(seg) or {})
+        per_sig = seg in PER_SIGNAL_SEGMENTS
         for vid, val in (patch[seg] or {}).items():
-            if val is None or (isinstance(val, dict) and not val):
-                cur.pop(str(vid), None)               # 默认态 / 没有编辑 → 不留空壳
-            else:
-                cur[str(vid)] = val
+            vid = str(vid)
+            if val is None:                           # 显式整格删（两种段同义）
+                cur.pop(vid, None)
+            elif not per_sig:
+                if isinstance(val, dict) and not val:
+                    cur.pop(vid, None)                # 默认态 / 没有编辑 → 不留空壳
+                else:
+                    cur[vid] = val
+            elif isinstance(val, dict) and val:
+                sub = dict(cur.get(vid) or {})
+                for k, v in val.items():
+                    if v is None:
+                        sub.pop(str(k), None)         # 用户删掉的那一条 → 文件里也删
+                    else:
+                        sub[str(k)] = v
+                if sub:
+                    cur[vid] = sub
+                else:
+                    cur.pop(vid, None)                # 一个信号都不剩 → 不留空壳
         if cur:
             bucket[seg] = cur
         else:

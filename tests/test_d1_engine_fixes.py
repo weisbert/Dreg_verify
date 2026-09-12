@@ -266,7 +266,7 @@ def _fill_mux_data(st, name, text, vid=VID):
     assert e is not None, "%s 没有可手填的数据行" % name
     ED.set_mux_data_value(st.mux_data(vid), name.lower(), str(an["src_out_name"]).lower(),
                           str(an["name"]), e["mux_data_base"], int(e["width"]), text)
-    st.mux_data_touched(vid)
+    st.mux_data_touched(name, vid)
     return e
 
 
@@ -342,6 +342,132 @@ def test_r2_01_mux_data_segment_does_not_touch_legacy(qapp, iso, wl):
     assert json.dumps({k: now[k] for k in legacy}, sort_keys=True, ensure_ascii=False) == frozen
     assert now["view_edits"]["logic"]["d_x"]["name"] == "d_x", "别的 view_id 子桶被动了"
     assert now["view_mux_data"][VID][nm.lower()]
+
+
+# ═══════════════ R2-04 / R2-06：view_edits 逐信号合并（I-05 / C-300 / C-241）═══════════════
+LOGIC_SIG = "d_logic_bt_lp_rx_en"          # btlp 镜像里一个 logic 根、可编辑
+
+
+def _edit_one(st, name, exp=None, vid=VID):
+    """在某个信号上改一格期望（走 `put_edit` = 真值表面板的出口）。"""
+    an = st.analyze(name, vid)
+    cols = ED.cols_from_vectors(an, e_inputs_from_an(an))
+    cols[0]["exp"] = (cols[0]["auto"] ^ 1) if exp is None else exp
+    st.put_edit(name, rec_of(st, name, cols, vid), vid)
+    return cols
+
+
+def _two_editables(st, vid=VID):
+    out = []
+    for m in st.models(vid):
+        an = st.analyze(m["name"], vid)
+        if an and an.get("editable"):
+            out.append(m["name"])
+        if len(out) == 2:
+            break
+    return out
+
+
+@pytest.mark.contract("C-300", "C-241")
+def test_r2_04_unrestorable_signal_is_not_wiped_and_is_named(qapp, iso, btlp, monkeypatch):
+    """R2-04：某信号这一趟恢复不出来（引擎瞬时异常）→ 状态栏**点名** +
+    文件里那条手填期望**原样留着**，接下来的普通编辑不许把它抹掉。
+
+    用户看到的：分析偶发抛了一次，状态栏只说「已恢复 N 个」；他改了另一个信号一格，
+    那个没恢复出来的信号存了一上午的手填期望就永久没了 —— 下次导出才发现。
+    """
+    st = loaded(btlp)
+    a, b = _two_editables(st)
+    _edit_one(st, a, 3)
+    _edit_one(st, b, 5)
+    before = P.load_edits_bucket(str(btlp))["view_edits"][VID]
+    assert set(before) == {a.lower(), b.lower()}
+
+    # 重开，但 a 的分析这一趟必炸（瞬时异常）
+    st2 = ST.WorkbenchState()
+    said = []
+    st2.statusMessage.connect(said.append)
+    assert st2.load(str(btlp))
+    real_analyze = st2.analyze
+    boom = {"on": True}
+
+    def flaky(name, view_id=None, want_graph=False):
+        if boom["on"] and str(name).lower() == a.lower():
+            raise RuntimeError("boom")
+        return real_analyze(name, view_id, want_graph)
+
+    # ⚠ 不能用 `monkeypatch.undo()` 复原 —— 那会把 `iso` 夹具对 EDITS_PATH 的隔离一起撤掉，
+    #   测试就去读用户真机那份 `~/.dreg_verify_edits.json` 了。
+    monkeypatch.setattr(st2, "analyze", flaky)
+    st2.set_models(VID, st2.provider(VID).skeleton_models(), partial=True)
+
+    assert a.lower() not in st2.edits(VID), "夹具没生效：a 居然恢复出来了"
+    assert any(a in s for s in said), "恢复不出来的信号没点名：%s" % said
+
+    # 现在改 b 一格 —— a 那条必须原样躺在文件里
+    boom["on"] = False
+    _edit_one(st2, b, 9)
+    now = P.load_edits_bucket(str(btlp))["view_edits"][VID]
+    assert a.lower() in now, "恢复不出来的信号被下一次普通编辑抹掉了"
+    assert now[a.lower()] == before[a.lower()], "它还被改了内容"
+    assert now[b.lower()]["cols"][0]["exp"] == 9
+
+
+@pytest.mark.contract("C-300")
+def test_r2_06_two_windows_do_not_overwrite_each_other(qapp, iso, btlp):
+    """R2-06：同一张表开两个窗口交替存盘，各改各的信号 → 两个人的活都要在。
+
+    用户看到的：同事开着同一张表，你存一次，他的手填期望没了；他存一次，你的没了。
+    零提示。两轮交替（第二轮与第一轮方向相反：这次先 B 后 A）。
+    """
+    A, B = loaded(btlp), loaded(btlp)
+    a, b = _two_editables(A)
+
+    _edit_one(A, a, 3)                                  # 第一轮：A 先写、B 后写
+    _edit_one(B, b, 5)
+    seg = P.load_edits_bucket(str(btlp))["view_edits"][VID]
+    assert seg[a.lower()]["cols"][0]["exp"] == 3, "B 存盘把 A 的活盖掉了"
+    assert seg[b.lower()]["cols"][0]["exp"] == 5
+
+    _edit_one(B, b, 6)                                  # 第二轮：反过来，B 先写、A 后写
+    _edit_one(A, a, 4)
+    seg = P.load_edits_bucket(str(btlp))["view_edits"][VID]
+    assert seg[a.lower()]["cols"][0]["exp"] == 4
+    assert seg[b.lower()]["cols"][0]["exp"] == 6, "A 存盘把 B 的活盖掉了"
+
+
+@pytest.mark.contract("C-300")
+def test_r2_04_drop_edit_really_deletes_from_file(qapp, iso, btlp):
+    """R2-04：逐信号合并之后，`drop_edit` 仍要把文件里那一条**真的删掉**
+    （否则「回到引擎默认真值表」下次开工具又变回来了）。"""
+    st = loaded(btlp)
+    a, b = _two_editables(st)
+    _edit_one(st, a, 3)
+    _edit_one(st, b, 5)
+    st.drop_edit(a)
+    seg = P.load_edits_bucket(str(btlp))["view_edits"][VID]
+    assert a.lower() not in seg, "drop_edit 没删掉文件里那条"
+    assert seg[b.lower()]["cols"][0]["exp"] == 5, "顺手把别人删了"
+    st.drop_edit(b)
+    assert "view_edits" not in P.load_edits_bucket(str(btlp)), "一条不剩时该连段一起清掉"
+
+
+@pytest.mark.contract("C-300")
+def test_r2_04_mux_data_is_merged_per_signal_too(qapp, iso, wl):
+    """R2-04：`view_mux_data` 同口径 —— 另一个窗口填的数据值不许被盖掉；清空那一格要真删。"""
+    A, B = loaded(wl), loaded(wl)
+    muxes = [n for n in mux_signals(A) if _data_row(A.analyze(n)) is not None]
+    assert len(muxes) >= 2, "这张镜像 mux 信号不够两条"
+    a, b = muxes[0], muxes[1]
+    _fill_mux_data(A, a, "5")
+    _fill_mux_data(B, b, "6")
+    seg = P.load_edits_bucket(str(wl))["view_mux_data"][VID]
+    assert a.lower() in seg and b.lower() in seg, "两个窗口互相盖掉了：%s" % sorted(seg)
+
+    _fill_mux_data(A, a, "")                            # 清空 = 恢复自动分配
+    seg = P.load_edits_bucket(str(wl))["view_mux_data"][VID]
+    assert a.lower() not in seg, "清空那一格没从文件里删掉"
+    assert b.lower() in seg
 
 
 # ═══════════════ R2-03：手编列标号（C-091 / C-139）═══════════════

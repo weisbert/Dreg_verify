@@ -154,6 +154,11 @@ class WorkbenchState(QtCore.QObject):
         self._bucket = {}               # 本表的 edits 桶（载表时读一次）
         self._restored = set()          # 已按本表桶还原过的范围（每次载表一遍）
         self._owned = set()             # 本会话管着的范围 → 只有它们才回写（见 persist_edits）
+        # R2-04 / R2-06：本会话**真的动过**的信号名（逐范围）。回写只覆盖它们，
+        # 「这一趟恢复不出来的」与「另一个窗口刚存进去的」原样留在文件里。
+        self._touched = {vid: set() for vid in contracts.VIEW_IDS}
+        self._touched_mux = {vid: set() for vid in contracts.VIEW_IDS}
+        self._touched_checks = set()    # 勾选集是整个视图一个值，只记范围
         self._persist_suspended = 0
         self._persist_pending = False
         self._code_version = None       # 懒算一次，见 code_version()
@@ -196,6 +201,9 @@ class WorkbenchState(QtCore.QObject):
             self._negs[vid] = set()
             self._edits[vid] = {}
             self._mux_data[vid] = {}
+            self._touched[vid] = set()
+            self._touched_mux[vid] = set()
+        self._touched_checks.clear()
         self._fingerprint.clear()
         self._an_cache.clear()
         self._an_fp.clear()
@@ -397,6 +405,7 @@ class WorkbenchState(QtCore.QObject):
                 cur.discard(low)
         self._checks[vid] = None if (all_low and cur >= all_low) else cur
         self._owned.add(vid)
+        self._touched_checks.add(vid)       # R2-06：没动过就不回写，免得盖掉另一个窗口的
         self.checksChanged.emit(vid)
         self.persist_edits()
 
@@ -476,16 +485,18 @@ class WorkbenchState(QtCore.QObject):
         vid = self._vid(view_id)
         self._edits[vid][str(name).lower()] = record
         self._owned.add(vid)
+        self._touched[vid].add(str(name).lower())        # R2-04：只有它才回写进文件
         self._sync_negs(vid)
         self.editsChanged.emit(vid, str(name))
         self.persist_edits()
 
     def drop_edit(self, name, view_id=None):
-        """丢掉某信号的编辑（回到引擎默认真值表）。"""
+        """丢掉某信号的编辑（回到引擎默认真值表）——**连文件里那条一起删**（R2-04）。"""
         vid = self._vid(view_id)
         if self._edits[vid].pop(str(name).lower(), None) is None:
             return
         self._owned.add(vid)
+        self._touched[vid].add(str(name).lower())        # 在 touched 里、不在 edits 里 = 删
         self._sync_negs(vid)
         self.editsChanged.emit(vid, str(name))
         self.persist_edits()
@@ -500,13 +511,15 @@ class WorkbenchState(QtCore.QObject):
         """
         return self._mux_data.setdefault(self._vid(view_id), {})
 
-    def mux_data_touched(self, view_id=None):
-        """mux 数据值手填改过了 → 认领这个范围并落盘（R2-01）。
+    def mux_data_touched(self, name, view_id=None):
+        """某信号的 mux 数据值手填改过了 → 认领它并落盘（R2-01 / R2-04）。
 
-        真值表面板改完 `mux_data()` 里那一格就调一次。列集跟着重出时 `colsChanged`
-        本来也会带出一次 `put_edit`，但「改完数据值恰好列集没变」那一趟不能指望它。"""
+        真值表面板改完 `mux_data()` 里那一格就调一次（`name` = 那个信号）。列集跟着重出时
+        `colsChanged` 本来也会带出一次 `put_edit`，但「改完数据值恰好列集没变」那一趟
+        不能指望它。名字记进 `_touched_mux`：清空那一格（文本填空）时文件里那条才删得掉。"""
         vid = self._vid(view_id)
         self._owned.add(vid)
+        self._touched_mux[vid].add(str(name or "").lower())
         return self.persist_edits()
 
     def compute_edited(self, view_id=None):
@@ -629,7 +642,11 @@ class WorkbenchState(QtCore.QObject):
                 for name in [m["name"] for m in self.models(vid)
                              if str(m["name"]).lower() in self._edits[vid]]:
                     self.drop_edit(name, vid)
-                self._edits[vid].clear()            # 清单里没有的名字（换过表）也一并清掉
+                # 清单里没有的名字（换过表）也一并清掉。C-192 的语义是「加载这份工作状态」，
+                # 不是叠加 —— 所以这些也要进 `_touched`，文件里那几条跟着删（R2-04）。
+                self._touched[vid] |= set(self._edits[vid])
+                self._touched_mux[vid] |= set(self._mux_data[vid])
+                self._edits[vid].clear()
                 self._mux_data[vid].clear()
                 self.set_checked([m["name"] for m in self.models(vid)], True, vid)
                 cov = self._cov[vid]
@@ -699,11 +716,21 @@ class WorkbenchState(QtCore.QObject):
                 self.persist_edits()
 
     def persist_edits(self):
-        """把本会话管着的范围写回 edits 文件（**桶合并**，C-300）。返回是否真落了盘。
+        """把本会话**真的动过的信号**写回 edits 文件（桶合并 + 逐信号合并，C-300 / R2-04 / R2-06）。
+        返回是否真落了盘。
 
         `_owned` 是「本会话按本表桶还原过、或本会话改过」的范围。只回写这些：
         清单还没出来（worker 还在跑）时若把五个范围一股脑写回去，等于用一份空编辑
-        覆盖掉同事存在文件里的手填期望——而且没有任何报错。"""
+        覆盖掉同事存在文件里的手填期望——而且没有任何报错。
+
+        范围之内再按信号过一道 `_touched`（R2-04 / R2-06）：
+          · 在 `_touched` 里、`_edits` 里也有 → 写这一条；
+          · 在 `_touched` 里、`_edits` 里没有（用户删掉的）→ 进 `drop`，文件里那条也删；
+          · **不在 `_touched` 里** → 一个字节都不碰。这一趟恢复不出来的信号（引擎瞬时异常 /
+            名字暂时不在清单 / `editable == ""`）就属于这一类：它们存在文件里的手填期望
+            要原样留着，否则用户接下来随便改一格就把它们永久抹掉了；同一张表开着的
+            **另一个窗口**刚存进去的信号同理。
+        """
         if self._persist_suspended > 0:
             self._persist_pending = True
             return False
@@ -711,15 +738,21 @@ class WorkbenchState(QtCore.QObject):
             return False
         ve, vc, vm = {}, {}, {}
         for vid in sorted(self._owned):
-            ve[vid] = ED.serialize_view_edits(self._edits[vid])
-            ch = self._checks.get(vid)
-            # C-243：全勾（None）= 默认态 → 写 None，`write_edits_bucket` 会把这一格删掉
-            vc[vid] = None if ch is None else [m["name"] for m in self.models(vid)
-                                               if str(m["name"]).lower() in ch]
+            touched = self._touched.get(vid) or set()
+            mine = {low: ed for low, ed in self._edits[vid].items() if low in touched}
+            sub = ED.serialize_view_edits(mine)
+            sub.update({low: None for low in touched if low not in self._edits[vid]})
+            ve[vid] = sub                              # None = 用户删掉的，文件里那条也删
+            tmux = self._touched_mux.get(vid) or set()
+            cur_mux = self._mux_data.get(vid) or {}
             # R2-01：mux 数据值手填也是劳动成果，legacy 桶的 `mux_data` 段形状 + 一层 view_id
-            vm[vid] = {low: dict(ent.get("data") or {})
-                       for low, ent in (self._mux_data.get(vid) or {}).items()
-                       if ent.get("data")}
+            vm[vid] = {low: (dict((cur_mux.get(low) or {}).get("data") or {})
+                             or None) for low in tmux}
+            if vid in self._touched_checks:
+                ch = self._checks.get(vid)
+                # C-243：全勾（None）= 默认态 → 写 None，`write_edits_bucket` 会把这一格删掉
+                vc[vid] = None if ch is None else [m["name"] for m in self.models(vid)
+                                                   if str(m["name"]).lower() in ch]
         return persist.write_edits_bucket(self.loaded_path, {"view_edits": ve, "view_checks": vc,
                                                              "view_mux_data": vm})
 
@@ -728,7 +761,12 @@ class WorkbenchState(QtCore.QObject):
 
         每次载表每个范围只做一遍（骨架清单到齐就能做——还原只要名字对得上）。
         还原走 `edits.restore_view_edits`：逐信号重新分析、**重算 auto**（C-238，改表后不留陈旧假绿），
-        桶里有而当前表没有的信号点名跳过（C-239），坏数值逐条跳过（C-240），最后报个数（C-241）。"""
+        桶里有而当前表没有的信号点名跳过（C-239），坏数值逐条跳过（C-240），最后报个数（C-241）。
+
+        R2-04：**「名字在表里、可就是恢复不出来」的也要点名**（引擎瞬时异常 / `editable == ""`）。
+        此前这一类被 `restore_view_edits` 整条静默跳过，用户只看到「已恢复 N 个」，
+        而那几条存在文件里的手填期望正在下一次普通编辑时被抹掉。名字不进 `_touched`，
+        所以文件里那几条原样留着；状态栏那句沿用同一个模板，只是把名字并进去。"""
         if vid in self._restored or not self._models.get(vid):
             return
         self._restored.add(vid)
@@ -748,7 +786,10 @@ class WorkbenchState(QtCore.QObject):
             self._sync_negs(vid)
             bad = sum(max(0, len((ve.get(low) or {}).get("cols") or []) - len(ed.get("cols") or []))
                       for low, ed in self._edits[vid].items())
-            self._report_restore(len(self._edits[vid]), missing + md_missing, bad)
+            # R2-04：名字在表里、却没恢复出来的（分析失败 / 不可编辑）也点名
+            failed = [real_of[str(n).lower()] for n in ve
+                      if str(n).lower() in have and str(n).lower() not in self._edits[vid]]
+            self._report_restore(len(self._edits[vid]), missing + failed + md_missing, bad)
         elif md_missing:
             self._report_restore(0, md_missing, 0)
         # ② 回填 mux 数据值那条记录的 src_out_name / 显示名（`compute_edited` 造 data-only

@@ -258,11 +258,20 @@ def test_c300_c235_bucket_merge_preserves_legacy(iso):
     assert "topout" not in now["view_checks"]                # None = 全勾 → 不写这一格（C-243）
     assert P.load_edits_all()[other] == {"edits": {"d_elsewhere": []}}
 
-    # 某个范围的编辑被清空 → 只删它那一格，别的段照旧
+    # R2-04：`view_edits` 现在按**信号**逐条合并，`{}` = 「这一趟没有要写的信号」= 什么都不做
+    # （此前 `{}` 是「删掉这一格」—— 恢复了 0 个信号就把整段清了，那正是 R2-04 的洞）
     assert P.write_edits_bucket(path, {"view_edits": {"topout": {}}})
+    assert P.load_edits_all()[path]["view_edits"]["topout"] == new_topout, "空 patch 不许动文件"
+
+    # 某个信号写成 None = 把文件里那一条删掉；一条不剩时那一格才跟着没
+    assert P.write_edits_bucket(path, {"view_edits": {"topout": {"clk_force_on": None}}})
     now2 = P.load_edits_all()[path]
     assert "topout" not in now2["view_edits"] and "logic" in now2["view_edits"]
     assert now2["edits"] == bucket["edits"]
+
+    # 整个 view_id 写成 None 仍然是「整格删掉」（`view_checks` 的 C-243 用的就是这条）
+    assert P.write_edits_bucket(path, {"view_edits": {"logic": None}})
+    assert "view_edits" not in P.load_edits_all()[path], "段里一格不剩 → 段也该没了"
 
     # C-235：legacy 段只读不删，读出来的就是原文
     assert P.load_legacy_bucket(path) == {k: bucket[k] for k in P.LEGACY_SEGMENTS}
