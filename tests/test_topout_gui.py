@@ -795,6 +795,59 @@ def test_e_addneg_names_survive_export(topo_win):
     assert len(names) == len(set(names)) and all(names)
 
 
+_FORCE_LEAF = "d_bt_lp_rx_en_local"        # mirror 里 rx_en 的一个可写寄存器叶子（默认走 RF_WRITE）
+
+
+def _leaf_kind(v, base):
+    return next(b.kind for b in (v.cur_an["bindings"] or {}).values()
+                if b is not None and b.base == base)
+
+
+def test_force_signals_reach_topout_and_page_backends(topo_win):
+    """轨0-⑥：『强制 force 信号』此前只对『排查(旧)』生效——Topout/子视图建 Resolver 与 GenOptions
+    时根本不传 force_overrides，用户配了等于没配（那个网照旧 RF_WRITE，静默）。
+    现在 provider 读 main 的同一份名单：分析的输入类型、.sv、报告都按它走。"""
+    w = topo_win
+    v = w.topout_view
+    forced = "force `ENV_RF.%s=" % _FORCE_LEAF
+    sv0, _ = v.provider.render_sv(["d_logic_bt_lp_rx_en"], "min", 256, False, {})
+    assert forced not in sv0                                  # 默认：可写寄存器 → RF_WRITE
+    v._load_signal("d_logic_bt_lp_rx_en")
+    assert _leaf_kind(v, _FORCE_LEAF) == "RW"
+
+    w._force_signals = {_FORCE_LEAF}
+    v.refresh()
+    v._load_signal("d_logic_bt_lp_rx_en")
+    assert _leaf_kind(v, _FORCE_LEAF) == "RO"                 # 分析层按 force 处理
+    sv1, _ = v.provider.render_sv(["d_logic_bt_lp_rx_en"], "min", 256, False, {})
+    assert forced in sv1                                      # ⭐.sv 里该网变 force，不再 RF_WRITE
+    rep = v.provider.render_report("min", 256, False, only=["d_logic_bt_lp_rx_en"])
+    t = next(x for x in rep["tables"] if x.get("topout_name") == "d_logic_bt_lp_rx_en")
+    assert next(i["kind"] for i in t["inputs"] if i.get("base") == _FORCE_LEAF) == "RO"
+
+    pv = w.page_views["logic"]                                # 子视图共用同一份名单
+    ps, _ = pv.provider.render_sv(["d_logic_bt_lp_rx_en"], "min", 256, False, {})
+    assert forced in ps
+
+    w._force_signals = set()                                  # 清空 → 逐字节回到默认
+    v.refresh()
+    sv2, _ = v.provider.render_sv(["d_logic_bt_lp_rx_en"], "min", 256, False, {})
+    assert sv2 == sv0
+
+
+def test_force_signals_button_delegates_to_main(topo_win, monkeypatch):
+    """轨0-⑥：SignalView 底部有「强制 force 信号…」，委托 main 的名单编辑器 + 改完重算本视图
+    （仿 on_set_prefix 的委托写法，两个门面共用同一份名单）。"""
+    from PySide6 import QtWidgets
+    v = topo_win.topout_view
+    assert "强制 force 信号…" in [b.text() for b in v.findChildren(QtWidgets.QPushButton)]
+    calls = []
+    monkeypatch.setattr(topo_win, "on_set_force_signals", lambda: calls.append("dlg"))
+    monkeypatch.setattr(v, "refresh", lambda *a, **k: calls.append("refresh"))
+    v.on_set_force()
+    assert calls == ["dlg", "refresh"]                         # 先弹编辑器，再重算
+
+
 def _rename_to(monkeypatch, text, ok=True):
     from PySide6 import QtWidgets
     monkeypatch.setattr(QtWidgets.QInputDialog, "getText",

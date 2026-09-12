@@ -528,6 +528,12 @@ class _TopoutProvider:
         Topout 顶层探针展到底后多无需前缀，但 cone 叶子的 RO readback / iddq 门若埋子模块仍要前缀。"""
         return getattr(self.main, "_probe_prefixes", None) or None
 
+    def _fo(self):
+        """『强制 force 信号』基名集合（与『排查(旧)』共用同一份 self._force_signals）——
+        列进来的叶子跳过 cone、直接 force 顶层基名网。此前 Topout 路径根本不读这份配置，
+        用户配了等于没配（.sv 里那个网照旧走 RF_WRITE，静默）。"""
+        return set(getattr(self.main, "_force_signals", None) or ()) or None
+
     @contextlib.contextmanager
     def _supplemented(self):
         """N4：临时把 wb.logic 换成应用了 RTL 补充逻辑(main._logic_overrides)的版本——让 Topout 的
@@ -560,6 +566,7 @@ class _TopoutProvider:
         with self._supplemented():
             return T.topout_view_models(self.wb, mode=mode, max_tests=max_tests,
                                         exhaustive=exhaustive, probe_prefixes=self._pp(),
+                                        force_overrides=self._fo(),
                                         sig_cov=sig_cov, form_cov=form_cov)
 
     def analyze(self, name, mode, max_tests, exhaustive, mux_data=None):
@@ -568,7 +575,8 @@ class _TopoutProvider:
             topo = next((t for t in (self.wb.topout or []) if t.name == name), None)
             if topo is None:
                 return None
-            res = T.analyze_signal(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()), topo,
+            res = T.analyze_signal(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp(),
+                                                       force_overrides=self._fo()), topo,
                                    mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                    mux_data=mux_data)
             return _norm_topout_result(res, self.wb)      # m4：传 wb → 输入按 for_test 行序
@@ -581,21 +589,22 @@ class _TopoutProvider:
             return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                       comments=comments, sv_summary=sv_summary,
                                       owner_in_msg=owner_in_msg, only=only, edit_overrides=eo,
-                                      probe_prefixes=self._pp(), scope=scope, sig_cov=sig_cov,
-                                      form_cov=form_cov)
+                                      probe_prefixes=self._pp(), force_overrides=self._fo(),
+                                      scope=scope, sig_cov=sig_cov, form_cov=form_cov)
 
     def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None, form_cov=None):
         from . import topout as T
         with self._supplemented():
             return T.topout_report(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                   probe_prefixes=self._pp(), only=only, sig_cov=sig_cov,
-                                   form_cov=form_cov)
+                                   probe_prefixes=self._pp(), force_overrides=self._fo(),
+                                   only=only, sig_cov=sig_cov, form_cov=form_cov)
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         from . import topout as T
         from . import fortest_writer as F
         with self._supplemented():
-            rep = T.report_for_topout(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp()),
+            rep = T.report_for_topout(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp(),
+                                                          force_overrides=self._fo()),
                                       mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                       probe_prefixes=self._pp(), only=only)
         F.write_fortest(src, out, rep, include_mux=True)
@@ -689,19 +698,25 @@ class _PageProvider:
         """探针前缀映射（与 Topout/排查(旧)/全局编辑器共用同一份 self._probe_prefixes）。"""
         return getattr(self.main, "_probe_prefixes", None) or None
 
+    def _fo(self):
+        """『强制 force 信号』基名集合（与 Topout/排查(旧) 共用同一份 self._force_signals）。"""
+        return set(getattr(self.main, "_force_signals", None) or ()) or None
+
     supports_sig_cov = False           # 子视图(logic/mux/dft/iddq)暂不放单点覆盖度（N3 仅 Topout）
 
     def view_models(self, mode, max_tests, exhaustive, sig_cov=None, form_cov=None):
         from . import pageviews as P
         return P.page_view_models(self.wb, self.page, mode=mode, max_tests=max_tests,
-                                  exhaustive=exhaustive, probe_prefixes=self._pp())
+                                  exhaustive=exhaustive, probe_prefixes=self._pp(),
+                                  force_overrides=self._fo())
 
     def analyze(self, name, mode, max_tests, exhaustive, mux_data=None):
         from . import pageviews as P
         sig = next((s for s in P.page_signals(self.wb, self.page) if s.out_name == name), None)
         if sig is None:
             return None
-        res = P.analyze_page_signal(self.wb, P._page_resolver(self.wb, self._pp()), sig, self.page,
+        res = P.analyze_page_signal(self.wb, P._page_resolver(self.wb, self._pp(), self._fo()),
+                                    sig, self.page,
                                     mode=mode, max_tests=max_tests, exhaustive=exhaustive)
         return _norm_page_result(res, self.wb)            # m4：传 wb → 输入按 for_test 行序
 
@@ -711,17 +726,20 @@ class _PageProvider:
         return P.build_page_sv(self.wb, self.page, mode=mode, max_tests=max_tests,
                                exhaustive=exhaustive, edit_overrides=_page_edit_overrides(edited),
                                only=only, comments=comments, sv_summary=sv_summary,
-                               owner_in_msg=owner_in_msg, probe_prefixes=self._pp(), scope=scope)
+                               owner_in_msg=owner_in_msg, probe_prefixes=self._pp(), scope=scope,
+                               force_overrides=self._fo())
 
     def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None, form_cov=None):
         from . import pageviews as P
         return P.page_report(self.wb, self.page, mode=mode, max_tests=max_tests,
-                             exhaustive=exhaustive, probe_prefixes=self._pp(), only=only)
+                             exhaustive=exhaustive, probe_prefixes=self._pp(), only=only,
+                             force_overrides=self._fo())
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         from . import pageviews as P
         P.page_fortest(self.wb, self.page, src, out, mode=mode, max_tests=max_tests,
-                       exhaustive=exhaustive, probe_prefixes=self._pp(), only=only)
+                       exhaustive=exhaustive, probe_prefixes=self._pp(), only=only,
+                       force_overrides=self._fo())
 
 
 class SignalView(QtWidgets.QWidget):
@@ -1031,7 +1049,14 @@ class SignalView(QtWidgets.QWidget):
         b_nets = QtWidgets.QPushButton("导出 nets.txt…"); b_nets.clicked.connect(self.on_export_nets)
         b_nets.setToolTip("导出当前表需在 ENV_RF 层定位的网清单，供仿真服务器跑 scan_rtl 扫 RTL（N5：\n"
                           "跨机器两段式工作流第①步，与具体视图无关、从默认 Topout 视图直接够得着）。")
+        b_force = QtWidgets.QPushButton("强制 force 信号…"); b_force.clicked.connect(self.on_set_force)
+        b_force.setToolTip(
+            "指定哪些信号【不展开 cone】、直接 force 顶层基名网 `ENV_RF.<基名>（= for_test 那招）。\n"
+            "用于工具判错类型的场合：撞名 RO 寄存器的内部信号(如 d_wl_rf_linectrl_band_sel)本该 force，\n"
+            "工具却当成可写寄存器去 RF_WRITE。前提是该基名在 ENV_RF 顶层真实存在，否则仿真 CUVUNF。\n"
+            "与『排查(旧)』共用同一份名单；改完本视图自动重算。")
         btns.addWidget(b_pfx)
+        btns.addWidget(b_force)
         btns.addWidget(b_nets)
         if getattr(self.provider, "supports_logic_overrides", False):   # N4：仅 Topout 视图放
             b_lo = QtWidgets.QPushButton("RTL 补充逻辑…"); b_lo.clicked.connect(self.on_logic_overrides)
@@ -2206,6 +2231,14 @@ class SignalView(QtWidgets.QWidget):
         if not self.main.wb:
             return
         self.main.on_set_probe_prefix()
+        self.refresh()
+
+    def on_set_force(self):
+        """打开『强制 force 信号』名单编辑器（与『排查(旧)』共用同一份），改完重算本视图——
+        名单里的叶子跳过 cone、直接 force 顶层基名网，Topout/子视图的分析与 .sv 都按它走。"""
+        if not self.main.wb:
+            return
+        self.main.on_set_force_signals()
         self.refresh()
 
     def _ask_export_options(self):

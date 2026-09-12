@@ -49,14 +49,17 @@ def page_available(wb, page):
     return bool(page_signals(wb, page))
 
 
-def _page_resolver(wb, probe_prefixes=None):
+def _page_resolver(wb, probe_prefixes=None, force_overrides=None):
     """页本地用的干净 resolver：级联=force(绝不 cone 上游)。
     尾缀沿用全局默认(append_to_logic=True / append_to_mux=False)=RTL 真名——与 Topout/排查(旧)
     同口径，且【不擅自改 wb.logic 各信号的 _append_to_logic 共享态】(Resolver.__init__ 会回写它，
     若这里强行设 False 会污染别的视图的 rtl_name，2026-06-24 实测撞了 append_to_logic 开关测试)。
     页本地的『不跨页』靠 cascade_mode=force 实现，与输出尾缀无关。
-    probe_prefixes：force 衔接网/输出探针埋子模块时的层级前缀（与 Topout/排查(旧) 共用同一份）。"""
-    return R.Resolver(wb, cascade_mode="force", wire_prefixes=probe_prefixes)
+    probe_prefixes：force 衔接网/输出探针埋子模块时的层级前缀（与 Topout/排查(旧) 共用同一份）。
+    force_overrides：『强制 force 信号』基名集合——这些叶子按 RO 处理(直接 force 顶层基名网)，
+    与『排查(旧)』/CLI --force-signals 同口径；此前子视图完全不接，配了等于没配(静默)。"""
+    return R.Resolver(wb, cascade_mode="force", wire_prefixes=probe_prefixes,
+                      force_overrides=force_overrides)
 
 
 # ───────────────────────────── 单行分析结果 ─────────────────────────────
@@ -167,9 +170,9 @@ def analyze_page_signal(wb, resolver, sig, page, mode="min", max_tests=256,
 
 
 def analyze_all(wb, page, mode="min", max_tests=256, exhaustive=False, want_vectors=True,
-                probe_prefixes=None):
+                probe_prefixes=None, force_overrides=None):
     """对某一页全清单逐行分析。返回 list[PageResult]。"""
-    resolver = _page_resolver(wb, probe_prefixes)
+    resolver = _page_resolver(wb, probe_prefixes, force_overrides)
     return [analyze_page_signal(wb, resolver, s, page, mode=mode, max_tests=max_tests,
                                 exhaustive=exhaustive, want_vectors=want_vectors)
             for s in page_signals(wb, page)]
@@ -266,12 +269,13 @@ def _prefix_for(probe_prefixes, name):
     return pp.get(str(name).strip().lower(), "")
 
 
-def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None):
+def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
+                    force_overrides=None):
     """某一页的【视图模型清单】（GUI 子视图 / 无头测试消费），按页行序。
     每个模型带 probe_net(assert LHS=输出 rtl_base) + prefix(配的探针层级前缀)，供『探针前缀』列显示。"""
     models = []
-    for r in analyze_all(wb, page, mode=mode, max_tests=max_tests,
-                         exhaustive=exhaustive, probe_prefixes=probe_prefixes):
+    for r in analyze_all(wb, page, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
+                         probe_prefixes=probe_prefixes, force_overrides=force_overrides):
         m = result_to_model(r)
         pnet = getattr(r.sig, "rtl_base", None) or r.name
         m["probe_net"] = pnet
@@ -284,7 +288,7 @@ def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False, prob
 # ═══════════════ 页本地 .sv / 报告 / for_test 产出（复用 generator.build/report，force 级联=不跨页 cone）═══
 def _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides=None,
                    signals=None, comments=False, probe_prefixes=None,
-                   sv_summary=False, owner_in_msg=False):
+                   sv_summary=False, owner_in_msg=False, force_overrides=None):
     """构造页本地 GenOptions：force 级联(不跨页 cone) + include_risky + 编辑回流。"""
     eo = edit_overrides or {}
     return G.GenOptions(
@@ -292,6 +296,7 @@ def _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides=None,
         comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
         gen_mux=(page == "mux"), signals=signals,
         logic_cascade="force", mux_cascade="force", probe_prefixes=probe_prefixes,
+        force_overrides=force_overrides,
         vector_overrides=eo.get("vector_overrides") or None,
         mux_user_vecs=eo.get("mux_user_vecs"), mux_expected=eo.get("mux_expected"),
         mux_data=eo.get("mux_data"), mux_dropped=eo.get("mux_dropped"),
@@ -318,7 +323,7 @@ def _page_signals_filter(wb, page, only):
 
 def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
                   edit_overrides=None, only=None, comments=False, probe_prefixes=None,
-                  sv_summary=False, owner_in_msg=False, scope="all"):
+                  sv_summary=False, owner_in_msg=False, scope="all", force_overrides=None):
     """页本地 .sv：复用 generator.build（force 级联=不跨页 cone）。返回 (text, summary)。"""
     saved = _with_page_logic(wb, page)
     try:
@@ -333,7 +338,7 @@ def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
         opts = _page_gen_opts(page, mode, max_tests, exhaustive, eo,
                               signals=sigs, comments=comments,
                               probe_prefixes=probe_prefixes, sv_summary=sv_summary,
-                              owner_in_msg=owner_in_msg)
+                              owner_in_msg=owner_in_msg, force_overrides=force_overrides)
         built = G.build(wb, opts)
     finally:
         if saved is not None:
@@ -361,14 +366,15 @@ def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
 
 
 def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                only=None):
+                only=None, force_overrides=None):
     """页本地报告（write_report 兼容：summary/detail/tables/verifiability）。
     only：限定只报这些信号（GUI 勾选项过滤；None=全部，N6）。"""
     saved = _with_page_logic(wb, page)
     try:
         opts = _page_gen_opts(page, mode, max_tests, exhaustive,
                               signals=_page_signals_filter(wb, page, only),
-                              probe_prefixes=probe_prefixes)
+                              probe_prefixes=probe_prefixes,
+                              force_overrides=force_overrides)
         return G.report(wb, opts)
     finally:
         if saved is not None:
@@ -376,9 +382,10 @@ def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_pre
 
 
 def page_fortest(wb, page, src_path, out_path, mode="min", max_tests=256, exhaustive=False,
-                 probe_prefixes=None, only=None):
+                 probe_prefixes=None, only=None, force_overrides=None):
     """页本地 for_test 回填（含 mux 表）。"""
     from . import fortest_writer
     rep = page_report(wb, page, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                      probe_prefixes=probe_prefixes, only=only)
+                      probe_prefixes=probe_prefixes, only=only,
+                      force_overrides=force_overrides)
     fortest_writer.write_fortest(src_path, out_path, rep, include_mux=True)
