@@ -157,3 +157,110 @@ def test_r3_03_import_config_bad_json_and_wrong_file(win, tmp_path):
     gone = tmp_path / "压根没有.json"
     rep2 = EC.import_config(win.state, str(gone))
     assert T.EXC_TEXT["FileNotFoundError"] in rep2.text() and "Errno" not in rep2.text()
+
+
+# ═══════════════ R3-01 / P-17：跳过原因三屏同一句人话，且点名 ═══════════════
+def test_r3_01_p17_skip_reason_is_the_same_human_sentence_on_all_three_screens(win, tmp_path):
+    """关掉「缺前缀是否强制生成」→ 缺前缀的信号被跳过。
+
+    以前三屏（导出前摘要点名块 / .sv 预览尾 / 完成弹层琥珀块）同时写着
+    「generator.build 未产出该块（规格冲突/空向量/被跳过，见账目）」—— 一个内部函数名
+    加三个并列的猜测，而这是 needs-prefix 档**唯一**能给的那句（P-17 同源）。
+    现在三屏各自去问同一个 `terms.skip_reason_of`，说的是「缺哪几根网的层级前缀」。"""
+    _load(win, "wl", risky=False)
+    assert _first_with(win, "needs-prefix"), "关了强制生成却没有 needs-prefix 档，样本选错了"
+
+    rows = EC.default_rows(win.state)
+    for r in rows:
+        r.enabled = (r.kind == "sv")
+    plan = EC.build_plan(win.state, rows)
+    assert plan.will_skip, "这一趟一条都没跳过，本条就验不到了"
+    res = EC.run_plan(win.state, plan, lambda _r: str(tmp_path / "o.sv"))
+    win.sv_preview.set_mode("checked")
+    win.sv_preview.refresh(force=True)
+    tail = win.sv_preview.text()
+
+    by_name = dict(plan.will_skip)
+    assert dict(res.skipped) == by_name, "摘要与完成弹层说的不是同一句"
+    hit_prefix = hit_rows = False
+    for name, why in plan.will_skip:
+        assert "generator" not in why and "未产出该块" not in why       # R3-01 的原句没了
+        assert "%s：%s" % (name, why) in tail, "预览尾与摘要说的不是同一句"
+        if T.SKIP_REASON_NEEDS_PREFIX_FMT.split("{")[0] in why:
+            hit_prefix = True
+            assert "_to_mux" in why or "_to_logic" in why, "缺前缀却没点名是哪根网：%r" % why
+        if "规格矛盾" in why:
+            hit_rows = True
+            assert "行与第" in why, "规格矛盾却没点 Excel 行号：%r" % why
+    assert hit_prefix and hit_rows, "wl 这趟没同时验到缺前缀与规格矛盾两档"
+
+    # 完成弹层琥珀块上写的就是这一句（名字在前、原因在下一行）
+    done = EC.ExportDoneDialog(res, win)
+    body = done.skipped_text(full=True)
+    for name, why in res.skipped:
+        assert name in body and why.splitlines()[0] in body
+    assert "generator" not in body
+    done.close()
+
+
+def test_r3_01_skip_reason_of_falls_back_without_an():
+    """`an` 取不到（预览侧只有 build 结果）也不能把引擎兜底句照抄上屏。"""
+    raw = "被跳过；generator.build 未产出该块（规格冲突/空向量/被跳过，见账目）"
+    assert T.skip_reason_of(raw) == T.SKIP_REASON_FALLBACK
+    assert T.skip_reason_of("") == T.SKIP_REASON_FALLBACK
+    # 认得出的状态各自改写；认不出的（RO 回读这种本来就是人话）原样留
+    assert T.skip_reason_of("用户已清空(零用例，本信号不产出测试)") == T.SKIP_REASON_CLEARED
+    assert T.skip_reason_of("RO 回读信号，本就不产断言") == "RO 回读信号，本就不产断言"
+    got = T.skip_reason_of("mux 规格冲突：mux 页第 7 行与第 3 行选了不同数据源")
+    assert "第 7 行与第 3 行" in got and "designer" in got
+
+
+# ═══════════════ R3-02 / R3-17：行内原因块正文必须点名 ═══════════════
+def _reason_body(win, name):
+    from PySide6 import QtWidgets
+    assert win.list_panel.view.set_expanded(name) == name, name
+    H.app().processEvents()
+    lab = win.list_panel.view.findChild(QtWidgets.QLabel, names.LIST_REASON_BODY)
+    assert lab is not None, "原因块没画出来"
+    return lab.text()
+
+
+def test_r3_02_needs_prefix_reason_block_names_the_nets(win):
+    """关了强制生成 → needs-prefix 的原因块正文点名缺前缀的那几根输入。
+
+    以前引擎不给 `issues_meta`，模板的 `{input}` 永远填不上，整段退化成该档的通用悬停解释
+    「要 force 的某根输入网埋在子模块里…」——「某根」是哪根，屏幕上没有第二处能查。"""
+    _load(win, "wl", risky=False)
+    m = _first_with(win, "needs-prefix")
+    assert m, "关了强制生成却没有 needs-prefix 档，样本选错了"
+    body = _reason_body(win, m["name"])
+    assert "某根" not in body and T.STATUS["needs-prefix"][2] not in body
+    nets = IT.needs_prefix_rows(win.state.analyze(m["name"]))
+    assert nets, "这个信号本该有缺前缀的输入"
+    for r in nets[:4]:
+        assert r["name"] in body, "缺前缀的输入 %r 没出现在原因块里：%r" % (r["name"], body)
+
+
+def test_r3_02_risky_generated_reason_block_names_signal_and_nets(win):
+    """risky-generated 的原因块必含**信号名 + 裸名 force 的那几根网**（以前一个名字都没有）。"""
+    _load(win, "wl")
+    m = _first_with(win, "risky-generated")
+    assert m, "这张镜像没有 risky-generated 档，样本选错了"
+    body = _reason_body(win, m["name"])
+    assert T.STATUS["risky-generated"][2] not in body
+    nets = IT.needs_prefix_rows(win.state.analyze(m["name"]))
+    assert nets
+    for r in nets[:4]:
+        assert r["name"] in body
+    assert "强制生成" in body
+
+
+def test_r3_17_bare_probe_reason_block_does_not_repeat_the_name(win):
+    """R3-17：bare-probe 的原因块以前把同一个名字连写两遍（`{group}` 与 `{signal}` 都填 disp）。"""
+    _load(win, "btlp")
+    m = _first_with(win, "bare-probe")
+    assert m, "这张镜像没有 bare-probe 档，样本选错了"
+    body = _reason_body(win, m["name"])
+    base = str(m["name"])
+    assert body.count(base) == 1, "同一个名字写了 %d 遍：%r" % (body.count(base), body)
+    assert base in body and "nets.txt" in body

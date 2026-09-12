@@ -27,6 +27,7 @@ import string
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from dreg_verify import inputs_table as IT
 from . import contracts as CT
 from . import names as N
 from . import terms as T
@@ -116,15 +117,55 @@ def _reason_rows(model):
     return tuple(int(x) for x in _ROW_RE.findall("\n".join(_scrub_lines((model or {}).get("issues")))))
 
 
-def _reason_values(model, rows=()):
-    """原因块模板可填的占位符。引擎还没给结构化 meta 时只有这几个是确定的。"""
+def _input_names(an, key, cap=4):
+    """这一档该点名的输入行 → (名字串, 网名串)。取不到就两个空串。
+
+    · needs-prefix / risky-generated → **缺层级前缀**的那几行（名字没问题，只差一层前缀）；
+    · wire-fallback                  → **名字靠不住**的那几行（按命名约定猜的 / 没解析出网）。
+    两类是两件事（N10 把它们拆开过），原因块上也不能合回去。"""
+    try:
+        if key in ("needs-prefix", "risky-generated"):
+            rows = IT.needs_prefix_rows(an)
+        elif key == "wire-fallback":
+            rows = IT.shaky_rows(an)
+        else:
+            rows = []
+    except Exception:                                  # noqa: BLE001  取不到就退到不点名那句
+        return ("", "")
+    names, nets = [], []
+    for r in rows[:cap]:
+        nm = str(r.get("name") or r.get("base") or "").strip()
+        net = str(r.get("net") or "").strip()
+        if nm and nm not in names:
+            names.append(nm)
+        if net and net not in nets:
+            nets.append(net)
+    return ("、".join(names), "、".join(nets))
+
+
+def _reason_values(model, rows=(), an=None, key=""):
+    """原因块模板可填的占位符。引擎还没给结构化 meta 时只有这几个是确定的。
+
+    `an` 给了就再从**输入侧**补 `{input}` / `{net}`（R3-02）：needs-prefix 与
+    risky-generated 那两条模板本来就写着「输入 {input} 在 ENV_RF 层探不到」，只因为这两格
+    永远填不上（引擎不给 `issues_meta`）而整段退化成该档的通用悬停解释，屏幕上一个名字都没有。
+    `an` 的输入行里就有名字，不必等引擎补 meta。
+
+    ⚠ `{group}` **只在引擎真给了组名时才填**（R3-17）：以前它跟 `{signal}` 一样填 disp，
+    bare-probe 那条模板于是把同一个名字连写两遍（「<X> 的输出网 <X> 在寄存器表…」）。
+    填不上时按 `terms.REASON_BODY_FALLBACK` 降一格 —— 降一格仍然点名。"""
     m = model or {}
     meta = dict(m.get("issues_meta") or {})            # C0-a 后续补；现在恒空
     vals = {k: v for k, v in meta.items() if v not in (None, "")}
     vals.setdefault("signal", m.get("disp") or m.get("name") or "")
-    vals.setdefault("group", m.get("disp") or m.get("name") or "")
     vals.setdefault("net", m.get("out_net") or m.get("probe_net") or "")
     vals.setdefault("prefix", m.get("prefix") or "")
+    if an is not None:
+        inputs, nets = _input_names(an, key or status_key_of(m))
+        if inputs:
+            vals.setdefault("input", inputs)
+        if nets and not str(vals.get("net") or "").strip():
+            vals["net"] = nets
     if rows:
         vals.setdefault("n_bad", len(rows))            # 点名了几行就是几条——与「导出这 N 行」同一批
     detail = "\n".join(_scrub_lines(m.get("issues")) + ([_scrub(m.get("note"))] if m.get("note") else []))
@@ -148,22 +189,36 @@ def _strip_placeholders(template):
     return re.sub(r"\s{2,}", " ", re.sub(r"\{[a-z_]+\}", "", template or "")).strip()
 
 
-def build_reason_block(model):
+def build_reason_block(model, an=None):
     """模型行 → `contracts.ReasonBlock`（没有对应模板 = 这一档没有行内原因块，返回 None）。
 
-    正文：模板占位符全部填得上就按 `terms.REASON_TEMPLATES` 拼；填不上（引擎还没给结构化 meta）
-    按架构 §6.3 退化成 `{detail}` = scrub 后的 issues / note 全文，**标题不变**；两者都空时
-    退到该档的悬停解释，保证原因块永远不是一片空白。"""
+    正文四级降级（R3-02）：
+      ① 模板占位符全填得上 → 按 `terms.REASON_TEMPLATES` 拼；
+      ② 填不上 → `{detail}` = scrub 后的 issues / note 全文（引擎的告警里有行号 / 位宽）；
+      ③ 引擎也没给 → `terms.REASON_BODY_FALLBACK` 的**降一格正文**（细节少几格，但仍点名）；
+      ④ 都空 → 该档的悬停解释（通用句，一个名字都没有）。
+    ③ 是这次补的：以前 ② 一空就直接掉到 ④，而 needs-prefix / risky-generated / bare-probe
+    这三档**引擎恰恰不给 issues**，于是原因块正文永远是「要 force 的某根输入网埋在子模块里…」
+    ——「某根」是哪根，屏幕上没有第二处能查。
+    **标题不变**（标题里的数字填不上时用该档标签，不留 `{n_bad}` 露在界面上）。
+
+    `an` 给了就能从输入侧把 `{input}` / `{net}` 填出来（`state.analyze` 的结果）。"""
     key = status_key_of(model)
     tpl = T.REASON_TEMPLATES.get(key)
     if tpl is None:
         return None
     title_tpl, body_tpl, action_tpl, target = tpl
     rows = _reason_rows(model)
-    vals = _reason_values(model, rows)
+    vals = _reason_values(model, rows, an, key)
     title = (title_tpl.format_map(_Blanks(vals)) if _fillable(title_tpl, vals)
              else T.STATUS[key][0])               # 标题里的数字填不上 → 用该档标签，不留 {n_bad} 露在界面上
-    body = body_tpl.format_map(_Blanks(vals)) if _fillable(body_tpl, vals) else vals.get("detail", "")
+    body = body_tpl.format_map(_Blanks(vals)) if _fillable(body_tpl, vals) else ""
+    if not str(body).strip():
+        body = vals.get("detail", "")            # 引擎给了告警全文就用它（里面有行号 / 位宽）
+    if not str(body).strip():
+        alt = T.REASON_BODY_FALLBACK.get(key, "")
+        if alt and _fillable(alt, vals):
+            body = alt.format_map(_Blanks(vals))
     if not str(body).strip():
         body = T.STATUS[key][2]
     action = (action_tpl.format_map(_Blanks(vals)) if _fillable(action_tpl, vals)
@@ -194,6 +249,7 @@ class SignalListModel(QtCore.QAbstractItemModel):
         self._expanded = -1           # 展开中的源行号（-1 = 没展开）
         self._reason_h = TH.ROW_H * 4
         self._prefix_map = {}         # {小写网名: 层级前缀} —— C-020 输入侧命中
+        self._analyze = None          # name -> an（原因块点名要用，R3-02；panel 挂 state.analyze）
         self._dot = None
 
     # ── 装载 / 增量升级 ──
@@ -277,8 +333,23 @@ class SignalListModel(QtCore.QAbstractItemModel):
         r = self._index.get(str(name or ""), -1)
         return self.index(r, 0) if r >= 0 else QtCore.QModelIndex()
 
+    def set_analyzer(self, fn):
+        """挂 `state.analyze`（R3-02：原因块要从 an 的输入行里捞出「缺哪几根网」）。
+
+        只在**展开那一行**时才调 —— 整表 analyze 一遍是几十秒的活，清单不能为了画一句话去跑它。"""
+        self._analyze = fn if callable(fn) else None
+
+    def _an_of(self, name):
+        if self._analyze is None or not name:
+            return None
+        try:
+            return self._analyze(name)
+        except Exception:                                # noqa: BLE001  算不出来就退到不点名那句
+            return None
+
     def reason_of(self, row):
-        return build_reason_block(self.model_at(row))
+        m = self.model_at(row)
+        return build_reason_block(m, self._an_of(str(m.get("name", ""))))
 
     def is_checked(self, name):
         return self._checked is None or str(name) in self._checked
@@ -928,7 +999,7 @@ class SignalListView(QtWidgets.QTreeView):
         self._expanded_name = ""
         if not name:
             return ""
-        block = build_reason_block(src.model_at(src.index_of(name).row())) if src.index_of(name).isValid() else None
+        block = src.reason_of(src.index_of(name).row()) if src.index_of(name).isValid() else None
         if block is None:
             return ""
         src.set_expanded(name)
@@ -1171,6 +1242,7 @@ class SignalListPanel(QtWidgets.QWidget):
         keep = self.current_name() or str(getattr(self.state, "current_name", "") or "")
         models = list(self.state.models(self._view_id) or [])
         self.model.set_prefix_map(getattr(self.state, "probe_prefixes", None) or {})
+        self.model.set_analyzer(getattr(self.state, "analyze", None))     # R3-02 原因块点名
         self.model.load(models, self._checked_set(), self.state.negs(self._view_id))
         self.view.set_expanded(None)
         if not (keep and self.select_name(keep)):

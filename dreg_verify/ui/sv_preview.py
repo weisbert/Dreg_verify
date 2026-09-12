@@ -39,14 +39,17 @@ def truncate(text, max_lines=theme.SV_PREVIEW_MAX_LINES):
         total=len(lines), shown=int(max_lines))
 
 
-def skipped_tail(build):
-    """C-070 / C-270：本次会跳过哪些信号、各缺哪根输入 —— **名字在前**，计数在后。"""
-    rows = X.build_skipped(build or {})
+def skipped_tail(build, analyze=None):
+    """C-070 / C-270：本次会跳过哪些信号、各缺哪根输入 —— **名字在前**，计数在后。
+
+    原因走 `terms.skip_reason_of`（R3-01：三屏共用那一个函数），`analyze` 给了就能点出
+    是缺哪几根网的层级前缀。"""
+    rows = terms.humanize_skipped(X.build_skipped(build or {}), analyze)
     if not rows:
         return ""
     out = [terms.SV_SKIPPED_TAIL_HEAD]
     for name, reason in rows:
-        body = terms.scrub(str(reason or "")).replace("\n", "\n      ")
+        body = str(reason or "").replace("\n", "\n      ")
         out.append("  %s：%s" % (name, body))
     return "\n".join(out)
 
@@ -216,7 +219,7 @@ class SvPreview(QtWidgets.QWidget):
         self._dirty = False
         text, build = self._render()
         body = truncate(text)
-        tail = skipped_tail(build)
+        tail = skipped_tail(build, getattr(self._state, "analyze", None))
         if tail:
             body = (body.rstrip("\n") + "\n\n" + tail) if body.strip() else tail
         self.view.setPlainText(body)

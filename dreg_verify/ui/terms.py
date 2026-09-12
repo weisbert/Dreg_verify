@@ -194,6 +194,34 @@ REASON_TEMPLATES = {
         "{detail}",
         "解析明细", "resolve_detail"),
 }
+#: R3-02 / R3-17：模板占位符填不上时的**降一格正文** —— 细节少几格，但**仍然点名**。
+#: 以前填不上就直接退到该档的悬停解释（`STATUS[key][2]`，一句通用话、一个名字都没有）：
+#: needs-prefix 的原因块永远写着「要 force 的某根输入网埋在子模块里」，
+#: risky-generated 连信号名都没有 —— 而「跳过/有问题的东西一律先点名」是红线第 2 条。
+#: 这里只需要 `{input}`（缺前缀 / 猜名的那几条输入，由清单层从 an 捞）或 `{signal}`。
+REASON_BODY_FALLBACK = {
+    "needs-prefix": (
+        "缺层级前缀的输入：{input}\n"
+        "这几根网埋在子模块里，不配前缀就是 force 一根不存在的网，仿真 elaboration 直接失败。\n"
+        "先跑 scan_rtl 扫出层级前缀导回来，这组才会生成。"),
+    "risky-generated": (
+        "缺层级前缀、这次按裸名 force 的输入：{input}\n"
+        "「缺前缀是否强制生成」当前开着，所以 {signal} 照样进了 .sv。\n"
+        "仿真过 = 此设计不需前缀；报找不到网则跑 scan_rtl 配前缀重生成。"),
+    "wire-fallback": (
+        "名字是按命名约定猜的输入：{input}\n"
+        "它们在寄存器表 / 地址表都没查到，已按线网 force。\n"
+        "名字对不对要用 nets.txt 扫一次；扫不到就跑 scan_rtl 配层级前缀。"),
+    "bare-probe": (
+        "输出网 {signal} 在寄存器表 / 地址表都没查到，按命名约定直接用了裸名。\n"
+        "断言能生成，但名字对不对要用 nets.txt 扫一次才知道。"),
+    "false-green": (
+        "{signal} 的数据寄存器字段装不下每条 case 的互异值 —— 硬生成会变成「接错路也 PASS」"
+        "的假测试，所以这组保护性跳过。要验得加宽字段或拆组。"),
+    "spec-collision": (
+        "{signal} 的 mux 页有两行控制选择值相同却选了不同数据源 —— 同一选择值 RTL 只能输出"
+        "一个，已整组跳过。撞车的 Excel 行号在下面的告警全文里，请对应 designer 核对改表。"),
+}
 #: 跳转目标 → 谁处理（app.py 的 route_reason_action）
 REASON_TARGETS = {
     "diag_cuvunf": "打开诊断抽屉并滚到「找不到网」三步",
@@ -577,6 +605,89 @@ EXPORT_SUMMARY_SKIPPED_LESS = "收起"
 EXPORT_SUMMARY_UNAVAILABLE = ("导出前摘要这次算不出来（{reason}）——仍可导出，"
                               "跳过了哪些信号会在导出完成后点名")
 EXPORT_SKIPPED_ROW_FMT = "{name}　{reason}"                 # 名字在前（I-20 / C-270）
+# ── R3-01 / P-17：跳过原因的 UI 层改写（导出前摘要 / .sv 预览尾 / 完成弹层三屏共用）──
+#: ⚠ **引擎那句不动**：`topout._account_block` 的 reason 会原样写进 .sv 的块顶注释
+#: （`// [topout] <名字> (<kind>/<status>)：<reason>`），受 byte-gate 保护。这里改的是
+#: 三块屏幕上显示的那一份。以前它们照抄引擎的兜底句「generator.build 未产出该块
+#: （规格冲突/空向量/被跳过，见账目）」—— 一个内部函数名 + 三个并列的猜测，
+#: 而 needs-prefix 档**只有**这一句可给（关掉「缺前缀是否强制生成」后必然撞上）。
+SKIP_REASON_NEEDS_PREFIX_FMT = "缺 {nets} 的层级前缀，这次没进 .sv —— 先跑 scan_rtl 配前缀"
+SKIP_REASON_NEEDS_PREFIX_PLAIN = ("有输入网埋在子模块里、缺层级前缀，这次没进 .sv —— "
+                                  "先跑 scan_rtl 配前缀")
+SKIP_REASON_COLLISION_ROWS_FMT = ("mux 页第 {a} 行与第 {b} 行规格矛盾{more}，这次没进 .sv "
+                                  "—— 请 designer 核对改表")
+SKIP_REASON_COLLISION_MORE_FMT = "（这样的还有 {n} 处）"
+SKIP_REASON_COLLISION = ("mux 页有两行规格矛盾（同一控制选择值选了不同数据源），这次没进 .sv "
+                         "—— 请 designer 核对改表")
+SKIP_REASON_CLEARED = "已清零成零用例：只记录、不产生断言"
+#: 引擎确实没给原因时的兜底 —— 说清「去哪儿看」，不编三个并列的猜测
+SKIP_REASON_FALLBACK = "这组没生成断言（引擎没给原因，看行内原因块）"
+#: 引擎兜底句的识别特征（`topout.py` 那一句；`an` 取不到时按文本认）
+_SKIP_RAW_FALLBACK_RE = re.compile(r"未产出该块|规格冲突/空向量")
+_SKIP_ROW_RE = re.compile(r"第\s*(\d+)\s*行")
+_SKIP_CLEARED_RE = re.compile(r"用户已清空|清空该信号的测试列")
+
+
+def _needs_prefix_net_list(an, cap=4):
+    """缺层级前缀的那几根网 —— 点名用（超出 cap 就省略号，别把整张表抄进一行）。"""
+    try:
+        from dreg_verify import inputs_table as _IT
+        rows = _IT.needs_prefix_rows(an)
+    except Exception:                                       # noqa: BLE001  取不到就退到不点名那句
+        return []
+    out = []
+    for r in rows:
+        nm = str(r.get("net") or r.get("name") or "").strip()
+        if nm and nm not in out:
+            out.append(nm)
+    return out[:cap] + (["…"] if len(out) > cap else [])
+
+
+def skip_reason_of(reason="", an=None):
+    """引擎给的跳过原因 → 屏幕上那一句（**导出前摘要 / .sv 预览尾 / 完成弹层共用这一个函数**）。
+
+    判据优先用 `an` 的 `status_detail`（八档，`status_key_of`）；`an` 取不到（预览侧只有
+    build 结果）就退到按原文认。认不出的状态原样返回 —— RO 回读 / 同源已覆盖 /
+    本次范围没有用例这些本来就是人话，不必改写。"""
+    txt = scrub(str(reason or "")).strip()
+    key = status_key_of(an) if an else ""
+    engine_fallback = bool(not txt or _SKIP_RAW_FALLBACK_RE.search(txt))
+    if key == "needs-prefix" or (not key and "缺探针前缀" in txt):
+        nets = _needs_prefix_net_list(an)
+        return (SKIP_REASON_NEEDS_PREFIX_FMT.format(nets="、".join(nets)) if nets
+                else SKIP_REASON_NEEDS_PREFIX_PLAIN)
+    # ⚠ 引擎兜底句里也有「规格冲突/空向量」四个字（那是三个并列的**猜测**，不是判断），
+    #    所以认不出状态时先把它挡在前面 —— 否则一句「不知道为什么」会被当成「规格冲突」。
+    if key == "spec-collision" or (not engine_fallback and "规格冲突" in txt):
+        # 引擎那几句是「mux 页第 33 行与第 23 行…」—— 行号成对出现，点头一对、其余报个数
+        rows = _SKIP_ROW_RE.findall(txt)
+        if len(rows) >= 2:
+            more = (SKIP_REASON_COLLISION_MORE_FMT.format(n=len(rows) // 2 - 1)
+                    if len(rows) >= 4 else "")
+            return SKIP_REASON_COLLISION_ROWS_FMT.format(a=rows[0], b=rows[1], more=more)
+        return SKIP_REASON_COLLISION
+    if _SKIP_CLEARED_RE.search(txt):
+        return SKIP_REASON_CLEARED
+    if engine_fallback:
+        return SKIP_REASON_FALLBACK
+    return txt
+
+
+def humanize_skipped(pairs, analyze=None):
+    """[(信号名, 引擎原因)] → [(信号名, 屏幕上那一句)]。
+
+    `analyze` 是 `state.analyze` 那样的 `name -> an`（给 `skip_reason_of` 拿 `status_detail`
+    与缺前缀的网名）；不给就只按原文改写。**算不出 an 不该挡住导出**，所以整条包 try。"""
+    out = []
+    for name, reason in (pairs or ()):
+        an = None
+        if callable(analyze):
+            try:
+                an = analyze(name)
+            except Exception:                               # noqa: BLE001
+                an = None
+        out.append((name, skip_reason_of(reason, an)))
+    return out
 EXPORT_OPT_BTN_FMT = "{summary}　▾"
 EXPORT_BTN_RUN_FMT = "导出勾选的 {k} 项"
 EXPORT_BTN_RUN_NONE = "先勾选要导出的交付物"

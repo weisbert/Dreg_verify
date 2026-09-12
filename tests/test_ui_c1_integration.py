@@ -297,6 +297,10 @@ QTFREE_ALLOWED = {
         "inputs_table": "input_rows 的 needs_prefix / guessed / found_in —— 「还差几根网没前缀」"
                         "与探针前缀影响面（C-204）都按这三项数，不在视图里猜",
     },
+    "signal_list.py": {
+        "inputs_table": "needs_prefix_rows / shaky_rows —— 行内原因块点名的是**哪几根网**"
+                        "（R3-02：引擎不给 issues_meta 时就靠这两行，不在视图里自己判 found_in）",
+    },
     "dialogs.py": {
         "edits": "反例列的保护性判定（哪些是自定义命名 / 手调过错值的）",
         "truth_edit": "check_col_name / parse_int —— 重命名列与 mux 数据值的三道校验",

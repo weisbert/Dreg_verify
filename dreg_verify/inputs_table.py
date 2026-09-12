@@ -32,6 +32,7 @@ __all__ = [
     "vheader_label", "vheader_short", "vheader_display", "mux_label", "dft_gate_row", "mux_ctrl_rows",
     "input_rows", "row_cells", "drive_ctx", "drive_pair", "vector_drives", "column_drives",
     "cell_drive_tip", "header_drive_tip", "gate_pin", "legacy_resolve_detail", "resolve_detail",
+    "needs_prefix_rows", "shaky_rows",
 ]
 
 # 「输入信号」表(真值表上方)：把字母→信号/角色/驱动 集中成一张可读的小表
@@ -233,6 +234,9 @@ def _row(letter, name, role, b, width=None, bold=False, key=None,
     return {
         "letter": letter,
         "name": name,
+        # .sv 里真正会 force 的那根网（`force ENV_RF.<net>` 的 net）。界面上「缺哪根网的
+        # 层级前缀」要点的就是它 —— 以前只有拼在 `drive` 文本里的一份，没法单独取。
+        "net": (getattr(b, "wire_lhs", "") or "") if b is not None else "",
         "width": width if width is not None else (getattr(b, "width", 1) or 1),
         "role": role,
         "rw": k,                       # RO / RW / ? / mux
@@ -581,6 +585,19 @@ def _needs_prefix_rows(rows):
     """网名对、但**埋在子模块里**的输入（上游 mux 输出衔接网 / 级联内部网）：只差跑 scan_rtl
     配一层层级前缀就 force 得到；没配则整组跳过。名字不是猜的，所以不进『最可疑』那一行。"""
     return [r for r in rows if r.get("needs_prefix") and r["resolved"]]
+
+
+def needs_prefix_rows(an):
+    """an → 缺层级前缀、force 不到的那几条输入行（公开口，v2 的跳过原因 / 原因块点名用）。
+
+    「跳过必须点名」这条规矩要点的是**哪几根网**：以前只有解析明细里那一行拼过它们，
+    跳过原因与行内原因块都只能说「某根输入网埋在子模块里」（R3-01 / R3-02）。"""
+    return _needs_prefix_rows(input_rows(an or {}))
+
+
+def shaky_rows(an):
+    """an → **名字本身靠不住**的那几条输入行（猜名的 / 没解析出网）。公开口，同 `needs_prefix_rows`。"""
+    return _shaky_rows(input_rows(an or {}))
 
 
 def _source_mark(row):

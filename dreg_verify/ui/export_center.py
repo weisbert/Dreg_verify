@@ -338,7 +338,9 @@ def build_plan(state, rows):
         #   记一句真话，`summary_text` 据此改文案；真正的点名在完成弹层（那时是真跑过一趟）。
         plan.summary_error = terms.exc_text(ex)            # R3-03：不贴异常原文
         return plan
-    plan.will_skip = _dedup(X.build_skipped(build))
+    # R3-01：屏幕上那一句由 `terms.skip_reason_of` 改写（引擎原文只进 .sv 注释，不上屏）
+    plan.will_skip = terms.humanize_skipped(_dedup(X.build_skipped(build)),
+                                            getattr(state, "analyze", None))
     plan.dup_labels = [tuple(d) for d in (build.get("dup_labels") or ())]
     return plan
 
@@ -459,8 +461,11 @@ def run_plan(state, plan, ask_path):
             state.record_export(row.kind, out.path)
             if not res.out_dir:
                 res.out_dir = os.path.dirname(out.path) or ""
-    res.skipped = _dedup(skipped)
-    res.accounted = [n for n, why in res.skipped if is_accounted(why)]
+    raw = _dedup(skipped)
+    # ⚠ 「只记录、不产生断言」的判据（C-166）按 **引擎原文**的状态标签算 —— 必须在改写之前，
+    #    改写后的句子里没有那些标签了。
+    res.accounted = [n for n, why in raw if is_accounted(why)]
+    res.skipped = terms.humanize_skipped(raw, getattr(state, "analyze", None))   # R3-01
     return res
 
 
