@@ -91,14 +91,19 @@ class _BaseProvider(object):
         return getattr(self.cfg, "engine_lock", None) or contextlib.nullcontext()
 
     # ── 探针前缀（an 里缺的那一格）──
+    def _probe_prefix_for(self, net):
+        """某根探针网配的层级前缀（没配 → 空串）。Topout 与页视图共用 topout 那一个实现
+        （`pageviews._prefix_for` 与它同口径），免得「配了前缀算不算数」两处各判一次。"""
+        from . import topout as T
+        return T._probe_prefix_for_name(self._pp(), net)
+
     def _fill_probe_prefix(self, an, fallback_net=""):
         """给 an 补 `probe_prefix`：探针网**在哪一层**是配置，不是网名本身，引擎不该知道；
         拿着 probe_prefixes 的是 provider，所以由它补（执行计划 §7-1）。
         优先用 C0-a 补的 an["out_net"]；没有就用调用点算出的探针网兜底。"""
         if not an:
             return an
-        from . import topout as T
-        an["probe_prefix"] = T._probe_prefix_for_name(self._pp(), an.get("out_net") or fallback_net)
+        an["probe_prefix"] = self._probe_prefix_for(an.get("out_net") or fallback_net)
         return an
 
 
@@ -168,7 +173,12 @@ class TopoutProvider(_BaseProvider):
     # ── 单信号 ──
     def analyze(self, name, mode, max_tests, exhaustive, mux_data=None, want_graph=False):
         """一个 Topout 信号 → 统一分析 dict an（编辑器/真值表/展开链/输入表都吃它）。
-        找不到这个名字 → None（调用方按「没选中」处理，不是错误）。"""
+        找不到这个名字 → None（调用方按「没选中」处理，不是错误）。
+
+        include_risky / probe_prefix 一并喂给归一化层：`an["status_detail"]` 的
+        needs-prefix / risky-generated / bare-probe 三档全靠这两样（§7-2），而它们都是
+        **配置**、引擎不知道 —— 不传 = 用默认值 (True, "")，清单上会恒显 risky-generated /
+        bare-probe，那是假的档。"""
         from . import topout as T
         with self._engine(), self._supplemented():
             topo = next((t for t in (self.wb.topout or []) if t.name == name), None)
@@ -178,8 +188,11 @@ class TopoutProvider(_BaseProvider):
                                                        force_overrides=self._fo()), topo,
                                    mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                    mux_data=mux_data, want_graph=want_graph)
-            an = AN.norm_topout_result(res, self.wb)   # 传 wb → 输入按 for_test 行序
-        return self._fill_probe_prefix(an, T._topout_probe_net(res))
+            out_net = T._topout_probe_net(res)          # = an["out_net"]（assert LHS 网名）
+            an = AN.norm_topout_result(res, self.wb,    # 传 wb → 输入按 for_test 行序
+                                       include_risky=self._risky(),
+                                       probe_prefix=self._probe_prefix_for(out_net))
+        return self._fill_probe_prefix(an, out_net)
 
     # ── 产出 ──
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,
@@ -211,7 +224,8 @@ class TopoutProvider(_BaseProvider):
             rep = T.report_for_topout(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp(),
                                                           force_overrides=self._fo()),
                                       mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                      probe_prefixes=self._pp(), only=only)
+                                      probe_prefixes=self._pp(), only=only,
+                                      include_risky=self._risky())
         return F.write_fortest(src, out, rep, include_mux=True)
 
 
@@ -294,8 +308,11 @@ class PageProvider(_BaseProvider):
             res = P.analyze_page_signal(
                 self.wb, P._page_resolver(self.wb, self._pp(), self._fo()), sig, self.page,
                 mode=mode, max_tests=max_tests, exhaustive=exhaustive)
-            an = AN.norm_page_result(res, self.wb)     # 传 wb → 输入按 for_test 行序
-        return self._fill_probe_prefix(an, getattr(res.sig, "rtl_base", None) or res.name)
+            out_net = getattr(res.sig, "rtl_base", None) or res.name    # = an["out_net"]
+            an = AN.norm_page_result(res, self.wb,     # 传 wb → 输入按 for_test 行序
+                                     include_risky=self._risky(),
+                                     probe_prefix=self._probe_prefix_for(out_net))
+        return self._fill_probe_prefix(an, out_net)
 
     # ── 产出 ──
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=True,

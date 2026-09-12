@@ -200,6 +200,37 @@ def _fp(v, depth=0):
 
 _COV_CASES = [("min", 64, False), ("max", 256, False), ("max", 100000, True)]
 
+#: C0-a 之后 an 才有的 6 个键。旧 gui provider 调 `norm_*` 时**不传** include_risky /
+#: probe_prefix（它没有 cfg），新 provider 传（C0-d 接通）——所以这几个键的口径不再是
+#: 「搬家等不等价」的事，从等价性指纹里排除，另用 `_assert_new_keys_equal` 逐键对照。
+_C0A_AN_KEYS = ("out_net", "status_detail", "ctrl_keys_missing", "dft_gate_skipped", "graph",
+                "probe_prefix")
+
+
+def _old_keys_fp(an):
+    """an 的【旧键集】语义指纹（C0-a 那 6 个新键排除在外）——搬家等价性只比这一份。"""
+    return _fp({k: v for k, v in an.items() if k not in _C0A_AN_KEYS})
+
+
+def _assert_new_keys_equal(a_new, a_old, who):
+    """C0-a 新键单独对照（**排除 ≠ 不比**，不许整块放掉）：
+
+      · out_net / ctrl_keys_missing / dft_gate_skipped / graph —— 纯结构派生，不吃 provider
+        的任何配置 → 必须逐键相等，不等就是搬家真漏了东西。
+      · status_detail —— 吃 include_risky 与 probe_prefix（§7-2 的 needs-prefix /
+        risky-generated / bare-probe 三档靠它们分）。旧 provider 两个都不传 = 恒按「缺前缀
+        也照生成、探针一律裸名」判档。本文件全程 include_risky=True，配的探针前缀又都落在
+        非 bare-probe 的信号上，所以这里仍断言相等；真分叉时这条会指名道姓报出来
+        （那说明 cfg 咬到了，不是搬漏 —— 三档本身另有
+        `test_provider_status_detail_tiers_need_include_risky_and_probe_prefix` 钉死）。
+      · probe_prefix —— 旧 provider 根本没有这一格（它不拿 probe_prefixes 配置）。
+    """
+    for k in ("out_net", "ctrl_keys_missing", "dft_gate_skipped", "graph"):
+        assert _fp(a_new[k]) == _fp(a_old[k]), "%s 的 an[%r] 不一致（搬家漏了？）" % (who, k)
+    assert a_new["status_detail"] == a_old["status_detail"], \
+        "%s status_detail 分档不一致（include_risky/probe_prefix 咬到了）" % who
+    assert "probe_prefix" in a_new and "probe_prefix" not in a_old
+
 
 def _both(wb, main, page=None, **cfgkw):
     """(新 provider, 旧 gui provider) —— 两边读同一份配置。"""
@@ -278,8 +309,9 @@ def test_providers_equivalent_to_gui_providers(gui_windows):
             # probe_prefix 是本层补的那一格，旧 provider 没有 → 其余键必须逐键相等
             assert set(a_new) - set(a_old) == {"probe_prefix"}, name
             assert set(a_old) - set(a_new) == set(), name
-            assert _fp({k: v for k, v in a_new.items() if k != "probe_prefix"}) == _fp(a_old), \
+            assert _old_keys_fp(a_new) == _old_keys_fp(a_old), \
                 "%s/%s analyze 不一致" % (tag, name)
+            _assert_new_keys_equal(a_new, a_old, "%s/%s" % (tag, name))
             checked["an"] += 1
         assert new.analyze("查无此信号", "min", 64, False) is None
 
@@ -306,7 +338,8 @@ def test_providers_equivalent_to_gui_providers(gui_windows):
                 a_new = pnew.analyze(m["name"], "min", 64, False)
                 a_old = pold.analyze(m["name"], "min", 64, False)
                 assert set(a_new) - set(a_old) == {"probe_prefix"}
-                assert _fp({k: v for k, v in a_new.items() if k != "probe_prefix"}) == _fp(a_old)
+                assert _old_keys_fp(a_new) == _old_keys_fp(a_old)
+                _assert_new_keys_equal(a_new, a_old, "%s/%s/%s" % (tag, page, m["name"]))
                 checked["an"] += 1
             t_new, b_new = pnew.render_sv(None, "min", 64, False, None, sv_summary=True)
             t_old, b_old = pold.render_sv(None, "min", 64, False, None, sv_summary=True)
@@ -339,8 +372,9 @@ def test_providers_equivalent_with_logic_overrides(gui_windows):
         new = PV.TopoutProvider(_Cfg(wb, logic_overrides={k: dict(v) for k, v in _SUPP.items()}))
         old = G._TopoutProvider(w)
         assert _fp(new.view_models("min", 64, False)) == _fp(old.view_models("min", 64, False))
-        assert _fp({k: v for k, v in new.analyze(target, "min", 64, False).items()
-                    if k != "probe_prefix"}) == _fp(old.analyze(target, "min", 64, False))
+        a_new, a_old = new.analyze(target, "min", 64, False), old.analyze(target, "min", 64, False)
+        assert _old_keys_fp(a_new) == _old_keys_fp(a_old)
+        _assert_new_keys_equal(a_new, a_old, "%s/%s(补充逻辑)" % (tag, target))
         assert new.render_sv(None, "min", 64, False, None)[0] == \
             old.render_sv(None, "min", 64, False, None)[0]
         # 补充确实生效了（不是两边都没应用所以「相等」）
@@ -494,6 +528,49 @@ def test_provider_passes_include_risky_where_the_engine_takes_it(btlp):
         assert seen["include_risky"] is True                  # cfg 缺字段 → True = 引擎写死值
     finally:
         PP.build_page_sv = real
+
+
+@pytest.mark.contract("C-217")
+def test_provider_status_detail_tiers_need_include_risky_and_probe_prefix(btlp, wl):
+    """§7-2 三档实测：`an["status_detail"]` 的 needs-prefix / risky-generated / bare-probe
+    **只能**由 provider 定——判据是 cfg 的 `include_risky` 与该信号 out_net 配的探针前缀，
+    这两样引擎都不知道（C0-d 把它们接进 `norm_topout_result` / `norm_page_result`）。
+
+    provider 不传这两个参数时归一化层用默认值 (True, "")，于是缺前缀的信号恒显
+    `risky-generated`、裸名探针恒显 `bare-probe` —— 清单上就是一排假档。
+
+      ① cfg.include_risky=False → 缺前缀的输入落 `needs-prefix`（硬阻断，整组跳过）
+      ② cfg.include_risky=True  → 同一个信号落 `risky-generated`（照生成，裸名 force 交仿真验）
+      ③ 给 out_net 配上探针前缀   → 裸名探针那档 `bare-probe` 变 `clean`
+    """
+    from dreg_verify import providers as PV
+
+    # ①② 缺前缀的输入：wl 两个信号的叶子是埋在子模块里的衔接网
+    on = PV.TopoutProvider(_Cfg(wl, include_risky=True))
+    off = PV.TopoutProvider(_Cfg(wl, include_risky=False))
+    for nm in ("d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim", "d_wl_rf_lp5g_gm_itrim"):
+        assert on.analyze(nm, "min", 64, False)["status_detail"] == "risky-generated", nm
+        assert off.analyze(nm, "min", 64, False)["status_detail"] == "needs-prefix", nm
+
+    # 页视图那条流水线同一口径（两条流水线的档不许分叉）
+    for page, nm in (("logic", "d_wl_rf_lo2g5g_bias_en"),
+                     ("mux", "d_wl_rf_lo2g5g_mixer2g_trim[1:0]")):
+        p_on = PV.PageProvider(_Cfg(wl, include_risky=True), page)
+        p_off = PV.PageProvider(_Cfg(wl, include_risky=False), page)
+        assert p_on.analyze(nm, "min", 64, False)["status_detail"] == "risky-generated", nm
+        assert p_off.analyze(nm, "min", 64, False)["status_detail"] == "needs-prefix", nm
+
+    # ③ 输出侧裸名探针：btlp 的 d_logic_bt_lp_tsensor 断言贴的是 *_to_mux 衔接网
+    bare = "d_logic_bt_lp_tsensor"
+    a = PV.TopoutProvider(_Cfg(btlp)).analyze(bare, "min", 64, False)
+    assert a["status_detail"] == "bare-probe" and a["probe_prefix"] == ""
+    assert a["out_net"] != bare                       # 贴的不是声明名 → 才会判 bare-probe
+    b = PV.TopoutProvider(_Cfg(btlp, probe_prefixes={a["out_net"]: "U_TOP.U_SUB"})).analyze(
+        bare, "min", 64, False)
+    assert b["probe_prefix"] == "U_TOP.U_SUB" and b["status_detail"] == "clean"
+    # 配到别的网上不算数（前缀按 out_net 查，不是「配过就算」）
+    assert PV.TopoutProvider(_Cfg(btlp, probe_prefixes={"d_别的网": "U_X"})).analyze(
+        bare, "min", 64, False)["status_detail"] == "bare-probe"
 
 
 @pytest.mark.contract("C-276")
