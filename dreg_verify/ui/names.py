@@ -14,6 +14,7 @@ Design 对照：区号 = docs/GUI_v2_Design对齐_20260912.md §1.2 的 ①–�
 # ───────── 窗口 / 容器 ─────────
 WIN_MAIN = "win_main"                      # QMainWindow（标题「Dreg_verify · 版本 <短HEAD>」C-259）
 WIN_WORKBENCH = "win_workbench"            # 载入后的工作台根 QWidget（顶栏以下、状态栏以上）
+WIN_WORKBENCH_ROOT = "win_workbench_root"  # 工作台外层容器（central，装载入态卡片与工作台）
 WIN_STACK = "win_stack"                    # QStackedWidget：空态⑭ / 工作台 **两页**
 #   ⚠ B3 阶段这里写的是「三页」。实现定版为两页：载入态⑮不是独立一页，而是工作台详情列顶部的
 #     卡片——C-276 / 场景⑧ 要求「分析进行中清单仍然可点」，独占一页就做不到（见 app.py 模块头）。

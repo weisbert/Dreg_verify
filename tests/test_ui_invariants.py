@@ -657,7 +657,7 @@ _QT_INTERNAL = ("qt_", "_q_")
 #: **实物里确实没登记**的那一个（证据见下面的 xfail 用例）：`ui/app.py:211` 拿
 #: `names.WIN_WORKBENCH + "_root"` 拼出来的工作台根容器名。放行是**逐条写下来**的，
 #: 不是把规则放宽；哪天它进了注册表，下面那条 `strict=True` 的 xfail 会当场变红提醒删掉这里。
-_UNREGISTERED_KNOWN = {"win_workbench_root": "ui/app.py:211 用 WIN_WORKBENCH + \"_root\" 拼的"}
+_UNREGISTERED_KNOWN = {}   # 曾有 win_workbench_root（app.py 拼名），已登记为 names.WIN_WORKBENCH_ROOT；表空 = 违规零容忍
 
 
 def _unregistered_object_names(root, allow_known=True):
@@ -748,19 +748,12 @@ def test_i14_names_registry_matches_widgets(qapp, monkeypatch, tmp_path):
         qapp.processEvents()
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="I-14 被 ui/app.py 破坏：工作台根容器名 `win_workbench_root` 是 "
-                          "`app.py:211` 用 `names.WIN_WORKBENCH + \"_root\"` 拼出来的，"
-                          "没有进 names.py，`names.all_names()` 里查不到")
-def test_i14_workbench_root_name_is_not_in_the_registry(qapp):
-    """I-14 的那一处**实物破坏**，单独立一条 `strict=True` 的 xfail 钉住。
-
-    `setObjectName(names.WIN_WORKBENCH + "_root")` 这种拼法看着无害，坏在两头：
-    注册表里查不到这个名字（`test_ui_names_all_present` 那条正向用例扫不到它），
-    反向用例又只能把它放进白名单 —— 于是这个控件谁都没验过。
-    修的成本是一行（`names.py` 加一个 `WIN_WORKBENCH_ROOT`），但那要动 `dreg_verify/`，
-    归 C4-int / C5；这里只负责让它别再悄无声息。"""
+def test_i14_workbench_root_name_is_in_the_registry(qapp):
+    """I-14 曾被 ui/app.py 破坏过一次：工作台外层容器名是用 `names.WIN_WORKBENCH + "_root"`
+    拼出来的，注册表里查不到（正向用例扫不到、反向用例只能白名单）。C4-c 钉成 xfail，
+    主控随手修成 `names.WIN_WORKBENCH_ROOT`；这条留着防止再有人拼名字。"""
     assert "win_workbench_root" in set(names.all_names().values())
+    assert names.WIN_WORKBENCH_ROOT == "win_workbench_root"
 
 
 # ═══════════════════ I-18：四个订阅方互不 import（静态半条）═══════════════════

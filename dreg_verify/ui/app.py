@@ -208,7 +208,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ───────────────────────── 构建 ─────────────────────────
     def _build_ui(self):
         central = QtWidgets.QWidget(self)
-        central.setObjectName(names.WIN_WORKBENCH + "_root")
+        central.setObjectName(names.WIN_WORKBENCH_ROOT)
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
