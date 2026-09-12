@@ -41,120 +41,53 @@ from dreg_verify import expr as E                 # noqa: E402
 from dreg_verify import vectors as V              # noqa: E402
 from dreg_verify import sv_writer as W            # noqa: E402
 from dreg_verify import truth_edit as TE          # noqa: E402
+from dreg_verify import edits as ED               # noqa: E402
 
 # 记住上次加载的 Excel，下次启动自动加载（省去重复浏览/点击）
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_gui.json")
 # 测试项编辑(含 designer 手填期望)的持久化文件：按 Excel 路径分桶，关 GUI 不丢、换表自动恢复。
 # 与 SETTINGS_PATH 分开存——编辑数据可能较大，且语义上是"劳动成果"而非"界面偏好"。
-EDITS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_edits.json")
+# 实现全在 edits.py（Qt-free 编辑层）；这里只留路径常量 + 薄委托——测试仍可 monkeypatch
+# gui.EDITS_PATH 到临时文件（委托每次现读本模块的 EDITS_PATH，patch 照样生效）。
+EDITS_PATH = ED.DEFAULT_EDITS_PATH
 _EDITS_PATH_DEFAULT = EDITS_PATH
 # rowdict 里需要持久化的字段（计算字段 correct/expected/_vec 等加载后重算，不落盘）
-_ROW_PERSIST_KEYS = ("kind", "wrong_value", "name", "user_added", "note", "designer_expected")
+_ROW_PERSIST_KEYS = ED.ROW_PERSIST_KEYS
 
 
 def _load_edits_file():
     """读取测试项编辑持久化文件。返回 {excel_path: {"edits": {...}, "neg_only": {...}}}。"""
-    try:
-        with open(EDITS_PATH, encoding="utf-8") as f:
-            d = json.load(f)
-            return d if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001
-        return {}
+    return ED.load_edits_file(EDITS_PATH)
 
 
 def _save_edits_file(d):
     # 测试环境(pytest)下默认不落盘(防污染用户真实编辑)；测试可 monkeypatch EDITS_PATH 到临时文件启用
-    if "pytest" in sys.modules and EDITS_PATH == _EDITS_PATH_DEFAULT:
-        return
-    try:
-        with open(EDITS_PATH, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        pass
+    ED.save_edits_file(EDITS_PATH, d, _EDITS_PATH_DEFAULT)
 
 
 def _coerce_int_map(d, lower=False):
-    """把 {key: value} 安全转成 {key: int}，跳过非法数值（不崩）。返回 (干净 dict, 跳过个数)。
-    用于恢复/导入外部 edits.json 时——损坏/手改的 mux_expected/mux_data 不能让整个加载流程崩
-    （_restore_edits 每次加载 Excel 都跑，审查 #7）。"""
-    out, bad = {}, 0
-    for k, v in (d or {}).items():
-        try:
-            out[str(k).lower() if lower else str(k)] = int(v)
-        except (ValueError, TypeError):
-            bad += 1
-    return out, bad
+    """把 {key: value} 安全转成 {key: int}，跳过非法数值（不崩）。返回 (干净 dict, 跳过个数)。"""
+    return ED.coerce_int_map(d, lower=lower)
 
 
 def _serialize_rows(rows):
     """rowdict 列表 → 可 JSON 化的精简结构（只留输入取值与用户意图，计算字段重算）。"""
-    out = []
-    for rd in rows:
-        d = {"base_values": {k: int(v) for k, v in rd.get("base_values", {}).items()}}
-        for k in _ROW_PERSIST_KEYS:
-            v = rd.get(k)
-            if v is not None and v != "" and v is not False:
-                d[k] = v
-        d.setdefault("kind", "pos")
-        out.append(d)
-    return out
+    return ED.serialize_rows(rows)
 
 
 def _deserialize_rows(rows_json):
     """JSON 结构 → rowdict 列表（correct/expected 等由 _recompute_row 重算）。"""
-    out = []
-    for d in rows_json or []:
-        if not isinstance(d, dict):
-            continue
-        rd = {"base_values": {str(k): int(v) for k, v in (d.get("base_values") or {}).items()},
-              "kind": d.get("kind", "pos"), "note": d.get("note", "")}
-        for k in ("wrong_value", "name", "designer_expected"):
-            if d.get(k) is not None:
-                rd[k] = d[k]
-        if d.get("user_added"):
-            rd["user_added"] = True
-        out.append(rd)
-    return out
+    return ED.deserialize_rows(rows_json)
 
 
 def _serialize_mux_vecs(vecs):
-    """mux 用户手编/复制/负向列(TestVector) → 可 JSON 化结构（第二十八轮）。
-    存 assignments(取值) + auto_out/期望/负向错值 + case_index(路由 case) + 名字。"""
-    out = []
-    for v in vecs or []:
-        out.append({
-            "assignments": {str(k): int(x) for k, x in v.assignments.items()},
-            "exp_value": int(v.exp_value), "exp_width": int(v.exp_width),
-            "is_negative": bool(v.is_negative),
-            "neg_value": None if v.neg_value is None else int(v.neg_value),
-            "neg_mode": v.neg_mode,
-            "name": v.name, "note": v.note or "",
-            "designer_expected": None if v.designer_expected is None else int(v.designer_expected),
-            "case_index": None if v.case_index is None else int(v.case_index),
-        })
-    return out
+    """mux 用户手编/复制/负向列(TestVector) → 可 JSON 化结构（第二十八轮）。"""
+    return ED.serialize_mux_vecs(vecs)
 
 
 def _deserialize_mux_vecs(lst):
     """JSON 结构 → mux 用户列 TestVector 列表（损坏项跳过，不崩——每次加载 Excel 都跑）。"""
-    out = []
-    for d in (lst or []):
-        if not isinstance(d, dict):
-            continue
-        try:
-            assigns = {str(k): int(x) for k, x in (d.get("assignments") or {}).items()}
-            v = V.TestVector(0, assigns, int(d.get("exp_value", 0)), int(d.get("exp_width", 1)),
-                             is_negative=bool(d.get("is_negative")),
-                             neg_value=None if d.get("neg_value") is None else int(d["neg_value"]),
-                             neg_mode=d.get("neg_mode"),
-                             note=d.get("note", "") or "", name=d.get("name"),
-                             designer_expected=None if d.get("designer_expected") is None
-                             else int(d["designer_expected"]),
-                             case_index=None if d.get("case_index") is None else int(d["case_index"]))
-        except (ValueError, TypeError):
-            continue
-        out.append(v)
-    return out
+    return ED.deserialize_mux_vecs(lst)
 
 
 def _load_settings():
@@ -604,57 +537,12 @@ class _TopoutProvider:
 def _topout_edit_overrides(edited):
     """SignalView 收集的逐信号编辑 → topout.build_for_topout 的 edit_overrides。
     edited[name_low] = {'kind','src_out_name','cleared','vectors'(logic/reg),'mux':{...}}。"""
-    vov, reg_ov = {}, {}
-    mux_user, mux_exp, mux_drop, mux_cleared, mux_data = {}, {}, {}, [], {}
-    for ed in (edited or {}).values():
-        kind = ed["kind"]
-        # dft 改名信号：build_for_topout 走 _topout_probe_block(reg 路)、按顶层名键 reg_overrides——
-        # 编辑也必须走 reg 路按顶层名键，否则编辑落 vov[源名] 被改名路忽略=改了不生效(静默)。
-        if ed.get("renamed"):
-            reg_ov[ed["name"].lower()] = ed["vectors"]
-        elif kind == "logic":
-            vov[ed["src_out_name"].lower()] = ed["vectors"]
-        elif kind == "register":
-            reg_ov[ed["name"].lower()] = ed["vectors"]
-        elif kind == "mux":
-            src = ed["src_out_name"].lower()
-            mx = ed.get("mux") or {}
-            if mx.get("cleared"):
-                mux_cleared.append(src)
-            if mx.get("dropped"):
-                mux_drop[src] = list(mx["dropped"])
-            if mx.get("expected"):
-                mux_exp[src] = dict(mx["expected"])
-            if mx.get("user_vecs"):
-                mux_user[src] = list(mx["user_vecs"])
-            if mx.get("data"):                    # B2/N8：mux 数据值手填 {物理基名: int}
-                mux_data[src] = dict(mx["data"])
-    return {"vector_overrides": vov or None, "reg_overrides": reg_ov or None,
-            "mux_user_vecs": mux_user or None, "mux_expected": mux_exp or None,
-            "mux_dropped": mux_drop or None, "mux_cleared": mux_cleared or None,
-            "mux_data": mux_data or None}
+    return ED.topout_edit_overrides(edited)
 
 
 def _page_edit_overrides(edited):
     """SignalView 收集的逐信号编辑 → pageviews build/report 的 edit_overrides（页本地无 register 根）。"""
-    vov, mux_user, mux_exp, mux_drop, mux_cleared = {}, {}, {}, {}, []
-    for ed in (edited or {}).values():
-        if ed["kind"] == "logic":
-            vov[ed["src_out_name"].lower()] = ed["vectors"]
-        elif ed["kind"] == "mux":
-            src = ed["src_out_name"].lower()
-            mx = ed.get("mux") or {}
-            if mx.get("cleared"):
-                mux_cleared.append(src)
-            if mx.get("dropped"):
-                mux_drop[src] = list(mx["dropped"])
-            if mx.get("expected"):
-                mux_exp[src] = dict(mx["expected"])
-            if mx.get("user_vecs"):
-                mux_user[src] = list(mx["user_vecs"])
-    return {"vector_overrides": vov or None, "mux_user_vecs": mux_user or None,
-            "mux_expected": mux_exp or None, "mux_dropped": mux_drop or None,
-            "mux_cleared": mux_cleared or None}
+    return ED.page_edit_overrides(edited)
 
 
 class _PageProvider:
@@ -1367,40 +1255,12 @@ class SignalView(QtWidgets.QWidget):
                 self._load_signal(real)
 
     def _cols_from_vectors(self, an):
-        cols = []
-        groups = an["groups"]
-        keys = [e["key"] for e in self.e_inputs]
-        for vec in an["vectors"]:
-            if an["editable"] == "mux":
-                vals = {k: vec.assignments.get(k, 0) for k in keys}
-            else:
-                bv = V.vector_to_base_values(vec, groups)
-                vals = {g["key"]: bv.get(g["key"], 0) for g in groups}
-            gate = an.get("dft_gate")            # iddq 门值：本向量 extra_forces 里 force 的值(功能拍=透传,DFT 拍=1)
-            if gate:
-                gv = gate["transp"]
-                for (wl, wv, _ww) in (getattr(vec, "extra_forces", None) or []):
-                    if wl == gate["wire_lhs"]:
-                        gv = wv
-                vals[gate["key"]] = gv
-            neg = vec.is_negative
-            exp = (vec.asserted_value if neg
-                   else (vec.designer_expected if vec.designer_expected is not None else None))
-            cols.append({"name": W.test_label(vec), "neg": neg, "vals": vals,
-                         "exp": exp, "auto": vec.exp_value, "auto_w": vec.exp_width,
-                         "user": False, "vec": vec,
-                         "dft": bool(getattr(vec, "dft_pitch", False))})
-        return cols
+        return ED.cols_from_vectors(an, self.e_inputs)
 
     def _is_dft_pitch_col(self, an, col):
         """该列是否 iddq 漏电态自检拍（iddq 门被 force 到非透传值=DFT 态、输出压常量）。
         节点表达式不建模 iddq 门，故重算 auto / 染色都要把它当特例，否则会假红当成反例。"""
-        gate = an.get("dft_gate") if an else None
-        if not gate:
-            return False
-        if col.get("dft"):
-            return True
-        return col.get("vals", {}).get(gate["key"]) != gate["transp"]
+        return ED.is_dft_pitch_col(an, col)
 
     def _render_head(self, an):
         import html
@@ -1474,24 +1334,22 @@ class SignalView(QtWidgets.QWidget):
         vlabels = [e["label"] for e in self.e_inputs] + ["auto_out%s" % slc, "期望%s" % slc]
         tbl.setVerticalHeaderLabels(vlabels)
         tbl.setHorizontalHeaderLabels([c["name"] for c in cols])
-        editable_inputs = (self.cur_an["editable"] == "logic")
-        is_mux = (self.cur_an["editable"] == "mux")
         for j, c in enumerate(cols):
             for i, e in enumerate(self.e_inputs):
                 it = QtWidgets.QTableWidgetItem(generator._fmt_cell(c["vals"].get(e["key"], 0), e["width"]))
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if e.get("control"):
                     f = it.font(); f.setBold(True); it.setFont(f)
-                # logic 输入行可编辑；mux 数据角色行可手填(N8，控制位/选择位仍只读)
-                row_editable = (editable_inputs and e["editable"]) or (is_mux and e.get("mux_data_base"))
-                if not row_editable:
+                # logic 输入行可编辑；mux 数据角色行可手填(N8，控制位/选择位仍只读)——判定在 edits.py
+                if not ED.input_cell_editable(self.cur_an, e):
                     it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
                     it.setForeground(QtGui.QColor("#555555"))
-                if e.get("is_dft_gate"):           # iddq DFT 门行：紫字 + 提示，区别于 cone 输入
+                st = ED.input_cell_state(self.cur_an, e)
+                if st == ED.CELL_DFT_GATE:         # iddq DFT 门行：紫字 + 提示，区别于 cone 输入
                     it.setForeground(QtGui.QColor("#7c3aed"))
                     it.setToolTip("iddq DFT 门（只读）：功能拍 force 透传值 %d，末尾 DFT 拍 force 1 验常量支。\n"
                                   "门在向量 force 路径里(不是真值表自由输入)，与 .sv/报告同口径。" % e.get("transp", 0))
-                elif is_mux and e.get("mux_data_base"):
+                elif st == ED.CELL_MUX_DATA:
                     it.setForeground(QtGui.QColor("#1558d6"))   # 蓝=mux 数据行可手填
                 tbl.setItem(i, j, it)
             a = QtWidgets.QTableWidgetItem(generator._fmt_cell(c["auto"], c["auto_w"]))
@@ -1508,18 +1366,20 @@ class SignalView(QtWidgets.QWidget):
                 e_it.setFlags(e_it.flags() | QtCore.Qt.ItemIsEditable)
             else:
                 e_it.setFlags(e_it.flags() & ~QtCore.Qt.ItemIsEditable)
-            if self._is_dft_pitch_col(self.cur_an, c):   # iddq 漏电态自检拍：淡紫，区别于反例(琥珀)/手填红
+            # 期望格状态判定在 edits.py（v2 同一套）；这里只把状态映射成颜色
+            est = ED.expected_cell_state(self.cur_an, c)
+            if est == ED.EXP_DFT:                        # iddq 漏电态自检拍：淡紫，区别于反例(琥珀)/手填红
                 e_it.setForeground(QtGui.QColor("#7c3aed"))
                 e_it.setBackground(DFT_BG)
                 e_it.setToolTip("iddq 漏电态自检拍（工具自动加，不是反例）：\n"
                                 "force iddq=1（DFT 态），断言输出压到 0。\n"
                                 ".sv/报告同口径；表达式不建模 iddq 门，故此列输出固定 0、不参与表达式比对。")
-            elif c["neg"]:
+            elif est == ED.EXP_NEG:
                 e_it.setForeground(QtGui.QColor("#d97706"))
                 e_it.setBackground(NEG_BG)
-            elif c["exp"] is None:
+            elif est == ED.EXP_UNFILLED:
                 e_it.setForeground(FB_FG)
-            elif (c["exp"] & E.mask(c["auto_w"])) == (c["auto"] & E.mask(c["auto_w"])):
+            elif est == ED.EXP_MATCH:
                 e_it.setBackground(DSGN_BG)
             else:
                 e_it.setBackground(DIFF_BG)
@@ -1584,20 +1444,13 @@ class SignalView(QtWidgets.QWidget):
         （data_overrides 经 make_mux_vectors 整表同步 auto_out/选路）+重渲。会话内有效（不存盘）。"""
         if self.cur_name is None or self.cur_an is None:
             return
-        ent = self._mux_data.setdefault(self.cur_name, {
-            "src": self.cur_an["src_out_name"].lower(), "name": self.cur_an["name"], "data": {}})
-        txt = (text or "").strip()
-        if txt == "":
-            ent["data"].pop(base_low, None)
-        else:
-            try:
-                val = TE.parse_int(txt)
-            except ValueError as ex:
-                self._parse_failed(ex)
-                return
-            ent["data"][base_low] = val & E.mask(width)
-        if not ent["data"]:
-            self._mux_data.pop(self.cur_name, None)
+        try:
+            ED.set_mux_data_value(self._mux_data, self.cur_name,
+                                  self.cur_an["src_out_name"].lower(), self.cur_an["name"],
+                                  base_low, width, text)
+        except ValueError as ex:
+            self._parse_failed(ex)
+            return
         real = next((m["name"] for m in self.models if m["name"].lower() == self.cur_name), None)
         if real is None:
             return
@@ -1619,60 +1472,30 @@ class SignalView(QtWidgets.QWidget):
         已手填的期望 / 负向标记；用户删掉的自动列不复活（清零过就还是零用例）；
         用户手编列原样保留（它们的数据值归自己管，与 legacy 的 _mux_user_vecs 一样不随整表走）。
         """
-        old = list(old_cols or [])
-        old_auto = {str(c.get("name")): c for c in old if not c.get("user")}
-        cols = []
-        for c in self._cols_from_vectors(an):
-            o = old_auto.get(str(c["name"]))
-            if o is None:
-                continue                       # 老模型里没有这列 = 用户删过 → 不复活
-            c["exp"] = o.get("exp")
-            c["neg"] = bool(o.get("neg"))
-            cols.append(c)
-        cols.extend(c for c in old if c.get("user"))
-        return cols
+        return ED.mux_resync_cols(an, old_cols, self.e_inputs)
 
     def _set_mux_user_data(self, col, e, text):
         """mux【用户手编列】数据行手填：只改本列该键的取值 + 按路由源重算 auto_out，不整表联动
         （对齐 legacy _on_mux_user_data_changed；自动生成列才走 _set_mux_data 的 by_base 同步）。"""
-        vec = col.get("vec")
-        if vec is None:
-            return
         try:
-            val = TE.parse_int(text) & E.mask(e["width"])
+            if not ED.set_mux_user_data(self.cur_an, col, e["key"], e["width"], text):
+                return
         except ValueError as ex:
             self._parse_failed(ex)
             return
-        vec.assignments[e["key"]] = val
-        col["vals"][e["key"]] = val
-        self._recompute_mux_user_auto(col)
         self._commit(); self._populate_truth()
         self.main.status.showMessage("已改本列数据值（仅这一列）；auto_out 已按路由源重算")
 
     def _recompute_mux_user_auto(self, col):
         """用户列 auto_out = 它路由的那条 case 的数据源取值——vec 克隆自某条真实 case，
         case_index 即路由 case，expansion['data_keys'][case_index] 即路由源的绑定键。"""
-        vec = col.get("vec")
-        exp = (self.cur_an or {}).get("expansion") or {}
-        dkeys = exp.get("data_keys") or []
-        ci = getattr(vec, "case_index", None) if vec is not None else None
-        if ci is None or not (0 <= ci < len(dkeys)):
-            return
-        val = vec.assignments.get(dkeys[ci], 0) & E.mask(col.get("auto_w") or 1)
-        col["auto"] = val
-        vec.exp_value = val
+        ED.recompute_mux_user_auto(self.cur_an, col)
 
     def _recompute_col(self, col):
         self._recompute_col_an(self.cur_an, col)
 
     def _recompute_col_an(self, an, col):
-        if an is None or an["editable"] != "logic":
-            return
-        if self._is_dft_pitch_col(an, col):
-            return    # iddq DFT 拍：节点不含 iddq 门，重算会得功能值→与 force 的常量 0 假红；保留 0
-        vec = V.make_vector_from_base_values(an["node"], an["bindings"], an["groups"],
-                                             col["vals"], an["out_width"])
-        col["auto"], col["auto_w"] = vec.exp_value, vec.exp_width
+        ED.recompute_col_an(an, col)
 
     # ───────────── 编辑操作 ─────────────
     def _sel_cols(self):
@@ -1718,38 +1541,25 @@ class SignalView(QtWidgets.QWidget):
         self._persist()                      # 丢弃自定义也要落盘（否则下次又恢复旧自定义）
 
     def _col_names(self):
-        return {c["name"] for c in (self.cur_cols or [])}
+        return ED.col_names(self.cur_cols)
 
     def _new_col_name(self, suffix=""):
         """新列名：唯一性查【全集】（含 T<n> 自动列与 _NEG 负向列，大小写无关）。
         此前只查 "U%d"、查不到已存在的 U0_NEG → 批量加负向时每条都拿到同一个 U0_NEG。"""
-        return TE.uniq_col_name(self._col_names(), suffix=suffix)
+        return ED.new_col_name(self.cur_cols, suffix=suffix)
 
     def _e_add(self):
         if self.cur_an is None or not self.cur_an["editable"]:
             return
         if self.cur_an["editable"] == "mux":
             return self._e_copy()
-        col = {"name": self._new_col_name(), "neg": False,
-               "vals": {e["key"]: 0 for e in self.e_inputs}, "exp": None,
-               "auto": 0, "auto_w": self.cur_an["out_width"] or 1, "user": True, "vec": None}
-        self._recompute_col(col)
-        self.cur_cols.append(col)
+        self.cur_cols.append(ED.add_col(self.cur_an, self.cur_cols, self.e_inputs))
         self._commit(); self._populate_truth()
 
     def _e_copy(self):
         if self.cur_an is None or not self.cur_cols:
             return
-        sel = self._sel_cols() or [len(self.cur_cols) - 1]
-        for j in sel:
-            if j < 0 or j >= len(self.cur_cols):
-                continue
-            src = self.cur_cols[j]
-            new = {"name": self._new_col_name(), "neg": src["neg"],
-                   "vals": dict(src["vals"]), "exp": src["exp"],
-                   "auto": src["auto"], "auto_w": src["auto_w"], "user": True,
-                   "vec": (V.clone_vector(src["vec"]) if src["vec"] is not None else None)}
-            self.cur_cols.append(new)
+        self.cur_cols.extend(ED.copy_cols(self.cur_cols, self._sel_cols()))
         self._commit(); self._populate_truth()
 
     def _e_del(self):
@@ -1759,7 +1569,7 @@ class SignalView(QtWidgets.QWidget):
         if not sel:
             QtWidgets.QMessageBox.information(self, "删列", "请先点选要删除的测试列(点列头/单元格)。")
             return
-        self.cur_cols = [c for i, c in enumerate(self.cur_cols) if i not in sel]
+        self.cur_cols = ED.del_cols(self.cur_cols, sel)
         self._commit(); self._populate_truth()
 
     def _confirm(self, title, text):
@@ -1783,7 +1593,7 @@ class SignalView(QtWidgets.QWidget):
     def _e_fill(self):
         if self.cur_an is None or not self.cur_cols:
             return
-        targets = [c for c in self.cur_cols if not c["neg"] and c["exp"] is None]
+        targets = ED.fill_targets(self.cur_cols)
         if not targets:
             self.main.status.showMessage("没有可填的列：期望都已手填(或全是负向列)")
             return
@@ -1794,10 +1604,9 @@ class SignalView(QtWidgets.QWidget):
                 "更稳妥的做法是自己算一遍再填(或用 HTML 报告的『真值表检查』页自测)。\n"
                 "确认无误时再用这个快捷方式。" % len(targets)):
             return
-        for c in targets:
-            c["exp"] = c["auto"]
+        n = ED.fill_expected(self.cur_cols)
         self._commit(); self._populate_truth()
-        self.main.status.showMessage("已把 auto_out 填入 %d 列「期望」(已手填的未动)" % len(targets))
+        self.main.status.showMessage("已把 auto_out 填入 %d 列「期望」(已手填的未动)" % n)
 
     def _e_addneg(self, *_):
         self._add_negatives(False)
@@ -1813,27 +1622,16 @@ class SignalView(QtWidgets.QWidget):
         if self.cur_an is None or not self.cur_cols:
             return
         sel = None if all_positive else self._sel_cols()
-        targets, skipped = TE.plan_negatives(self.cur_cols, sel, all_positive=all_positive)
-        if not targets:
+        added, skipped = ED.add_negatives(self.cur_cols, sel, all_positive)
+        if not added:
             if skipped:
                 self.main.status.showMessage("选中的用例都已有负向，未重复添加")
             else:
                 QtWidgets.QMessageBox.information(self, "加负向", "本信号没有可作负向来源的正向用例。")
             return
-        for j in targets:
-            src = self.cur_cols[j]
-            # m6：错值防撞——避开 auto_out(=src['auto']) 与 designer 手填期望(=src['exp'])两个『正确值』，
-            # 否则 ~auto 恰=designer 期望时反例会 PASS=NEG-BROKEN(静默)。复用 vectors.make_negative 的防撞
-            # 逻辑(避 correct + designer)，不再裸 ~auto。src['exp']=None(无手填)时退化成 ~auto、行为不变。
-            _tmpv = V.TestVector(0, {}, src["auto"], src["auto_w"], designer_expected=src["exp"])
-            wrong = V.make_negative(_tmpv, mode="invert").neg_value
-            new = {"name": self._new_col_name("_NEG"), "neg": True,
-                   "vals": dict(src["vals"]), "exp": wrong,
-                   "auto": src["auto"], "auto_w": src["auto_w"], "user": True,
-                   "vec": (V.clone_vector(src["vec"]) if src["vec"] is not None else None)}
-            self.cur_cols.append(new)
+        self.cur_cols.extend(added)
         self._commit(); self._populate_truth()
-        msg = "已加 %d 条负向用例（故意填错期望，自检 checker）" % len(targets)
+        msg = "已加 %d 条负向用例（故意填错期望，自检 checker）" % len(added)
         if skipped:
             msg += "；%d 条用例已有负向，已跳过" % skipped
         self.main.status.showMessage(msg)
@@ -1841,23 +1639,13 @@ class SignalView(QtWidgets.QWidget):
     def _protected_negatives(self):
         """"值得保护"的负向列 = 自定义命名 或 手填过错值（误删就是丢用户的活）。
         自动造的负向叫 T<n>_NEG / U<n>_NEG、错值 = make_negative 的防撞取反值。"""
-        out = []
-        for c in (self.cur_cols or []):
-            if not c.get("neg"):
-                continue
-            named = not TE.is_auto_neg_name(c.get("name"))
-            _tmpv = V.TestVector(0, {}, c["auto"], c["auto_w"])
-            hand = (c.get("exp") is not None
-                    and c["exp"] != V.make_negative(_tmpv, mode="invert").neg_value)
-            if named or hand:
-                out.append(c)
-        return out
+        return ED.protected_negatives(self.cur_cols)
 
     def _e_delneg(self):
         if self.cur_an is None or not self.cur_cols:
             return
-        negs = [c for c in self.cur_cols if c["neg"]]
-        if not negs:
+        rest, n_neg = ED.del_negatives(self.cur_cols)
+        if not n_neg:
             self.main.status.showMessage("本信号没有负向列可删")
             return
         prot = self._protected_negatives()
@@ -1866,9 +1654,9 @@ class SignalView(QtWidgets.QWidget):
                 "%s 有 %d 条自定义命名/手填错值的负向，删除会丢失（正向列保留）。确定？"
                 % (self.cur_an["name"], len(prot))):
             return
-        self.cur_cols = [c for c in self.cur_cols if not c["neg"]]
+        self.cur_cols = rest
         self._commit(); self._populate_truth()
-        self.main.status.showMessage("已删除 %d 条负向列（正向保留）" % len(negs))
+        self.main.status.showMessage("已删除 %d 条负向列（正向保留）" % n_neg)
 
     def _e_rename(self):
         sel = self._sel_cols()
@@ -1888,14 +1676,12 @@ class SignalView(QtWidgets.QWidget):
                                                  text=col["name"])
         if not ok:
             return
-        # 校验三道关（与『排查(旧)』同一套，实现在 truth_edit）：非法字符清成下划线且不得为空、
+        # 校验三道关（与『排查(旧)』同一套，实现在 edits→truth_edit）：非法字符清成下划线且不得为空、
         # 不许占 T<编号> 这个自动测试保留名、不得与其它列的最终标号重名(否则 .sv 里两块同名)。
-        others = [c["name"] for i, c in enumerate(self.cur_cols) if i != j]
-        good, info = TE.check_col_name(new, others, negative=bool(col["neg"]))
+        good, info = ED.rename_col(self.cur_cols, j, new)
         if not good:
             QtWidgets.QMessageBox.warning(self, "改名失败", info)
             return
-        col["name"] = info
         self._commit(); self._populate_truth()
         self.main.status.showMessage("测试列已改名为 %s" % info)
 
@@ -1999,75 +1785,14 @@ class SignalView(QtWidgets.QWidget):
 
     # ───────────── 编辑回流 → 导出 ─────────────
     def _compute_edited(self):
-        out = {}
-        for name_low, ed in self.edits.items():
-            an = ed["an"]
-            cols = ed["cols"]
-            rec = {"kind": ed["kind"], "src_out_name": ed["src_out_name"], "name": ed["name"],
-                   "renamed": ed.get("renamed", False)}
-            # dft 改名根 = 节点路（与 register 同：节点+向量），无论底层 kind 是 logic 还是 register
-            if rec["renamed"] or ed["kind"] in ("logic", "register"):
-                rec["cleared"] = (len(cols) == 0)
-                rec["vectors"] = self._cols_to_vectors(an, cols)
-            elif ed["kind"] == "mux":
-                rec["mux"] = self._mux_derive(an, cols)
-            out[name_low] = rec
-        # N8：mux 数据值手填——注入对应 mux 信号的 rec；没在 edits 里(纯手填数据)的补一个 data-only rec
-        for name_low, ent in self._mux_data.items():
-            data = ent.get("data") or {}
-            if not data:
-                continue
-            if name_low in out and out[name_low].get("mux") is not None:
-                out[name_low]["mux"]["data"] = dict(data)
-            elif ent.get("src"):
-                out[name_low] = {"kind": "mux", "src_out_name": ent["src"], "name": ent["name"],
-                                 "renamed": False,
-                                 "mux": {"cleared": False, "dropped": [], "expected": {},
-                                         "user_vecs": [], "data": dict(data)}}
-        return out
+        """本视图的编辑状态 → 逐信号 edit 记录（含 N8 的 mux 数据值手填注入）。"""
+        return ED.compute_edited(self.edits, self._mux_data)
 
     def _cols_to_vectors(self, an, cols):
-        vecs = []
-        for i, c in enumerate(cols):
-            nm = c["name"] if c["user"] else None
-            if c["neg"]:
-                v = V.make_vector_from_base_values(
-                    an["node"], an["bindings"], an["groups"], c["vals"], an["out_width"],
-                    index=i, expected_override=c["exp"], name=nm)
-                # 用户把负向列期望恰好填成 auto → make_vector 不标负向(会静默退化成『通过』断言)。
-                # 显式保住负向身份(=NEG-BROKEN：标负向但错值==正确值，仿真会过)，不静默丢用户的负向意图。
-                if not v.is_negative and c["exp"] is not None:
-                    v.is_negative = True
-                    v.neg_value = c["exp"] & E.mask(v.exp_width)
-                    v.neg_mode = "value"
-            else:
-                v = V.make_vector_from_base_values(
-                    an["node"], an["bindings"], an["groups"], c["vals"], an["out_width"],
-                    index=i, name=nm, designer_expected=c["exp"])
-            vecs.append(v)
-        return vecs
+        return ED.cols_to_vectors(an, cols)
 
     def _mux_derive(self, an, cols):
-        auto_keys = {generator.mux_assign_key(v.assignments) for v in an["vectors"]}
-        cur_auto_keys, expected, user_vecs = set(), {}, []
-        for c in cols:
-            vec = c["vec"]
-            if vec is None:
-                continue
-            key = generator.mux_assign_key(vec.assignments)
-            if c["user"]:
-                uv = V.clone_vector(vec)
-                if c["neg"]:
-                    uv.is_negative = True; uv.neg_value = c["exp"]; uv.neg_mode = "value"
-                elif c["exp"] is not None:
-                    uv.designer_expected = c["exp"]
-                user_vecs.append(uv)
-            else:
-                cur_auto_keys.add(key)
-                if c["exp"] is not None and not c["neg"]:
-                    expected[key] = c["exp"]
-        return {"cleared": len(cols) == 0, "dropped": list(auto_keys - cur_auto_keys),
-                "expected": expected, "user_vecs": user_vecs}
+        return ED.mux_derive(an, cols)
 
     # ───────────── 逐信号编辑 + 勾选 的持久化（接进 MainWindow 现有 EDITS_PATH/配置框架，2026-06-24）─────────────
     # SignalView.edits（手填期望/增删改测试列）此前【从不存盘、换表即 clear】=designer 默认进 Topout
@@ -2075,74 +1800,20 @@ class SignalView(QtWidgets.QWidget):
     # neg/name/user，auto 作兜底)；恢复时按当前表/覆盖度重析（logic 重算 auto 防改表后陈旧假绿；mux 据
     # assignments 重建 vec）。信号找不到/不可编辑 → 优雅跳过，绝不崩（护栏3）。
     def _serialize_view_edits(self):
-        out = {}
-        for name_low, ed in (self.edits or {}).items():
-            cols = []
-            for c in (ed.get("cols") or []):
-                vec = c.get("vec")
-                cols.append({
-                    "name": c.get("name"), "neg": bool(c.get("neg")),
-                    "vals": {str(k): int(v) for k, v in (c.get("vals") or {}).items()},
-                    "exp": None if c.get("exp") is None else int(c["exp"]),
-                    "auto": int(c.get("auto") or 0), "auto_w": int(c.get("auto_w") or 1),
-                    "user": bool(c.get("user")), "dft": bool(c.get("dft")),
-                    "case_index": (int(vec.case_index) if vec is not None
-                                   and getattr(vec, "case_index", None) is not None else None),
-                })
-            out[name_low] = {"kind": ed["kind"], "src_out_name": ed["src_out_name"],
-                             "name": ed["name"], "renamed": bool(ed.get("renamed")), "cols": cols}
-        return out
+        return ED.serialize_view_edits(self.edits)
 
     def _restore_cols(self, an, specs):
-        cols, ow = [], (an.get("out_width") or 1)
-        for cs in (specs or []):
-            if not isinstance(cs, dict):
-                continue
-            try:
-                vals = {str(k): int(v) for k, v in (cs.get("vals") or {}).items()}
-            except (ValueError, TypeError):
-                continue
-            exp = cs.get("exp")
-            col = {"name": cs.get("name") or "T", "neg": bool(cs.get("neg")), "vals": vals,
-                   "exp": None if exp is None else int(exp),
-                   "auto": int(cs.get("auto") or 0), "auto_w": int(cs.get("auto_w") or ow),
-                   "user": bool(cs.get("user")), "dft": bool(cs.get("dft")), "vec": None}
-            if an["editable"] == "logic":
-                self._recompute_col_an(an, col)              # 权威重算 auto（改表后不陈旧；DFT 拍跳过）
-            elif an["editable"] == "mux":
-                ci = cs.get("case_index")
-                col["vec"] = V.TestVector(0, dict(vals), col["auto"], col["auto_w"],
-                                          is_negative=bool(col["neg"]),
-                                          name=(col["name"] if col["user"] else None),
-                                          case_index=None if ci is None else int(ci))
-            cols.append(col)
-        return cols
+        return ED.restore_cols(an, specs)
 
     def _restore_view_edits(self, view_bucket):
         """把序列化的本视图编辑还原进 self.edits（须在 refresh() 之后调，self.models 已建）。
         信号在当前表/覆盖度下找不到或不可编辑 → 跳过（不崩）。返回恢复个数。"""
-        self.edits = {}
-        if not isinstance(view_bucket, dict) or not self.models:
-            return 0
         mode, exh = self._mode()
         maxt = self._maxt()
-        real_of = {m["name"].lower(): m["name"] for m in self.models}
-        n = 0
-        for name_low, ev in view_bucket.items():
-            real = real_of.get(str(name_low).lower())
-            if real is None or not isinstance(ev, dict):
-                continue
-            try:
-                an = self.provider.analyze(real, mode, maxt, exh)
-            except Exception:   # noqa: BLE001 —— 护栏3
-                an = None
-            if an is None or not an.get("editable"):
-                continue
-            self.edits[real.lower()] = {
-                "kind": an["kind"], "src_out_name": an["src_out_name"], "name": an["name"],
-                "cols": self._restore_cols(an, ev.get("cols")), "an": an,
-                "renamed": an.get("renamed", False)}
-            n += 1
+        self.edits = ED.restore_view_edits(
+            view_bucket, self.models,
+            lambda real: self.provider.analyze(real, mode, maxt, exh))
+        n = len(self.edits)
         if n:
             self._after_restore_render()
         return n
