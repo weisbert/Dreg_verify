@@ -549,6 +549,30 @@ def test_reduce_cmp_bus_elements():
     assert len(cmp_.port_names("left")) == 2
     g = _graph_of_ast(E.Concat([E.Var("A"), E.Var("B")]))             # {A,B} 拼接
     assert g.has_kind("BUSMERGE")
+
+
+def test_concat_unknown_width_says_unknown():
+    """M5：位宽算不出来时不许硬编 0 —— 以前 hi=(w or 0)-1 会把占位段标成 [-1:-2]、
+    附注写「拼接 0bit」，是明明白白的错信息（比不标还坏）。宽度未知就老实说未知。"""
+    g = _graph_of_ast(E.Concat([E.Var("A"), E.Var("B")]))             # bindings 空 → 宽度未知
+    bm = next(n for n in g.nodes if n.kind == "BUSMERGE")
+    assert bm.sub == "拼接（位宽未知）"
+    assert [p["label"] for p in bm.ports] == ["", ""]
+    svg = SF.render_svg(g)
+    assert "[-1" not in svg and "0bit" not in svg
+
+    # 宽度算得出来时照旧标真实占位段
+    class _B:
+        def __init__(self, wd):
+            self.base, self.found_in, self.kind = "r%d" % wd, "regmap", "RW"
+            self.address, self.reg_msb, self.reg_lsb = 0x10, wd - 1, 0
+            self.width, self.wire, self.reg_name, self.note = wd, "", "", ""
+    res = _FakeRes(E.Concat([E.Var("A"), E.Var("B")]),
+                   {"A": _B(2), "B": _B(3)}, out_width=5)
+    bm = next(n for n in SF.build_graph(None, None, res, _FakeRoot()).nodes
+              if n.kind == "BUSMERGE")
+    assert bm.sub == "拼接 5bit"
+    assert [p["label"] for p in bm.ports] == ["[4:3]", "[2:0]"]
     g = _graph_of_ast(E.Part(E.Binary("&", E.Var("A"), E.Var("B")), 2, 1))
     tap = next(n for n in g.nodes if n.kind == "BUSTAP")
     assert tap.label == "[2:1]" and tap.meta["msb"] == 2 and tap.meta["lsb"] == 1

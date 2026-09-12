@@ -484,13 +484,22 @@ class _Builder:
             return fin(n)
 
         if isinstance(node, E.Concat):
-            ports, hi = [], (w or 0) - 1
+            # ⭐ M5：位宽算不出来（叶子宽度未知 → self_width 抛错）时【不许】硬编 0 —— 那会把
+            # 占位段标成 [-1:-2]、附注写「拼接 0bit」，是明明白白的错信息。宽度未知就老实说未知。
+            widths = [self._width(p, env) for p in node.parts]
+            known = w is not None and all(x is not None for x in widths)
+            ports, hi = [], ((w or 0) - 1)
             for i, p in enumerate(node.parts):
-                pw = self._width(p, env) or 1
-                ports.append({"name": "P%d" % i, "side": "left",
-                              "label": ("[%d:%d]" % (hi, hi - pw + 1)) if pw > 1 else "[%d]" % hi})
-                hi -= pw
-            n = self.g.add_node("BUSMERGE", "{ }", sub="拼接 %dbit" % (w or 0), ports=ports)
+                if known:
+                    pw = widths[i] or 1
+                    lab = ("[%d:%d]" % (hi, hi - pw + 1)) if pw > 1 else "[%d]" % hi
+                    hi -= pw
+                else:
+                    lab = ""            # 位宽未知：不编造占位段，端口只留 P0/P1… 的顺序
+                ports.append({"name": "P%d" % i, "side": "left", "label": lab})
+            n = self.g.add_node("BUSMERGE", "{ }",
+                                sub=("拼接 %dbit" % w) if known else "拼接（位宽未知）",
+                                ports=ports)
             for i, p in enumerate(node.parts):
                 self._link(self._ast(p, binds, env, _d + 1).id, n, "P%d" % i,
                            label=ports[i]["label"])
