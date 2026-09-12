@@ -122,6 +122,31 @@ def test_c016_status_detail_eight_grades(wb, wl_wb):
     assert "parse-err" in {x["status_detail"] for x in mx}
 
 
+# ───────────────────────────── §7-4：an["ctrl_keys_missing"] ─────────────────────────────
+def test_c060_an_ctrl_keys_missing(wb, wl_wb):
+    """§7-4：真值表输入行(used_vars) 里【没有任何驱动器点到名】的键要如实报出来。
+
+    WL 实证：mux 级联的**备用载体** `m<N>.d:<i>`（item④ alt 轮的线控载体）进了 used_vars，
+    却既不是主载体也不是上游控制——真值表有这一行、输入信号表没有。只报告，不改引擎。"""
+    for wb_ in (wb, wl_wb):
+        for name, a in _ans(wb_).items():
+            miss = a["ctrl_keys_missing"]
+            assert isinstance(miss, list)
+            if a["kind"] != "mux" or a["status"] != "ok":
+                assert miss == [], name          # 非 mux 根恒空（没有 expansion）
+                continue
+            exp = a["expansion"]
+            assert set(miss) <= set(exp["used_vars"])            # 只报真值表真有的行
+            assert not (set(miss) & set(exp["data_keys"]))       # 数据键本来就有行
+            for k in miss:                                        # 消费方补行时拿得到绑定
+                assert exp["bindings"].get(k) is not None
+    # WL 的 4 个级联 mux 各缺一个备用载体键（btlp 无级联 → 全空）
+    wl = _ans(wl_wb)
+    assert wl["d_wl_rf_lp5g_gm_itrim"]["ctrl_keys_missing"] == ["m32.d:0"]
+    assert wl["d_wl_rf_lo2g5g_mixer2g_trim"]["ctrl_keys_missing"] == ["m56.d:0"]
+    assert all(not a["ctrl_keys_missing"] for a in _ans(wb).values())
+
+
 def test_c016_status_detail_probe_prefix_clears_bare_probe(wb):
     """配了探针前缀 = 用户给了「这根网在哪」的证据 → 输出侧不再算裸名猜测。"""
     topo = next(t for t in wb.topout if t.name == "d_logic_bt_lp_tsensor")

@@ -35,6 +35,7 @@ an 的字段（两条流水线保证同名同义）::
 GUI v2 C0-a（2026-09-12）新增的键全部 additive（只加不改），老消费方逐字节不受影响：
     out_net       见上。前缀由 provider 另补 an["probe_prefix"]（它才有 probe_prefixes 配置）。
     status_detail 判据只取结构化字段，缺判据的档退回 "clean" 并保留 issues 原文（绝不猜文本）。
+    ctrl_keys_missing [键]  §7-4：used_vars 里没被任何驱动器点到名的赋值键（mux 根才可能非空）。
 
 搬家说明（2026-09-12，GUI v2 阶段 A4c）：本模块四个函数原本长在 gui.py 里，
 是纯函数、不碰 Qt；抽出来后 gui.py 保留同名薄委托，行为逐字节不变。
@@ -195,6 +196,45 @@ def status_detail(res, include_risky=True, probe_prefix=""):
     return "clean"
 
 
+def _driver_row_keys(drv):
+    """一个 mux 控制驱动器【自己点得到名】的赋值键——即消费方（输入信号表）能据这个 driver
+    dict 直接建出行来的那些键，与 inputs_table.mux_ctrl_rows 的三来源遍历逐条对应：
+
+      source="logic"                → drv["keys"]（表达式各输入，line/local/模式位各一行）
+      source="reg"/"mux-force"/未知 → [drv["key"]]（一根网/一个寄存器一行）
+      source="mux"（级联展开）      → 上游配方的【主载体】carrier_key + 上游各控制驱动器的全部 keys
+    """
+    src = drv.get("source")
+    if src == "logic":
+        return list(drv.get("keys") or [])
+    if src == "mux":
+        out, recipe = [], (drv.get("recipe") or {})
+        if recipe.get("carrier_key") is not None:
+            out.append(recipe["carrier_key"])
+        for ud in recipe.get("ctrl_drivers") or []:
+            out.extend(ud.get("keys") or [])       # 上游控制这一层连它自己的配方键一起点名
+        return out
+    k = drv.get("key")
+    return [k] if k else list(drv.get("keys") or [])
+
+
+def _ctrl_keys_missing(expansion):
+    """§7-4：`used_vars` 里【没有】任何驱动器点到名的赋值键（mux 根才可能非空）。
+
+    真值表的输入行 = `expansion["used_vars"]`，而输入信号表的行是从 `ctrl_drivers` + `data_keys`
+    走出来的——两边不对齐时，真值表会多出几行『没人解释这是什么』的输入（WL 实证：mux 级联的
+    **备用载体** `m<N>.d:<i>`（item④ alt 轮的线控载体）进了 used_vars，却不在主载体/上游控制里，
+    输入信号表因此少一行）。这里只【报告】缺口，不改引擎的 used_vars/向量；C0-b 的 `input_rows`
+    按本键补行，`expansion["bindings"][k]` 就是那根网的绑定。
+    """
+    if not isinstance(expansion, dict):
+        return []
+    covered = set(expansion.get("data_keys") or [])
+    for d in expansion.get("ctrl_drivers") or []:
+        covered |= set(_driver_row_keys(d))
+    return [k for k in (expansion.get("used_vars") or []) if k not in covered]
+
+
 def norm_topout_result(res, wb=None, include_risky=True, probe_prefix=""):
     """topout.TopoutResult → SignalView 统一分析 dict（编辑/导出消费）。wb 传入则 logic 根输入按
     for_test 行序排（m4，与报告/导出一致）。"""
@@ -228,6 +268,8 @@ def norm_topout_result(res, wb=None, include_risky=True, probe_prefix=""):
     # §7-2：状态八档细分（老的 an["status"] 四档不动；判据见 status_detail）
     an["status_detail"] = status_detail(res, include_risky=include_risky,
                                         probe_prefix=probe_prefix)
+    # §7-4：used_vars 里没被任何驱动器点到名的键（真值表有行、输入信号表没行 → 消费方据此补行）
+    an["ctrl_keys_missing"] = _ctrl_keys_missing(an["expansion"])
     return an
 
 
@@ -262,4 +304,6 @@ def norm_page_result(res, wb=None, include_risky=True, probe_prefix=""):
     # §7-2：与 Topout 视图同一判据（两条流水线的状态档口径必须一致）
     an["status_detail"] = status_detail(res, include_risky=include_risky,
                                         probe_prefix=probe_prefix)
+    # §7-4：used_vars 里没被任何驱动器点到名的键（真值表有行、输入信号表没行 → 消费方据此补行）
+    an["ctrl_keys_missing"] = _ctrl_keys_missing(an["expansion"])
     return an
