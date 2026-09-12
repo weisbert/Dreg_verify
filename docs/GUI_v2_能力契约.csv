@@ -139,7 +139,7 @@ C-137,真值表编辑,单信号 CSV 里含 期望(bin) / force / RF_WRITE 三行
 C-138,真值表编辑,单信号 CSV 另写『期望来源』行（反例 / designer手填 / auto_out兜底）与『反例?』行,保留,SV.on_export_csv / MW.on_ti_export_csv,—,,,待落点,gui:on_export_csv,文档没写代码里有：designer 拿到 CSV 要分得清哪条是自己填的、哪条是工具兜底的
 C-139,真值表编辑,mux 信号导出真值表 CSV，且忠于产物（勾了反例就带上反例列、与生成同口径去重重排号）,保留,MW._export_mux_csv,generator._dedup_negatives / vectors.add_negatives,,,待落点,gui:_export_mux_csv,文档没写代码里有：CSV 要和实际导出的 .sv 一条不差，否则核对不了
 C-140,真值表编辑,两套真值表编辑器（SignalView 版 + 排查(旧)版）合成一套,合并,SV._e_* 一组 + MW.on_ti_* 一组,—,,,待落点,方案§4.2; 清单§2,
-C-141,真值表编辑,真值表编辑器实现路线,保留,—,—,,,待拍板(默认=QTableView 原生实现),计划§5-2,待拍板 #2：默认=QTableView 原生实现。A5 spike 证明八项行为都做得到且 offscreen 可测（数据量 ≤ 15 行 × 60 列，不值得为它嵌一个浏览器引擎）；spike 失败再走 WebEngine 内嵌 jspreadsheet
+C-141,真值表编辑,真值表编辑器实现路线,保留,—,—,,,待拍板(默认=QTableView 原生，A5 已实证),计划§5-2,待拍板 #2：默认=QTableView 原生实现。A5 spike 证明八项行为都做得到且 offscreen 可测（数据量 ≤ 15 行 × 60 列，不值得为它嵌一个浏览器引擎）；spike 失败再走 WebEngine 内嵌 jspreadsheet; 见 docs/GUI_v2_真值表编辑器路线_20260912.md
 C-142,覆盖度,全局默认覆盖档（精简 / 全面 / 穷举），所有信号的基线,保留,SV.cov（_build_coverage_panel）,"topout.topout_view_models(mode=,exhaustive=)",,,待落点,方案§4.1; Design§10,
 C-143,覆盖度,用例数上限（安全阀，防穷举/全面产生过多用例）,保留,SV.maxt_spin / MW.max_tests,topout.topout_view_models(max_tests=),,,待落点,方案§4.1; Design§10,
 C-144,覆盖度,覆盖度算法说明弹窗（logic 与 mux 各自三档怎么展开）,保留,SV._build_coverage_panel 的 ? 按钮（_COVERAGE_HELP）,—,,,待落点,方案§4.1; 方案§4.3; Design§10; 清单§3,主控裁决: ? 留在覆盖度控件上，诊断抽屉放链接

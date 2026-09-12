@@ -183,7 +183,7 @@
 | C-138 | 单信号 CSV 另写『期望来源』行（反例 / designer手填 / auto_out兜底）与『反例?』行 | SV.on_export_csv / MW.on_ti_export_csv | — | 保留 | | | 待落点 | gui:on_export_csv |
 | C-139 | mux 信号导出真值表 CSV，且忠于产物（勾了反例就带上反例列、与生成同口径去重重排号） | MW._export_mux_csv | generator._dedup_negatives / vectors.add_negatives | 保留 | | | 待落点 | gui:_export_mux_csv |
 | C-140 | 两套真值表编辑器（SignalView 版 + 排查(旧)版）合成一套 | SV._e_* 一组 + MW.on_ti_* 一组 | — | 合并 | | | 待落点 | 方案§4.2; 清单§2 |
-| C-141 | 真值表编辑器实现路线 | — | — | 保留 | | | 待拍板(默认=QTableView 原生实现) | 计划§5-2 |
+| C-141 | 真值表编辑器实现路线 | — | — | 保留 | | | 待拍板(默认=QTableView 原生实现，A5 已实证) | 计划§5-2; A5 |
 
 ## 覆盖度（15 条：保留 13，合并 2）
 
