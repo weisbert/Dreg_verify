@@ -300,6 +300,44 @@ def test_untrusted_leaves_marked(wl):
     assert "stroke-dasharray" in svg and SF.UNTRUSTED_TIP in svg
 
 
+def test_trusted_is_a_whitelist_not_a_blacklist():
+    """B1：可信 = found_in ∈ {tmm, regmap} 的【白名单】。
+
+    resolver 还会产出 None / mux-output / logic / logic-internal / logic-computed /
+    self-input… 用黑名单会把这些全默认成「可信」——恰恰是这张图最该防的假绿（今天没列举、
+    明天新加一个来源就静默变可信）。binding 完全没有(None) 的文案还要跟「查到了但要补前缀」分开。
+    """
+    assert SF.TRUSTED_FOUND_IN == ("tmm", "regmap")
+
+    class _B:                                                # 最小 InputBinding 替身
+        def __init__(self, found_in):
+            self.base, self.found_in, self.kind = "some_net", found_in, "RO"
+            self.address = self.reg_msb = self.reg_lsb = None
+            self.width, self.wire, self.reg_name, self.note = 1, "some_net", "", ""
+
+    for fi in ("tmm", "regmap"):
+        g = SF.build_graph(None, None, _FakeRes(E.Var("A"), {"A": _B(fi)}), _FakeRoot())
+        leaf = next(n for n in g.nodes if n.kind in ("REG", "PIN"))
+        assert leaf.meta["trusted"] is True, fi
+    for fi in (None, "mux-output", "logic", "logic-internal", "logic-computed",
+               "self-input", "wire", "needs-prefix", "prefixed-wire", "什么新来源"):
+        g = SF.build_graph(None, None, _FakeRes(E.Var("A"), {"A": _B(fi)}), _FakeRoot())
+        leaf = next(n for n in g.nodes if n.kind in ("REG", "PIN"))
+        assert leaf.meta["trusted"] is False, fi
+        assert leaf.meta["tip"] == (SF.UNKNOWN_TIP if fi is None else SF.UNTRUSTED_TIP)
+        assert all(not e.trusted for e in g.edges if e.src == leaf.id)
+
+
+def test_leaf_without_binding_is_untrusted():
+    """B1：连 binding 都没有的叶子（bindings 里查不到那个变量）→ 不可信 + 虚线 + 「表里完全没查到」。"""
+    g = SF.build_graph(None, None, _FakeRes(E.Var("A"), {}), _FakeRoot())
+    leaf = next(n for n in g.nodes if n.kind == "PIN")
+    assert leaf.meta["trusted"] is False and leaf.meta["found_in"] is None
+    assert leaf.meta["tip"] == SF.UNKNOWN_TIP
+    svg = SF.render_svg(g)
+    assert "stroke-dasharray" in svg and SF.UNKNOWN_TIP in svg
+
+
 def test_cse_merges_shared_subtrees(wl):
     """同一叶子/同构子树多处引用 → 结构哈希 CSE 合成一个源节点扇出（tx_epa 的 freq_sel
     mux 子树在 AST 里出现两次，图上只能有一个）。"""

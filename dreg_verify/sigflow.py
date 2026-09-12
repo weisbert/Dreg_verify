@@ -41,9 +41,17 @@ KINDS = (
     "TOPOUT",     # 顶层输出端子
 )
 
-# 「名字不是从表里查到的、是按命名约定猜的」——R41 推断层风险，图上必须一眼看穿
-UNTRUSTED_FOUND_IN = ("wire", "needs-prefix", "prefixed-wire")
+# ⭐【白名单】只有这两个来源的名字是真从表里查到的：tmm(total_memory_map) / regmap 命中了字段。
+# 其余一律算「猜的」——resolver.resolve 还会产出 None / mux-output / logic / logic-internal /
+# logic-computed / self-input / wire / needs-prefix / prefixed-wire，它们的网名全是按命名约定
+# 推的（R41「工具不知 RTL 真网名，全靠命名约定 + cone 猜」是总根）。用黑名单会漏掉今天没列举、
+# 明天新加的来源 → 静默标成「可信」，恰恰是这张图最该防的假绿。
+TRUSTED_FOUND_IN = ("tmm", "regmap")
 UNTRUSTED_TIP = "名字来自命名约定，表里未查到"
+UNKNOWN_TIP = "表里完全没查到这个名字"
+# 兼容旧引用（测试/外部）：不可信来源的常见取值，仅供显示分类，判定一律走 TRUSTED_FOUND_IN 白名单
+UNTRUSTED_FOUND_IN = ("wire", "needs-prefix", "prefixed-wire", "mux-output",
+                      "logic", "logic-internal", "logic-computed", "self-input")
 
 MAX_DEPTH = cone.MAX_DEPTH
 
@@ -275,7 +283,7 @@ class _Builder:
         kd = getattr(binding, "kind", None)
         addr = getattr(binding, "address", None)
         rmsb, rlsb = getattr(binding, "reg_msb", None), getattr(binding, "reg_lsb", None)
-        trusted = found_in not in UNTRUSTED_FOUND_IN
+        trusted = found_in in TRUSTED_FOUND_IN       # 白名单，见 TRUSTED_FOUND_IN 注
         if addr is not None:
             kind = "REG"
             bits = ("[%d:%d]" % (rmsb, rlsb)) if (rmsb is not None and rlsb is not None) else ""
@@ -292,7 +300,9 @@ class _Builder:
                 "xl_letters": list(getattr(binding, "xl_letters", None) or []),
                 "note": getattr(binding, "note", "")}
         if not trusted:
-            meta["tip"] = UNTRUSTED_TIP
+            # 连 binding 都没有 / 来源为空 = 这个名字在 tmm/regmap 里根本没出现过，
+            # 与「查到了但要按命名约定补前缀」不是一回事，文案要分开（别让人以为只是前缀问题）
+            meta["tip"] = UNKNOWN_TIP if found_in is None else UNTRUSTED_TIP
         n = self.g.add_node(kind, base + E._slice_suffix(msb, lsb), sub=sub, meta=meta)
         self._memo[key] = n.id
         return self._emit(n, net=base, width=(abs(msb - lsb) + 1) if msb is not None else w,
