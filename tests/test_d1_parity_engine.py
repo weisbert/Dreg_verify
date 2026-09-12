@@ -116,3 +116,104 @@ def test_p06_default_nets_export_covers_every_category(tmp_path, monkeypatch):
     only_purpose = str(tmp_path / "c.txt")
     X.export_nets_by_purpose(st.wb, only_purpose, list(row.options["purposes"]), pages=None)
     assert len(open(only_purpose, "rb").read()) < len(a)
+
+
+# ═════════ P-10 / P-12：覆盖度配置只作用于 v1 当初真用它的那两个范围 ═════════
+#: v1 那三个键（`coverage_logic` / `coverage_mux` / `max_tests`，外加只有单 `coverage` 的旧文件）
+#: 全是【排查(旧)】工具条上的控件，按信号类型分 logic / mux 两侧。Topout 与各页 SignalView
+#: 各有自己的 `cov_<vid>` / `maxt_<vid>`，既不读这几个键、导入配置也动不到。
+_V1_GLOBAL_VIEWS = ("logic", "mux")
+_V1_UNTOUCHED_VIEWS = ("topout", "dft", "iddq")
+
+
+def test_p12_legacy_single_coverage_keys_only_reach_the_views_v1_fed_them_to(tmp_path,
+                                                                            monkeypatch):
+    """P-12：同事机上留着一个 `coverage: 穷举` / `max_tests: 4096`，升级到 v2 后第一次导出
+    的 .sv 就从 110486 变 242551 字节 —— 他什么都没改。因为这两个旧键被迁到了全部五个范围。"""
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    P.save_settings({"coverage": "穷举", "max_tests": 4096})
+    st = ST.WorkbenchState()
+    assert st.load(H.mirror_path("btlp"))
+    got = {vid: (st.coverage(vid).global_label, int(st.coverage(vid).max_tests))
+           for vid in ("topout", "logic", "mux", "dft", "iddq")}
+    for vid in _V1_GLOBAL_VIEWS:
+        assert got[vid] == ("穷举", 4096), vid
+    for vid in _V1_UNTOUCHED_VIEWS:
+        assert got[vid] == (session.DEFAULT_COV_LABEL, session.DEFAULT_MAX_TESTS), vid
+
+
+def test_p12_per_view_keys_still_win_over_the_legacy_ones(tmp_path, monkeypatch):
+    """第二次、且不同：`cov_<vid>` / `maxt_<vid>` 存过就以它为准（C-229），旧键只是
+    「这个范围没存过时读一次」的兜底（C-230，且只读不回写）。"""
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    P.save_settings({"coverage": "穷举", "max_tests": 4096,
+                     "cov_logic": "全面", "cov_topout": "穷举", "maxt_topout": 64})
+    st = ST.WorkbenchState()
+    assert st.load(H.mirror_path("btlp"))
+    assert (st.coverage("logic").global_label, int(st.coverage("logic").max_tests)) == ("全面", 4096)
+    assert (st.coverage("mux").global_label, int(st.coverage("mux").max_tests)) == ("穷举", 4096)
+    assert (st.coverage("topout").global_label, int(st.coverage("topout").max_tests)) == ("穷举", 64)
+    raw = P.load_settings()
+    assert raw["coverage"] == "穷举" and raw["max_tests"] == 4096      # 旧键一个字节没动
+    assert "cov_dft" not in raw and "maxt_dft" not in raw              # 也没顺手回写新键
+
+
+def test_p10_config_global_block_only_lands_on_the_views_v1_applied_it_to(tmp_path, monkeypatch):
+    """P-10：导入一份完整配置，`global` 段的上限被无差别套到五个范围 → 同一份配置导进来，
+    .sv 从 84483 变 110486 字节。v1 `_apply_global_settings` 只动排查(旧)工具条那三个控件。"""
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    st = ST.WorkbenchState()
+    assert st.load(H.mirror_path("btlp"))
+    before = {vid: (st.coverage(vid).global_label, int(st.coverage(vid).max_tests))
+              for vid in _V1_UNTOUCHED_VIEWS}
+
+    cfg = str(tmp_path / "cfg.json")
+    session.write_config_file(cfg, session.collect_config(
+        H.mirror_path("btlp"),
+        {"coverage_logic": "穷举", "coverage_mux": "穷举", "max_tests": 4096}))
+    rep = EC.import_config(st, cfg)
+    assert rep.ok and rep.is_full
+    for vid in _V1_GLOBAL_VIEWS:
+        assert (st.coverage(vid).global_label, int(st.coverage(vid).max_tests)) == ("穷举", 4096), vid
+    for vid in _V1_UNTOUCHED_VIEWS:
+        assert (st.coverage(vid).global_label, int(st.coverage(vid).max_tests)) == before[vid], vid
+
+    # 第二次、且不同：再导一份档位不同的配置 —— 作用范围还是那两个，其余仍原样
+    cfg2 = str(tmp_path / "cfg2.json")
+    session.write_config_file(cfg2, session.collect_config(
+        H.mirror_path("btlp"),
+        {"coverage_logic": "精简", "coverage_mux": "精简", "max_tests": 42}))
+    assert EC.import_config(st, cfg2).is_full
+    for vid in _V1_GLOBAL_VIEWS:
+        assert (st.coverage(vid).global_label, int(st.coverage(vid).max_tests)) == ("精简", 42), vid
+    for vid in _V1_UNTOUCHED_VIEWS:
+        assert (st.coverage(vid).global_label, int(st.coverage(vid).max_tests)) == before[vid], vid
+
+
+def test_p10_global_block_round_trips_without_drifting(tmp_path, monkeypatch):
+    """收集与套用必须是同一批范围，否则「导出 → 导入 → 再导出」这三个数会自己漂
+    （以前 `max_tests` 从 Topout 取、却写回五个范围）。"""
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    st = ST.WorkbenchState()
+    assert st.load(H.mirror_path("btlp"))
+    st.coverage("logic").persist_global_label("穷举")
+    st.coverage("mux").persist_global_label("精简")
+    st.coverage("logic").persist_max_tests(777)
+    st.coverage("topout").persist_max_tests(12)            # Topout 另有一档，不该掺进来
+    one = EC.collect_config(st)["global"]
+    assert (one["coverage_logic"], one["coverage_mux"], one["max_tests"]) == ("穷举", "精简", 777)
+
+    cfg = str(tmp_path / "cfg.json")
+    session.write_config_file(cfg, EC.collect_config(st))
+    assert EC.import_config(st, cfg).is_full
+    two = EC.collect_config(st)["global"]
+    assert two == one, "同一份配置导进来再导出去，global 段就变了"
+    # Topout 的上限不在 `global` 段里（P-11 已登记 backlog）：导入时它走 C-192 的「先清空」
+    # 回出厂 256，而**不是**被配置里那个 777 顶掉 —— 后者才是 P-10 那 26003 字节的来处
+    assert int(st.coverage("topout").max_tests) == session.DEFAULT_MAX_TESTS

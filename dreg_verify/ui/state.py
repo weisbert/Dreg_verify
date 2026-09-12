@@ -221,7 +221,14 @@ class WorkbenchState(QtCore.QObject):
         """每个范围各自恢复全局档与用例上限（I-02 / C-229），缺键时读一次 legacy 键作迁移（C-230）。
 
         `may_read_machine_settings()` 挡住的只有「pytest + 真机路径」那一种组合（I-08）；
-        真机上四条恢复全都照常跑。"""
+        真机上四条恢复全都照常跑。
+
+        ⚠ 旧键**只喂 v1 当初真用它的那两个范围**（P-12）：`coverage_logic` / `coverage_mux` /
+        `coverage` / `max_tests` 在 v1 里全是**排查(旧)** 工具条那三个控件的（按信号类型分 logic
+        与 mux 两侧）；Topout 与各页 `SignalView` 各有自己的 `cov_<vid>` / `maxt_<vid>`，
+        从来不看这几个键。以前这里把它们迁到全部五个范围 —— 同事机上留着一个
+        `max_tests: 4096` / `coverage: 穷举`，升级后第一次导出的 .sv 就从 110486 变 242551 字节，
+        而他什么都没改。"""
         allow = persist.may_read_machine_settings()
         for vid, cov in self._cov.items():
             cov.sig_cov = {}                    # C-245：单点档/逻辑类型档是会话内的，换表清掉
@@ -230,8 +237,10 @@ class WorkbenchState(QtCore.QObject):
                 continue
             cov.restore_global_label()
             cov.restore_max_tests(skip_under_pytest=False)
+            if vid not in _LEGACY_COV_KEYS:     # v1 的旧键喂不到这个范围 → 保持本范围的默认
+                continue
             if cov.cov_key not in st:           # 没有 cov_<view_id> 才看旧键，且**只读不写**
-                legacy = st.get(_LEGACY_COV_KEYS.get(vid, ""), None) or st.get(_LEGACY_COV_FALLBACK)
+                legacy = st.get(_LEGACY_COV_KEYS[vid]) or st.get(_LEGACY_COV_FALLBACK)
                 if legacy in session.COV_LABELS:
                     cov.global_label = legacy
             if cov.maxt_key not in st:

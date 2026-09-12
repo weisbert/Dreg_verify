@@ -166,17 +166,21 @@ def test_i02_c229_c230_five_views_and_legacy_migrates_once(qapp, iso, btlp):
     而界面上两处下拉显示的都是「他自己设的那个值」—— 没人会怀疑是存盘串了格。
     """
     legacy = {"coverage_logic": "精简", "coverage_mux": "穷举",
-              "coverage": "全面", "max_tests": 77}
+              "coverage": "精简", "max_tests": 77}
     P.save_settings(dict(legacy))
 
     st = ST.WorkbenchState()
     assert st.load(btlp)
-    # 首次载入：五个范围都从 legacy 迁到（没有 cov_<vid> 新键时才迁）
+    # 首次载入：**只有 logic / mux 两个范围**从 legacy 迁（没有 cov_<vid> 新键时才迁）。
+    # 那四个旧键在 v1 里全是【排查(旧)】工具条上的控件，按信号类型分 logic / mux 两侧；
+    # Topout 与各页 SignalView 各有自己的 cov_<vid> / maxt_<vid>，从来不看它们（D1 P-12）。
     assert st.coverage("logic").global_label == "精简"
+    assert st.coverage("logic").max_tests == 77
     assert st.coverage("mux").global_label == "穷举"
+    assert st.coverage("mux").max_tests == 77
     for vid in ("topout", "dft", "iddq"):
-        assert st.coverage(vid).global_label == "全面", vid          # 都缺 → 迁 `coverage`
-        assert st.coverage(vid).max_tests == 77, vid                 # 迁 `max_tests`
+        assert st.coverage(vid).global_label == session.DEFAULT_COV_LABEL, vid
+        assert st.coverage(vid).max_tests == session.DEFAULT_MAX_TESTS, vid
 
     # 五个范围各写各的（值两两不同，串了格当场看得出来）
     labels = {"topout": "穷举", "logic": "精简", "mux": "全面", "dft": "穷举", "iddq": "精简"}

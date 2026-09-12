@@ -73,6 +73,12 @@ DEFAULT_ENABLED = tuple(ROW_ORDER[i] for i in (0, 1, 4))
 NETS_PURPOSES = X.NETS_PURPOSES
 #: settings 键：nets 的「按页类别」勾选（C-188 / C-232；v1 同键，同事机上的旧值照读）
 NETS_PAGES_KEY = "nets_pages"
+
+#: 完整配置 `global` 段的覆盖度档喂哪个范围（P-10）——v1 那三个控件在【排查(旧)】工具条上，
+#: 按信号类型分 logic / mux 两侧；Topout 与各页视图各有自己的档，导入配置动不到它们。
+GLOBAL_COV_KEYS = (("logic", "coverage_logic"), ("mux", "coverage_mux"))
+#: 同上：`max_tests` 在 v1 只有一个控件，喂的就是这两侧（收集时也从这里头一个取，往返才稳）
+GLOBAL_COV_VIEWS = tuple(vid for vid, _key in GLOBAL_COV_KEYS)
 #: 报告三格式 → 扩展名（C-176 的纠正走 `exports.correct_report_ext`，这里只挑筛选器）
 REPORT_EXT = {"html": ".html", "csv": ".csv", "xlsx": ".xlsx"}
 #: 「只记录、不产生断言」的账目状态（C-166）。判据 = 原因文本以 `exports.SKIP_STATUS_LABEL`
@@ -463,8 +469,9 @@ def collect_config(state):
     """完整配置 payload（I-09 / C-247 / C-250）——**字段集与 v1 `_collect_config` 逐键相同**。
 
     全部经 `session.collect_config`，本模块一个键都不自己拼。v2 与 v1 的取值映射：
-      · `coverage_logic` / `coverage_mux` ← 对应范围的全局档；`max_tests` ← Topout 范围的上限
-        （v1 只有一个上限控件，配置里也只有一格）；
+      · `coverage_logic` / `coverage_mux` ← 对应范围的全局档；`max_tests` ← **logic 范围**的上限
+        （v1 只有一个上限控件，配置里也只有一格；取值范围与 `_apply_global` 写回的范围必须是
+        同一批 `GLOBAL_COV_VIEWS`，否则「导出→导入→再导出」这个数会自己漂 —— P-10）；
       · `cascade_* / append_to_*` 四项 v2 已无界面（随入口退役），值从 settings 按
         `session.normalize_global_settings` 的兼容口径取 —— 字段留着，老同事的文件才导得回去；
       · legacy 的 `edits / neg_only / mux_*` 段 v2 不产（那是『排查(旧)』门面的劳动成果，
@@ -477,7 +484,7 @@ def collect_config(state):
     g = session.normalize_global_settings(state.settings())
     g["coverage_logic"] = state.coverage("logic").global_label
     g["coverage_mux"] = state.coverage("mux").global_label
-    g["max_tests"] = int(state.coverage(contracts.DEFAULT_VIEW_ID).max_tests)
+    g["max_tests"] = int(state.coverage(GLOBAL_COV_VIEWS[0]).max_tests)
     g["include_risky"] = bool(state.include_risky)
     view_edits, view_checks = {}, {}
     for vid in contracts.VIEW_IDS:
@@ -558,14 +565,21 @@ def _apply_global(state, g):
     """完整配置的 `global` 段 → v2 只认覆盖度档 / 用例上限 / 缺前缀强制生成三样。
 
     另外四项（级联模式 ×2、输出引用尾缀 ×2）随入口退役 —— **忽略但说一句**（不静默）。
-    返回要不要在结果里加那句提示。"""
+    返回要不要在结果里加那句提示。
+
+    ⚠ 作用范围 = `GLOBAL_COV_VIEWS`（P-10）：这三个键在 v1 里是**排查(旧)** 工具条那三个
+    控件（`coverage` / `coverage_mux` / `max_tests`，按信号类型分 logic 与 mux 两侧），
+    `_apply_global_settings` 也只往这三个控件上套；Topout / dft / iddq 的 `SignalView`
+    各有自己的档，导入配置从来动不到它们。以前这里把上限**无差别套到五个范围**，
+    同一份配置导进来 .sv 就从 84483 变 110486 字节 —— 而用户只是「打开了同事给的配置」。
+    """
     n = session.normalize_global_settings(g or {})
-    for vid, key in (("logic", "coverage_logic"), ("mux", "coverage_mux")):
+    for vid, key in GLOBAL_COV_KEYS:
         if n[key] is not None:
             state.coverage(vid).persist_global_label(n[key])
             state.coverage_touched(vid)
     if n["max_tests"] is not None:
-        for vid in contracts.VIEW_IDS:                 # v1 只有一个上限控件 → 套到每个范围
+        for vid in GLOBAL_COV_VIEWS:                   # v1 只有一个上限控件，喂的就是这两侧
             state.coverage(vid).persist_max_tests(int(n["max_tests"]))
             state.coverage_touched(vid)
     if n["include_risky"] is not None:

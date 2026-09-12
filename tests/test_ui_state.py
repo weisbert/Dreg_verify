@@ -126,8 +126,11 @@ def test_c229_c230_coverage_keys_per_view(qapp, iso, btlp):
     assert st.coverage("topout").max_tests == 512
     assert st.coverage("logic").global_label == "精简"       # 缺新键 → 迁 coverage_logic
     assert st.coverage("mux").global_label == "穷举"         # 缺新键 → 迁 coverage_mux
-    assert st.coverage("dft").global_label == "精简"         # 连 coverage_dft 都没有 → 迁 coverage
     assert st.coverage("logic").max_tests == 77              # 迁 max_tests
+    # ⚠ 旧键只喂 v1 当初真用它的那两侧（logic / mux）：那四个键在 v1 里是【排查(旧)】工具条
+    #   上的控件，dft / iddq / Topout 的 SignalView 各有自己的 cov_<vid> / maxt_<vid>（D1 P-12）
+    assert st.coverage("dft").global_label == session.DEFAULT_COV_LABEL
+    assert st.coverage("dft").max_tests == session.DEFAULT_MAX_TESTS
 
     st.coverage("logic").persist_global_label("全面")
     raw = P.load_settings()

@@ -676,7 +676,12 @@ def test_c192_c193_c217_import_config_applies_global_block(qapp, iso, btlp_path,
         cfg="另一张表.xlsx", cur=os.path.basename(btlp_path)) == n for n in rep.notes), rep.notes
     assert terms.EXPORT_IMPORT_IGNORED in rep.notes, "退役的四个键被静默吞了：%s" % rep.notes
     assert st.coverage("logic").global_label == "全面"
-    assert st.coverage().max_tests == 77, "用例上限没被套用：%r" % st.coverage().max_tests
+    # ⚠ 老断言是 `w2.max_tests.value() == 77` —— 那是【排查(旧)】工具条上的那个 spin，
+    #   v2 里它的对应物是 logic / mux 两个范围，不是 Topout（D1 对抗 review P-10 更正：
+    #   以前无差别套到五个范围，同一份配置导进来 .sv 就从 84483 变 110486 字节）。
+    assert st.coverage("logic").max_tests == 77, "用例上限没被套用：%r" % st.coverage("logic").max_tests
+    assert st.coverage("mux").max_tests == 77
+    assert st.coverage().max_tests == session.DEFAULT_MAX_TESTS, "Topout 的上限不在 global 段里"
     assert st.include_risky is False and risky_before is True
     assert sorted(st.checked_names()) == [name]
     assert not st.has_negatives(name), "导入完整配置没先清空：上一会话的反例还在"
@@ -696,7 +701,7 @@ def test_c192_c193_c217_import_config_applies_global_block(qapp, iso, btlp_path,
     assert not [n for n in rep2.notes
                 if n.startswith(terms.EXPORT_IMPORT_MISMATCH_FMT.split("{")[0])], rep2.notes
     assert st.coverage("logic").global_label == "精简"
-    assert st.coverage().max_tests == 42, "第二份配置的上限没生效"
+    assert st.coverage("logic").max_tests == 42, "第二份配置的上限没生效"
     # ⚠ 与 v1 的一处**有意差异**（C5-a 报告 §5-2）：v1 是「缺键 → 保持当前」，
     #   v2 按 C-192「先清空再照单恢复」，缺键 = 回出厂默认（True）。这里把 v2 的口径钉死，
     #   免得哪天被悄悄改成第三种。
