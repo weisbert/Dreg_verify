@@ -16,6 +16,7 @@
 """
 
 from .model import TruthModel
+from .panel import TruthPanel
 from .rows import e_inputs_from_an
 
-__all__ = ["TruthModel", "e_inputs_from_an"]
+__all__ = ["TruthModel", "TruthPanel", "e_inputs_from_an"]

@@ -771,16 +771,21 @@ def test_model_module_imports_only_allowed_layers():
     # exports：C3-d 的 `io.py` 走它导 CSV / 拿 .sv build（架构 §6.15 明写）——它自己也是
     # Qt-free 的编排层，不是引擎（`test_ui_layering` 的 ENGINE_MODULES 里没有它）。
     allowed = {"edits", "truth_edit", "inputs_table", "analysis_norm", "exports",
-               "contracts", "names", "terms", "commands", "rows", "model", "io"}
+               "contracts", "names", "terms", "commands", "rows", "model", "io", "panel"}
     #: 视图层（C3-b）另外准 import `theme` / `widgets` —— 架构 §6.13：底色字色**只**在
     #: delegate/表头里按 role 查 theme 的表。model 那半边照旧不许（它只给 CELL_STATE 键名）。
     view_extra = {"theme", "widgets", "delegate", "view", "panel"}
     view_files = {"view.py", "delegate.py", "panel.py"}
+    #: C3-c 的面板另外准 import `ui/dialogs.py` —— 三处确认 / 重命名列 / mux 数据值整表 /
+    #: 批量填四个框都在那儿（架构 §6.14 明写「三处确认 → dialogs.confirm」）。
+    #: **只给 panel.py**：view / delegate 一旦能弹框，「视图不改数据」那条线就守不住了。
+    panel_extra = {"dialogs"}
     bad = []
     for fn in sorted(os.listdir(src_dir)):
         if not fn.endswith(".py"):
             continue
         ok = allowed | (view_extra if fn in view_files else set())
+        ok |= (panel_extra if fn == "panel.py" else set())
         tree = ast.parse(io.open(os.path.join(src_dir, fn), encoding="utf-8").read())
         for node in ast.walk(tree):
             if not (isinstance(node, ast.ImportFrom) and node.level):

@@ -269,6 +269,11 @@ QTFREE_ALLOWED = {
     "truth/delegate.py": {
         "truth_edit": "parse_int —— 编辑器即时校验红框（C-083，不阻止提交）",
     },
+    "truth/panel.py": {
+        "edits": "cols_from_vectors（没有编辑记录时的出厂列模型，与 state.set_neg 同一条路）+ "
+                 "set_mux_data_value（C-110 reanalyzer 写 state.mux_data 桶的唯一入口）",
+        "inputs_table": "input_rows —— 输入行的【真名】，当前线网比对键按它算（I-18，面板不 import ui.bus）",
+    },
     "truth/io.py": {
         "exports": "signal_csv_text / write_signal_csv / render_sv / signal_build_vectors —— 单信号 CSV 与 .sv 同源（§6.15，C-139 忠于产物）",
         "truth_edit": "parse_int —— 导入期望文件时八种数值写法只此一份",
