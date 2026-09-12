@@ -688,8 +688,15 @@ class SigflowView(QtWidgets.QWidget):
         self._on_zoom_changed(self.canvas.zoom())
 
     def set_pending(self):
-        """后台还在展开这个信号（worker 的骨架行先出，图要等分析完）。"""
+        """后台还在展开这个信号（worker 的骨架行先出，图要等分析完）。
+
+        ⚠ 必须**当场把上一个信号的图撤掉**（与 `clear()` 一样 `set_graph(None)`）：
+        只切页不清图的话，画布里留着的还是上一个信号那一张 —— 所有看 `canvas.graph` 的地方
+        （导出 SVG/PNG、全屏）会把它当成「当前这个信号的图」，导出来的是别人的电路。
+        C2-int 接线后这条路是常态：清单先出 N 行「分析中」，用户点到哪一行都会走到这里。"""
         self.an = None
+        self._name = ""
+        self.canvas.set_graph(None)
         self._show_empty(T.FLOW_PENDING)
 
     def clear(self):

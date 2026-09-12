@@ -144,20 +144,10 @@ def test_c244_bulk_check_single_write(win, monkeypatch):
 
 
 # ═══════════════ I-14：objectName 全覆盖 ═══════════════
-#: C2 / C3 / C4 才落地的区（本波 find 不到很正常）——每条注明谁交付
+#: C3 / C4 才落地的区（本波 find 不到很正常）——每条注明谁交付。
+#: ⚠ C2-int 把详情区四件接进组合根后，HDR_* / TABS_* / MAIN_* / SV_* / SIDE_* / FLOW_*
+#:   整片从这张白名单里**删掉**了：它们现在起窗就该找得到（白名单只减不增）。
 LATER_WAVE_NAMES = {
-    "HDR_NAME", "HDR_STATUS_BADGE", "HDR_META", "HDR_PROGRESS_LABEL", "HDR_PROGRESS_BAR",
-    "HDR_PROGRESS_DIFF", "HDR_RESOLVE_BTN", "HDR_RESOLVE_PANEL", "HDR_RESOLVE_BOX",
-    "HDR_RESOLVE_DIAG_BTN", "HDR_PENDING", "HDR_NOT_EDITABLE", "HDR_SIDE_TOGGLE",
-    "HDR_ERROR_LABEL",                                           # C2-c detail_header
-    "TABS_BAR", "TABS_TRUTH", "TABS_SV", "MAIN_VIEW_PANEL", "MAIN_PAGE_TRUTH",   # C2-c main_view
-    "SV_TOOLBAR", "SV_TITLE", "SV_BTN_TOGGLE_SCOPE", "SV_BTN_COPY", "SV_TEXT",   # C2-c sv_preview
-    "SIDE_CHAIN_TITLE", "SIDE_CHAIN_HELP", "SIDE_INPUTS_TITLE",
-    "SIDE_INPUTS_GUESS_BADGE",                                    # C2-a side_panel
-    "FLOW_TOOLBAR", "FLOW_TITLE", "FLOW_SUBTITLE", "FLOW_BTN_FULLSCREEN", "FLOW_BTN_FIT",
-    "FLOW_BTN_100", "FLOW_ZOOM_LABEL", "FLOW_BTN_EXPORT_SVG", "FLOW_BTN_EXPORT_PNG",
-    "FLOW_VIEW", "FLOW_VIEWPORT", "FLOW_BODY", "FLOW_EMPTY",
-    "FLOW_FOOTER", "FLOW_LEGEND",                                 # C2-b sigflow_view
     "EXPORT_DIALOG", "EXPORT_TABLE", "EXPORT_SUMMARY", "EXPORT_SUMMARY_SKIPPED",
     "EXPORT_BTN_CANCEL", "EXPORT_BTN_RUN", "EXPORT_BTN_IMPORT_CONFIG",
     "EXPORT_OPTIONS_POPOVER",                                     # C4-a export_center
@@ -198,7 +188,8 @@ def test_ui_names_all_present(win, qapp):
     qapp.processEvents()
 
     want = {k: v for k, v in names.all_names().items() if _in_scope(k, v)}
-    assert len(want) > 90, "本波该覆盖的名字只剩 %d 个了，白名单是不是放太宽" % len(want)
+    # C2-int 把详情区四件接进来之后这个数只增不减（C1-int 收尾时是 95）
+    assert len(want) >= 130, "本波该覆盖的名字只剩 %d 个了，白名单是不是放太宽" % len(want)
     assert not _find_any(w, "no_such_object_name_xyz")     # 先证明这条查找能判「没有」
     missing = [("%s=%s" % (k, v)) for k, v in want.items() if not _find_any(w, v)]
     assert not missing, "这些 objectName 在起窗后找不到：%s" % missing

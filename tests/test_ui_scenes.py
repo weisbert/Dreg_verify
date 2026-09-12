@@ -22,6 +22,7 @@ pytest.importorskip("PySide6")
 from PySide6 import QtWidgets                                   # noqa: E402
 
 import ui_fakes as F                                            # noqa: E402
+from dreg_verify.ui import bus as BUS                           # noqa: E402
 from dreg_verify.ui import contracts, names, terms              # noqa: E402
 from dreg_verify.ui.app import MainWindow, build_window         # noqa: E402
 from dreg_verify.ui.signal_list import status_key_of            # noqa: E402
@@ -301,15 +302,127 @@ def test_scene_02_list_reason_expand(qapp, isolated, monkeypatch):
     w.close()
 
 
-# ═════════════════════ 其余 5 个场景（各波接手，别删这些桩）═════════════════════
-@pytest.mark.skip(reason="C3-int：真值表 + 电路图接上后补")
-def test_scene_03_detail_truth_and_flow():
-    """③ 详情 · 真值表 + 电路图：冻结列首行 = 真名；FLOW_VIEW 场景非空；tabs 文案含「手填 n/m」。"""
+# ═════════════════════ ③ 详情 · 标题栏 + 右栏 + 电路图 ═════════════════════
+def _loaded_window(qapp, monkeypatch, kind="wl"):
+    """真工厂起窗 + 载 mirror + 等这一趟分析跑完。"""
+    H.auto_dialogs(monkeypatch)
+    w = build_window([])
+    w.resize(1600, 900)
+    w.show()
+    ended = []
+    w.analysisEnded.connect(lambda vid, ok: ended.append((vid, ok)))
+    w.load_path(H.mirror_path(kind))
+    assert H.wait_for(lambda: bool(ended)), "分析没跑完：%s" % (ended,)
+    qapp.processEvents()
+    return w
 
 
-@pytest.mark.skip(reason="C2-int：ui/coverage.py 接上后补")
-def test_scene_04_coverage_popover():
-    """④ 覆盖度展开：COV_CHAIN_BAR 文本 = COV_CHAIN_FMT 渲染；生效两行高亮。"""
+def test_scene_03_detail_header_side_and_flow(qapp, isolated, monkeypatch):
+    """③ 详情：选中一个信号后**标题栏 + 右栏 + 电路图**都有内容，点右栏一个网名电路图对应块高亮。
+
+    ⚠ 真值表仍是占位（C3-c 接手），所以这条不断言真值表 —— 场景③ 的「冻结列首行 = 真名」
+    那半条留给 C3-int 补（当时把本条改名成 `..._truth_and_flow` 即可）。
+
+    全真：真 state（→ 真 provider / 真引擎）、真 worker、真清单 / 标题栏 / 右栏 / 电路图。
+    夹具只用 `tests/` 里的 mirror 镜像表（公开仓，绝不出现真实信号名）。"""
+    w = _loaded_window(qapp, monkeypatch)
+    panel = w.list_panel
+
+    # 挑一个真画得出图的信号（只读回读 / 未解析的没有图，验不到东西）
+    name = ""
+    for m in w.state.models():
+        an = w.state.analyze(m["name"], want_graph=True)
+        if an and an.get("graph") is not None and an["graph"].edges:
+            name = m["name"]
+            break
+    assert name, "mirror 里没有画得出图的信号：%s" % [m["name"] for m in w.state.models()]
+
+    H.click_cell(panel.view, _row_of(panel, name), int(LC.NAME))       # 真点击，不直接调槽
+    qapp.processEvents()
+    assert w.state.current_name == name
+
+    # ④ 标题栏：名字 / 状态徽标 / 摘要三样都填上了
+    assert H.find(w, names.HDR_NAME).text() == name
+    assert H.find(w, names.HDR_STATUS_BADGE).text() == terms.STATUS[status_key_of(
+        w.state.model_of(name))][0]
+    assert terms.OWNER_NONE in H.find(w, names.HDR_META).text() or \
+        (w.state.model_of(name).get("owner") or "") in H.find(w, names.HDR_META).text()
+
+    # ⑨ 右栏：逐层展开非空 + 输入信号表有行
+    assert H.find(w, names.SIDE_PANEL).isVisibleTo(w)
+    rows = w.side_panel.inputs_view.model().rows()
+    assert rows, "右栏输入表是空的"
+    assert w.side_panel.inputs_title.text() == terms.SIDE_INPUTS_TITLE_FMT.format(n=len(rows))
+    assert w.side_panel.chain_view.toPlainText().strip()
+
+    # ⑦ 电路图：在画布页（不是空态），画的是**这个**信号的图
+    # ⚠ 只断「有图」会漏：载表后清单自动选中第一行（C-044），那张图本来就在画布上，
+    #   `currentChanged → 电路图` 这根线断了照样「有图」—— 必须比图的标题是不是这一条。
+    assert w.main_view.tab() == "truth"                                # 真值表 + 电路图 那一页
+    assert w.flow_view.body.currentWidget() is w.flow_view.canvas
+    g = w.flow_view.canvas.graph
+    assert g is not None and g.nodes
+    assert name in g.title, "电路图画的是别的信号：%s" % g.title
+
+    # C-282：点右栏输入表的一行 → 电路图对应块高亮（同一根网，钥匙同一把）
+    net = next((r["name"] for r in rows
+                if any(BUS.net_key(e.net) == BUS.net_key(r["name"])
+                       for e in w.flow_view.canvas.graph.edges if e.net)), "")
+    assert net, "右栏的输入在图上一根线都对不上：%s" % [r["name"] for r in rows]
+    idx = next(i for i, r in enumerate(rows) if r["name"] == net)
+    H.click_cell(w.side_panel.inputs_view, 2 * idx, 1)                  # 主行（第二行是驱动串）
+    qapp.processEvents()
+    key = BUS.net_key(net)
+    assert w.bus.current_net == key and w.bus.current_origin == "inputs"
+    assert w.flow_view.canvas.current_net == key, "点了右栏，电路图没跟着高亮"
+    assert 'data-hl="1"' in w.flow_view.canvas.svg_text
+    assert w.side_panel.inputs_view.model().highlight() == key
+    assert w.side_panel.chain_view.highlight() == key
+
+    shot = H.shot(w, "scene_03")
+    assert shot.endswith("scene_03.png")
+    w.close()
+
+
+# ═════════════════════ ④ 覆盖度弹层 ═════════════════════
+def test_scene_04_coverage_popover(qapp, isolated, monkeypatch):
+    """④ 覆盖度：弹层打开 → 改一档 → 标题栏按钮与生效链当场回显（C-148 / C-150 / C-156）。"""
+    w = _loaded_window(qapp, monkeypatch)
+    panel = w.list_panel
+    assert panel.select_first_visible()
+    qapp.processEvents()
+    name = w.state.current_name
+    assert name
+
+    btn = H.find(w, names.HDR_COV_BTN)
+    assert btn.text(), "标题栏的覆盖度按钮是空的"
+    assert not H.find(w, names.COV_POPOVER).isVisible()
+
+    H.click(btn)                                        # 真点击（按钮是 checkable，点开弹层）
+    qapp.processEvents()
+    pop = H.find(w, names.COV_POPOVER)
+    assert pop.isVisible(), "覆盖度弹层没打开"
+    chain = H.find(w, names.COV_CHAIN_BAR).text()
+    assert chain and terms.COV_FOLLOW_UP in chain      # 默认：本信号跟随上级
+    before = btn.text()
+
+    # 改全局默认档 → 按钮与生效链当场跟着变（C-142 / C-148）
+    g = H.find(w, names.COV_GLOBAL_COMBO)
+    g.setCurrentIndex((g.currentIndex() + 1) % g.count())
+    qapp.processEvents()
+    assert btn.text() != before, "改了全局档，标题栏按钮没回显"
+    assert H.find(w, names.COV_CHAIN_BAR).text() != chain
+    assert w.state.coverage().global_label == g.currentText()
+    # 界面上不许出现形态编号（terms.FORBIDDEN 的 F0–F4）
+    for t in (btn.text(), H.find(w, names.COV_CHAIN_BAR).text(), H.find(w, names.COV_TITLE).text()):
+        assert not [x for x in terms.FORBIDDEN if x in t], t
+
+    shot = H.shot(w, "scene_04")
+    assert shot.endswith("scene_04.png")
+    w.close()
+
+
+# ═════════════════════ 其余 3 个场景（各波接手，别删这些桩）═════════════════════
 
 
 @pytest.mark.skip(reason="C4-int：ui/export_center.py 接上后补")
