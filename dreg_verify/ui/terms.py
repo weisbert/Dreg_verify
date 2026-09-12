@@ -321,6 +321,90 @@ TRUTH_CONFIRM_AUTO_FILL = "把程序算的值填进期望 = 放弃 designer 独�
 TRUTH_RENAME_AUTO_REFUSED = "自动生成的 T 列不能改名；要改名请先「复制列」得到一条手编列"     # C-093
 TRUTH_USER_COL_PREFIX = "U"
 
+# ── C3-int：以下整片从 truth/model.py(16) / io.py(10) / view.py(6) / panel.py(31) 的
+#    PENDING_TERMS 搬进来。同名同值的去重（粘贴报告两截尾巴 model 与 io 各一份、
+#    「读不了这个文件」model 与 panel 各一份），同名不同值按【面板/用户可见】那份定版：
+#    · `TRUTH_APPLY_EXP_MISSING_FMT`（model，只点名）→ 退役，统一用面板那句
+#      `TRUTH_IMPORT_MISSING_FMT`（点名 + 「共 N 个，已跳过」，计数在后 = I-20）；
+#    · `TRUTH_IMPORT_DONE_FMT`（panel）与 `TRUTH_IMPORT_EXP_REPORT_FMT`（model）说同一件事
+#      → 合成后者一句，且**翻正成名字在前**（见下）。
+# ── 空态 ──
+TRUTH_EMPTY_NO_SIGNAL = "在左边清单里选一个信号，这里出它的真值表"
+TRUTH_EMPTY_FAILED = "这个信号分析不出来，真值表空着（原因看左边清单的状态）"
+# ── 选区摘要（TRUTH_HINT_SELECTION_FMT 只覆盖「整列」那一种）──
+TRUTH_HINT_SELECTION_MULTI_FMT = "已选 {n} 格（跨 {ncol} 列）"
+# ── 列头 / 行标签悬停（C-063 / C-075）──
+TRUTH_HEADER_TIP_FMT = "{col}\n{drives}"
+TRUTH_HEADER_TIP_NONE = "这一列不用下 force / RF_WRITE"
+TRUTH_ROW_TIP_FMT = "{label}\n位宽 {width} 位 · {rw}"
+TRUTH_ROW_TIP_AUTO = "程序按表达式算的值，只读参考"
+TRUTH_ROW_TIP_EXP = "designer 手填的期望，进 .sv 断言"
+TRUTH_UNDO_CLEAR_EXP = "清空期望"                                             # 撤销栈上这一步的名字
+# ── 工具条动作的反馈 ──
+TRUTH_NO_COLUMN = "先点一格或一列，再用这个按钮"
+TRUTH_COL_OUT_OF_RANGE = "没有选中的测试列"
+TRUTH_ADD_NEG_NO_SELECTION = "没选中列，按 C-096 给第一条正向列加反例"
+TRUTH_ADD_NEG_DONE_FMT = "加了 {n} 条反例"
+TRUTH_ADD_NEG_SKIPPED_FMT = "，跳过 {n} 条（那几条正向列已经有反例了，不叠第二条）"
+TRUTH_DEL_NEG_DONE_FMT = "删了 {n} 条反例（正向列都留着）"
+TRUTH_DEL_COL_DONE_FMT = "删了 {names}，共 {n} 列"
+TRUTH_ADD_COL_DONE_FMT = "加了 {names}"
+TRUTH_CLEAR_DONE = "本信号已清零 = 零用例：导出时只记录、不产生断言"
+TRUTH_REGEN_DONE_FMT = "已按当前覆盖度重出 {n} 条测试列（本信号的自定义已丢弃，Ctrl+Z 可撤）"
+TRUTH_AUTO_FILL_DONE_FMT = "把 auto_out 填进了 {n} 条未填的期望格"
+TRUTH_BATCH_FILL_NOTHING = "没有可填的期望格（选中的列都是只读的）"
+TRUTH_BATCH_FILL_REPORT_FMT = "批量填了 {n} 列的期望"
+# ── C-294 粘贴结果说明的各截尾巴（`TRUTH_PASTE_REPORT_FMT` 的 {added} / {skipped}）──
+TRUTH_PASTE_ADDED_FMT = "，新增列 {names}"
+TRUTH_PASTE_SKIPPED_FMT = "，跳过 {n} 格（只读行/列）"
+TRUTH_PASTE_NO_COL_FMT = "，{n} 格右边没有测试列了（{why}）"
+TRUTH_PASTE_NO_NEW_COL_MUX = "mux 信号清零后没有 case 可克隆，加不出新列——先「重新生成」"
+TRUTH_PASTE_NO_NEW_COL = "这个信号加不出新列"
+TRUTH_PASTE_MUX_WHOLE_FMT = "，{n} 格是自动生成列的 mux 数据值（要整表一起改：工具条的「设置 mux 数据值」）"
+TRUTH_PASTE_BAD_FMT = "，{n} 格没认出写法：{names}"                            # C-083 的粘贴面：逐格点名
+TRUTH_PASTE_BAD_CELL_FMT = "{row}×{col}"
+#: 跳过某一格的原因（给用户逐格看的，不进汇总那句）
+TRUTH_PASTE_SKIP_READONLY = "只读格（auto_out 行 / 只读输入行 / 自检拍列）"
+TRUTH_PASTE_SKIP_PARSE_FMT = "写法没认出来：{text}"
+# ── C-110 / C-112 整表 mux 数据值同步 ──
+TRUTH_MUX_DATA_DONE_FMT = "已按物理寄存器 {base} 同步整表数据值（清空该格可恢复自动分配）"
+TRUTH_MUX_DATA_NO_BASE_FMT = "本信号没有物理寄存器 {base} 的 mux 数据行"
+TRUTH_MUX_DATA_NO_REANALYZER = "整表 mux 数据值同步还没接上会话状态（面板未调 set_reanalyzer），这一格已还原"
+# ── C-298 导入期望 / 批量填 ──
+#: I-20 翻正（C3-int）：旧版是「按列名回填了 N 列的期望{没对上的}」= 计数在前。
+#: 新版把点名那截放到句首（`{missing}` 由 `truth/io.import_report_text` 拼好、自带分号尾巴），
+#: `model.import_expectations` 与面板的「导入期望…」共用这一份，不再各拼各的。
+TRUTH_IMPORT_EXP_REPORT_FMT = "{missing}按列名回填了 {n} 列的期望"
+TRUTH_IMPORT_MISSING_FMT = "这些列名在本信号里没有：{names}（共 {n} 个，已跳过）"
+TRUTH_IMPORT_READ_FAILED_FMT = "读不了这个文件：{err}"
+TRUTH_IMPORT_NO_COLUMNS = "第一行是空的——第一行要是列名（导出的 CSV 原样改就行）"
+TRUTH_IMPORT_NO_EXP_ROW = "文件里没有「期望」行，也不止一行数据——没取到任何期望值"
+TRUTH_IMPORT_ONE_ROW_FMT = "文件里没有「期望」行，按唯一的那行「{label}」取值"
+TRUTH_IMPORT_BAD_CELL_FMT = "列「{name}」的写法没认出来：{text}（这一列跳过）"
+TRUTH_IMPORT_DUP_COL_FMT = "列名「{name}」在文件里出现了不止一次，只取第一处"
+TRUTH_IMPORT_EMPTY_FILE = "这个文件里一行都没有"
+# ── C-136…C-140 导出本信号 CSV ──
+TRUTH_EXPORT_DONE_FMT = "已写出 {path}（{n} 列）"
+TRUTH_EXPORT_FAILED_FMT = "导不出 CSV：{err}"
+TRUTH_EXPORT_MUX_NO_BUILD = ("这个 mux 信号这次没产出 .sv 块（被跳过或只记录），CSV 导的是编辑器这张表，"
+                             "与 .sv 不一定一一对应")
+TRUTH_EXPORT_CSV_FILTER = "CSV 表格 (*.csv)"
+TRUTH_IMPORT_EXP_FILTER = "期望值表 (*.csv *.xlsx *.xlsm)"
+TRUTH_EXPORT_CSV_TITLE = "导出本信号真值表 CSV"
+TRUTH_IMPORT_EXP_TITLE = "导入期望值"
+# ── mux 头部条（C-124 / C-125 / C-126）──
+TRUTH_MUX_CASE_FMT = "case({expr}) {n} 选 1"
+TRUTH_MUX_CASE_UNKNOWN = "mux 选路"
+TRUTH_MUX_HEADER_NOCOV_FMT = "{case_desc} · 手填 {n}/{m}"
+TRUTH_MUX_HOW = {
+    "精简": "每个 case 1 条（don't-care 位取 0）",
+    "全面": "精简 + case 的 x 位展开 + 每 case 一轮反码数据",
+    "穷举": "全面 + 另一条物理控制路径全扫每 case",
+}
+TRUTH_MUX_GATE_FORCEABLE = "门是只读网，能 force 到透传值"
+TRUTH_MUX_GATE_NOT_FORCEABLE = "门网 force 不了（见右栏输入信号表），只能靠功能拍"
+TRUTH_SUPPLEMENT_DOT_TEXT = "●"                                               # C-215 RTL 补充逻辑标记
+
 # ⑦ 电路图区
 FLOW_TITLE = "电路图"
 FLOW_SUBTITLE = "源寄存器在左 · 顶层输出在右"

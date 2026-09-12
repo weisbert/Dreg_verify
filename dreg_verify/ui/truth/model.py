@@ -36,53 +36,12 @@ from .. import terms
 from .commands import AddCols, MuxData, Regenerate, RemoveCols, RenameCol, SetCells
 from .rows import e_inputs_from_an
 
-__all__ = ["TruthModel", "fmt_cell", "norm_col", "COL_SCHEMA", "PENDING_TERMS"]
+__all__ = ["TruthModel", "fmt_cell", "norm_col", "COL_SCHEMA"]
 
 
-#: `ui/terms.py` 里还没有、但本模块要用的文案（C2-int 正在并行改 terms.py，这波不碰它）。
-#: C3-int 负责搬进 `terms.py` 并删掉这张表；取值一律经 `_t()`（terms 有就用 terms 的）。
-PENDING_TERMS = {
-    # 粘贴结果说明的两截尾巴（`terms.TRUTH_PASTE_REPORT_FMT` 的 {added} / {skipped} 占位）
-    "TRUTH_PASTE_ADDED_FMT": "，新增列 {names}",
-    "TRUTH_PASTE_SKIPPED_FMT": "，跳过 {n} 格（只读行/列）",
-    # 批量填（C-298 的另一半，对话框在 C3-c）
-    "TRUTH_BATCH_FILL_REPORT_FMT": "批量填了 {n} 列的期望",
-    # 按列名回填期望的结果（C-298；读文件那半边在 C3-d 的 truth/io.py）
-    "TRUTH_APPLY_EXP_MISSING_FMT": "这些列名在本信号里没有：{names}",
-    # 文件读不了（不存在 / 没权限 / 被 Excel 占用）：照实说一句，不把异常抛到面板上（绝不崩）
-    "TRUTH_IMPORT_READ_FAILED_FMT": "读不了这个文件：{err}",
-    # 列下标越界（按钮/右键菜单在没选中列时也可能点进来，不许崩）
-    "TRUTH_COL_OUT_OF_RANGE": "没有选中的测试列",
-    # 粘贴里没认出写法的格子要【点名】（行标签×列名），不能只报个数（C-083 的粘贴面）
-    "TRUTH_PASTE_BAD_FMT": "，{n} 格没认出写法：{names}",
-    "TRUTH_PASTE_BAD_CELL_FMT": "{row}×{col}",
-    # 粘贴时跳过的另外两种原因（护栏：跳过必有名字 + 原因，不能一律说成「只读」）
-    "TRUTH_PASTE_NO_COL_FMT": "，{n} 格右边没有测试列了（{why}）",
-    "TRUTH_PASTE_NO_NEW_COL_MUX": "mux 信号清零后没有 case 可克隆，加不出新列——先「重新生成」",
-    "TRUTH_PASTE_NO_NEW_COL": "这个信号加不出新列",
-    "TRUTH_PASTE_MUX_WHOLE_FMT":
-        "，{n} 格是自动生成列的 mux 数据值（要整表一起改：工具条的「设置 mux 数据值」）",
-    # 整表 mux 数据值同步的结果（C-110）
-    "TRUTH_MUX_DATA_DONE_FMT": "已按物理寄存器 {base} 同步整表数据值（清空该格可恢复自动分配）",
-    "TRUTH_MUX_DATA_NO_BASE_FMT": "本信号没有物理寄存器 {base} 的 mux 数据行",
-    # 没接 reanalyzer 就调整表同步（面板漏接线；宁可说清也不做个只改一格的假同步）
-    "TRUTH_MUX_DATA_NO_REANALYZER":
-        "整表 mux 数据值同步还没接上会话状态（面板未调 set_reanalyzer），这一格已还原",
-    # 导入期望的结果说明（C-298；读文件那半边在 C3-d 的 truth/io.py）
-    "TRUTH_IMPORT_EXP_REPORT_FMT": "按列名回填了 {n} 列的期望{missing}",
-}
-
-
-def _t(_name, **fmt):
-    """文案取值：`terms` 里有就用 `terms` 的，没有退回 `PENDING_TERMS`（C3-int 搬完即一致）。
-
-    第一个形参故意带下划线：占位符里已经有 `{name}` 这种叫法（`TRUTH_APPLY_EXP_MISSING_FMT`
-    一族），叫 `name` 的话 `_t("X", name="y")` 会撞成「重复传参」而不是格式化。
-    """
-    s = getattr(terms, _name, None)
-    if s is None:
-        s = PENDING_TERMS[_name]
-    return s.format(**fmt) if fmt else s
+#: ⚠ C3-int 起本模块**不再有 `PENDING_TERMS` 影子表**：文案只在 `ui/terms.py`
+#: （`terms.TRUTH_*`），粘贴 / 导入期望的**结果说明**整句在 `truth/io.py` 拼
+#: （`paste_report_text` / `import_report_text`），model 与面板共用同一份。
 
 
 def _mask(width):
@@ -555,7 +514,7 @@ class TruthModel(QAbstractTableModel):
                 try:
                     val = TE.parse_int(txt)
                 except ValueError:
-                    self.parseFailed.emit(_t("TRUTH_PARSE_FAILED_FMT", text=txt))
+                    self.parseFailed.emit(terms.TRUTH_PARSE_FAILED_FMT.format(text=txt))
                     return False
                 new = (val & _mask(col.get("auto_w") or 1), bool(col.get("neg")))
             old = self._get_cell(r, c)
@@ -574,7 +533,7 @@ class TruthModel(QAbstractTableModel):
         try:
             val = TE.parse_int(text)             # 输入格空 = 0（没有「未填」这一档）
         except ValueError:
-            self.parseFailed.emit(_t("TRUTH_PARSE_FAILED_FMT", text=text))
+            self.parseFailed.emit(terms.TRUTH_PARSE_FAILED_FMT.format(text=text))
             return False
         new = val & _mask(e["width"])
         old = self._get_cell(r, c)
@@ -629,7 +588,7 @@ class TruthModel(QAbstractTableModel):
     def rename_column(self, c, new_name):
         """改列名（C-091/C-092/C-093）。返回 (True, 最终名) 或 (False, 给用户看的原因)。"""
         if not (0 <= c < len(self._cols)):
-            return False, _t("TRUTH_COL_OUT_OF_RANGE")
+            return False, terms.TRUTH_COL_OUT_OF_RANGE
         col = self._cols[c]
         if not col.get("user"):
             return False, terms.TRUTH_RENAME_AUTO_REFUSED      # C-093 自动 T 列拒改名
@@ -726,7 +685,7 @@ class TruthModel(QAbstractTableModel):
         e = next((x for x in self._e_inputs
                   if (x["mux_data_base"] or "") == base_low), None)
         if e is None:
-            self.parseFailed.emit(_t("TRUTH_MUX_DATA_NO_BASE_FMT", base=base_low))
+            self.parseFailed.emit(terms.TRUTH_MUX_DATA_NO_BASE_FMT.format(base=base_low))
             return False
         txt = "" if text is None else str(text).strip()
         if txt == "":
@@ -735,10 +694,10 @@ class TruthModel(QAbstractTableModel):
             try:
                 norm = fmt_cell(TE.parse_int(txt), e["width"])
             except ValueError:
-                self.parseFailed.emit(_t("TRUTH_PARSE_FAILED_FMT", text=txt))
+                self.parseFailed.emit(terms.TRUTH_PARSE_FAILED_FMT.format(text=txt))
                 return False
         if self._reanalyze is None:
-            self.parseFailed.emit(_t("TRUTH_MUX_DATA_NO_REANALYZER"))
+            self.parseFailed.emit(terms.TRUTH_MUX_DATA_NO_REANALYZER)
             return False
         old = self._mux_text.get(self._mux_key(base_low), "")
         if old == norm:
@@ -760,7 +719,7 @@ class TruthModel(QAbstractTableModel):
         self._mux_text[self._mux_key(base_low)] = text
         self._apply_shape(an, self._e_inputs, cols)
         if text:
-            self.pasteReport.emit(_t("TRUTH_MUX_DATA_DONE_FMT", base=base_low))
+            self.pasteReport.emit(terms.TRUTH_MUX_DATA_DONE_FMT.format(base=base_low))
         # C-113：≥2 条数据路取到相同值 = 选错路也测不出。撞值判据在引擎的 meta
         # （`mux_gen` 的 value_collision / override_collision），`an` 里它已经归到
         # `status_detail == "false-green"` 这一档（见「引擎层发现」：an 不带 expansion["meta"]）。
@@ -780,7 +739,7 @@ class TruthModel(QAbstractTableModel):
         try:
             val = TE.parse_int(text)
         except ValueError:
-            self.parseFailed.emit(_t("TRUTH_PARSE_FAILED_FMT", text=text))
+            self.parseFailed.emit(terms.TRUTH_PARSE_FAILED_FMT.format(text=text))
             return False
         new = val & _mask(self._e_inputs[r]["width"])
         old = self._get_cell(r, c)
@@ -853,11 +812,10 @@ class TruthModel(QAbstractTableModel):
         r0, c0 = max(0, int(r0)), max(0, int(c0))
         if not rows:
             return {"ok": True, "rows": None, "r0": r0, "c0": c0, "need": 0,
-                    "report": _t("TRUTH_PASTE_REPORT_FMT", n=0, added="", skipped="")}
+                    "report": terms.TRUTH_PASTE_REPORT_FMT.format(n=0, added="", skipped="")}
         if r0 + len(rows) > self.rowCount():
             return {"ok": False, "rows": rows, "r0": r0, "c0": c0, "need": 0,
-                    "report": _t("TRUTH_PASTE_OVERFLOW_ROWS_FMT",
-                                 rows=len(rows), max=self.rowCount())}
+                    "report": terms.TRUTH_PASTE_OVERFLOW_ROWS_FMT.format(rows=len(rows), max=self.rowCount())}
         need = max(0, c0 + max(len(x) for x in rows) - len(self._cols))
         return {"ok": True, "rows": rows, "r0": r0, "c0": c0, "need": need, "report": ""}
 
@@ -883,19 +841,20 @@ class TruthModel(QAbstractTableModel):
                else "TRUTH_PASTE_NO_NEW_COL")
         skipped = ""
         if tally["ro"]:
-            skipped += _t("TRUTH_PASTE_SKIPPED_FMT", n=tally["ro"])
+            skipped += terms.TRUTH_PASTE_SKIPPED_FMT.format(n=tally["ro"])
         if tally["no_col"]:
-            skipped += _t("TRUTH_PASTE_NO_COL_FMT", n=tally["no_col"], why=_t(why))
+            skipped += terms.TRUTH_PASTE_NO_COL_FMT.format(n=tally["no_col"], why=getattr(terms, why))
         if tally["mux_whole"]:
-            skipped += _t("TRUTH_PASTE_MUX_WHOLE_FMT", n=tally["mux_whole"])
+            skipped += terms.TRUTH_PASTE_MUX_WHOLE_FMT.format(n=tally["mux_whole"])
         if tally["bad"]:
             names = tally["bad"][:_BAD_NAMES_MAX]
-            skipped += _t("TRUTH_PASTE_BAD_FMT", n=len(tally["bad"]),
-                          names="、".join(names)
-                          + ("…" if len(tally["bad"]) > _BAD_NAMES_MAX else ""))
-        return _t("TRUTH_PASTE_REPORT_FMT", n=tally["ok"],
-                  added=(_t("TRUTH_PASTE_ADDED_FMT", names=", ".join(added)) if added else ""),
-                  skipped=skipped)
+            skipped += terms.TRUTH_PASTE_BAD_FMT.format(
+                n=len(tally["bad"]),
+                names="、".join(names) + ("…" if len(tally["bad"]) > _BAD_NAMES_MAX else ""))
+        return terms.TRUTH_PASTE_REPORT_FMT.format(
+            n=tally["ok"],
+            added=(terms.TRUTH_PASTE_ADDED_FMT.format(names=", ".join(added)) if added else ""),
+            skipped=skipped)
 
     def _can_append(self):
         """现在还加得出测试列吗（`append_test_column` 会不会白跑一趟）。
@@ -946,7 +905,7 @@ class TruthModel(QAbstractTableModel):
                     continue
                 v = self._parse_for_cell(r, c, txt)
                 if v is _BAD:
-                    tally["bad"].append(_t("TRUTH_PASTE_BAD_CELL_FMT", row=self.row_label(r),
+                    tally["bad"].append(terms.TRUTH_PASTE_BAD_CELL_FMT.format(row=self.row_label(r),
                                            col=self.all_names()[c]))
                     continue
                 old = self._get_cell(r, c)
@@ -1006,6 +965,9 @@ class TruthModel(QAbstractTableModel):
         读文件那半边在 `truth/io.py`（C3-d：openpyxl 惰性加载 + 列名模糊匹配提示）——**惰性
         import**，io 还没落地时抛 `NotImplementedError` 而不是 `ImportError`（面板据此置灰按钮，
         也免得 model 在 C3-d 之前就 import 不动）。model 只负责把结果交给 `apply_expectations`。
+
+        ⚠ 结果说明那一句由 `io.import_report_text` 拼（C3-int 去重）：面板的「导入期望…」
+        走的是同一份，所以 model 与界面上看到的一字不差，且都是 **I-20 的名字在前**。
         """
         try:
             from . import io as TIO           # noqa: PLC0415  惰性：C3-d 还没落地时也不炸
@@ -1018,7 +980,7 @@ class TruthModel(QAbstractTableModel):
         try:
             got = read(path)
         except OSError as ex:              # 不存在 / 没权限 / 被 Excel 占用 —— 照实说，别崩
-            msg = _t("TRUTH_IMPORT_READ_FAILED_FMT", err=ex)
+            msg = terms.TRUTH_IMPORT_READ_FAILED_FMT.format(err=ex)
             self.parseFailed.emit(msg)
             return 0, [], msg
         # io 回的是 `(by_name, notes)`：by_name 已经是**解析好的 int**（表里写的是 8 种写法，
@@ -1026,19 +988,14 @@ class TruthModel(QAbstractTableModel):
         # 列名重了取了哪一处 / 没找到期望行」之类的逐条提示，原样接进结果说明（跳过必有原因）。
         by_name, notes = got if isinstance(got, tuple) else (got, [])
         n, missing = self.apply_expectations(by_name)
-        tail = ""
-        if missing:
-            tail += "；" + _t("TRUTH_APPLY_EXP_MISSING_FMT", names=", ".join(missing))
-        for note in (notes or ()):
-            tail += "；" + str(note)
-        return n, missing, _t("TRUTH_IMPORT_EXP_REPORT_FMT", n=n, missing=tail)
+        return n, missing, TIO.import_report_text(n, missing, notes)
 
     def batch_fill(self, cs, text):
         """把同一个值批量填进选中列的期望格（C-298 的「批量填…」）。返回 (落了几列, 提示文本)。"""
         try:
             val = TE.parse_int(text)
         except ValueError:
-            msg = _t("TRUTH_PARSE_FAILED_FMT", text=text)
+            msg = terms.TRUTH_PARSE_FAILED_FMT.format(text=text)
             self.parseFailed.emit(msg)
             return 0, msg
         exp_r = len(self._e_inputs) + 1
@@ -1053,7 +1010,7 @@ class TruthModel(QAbstractTableModel):
                 cells.append((exp_r, i, old, new))
         if cells:
             self._undo.push(SetCells(self, cells, "批量填期望"))
-        return len(cells), _t("TRUTH_BATCH_FILL_REPORT_FMT", n=len(cells))
+        return len(cells), terms.TRUTH_BATCH_FILL_REPORT_FMT.format(n=len(cells))
 
 
 class _Bad(object):

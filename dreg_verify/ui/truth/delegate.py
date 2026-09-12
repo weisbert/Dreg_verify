@@ -23,6 +23,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ... import truth_edit as TE
 from .. import contracts as CT
+from .. import names as N
 from .. import theme as TH
 from ..widgets import mono_font as _mono_font
 
@@ -32,14 +33,11 @@ CS = CT.TruthColState
 RK = CT.TruthRowKind
 
 __all__ = ["TruthDelegate", "CELL_FILL", "HEADER_COLORS", "NEG_CURRENT_BG",
-           "cell_colors", "header_colors", "PENDING_NAMES"]
+           "cell_colors", "header_colors"]
 
 
-#: `ui/names.py` 里还没有、但本波要用的 objectName（C3-int 搬进 names.py 并删掉这张表）。
-#: `view.py` 顶上还有一份同名表——两边各管各的类，搬的时候一起搬。
-PENDING_NAMES = {
-    "TRUTH_CELL_EDITOR": "truth_cell_editor",      # 单元格编辑器 QLineEdit（C-083 红框）
-}
+#: ⚠ C3-int 起本模块**不再有 `PENDING_NAMES` 影子表**：编辑器的 objectName 在
+#: `ui/names.py`（`N.TRUTH_CELL_EDITOR`）。
 
 #: 反例列**被选中**时的底色（C-107「更深的琥珀」）。
 #: theme 的琥珀家族里 `AMBER_BG`(#fdf3e0) 是常态底、`AMBER_BORDER`(#e6c98a) 是更深的一档；
@@ -114,7 +112,7 @@ class _CellEditor(QtWidgets.QLineEdit):
 
     def __init__(self, parent=None):
         QtWidgets.QLineEdit.__init__(self, parent)
-        self.setObjectName(PENDING_NAMES["TRUTH_CELL_EDITOR"])
+        self.setObjectName(N.TRUTH_CELL_EDITOR)
         self.setFont(_mono_font(TH.FS_MONO))
         self.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.setFrame(True)

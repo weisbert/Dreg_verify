@@ -480,7 +480,7 @@ def test_c083_editor_red_frame_but_commit_restores(rig):
     before_undo = m.undo_stack().count()
 
     ed = _open_editor(rig.grid, exp_r, 0)
-    assert ed.objectName() == D.PENDING_NAMES["TRUTH_CELL_EDITOR"]
+    assert ed.objectName() == N.TRUTH_CELL_EDITOR
     assert not ed.is_invalid(), "刚打开就标红了？"
 
     H.type_text(ed, "zz")                       # 非 ASCII / 换行会崩进程，这里只打 ASCII

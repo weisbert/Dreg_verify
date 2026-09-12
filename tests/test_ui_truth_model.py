@@ -32,6 +32,7 @@ pytest.importorskip("PySide6")
 from dreg_verify.ui import contracts                    # noqa: E402
 from dreg_verify.ui import terms                        # noqa: E402
 from dreg_verify.ui.truth import TruthModel, e_inputs_from_an          # noqa: E402
+from dreg_verify.ui.truth import io as TIO              # noqa: E402
 from dreg_verify.ui.truth import model as TM            # noqa: E402
 from dreg_verify.ui.truth import rows as TR             # noqa: E402
 
@@ -403,7 +404,7 @@ def test_c111_mux_user_data_matches_edits(btlp):
     before = _dump(m)
     assert m.setData(m.index(data_r, 0), "0b0011") is False    # 0 号列是自动生成列
     assert len(got_msgs) == 2 and all(got_msgs)
-    assert got_msgs[-1] == TM.PENDING_TERMS["TRUTH_MUX_DATA_NO_REANALYZER"]
+    assert got_msgs[-1] == terms.TRUTH_MUX_DATA_NO_REANALYZER
     assert _dump(m) == before
 
 
@@ -587,7 +588,7 @@ def test_c298_apply_expectations_and_batch_fill(btlp):
     got[:] = []
     n, missing, msg = m.import_expectations("nope.csv")
     assert (n, missing) == (0, [])
-    assert TM.PENDING_TERMS["TRUTH_IMPORT_READ_FAILED_FMT"].split("{")[0] in msg
+    assert terms.TRUTH_IMPORT_READ_FAILED_FMT.split("{")[0] in msg
     assert len(got) == 1 and got[0] == msg
     assert m.undo_stack().index() == n_undo + 1, "读失败不该动撤销栈"
 
@@ -1445,7 +1446,7 @@ def test_c294_paste_cannot_sneak_past_whole_table_mux_data(btlp):
     assert [c["vec"].assignments[key] for c in m.cols()] == before_asg
     assert rean.calls == [], "粘贴不该逐格触发整表重分析"
     assert m.undo_stack().count() == 0
-    assert TM.PENDING_TERMS["TRUTH_PASTE_MUX_WHOLE_FMT"].split("{")[0] in msg
+    assert terms.TRUTH_PASTE_MUX_WHOLE_FMT.split("{")[0] in msg
     assert str(m.columnCount()) in msg and reports[-1] == msg
 
     # 手编列的数据格照旧能粘（C-111：只改本列，`vec.assignments` 跟着走）
@@ -1468,16 +1469,16 @@ def test_c294_paste_says_why_it_could_not_add_columns(btlp):
     n_undo = m.undo_stack().index()
     ok, msg = m.paste_tsv("1\t1\t1", _exp_row(m), 0)
     assert ok is True and m.columnCount() == 0
-    assert TM.PENDING_TERMS["TRUTH_PASTE_NO_NEW_COL_MUX"] in msg, \
+    assert terms.TRUTH_PASTE_NO_NEW_COL_MUX in msg, \
         "没说清「mux 清零后没 case 可克隆」，只说了「只读」：%s" % msg
-    assert TM.PENDING_TERMS["TRUTH_PASTE_SKIPPED_FMT"].split("{")[0] not in msg
+    assert terms.TRUTH_PASTE_SKIPPED_FMT.split("{")[0] not in msg
     assert m.undo_stack().index() == n_undo, "一格都没落，不该占一步撤销"
     # logic 信号清零后是加得出列的（对照：证明上面那句 mux 的原因不是随口一说）
     lm, lan, lei = _fresh(btlp, LOGIC_SIG)
     lm.clear_all()
     ok, msg2 = lm.paste_tsv("1\t1\t1", _exp_row(lm), 0)
     assert ok is True and lm.columnCount() == 3
-    assert TM.PENDING_TERMS["TRUTH_PASTE_NO_NEW_COL_MUX"] not in msg2
+    assert terms.TRUTH_PASTE_NO_NEW_COL_MUX not in msg2
 
 
 @pytest.mark.contract("C-298")
@@ -1497,6 +1498,9 @@ def test_c298_import_expectations_goes_through_io(btlp, monkeypatch):
                 ["T9 这一列写法怪：zz+"])
 
     stub.read_expectations = _read
+    # 结果说明整句由真 io 拼（C3-int 去重后 model 与面板共用 `io.import_report_text`）——
+    # 这条 stub 的只是「读文件」那一半，报告仍要走真实现，否则测的就不是真文案了。
+    stub.import_report_text = TIO.import_report_text
     monkeypatch.setitem(sys.modules, "dreg_verify.ui.truth.io", stub)
     # 包上已经绑好 io 属性了（C3-d 的 io.py 已入库），`from . import io` 会先拿属性——
     # 只改 sys.modules 换不掉它，两处都得换

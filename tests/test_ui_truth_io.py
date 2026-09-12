@@ -322,12 +322,40 @@ def test_cell_editable_matches_model_flags(btlp, wl):
     assert IO._cell_editable(m, 0, m.columnCount()) is False
 
 
-def test_pending_terms_agree_with_model():
-    """粘贴报告那两截尾巴在 io 与 model 各有一份兜底（C3-int 搬进 terms.py 前）——不许漂。"""
-    shared = set(IO.PENDING_TERMS) & set(TM.PENDING_TERMS)
-    assert {"TRUTH_PASTE_ADDED_FMT", "TRUTH_PASTE_SKIPPED_FMT"} <= shared
-    for k in shared:
-        assert IO.PENDING_TERMS[k] == TM.PENDING_TERMS[k], k
+def test_paste_report_terms_live_only_in_terms_py():
+    """C3-int：粘贴 / 导入期望的文案**只有 terms.py 一份**，io 与 model 都不许再留影子表。
+
+    以前这条守的是「io 与 model 的两张 `PENDING_TERMS` 同名同值」；现在两张表都没了，
+    守的就是「一处定义」本身 —— 谁再在模块里写一份兜底，这条当场红。
+    """
+    for mod in (IO, TM):
+        for attr in ("PENDING_TERMS", "PENDING_NAMES"):
+            assert not hasattr(mod, attr), "%s.%s 还在，说明文案又有两份" % (mod.__name__, attr)
+    for key in ("TRUTH_PASTE_ADDED_FMT", "TRUTH_PASTE_SKIPPED_FMT", "TRUTH_PASTE_REPORT_FMT",
+                "TRUTH_PASTE_SKIP_READONLY", "TRUTH_PASTE_SKIP_PARSE_FMT",
+                "TRUTH_IMPORT_EXP_REPORT_FMT", "TRUTH_IMPORT_MISSING_FMT"):
+        assert isinstance(getattr(terms, key), str) and getattr(terms, key)
+
+
+@pytest.mark.contract("C-298")
+def test_c298_import_report_names_before_counts(btlp):
+    """I-20：导入期望的结果说明**名字在前、计数在后**，且 model 与面板共用这一句。
+
+    C3-int 之前 `model.import_expectations` 拼的是「按列名回填了 N 列的期望；这些列名…」
+    （计数在前），面板另拼了一份名字在前的 —— 现在只剩 `io.import_report_text` 一份。
+    """
+    msg = IO.import_report_text(2, ["T_NOT_HERE", "T_ALSO_GONE"], ["第一行是空的"])
+    assert msg.index("第一行是空的") < msg.index("T_NOT_HERE") < msg.index("2 列的期望")
+    assert "共 2 个" in msg and msg.endswith(terms.TRUTH_IMPORT_EXP_REPORT_FMT.format(missing="", n=2))
+    # 什么都没跳过时只剩计数那半句（不留空的分号）
+    assert IO.import_report_text(1) == terms.TRUTH_IMPORT_EXP_REPORT_FMT.format(missing="", n=1)
+    assert not IO.import_report_text(0).startswith("；")
+    # model 走的是同一句（逐字比）
+    m, _an, _p = _fresh(btlp, LOGIC_SIG)
+    n, missing = m.apply_expectations({"T_NOT_HERE": 1})
+    assert n == 0 and missing == ["T_NOT_HERE"]
+    assert IO.import_report_text(n, missing, []) ==         terms.TRUTH_IMPORT_EXP_REPORT_FMT.format(
+            missing=terms.TRUTH_IMPORT_MISSING_FMT.format(names="T_NOT_HERE", n=1) + "；", n=0)
 
 
 # ═══════════════════ C-298 导入期望 ═══════════════════
@@ -410,7 +438,7 @@ def test_c298_import_notes_name_the_problem(btlp, tmp_path):
     # ④ 没有「期望」行、又不止一行 → 一个值都不取，说清楚为什么
     p = _write(tmp_path / "none.csv", [["信号\\测试", names[0]], ["a", "1"], ["b", "2"]])
     by, notes = IO.read_expectations(p)
-    assert by == {} and notes == [IO.PENDING_TERMS["TRUTH_IMPORT_NO_EXP_ROW"]]
+    assert by == {} and notes == [terms.TRUTH_IMPORT_NO_EXP_ROW]
     # ⑤ 「期望来源」那行长得像但不是取值行，不许被当成期望
     p = _write(tmp_path / "src.csv", [["信号\\测试", names[0]],
                                       ["期望来源", "auto_out兜底"],
@@ -427,9 +455,9 @@ def test_c298_import_notes_name_the_problem(btlp, tmp_path):
                bom=False)
     assert IO.read_expectations(p)[0] == {names[0]: 1}
     p = _write(tmp_path / "empty.csv", [])
-    assert IO.read_expectations(p) == ({}, [IO.PENDING_TERMS["TRUTH_IMPORT_EMPTY_FILE"]])
+    assert IO.read_expectations(p) == ({}, [terms.TRUTH_IMPORT_EMPTY_FILE])
     p = _write(tmp_path / "nocol.csv", [["信号\\测试"], ["期望(进.sv)"]])
-    assert IO.read_expectations(p) == ({}, [IO.PENDING_TERMS["TRUTH_IMPORT_NO_COLUMNS"]])
+    assert IO.read_expectations(p) == ({}, [terms.TRUTH_IMPORT_NO_COLUMNS])
 
 
 def test_import_roundtrips_the_exported_csv(btlp, tmp_path):

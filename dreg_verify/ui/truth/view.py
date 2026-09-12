@@ -39,29 +39,11 @@ TR = CT.TruthRole
 RK = CT.TruthRowKind
 
 __all__ = ["TruthTableView", "TruthHeaderView", "NameModel", "FrozenNamesView",
-           "bind_frozen", "ROLE_GUESSED", "ROLE_NEEDS_PREFIX",
-           "PENDING_NAMES", "PENDING_TERMS", "MODEL_REQUIREMENTS"]
+           "bind_frozen", "ROLE_GUESSED", "ROLE_NEEDS_PREFIX", "MODEL_REQUIREMENTS"]
 
 
-#: `ui/names.py` 里还没有、本波要用的 objectName（C3-int 搬进 `names.py` 并删掉这张表）。
-PENDING_NAMES = {
-    "TRUTH_GRID_HEADER": "truth_grid_header",      # 网格列头（自绘：当前列 / 反例 / iddq 三种底）
-    "TRUTH_NAMES_HEADER": "truth_names_header",    # 冻结列表头
-}
-
-#: `ui/terms.py` 里还没有、本波要用的文案（C3-int 搬进 `terms.py` 并删掉这张表）。
-#: 取值一律经 `_t()`：`terms` 里有就用 `terms` 的，搬完自动一致。
-PENDING_TERMS = {
-    # C-063 列头悬停：这一列实际要下的 force / RF_WRITE
-    "TRUTH_HEADER_TIP_FMT": "{col}\n{drives}",
-    "TRUTH_HEADER_TIP_NONE": "这一列不用下 force / RF_WRITE",
-    # C-075 行标签悬停：位宽 + 怎么把值下进去（角色 · 端口已经内联在行标签里了）
-    "TRUTH_ROW_TIP_FMT": "{label}\n位宽 {width} 位 · {rw}",
-    "TRUTH_ROW_TIP_AUTO": "程序按表达式算的值，只读参考",
-    "TRUTH_ROW_TIP_EXP": "designer 手填的期望，进 .sv 断言",
-    # 撤销栈上这两步的名字（面板的撤销菜单会显示）
-    "TRUTH_UNDO_CLEAR_EXP": "清空期望",
-}
+#: ⚠ C3-int 起本模块**不再有 `PENDING_NAMES` / `PENDING_TERMS` 影子表**：objectName 只在
+#: `ui/names.py`（`N.TRUTH_*`），文案只在 `ui/terms.py`（`T.TRUTH_*`），一处定义一处改。
 
 #: 冻结列自己的 role（`contracts.TruthRole` 是网格 model 的，两边不重叠）
 ROLE_GUESSED = int(Qt.UserRole) + 21        # C-058/C-059：名字是按命名约定猜的
@@ -79,19 +61,6 @@ MODEL_REQUIREMENTS = {
 }
 
 
-def _t(name, **fmt):
-    """文案取值：`terms` 里有就用 `terms` 的，没有退回 `PENDING_TERMS`。"""
-    s = getattr(T, name, None)
-    if s is None:
-        s = PENDING_TERMS[name]
-    return s.format(**fmt) if fmt else s
-
-
-def _nm(name):
-    """objectName 取值：`names` 里有就用 `names` 的，没有退回 `PENDING_NAMES`。"""
-    return getattr(N, name, None) or PENDING_NAMES[name]
-
-
 # ═════════════════════════════ 列头（自绘三种底）═════════════════════════════
 class TruthHeaderView(QtWidgets.QHeaderView):
     """网格列头：按 `COL_STATE` + `IS_CURRENT_COL` 查 `delegate.HEADER_COLORS` 上色（C-107），
@@ -103,7 +72,7 @@ class TruthHeaderView(QtWidgets.QHeaderView):
 
     def __init__(self, parent=None):
         QtWidgets.QHeaderView.__init__(self, Qt.Horizontal, parent)
-        self.setObjectName(_nm("TRUTH_GRID_HEADER"))
+        self.setObjectName(N.TRUTH_GRID_HEADER)
         self.setFixedHeight(TH.TRUTH_HEADER_H)
         self.setHighlightSections(False)
         self.setSectionsClickable(True)
@@ -126,8 +95,8 @@ class TruthHeaderView(QtWidgets.QHeaderView):
         if isinstance(drives, str):
             drives = [drives]
         body = "\n".join(T.scrub(str(x)) for x in drives if str(x).strip())
-        return _t("TRUTH_HEADER_TIP_FMT", col=name,
-                  drives=body or _t("TRUTH_HEADER_TIP_NONE"))
+        return T.TRUTH_HEADER_TIP_FMT.format(col=name,
+                                            drives=body or T.TRUTH_HEADER_TIP_NONE)
 
     def paintSection(self, painter, rect, logicalIndex):
         m = self.model()
@@ -350,7 +319,7 @@ class TruthTableView(QtWidgets.QTableView):
         stack = m.undo_stack() if hasattr(m, "undo_stack") else None
         macro = stack is not None and len(ixs) > 1
         if macro:
-            stack.beginMacro(_t("TRUTH_UNDO_CLEAR_EXP"))
+            stack.beginMacro(T.TRUTH_UNDO_CLEAR_EXP)
         for ix in ixs:
             m.setData(ix, "", Qt.EditRole)
         if macro:
@@ -443,14 +412,14 @@ class NameModel(QtCore.QAbstractTableModel):
         """C-075：位宽 · 类型 · 来源，都过 `terms.scrub`（不变量 I-12）。"""
         kind = self._kind(row)
         if kind == RK.AUTO:
-            return _t("TRUTH_ROW_TIP_AUTO")
+            return T.TRUTH_ROW_TIP_AUTO
         if kind == RK.EXP:
-            return _t("TRUTH_ROW_TIP_EXP")
+            return T.TRUTH_ROW_TIP_EXP
         meta = self._meta[row] if 0 <= row < len(self._meta) else {}
         label = str(self._truth.row_label(row))
-        parts = [_t("TRUTH_ROW_TIP_FMT", label=label,
-                    width=int(meta.get("width") or 1),
-                    rw=str(meta.get("rw") or "?"))]
+        parts = [T.TRUTH_ROW_TIP_FMT.format(label=label,
+                                           width=int(meta.get("width") or 1),
+                                           rw=str(meta.get("rw") or "?"))]
         for key in ("found_in_text", "note"):
             txt = T.scrub(str(meta.get(key) or "")).strip()
             if txt:
@@ -530,7 +499,7 @@ class FrozenNamesView(QtWidgets.QTableView):
         self.setMinimumWidth(TH.CLAMP_FROZEN[0])
         self.setMaximumWidth(TH.CLAMP_FROZEN[1])
         hh = self.horizontalHeader()
-        hh.setObjectName(_nm("TRUTH_NAMES_HEADER"))
+        hh.setObjectName(N.TRUTH_NAMES_HEADER)
         hh.setFixedHeight(TH.TRUTH_HEADER_H)
         hh.setHighlightSections(False)
         hh.setFont(_ui_font(TH.FS_UI_SMALL))

@@ -47,7 +47,6 @@ from .. import theme as TH
 from .. import widgets as W
 from . import io as TIO
 from .delegate import TruthDelegate
-from .model import PENDING_TERMS as MODEL_PENDING_TERMS
 from .model import TruthModel
 from .rows import e_inputs_from_an
 from .view import FrozenNamesView, TruthTableView, bind_frozen
@@ -55,8 +54,7 @@ from .view import FrozenNamesView, TruthTableView, bind_frozen
 Qt = QtCore.Qt
 TR = CT.TruthRole
 
-__all__ = ["TruthPanel", "TOOLBAR_KEYS", "MENU_KEYS", "PENDING_NAMES", "PENDING_TERMS",
-           "STATE_REQUIREMENTS"]
+__all__ = ["TruthPanel", "TOOLBAR_KEYS", "MENU_KEYS", "STATE_REQUIREMENTS"]
 
 
 #: 工具条 13 键（Design「真值表工具条 13 按钮 + 1 提示条」，C-140）。顺序 = 屏幕上从左到右。
@@ -67,88 +65,10 @@ TOOLBAR_KEYS = ("regen", "add_col", "copy_col", "del_col", "rename_col", "clear"
 #: 右键菜单的项（顺序 = `terms.TRUTH_CONTEXT_MENU` 的语义顺序，C-296）
 MENU_KEYS = ("insert", "delete", "copy", "set_neg", "mux_data_col", "rename")
 
-#: `ui/names.py` 里还没有、本波要用的 objectName（C3-int 搬进 `names.py` 并删掉这张表）。
-#: 取值一律经 `_nm()`：`names` 里有就用 `names` 的，搬完自动一致。
-PENDING_NAMES = {
-    "TRUTH_SPLIT_NAMES_GRID": "truth_split_names_grid",   # 冻结列 ↔ 网格 的可拖分割（FROZEN_W）
-    "TRUTH_HINT_BAR": "truth_hint_bar",                   # 提示条三行的容器
-    "TRUTH_EMPTY": "truth_empty",                         # 空态文案（没选信号 / 分析失败）
-    "TRUTH_MUX_CASE": "truth_mux_case",                   # C-124 case 结构 + 生效档 + 手填进度
-    "TRUTH_MUX_SHADOWED": "truth_mux_shadowed",           # C-125 被跳过的死分支
-    "TRUTH_MUX_GATED": "truth_mux_gated",                 # C-126 受 dft 页 iddq 门控
-    "TRUTH_MUX_COLLISION_HINT": "truth_mux_collision",    # C-113 手填数据值撞值
-}
-#: 动态名（按键拼）：工具条按钮已在 `names.py`，这两类还没有
-NAME_LEGEND_FMT = "truth_legend_%s"          # 图例每一格（键 = theme.CELL_STATES 的键）
-NAME_MENU_FMT = "truth_menu_%s"              # 右键菜单每一项（键 = MENU_KEYS）
-
-#: `ui/terms.py` 里还没有、本波要用的文案（C3-int 搬进 `terms.py` 并删掉这张表）。
-PENDING_TERMS = {
-    # 空态（没选信号 / 这个信号分析不出来）
-    "TRUTH_EMPTY_NO_SIGNAL": "在左边清单里选一个信号，这里出它的真值表",
-    "TRUTH_EMPTY_FAILED": "这个信号分析不出来，真值表空着（原因看左边清单的状态）",
-    # 选区摘要（`terms.TRUTH_HINT_SELECTION_FMT` 只覆盖「整列」那一种）
-    "TRUTH_HINT_SELECTION_MULTI_FMT": "已选 {n} 格（跨 {ncol} 列）",
-    # 没选中列时的动作反馈
-    "TRUTH_NO_COLUMN": "先点一格或一列，再用这个按钮",
-    "TRUTH_ADD_NEG_NO_SELECTION": "没选中列，按 C-096 给第一条正向列加反例",
-    "TRUTH_ADD_NEG_DONE_FMT": "加了 {n} 条反例",
-    "TRUTH_ADD_NEG_SKIPPED_FMT": "，跳过 {n} 条（那几条正向列已经有反例了，不叠第二条）",
-    "TRUTH_DEL_NEG_DONE_FMT": "删了 {n} 条反例（正向列都留着）",
-    "TRUTH_DEL_COL_DONE_FMT": "删了 {names}，共 {n} 列",
-    "TRUTH_ADD_COL_DONE_FMT": "加了 {names}",
-    "TRUTH_CLEAR_DONE": "本信号已清零 = 零用例：导出时只记录、不产生断言",
-    "TRUTH_REGEN_DONE_FMT": "已按当前覆盖度重出 {n} 条测试列（本信号的自定义已丢弃，Ctrl+Z 可撤）",
-    "TRUTH_AUTO_FILL_DONE_FMT": "把 auto_out 填进了 {n} 条未填的期望格",
-    "TRUTH_BATCH_FILL_NOTHING": "没有可填的期望格（选中的列都是只读的）",
-    # 导入期望（C-298；名字在前、计数在后 = I-20）
-    "TRUTH_IMPORT_MISSING_FMT": "这些列名在本信号里没有：{names}（共 {n} 个，已跳过）",
-    "TRUTH_IMPORT_DONE_FMT": "按列名回填了 {n} 列的期望",
-    "TRUTH_IMPORT_READ_FAILED_FMT": "读不了这个文件：{err}",
-    # 导出 CSV（C-136…C-140）
-    "TRUTH_EXPORT_DONE_FMT": "已写出 {path}（{n} 列）",
-    "TRUTH_EXPORT_FAILED_FMT": "导不出 CSV：{err}",
-    "TRUTH_EXPORT_MUX_NO_BUILD":
-        "这个 mux 信号这次没产出 .sv 块（被跳过或只记录），CSV 导的是编辑器这张表，"
-        "与 .sv 不一定一一对应",
-    "TRUTH_EXPORT_CSV_FILTER": "CSV 表格 (*.csv)",
-    "TRUTH_IMPORT_EXP_FILTER": "期望值表 (*.csv *.xlsx *.xlsm)",
-    "TRUTH_EXPORT_CSV_TITLE": "导出本信号真值表 CSV",
-    "TRUTH_IMPORT_EXP_TITLE": "导入期望值",
-    # mux 头部条（C-124/C-125/C-126）
-    "TRUTH_MUX_CASE_FMT": "case({expr}) {n} 选 1",
-    "TRUTH_MUX_CASE_UNKNOWN": "mux 选路",
-    "TRUTH_MUX_HEADER_NOCOV_FMT": "{case_desc} · 手填 {n}/{m}",
-    "TRUTH_MUX_HOW": {
-        "精简": "每个 case 1 条（don't-care 位取 0）",
-        "全面": "精简 + case 的 x 位展开 + 每 case 一轮反码数据",
-        "穷举": "全面 + 另一条物理控制路径全扫每 case",
-    },
-    "TRUTH_MUX_GATE_FORCEABLE": "门是只读网，能 force 到透传值",
-    "TRUTH_MUX_GATE_NOT_FORCEABLE": "门网 force 不了（见右栏输入信号表），只能靠功能拍",
-    # C-215 RTL 补充逻辑标记
-    "TRUTH_SUPPLEMENT_DOT_TEXT": "●",
-}
-
-
-def _t(_name, **fmt):
-    """文案取值：`terms` → 本模块的 `PENDING_TERMS` → `truth/model.py` 的那张（C3-int 搬完即一致）。
-
-    最后一档是为了**不抄第二份**：「批量填了 N 列的期望」这句 model 已经有了（它的
-    `batch_fill` 就回这句），面板的「取 auto / 清空」两个分支说的是同一件事，抄一份迟早漂。
-    形参带下划线：占位符里就有 `{name}` / `{names}`，叫 `name` 会撞成「重复传参」。
-    """
-    s = getattr(T, _name, None)
-    if s is None:
-        s = PENDING_TERMS.get(_name)
-    if s is None:
-        s = MODEL_PENDING_TERMS[_name]
-    return s.format(**fmt) if fmt else s
-
-
-def _nm(name):
-    """objectName 取值：`names` 里有就用 `names` 的，没有退回 `PENDING_NAMES`。"""
-    return getattr(N, name, None) or PENDING_NAMES[name]
+#: ⚠ C3-int 起本模块**不再有 `PENDING_NAMES` / `PENDING_TERMS` 影子表**：objectName 只在
+#: `ui/names.py`（含动态的 `names.fmt_truth_legend` / `names.fmt_truth_menu`），
+#: 文案只在 `ui/terms.py`。粘贴 / 导入期望的**结果说明整句**在 `truth/io.py`，
+#: 与 `truth/model.py` 共用同一份（一处改，两处一起变）。
 
 
 #: 位宽切片（与 `excel_model._WIDTH_RANGE` / `_WIDTH_BIT` 同式：只认**结尾**的 `[3:0]` / `[2]`）
@@ -234,8 +154,8 @@ class TruthPanel(QtWidgets.QWidget):
         lay.addWidget(self._build_hints())
         lay.addWidget(self._build_grid(), 1)
         lay.addWidget(self._build_legend())
-        self.empty = QtWidgets.QLabel(_t("TRUTH_EMPTY_NO_SIGNAL"), self)
-        self.empty.setObjectName(_nm("TRUTH_EMPTY"))
+        self.empty = QtWidgets.QLabel(T.TRUTH_EMPTY_NO_SIGNAL, self)
+        self.empty.setObjectName(N.TRUTH_EMPTY)
         self.empty.setFont(W.ui_font())
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setWordWrap(True)
@@ -263,7 +183,7 @@ class TruthPanel(QtWidgets.QWidget):
         self.max_btn.toggled.connect(self._on_maximize)
         flow.addWidget(self.max_btn)
         # C-215：用了 RTL 补充逻辑的信号，名字旁边一颗琥珀点
-        self.supplement_dot = QtWidgets.QLabel(_t("TRUTH_SUPPLEMENT_DOT_TEXT"), bar)
+        self.supplement_dot = QtWidgets.QLabel(T.TRUTH_SUPPLEMENT_DOT_TEXT, bar)
         self.supplement_dot.setObjectName(N.TRUTH_SUPPLEMENT_DOT)
         self.supplement_dot.setFont(W.ui_font(TH.FS_UI_TITLE, bold=True))
         self.supplement_dot.setStyleSheet("color:%s;" % TH.AMBER_STROKE)
@@ -297,12 +217,12 @@ class TruthPanel(QtWidgets.QWidget):
         v.setContentsMargins(10, 4, 10, 4)
         v.setSpacing(1)
         self.mux_labels = {}
-        for key, oname, color in (("case", "TRUTH_MUX_CASE", TH.LIGHT_BLUE_FG),
-                                  ("shadowed", "TRUTH_MUX_SHADOWED", TH.MUTE),
-                                  ("gated", "TRUTH_MUX_GATED", TH.MUTE),
-                                  ("collision", "TRUTH_MUX_COLLISION_HINT", TH.AMBER_FG)):
+        for key, oname, color in (("case", N.TRUTH_MUX_CASE, TH.LIGHT_BLUE_FG),
+                                  ("shadowed", N.TRUTH_MUX_SHADOWED, TH.MUTE),
+                                  ("gated", N.TRUTH_MUX_GATED, TH.MUTE),
+                                  ("collision", N.TRUTH_MUX_COLLISION_HINT, TH.AMBER_FG)):
             lb = QtWidgets.QLabel("", box)
-            lb.setObjectName(_nm(oname))
+            lb.setObjectName(oname)
             lb.setFont(W.ui_font(TH.FS_UI_SMALL, bold=(key == "case")))
             lb.setWordWrap(True)
             lb.setStyleSheet("color:%s;" % color)
@@ -316,10 +236,10 @@ class TruthPanel(QtWidgets.QWidget):
     # ── 提示条三行 ──
     def _build_hints(self):
         box = QtWidgets.QWidget(self)
-        box.setObjectName(_nm("TRUTH_HINT_BAR"))
+        box.setObjectName(N.TRUTH_HINT_BAR)
         box.setAttribute(Qt.WA_StyledBackground, True)
         box.setStyleSheet("QWidget#%s{background:%s;border-bottom:1px solid %s;}"
-                          % (_nm("TRUTH_HINT_BAR"), TH.HINT_BG, TH.BORDER_LIGHT))
+                          % (N.TRUTH_HINT_BAR, TH.HINT_BG, TH.BORDER_LIGHT))
         v = QtWidgets.QVBoxLayout(box)
         v.setContentsMargins(10, 3, 10, 3)
         v.setSpacing(1)
@@ -343,7 +263,7 @@ class TruthPanel(QtWidgets.QWidget):
     # ── 冻结列 + 网格（C-295 / C-107 / C-108）──
     def _build_grid(self):
         split = QtWidgets.QSplitter(Qt.Horizontal, self)
-        split.setObjectName(_nm("TRUTH_SPLIT_NAMES_GRID"))
+        split.setObjectName(N.TRUTH_SPLIT_NAMES_GRID)
         split.setChildrenCollapsible(False)
         split.setHandleWidth(TH.HANDLE_W)
         split.setStyleSheet("QSplitter::handle{background:%s;}" % TH.HANDLE)
@@ -375,7 +295,7 @@ class TruthPanel(QtWidgets.QWidget):
         for key, text in T.TRUTH_LEGEND:
             bg, border, fg, line = TH.CELL_STATES[key]
             item = QtWidgets.QWidget(box)
-            item.setObjectName(NAME_LEGEND_FMT % key)
+            item.setObjectName(N.fmt_truth_legend(key))
             h = QtWidgets.QHBoxLayout(item)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(4)
@@ -455,7 +375,7 @@ class TruthPanel(QtWidgets.QWidget):
         except Exception:                            # noqa: BLE001 —— C-043：失败也只是一行字
             an = None
         if not an:
-            self.show_empty(_t("TRUTH_EMPTY_FAILED"))
+            self.show_empty(T.TRUTH_EMPTY_FAILED)
             return
         self.show_signal(name, an)
 
@@ -503,7 +423,7 @@ class TruthPanel(QtWidgets.QWidget):
             self.frozen.set_source(self.model, None, [])
         finally:
             self._loading = False
-        self.empty.setText(message or _t("TRUTH_EMPTY_NO_SIGNAL"))
+        self.empty.setText(message or T.TRUTH_EMPTY_NO_SIGNAL)
         self.empty.setVisible(True)
         self.splitter.setVisible(False)
         self.mux_header.setVisible(False)
@@ -587,8 +507,8 @@ class TruthPanel(QtWidgets.QWidget):
         label, _src = self._effective_label()
         n, m, _k = self.model.fill_progress()
         if not label:            # 没接会话档（独立起窗）→ 不编一个假的档位名出来
-            return _t("TRUTH_MUX_HEADER_NOCOV_FMT", case_desc=head, n=n, m=m)
-        how = _t("TRUTH_MUX_HOW").get(label, "")
+            return T.TRUTH_MUX_HEADER_NOCOV_FMT.format(case_desc=head, n=n, m=m)
+        how = T.TRUTH_MUX_HOW.get(label, "")
         return T.TRUTH_MUX_HEADER_FMT.format(case_desc=head, cov=label, how=how, n=n, m=m)
 
     @staticmethod
@@ -598,8 +518,8 @@ class TruthPanel(QtWidgets.QWidget):
         i, j = txt.find("("), txt.find(")")
         sel = txt[i + 1:j].strip() if 0 <= i < j else ""
         if not sel:
-            return _t("TRUTH_MUX_CASE_UNKNOWN")
-        return _t("TRUTH_MUX_CASE_FMT", expr=sel, n=int(n_cases or 0))
+            return T.TRUTH_MUX_CASE_UNKNOWN
+        return T.TRUTH_MUX_CASE_FMT.format(expr=sel, n=int(n_cases or 0))
 
     def _mux_shadowed_text(self):
         """C-125：靠后重复 case 被跳过 → 点名是哪几条（`expansion["shadowed"]`，没有 meta 层）。"""
@@ -620,8 +540,8 @@ class TruthPanel(QtWidgets.QWidget):
         forceable = getattr(gate.get("binding"), "kind", "") == "RO"
         return T.TRUTH_MUX_GATED_FMT.format(
             gate=T.scrub(str(gate.get("label") or "")),
-            forceable=_t("TRUTH_MUX_GATE_FORCEABLE" if forceable
-                         else "TRUTH_MUX_GATE_NOT_FORCEABLE"))
+            forceable=(T.TRUTH_MUX_GATE_FORCEABLE if forceable
+                       else T.TRUTH_MUX_GATE_NOT_FORCEABLE))
 
     def _mux_collision_text(self):
         """C-113：手填数据值撞值。判据 = `an["status_detail"] == "false-green"`
@@ -682,7 +602,7 @@ class TruthPanel(QtWidgets.QWidget):
             return
         ncol = len(self.selected_columns(fallback_current=False)) or 1
         self.hint_selection.setText(
-            _t("TRUTH_HINT_SELECTION_MULTI_FMT", n=int(n), ncol=ncol))
+            T.TRUTH_HINT_SELECTION_MULTI_FMT.format(n=int(n), ncol=ncol))
 
     def _on_progress(self, n, m, k):
         self.progressChanged.emit(int(n), int(m), int(k))
@@ -752,23 +672,23 @@ class TruthPanel(QtWidgets.QWidget):
         self._net_rows = self._build_net_rows()
         self._sync_toolbar()
         self._sync_mux_header()
-        self._say(_t("TRUTH_REGEN_DONE_FMT", n=self.model.columnCount()))
+        self._say(T.TRUTH_REGEN_DONE_FMT.format(n=self.model.columnCount()))
 
     # ── C-086 加列 ──
     def _do_add_col(self):
         c = self.current_column()
         names = self.model.append_test_column(1, src_idx=(c if c >= 0 else None))
         if not names:
-            self._say(_t("TRUTH_NO_COLUMN"))
+            self._say(T.TRUTH_NO_COLUMN)
             return
-        self._say(_t("TRUTH_ADD_COL_DONE_FMT", names="、".join(names)))
+        self._say(T.TRUTH_ADD_COL_DONE_FMT.format(names="、".join(names)))
         self._sync_mux_header()
 
     # ── C-087 / C-109 复制列 ──
     def _do_copy_col(self):
         c = self.current_column()
         if c < 0:
-            self._say(_t("TRUTH_NO_COLUMN"))
+            self._say(T.TRUTH_NO_COLUMN)
             return
         self._on_copy_column(c)
 
@@ -776,28 +696,28 @@ class TruthPanel(QtWidgets.QWidget):
         """Ctrl+D 与工具条走同一条路（视图只发信号，写入在这里，见 view.py 第 1 条线）。"""
         at, name = self.model.duplicate_column(int(c))
         if at < 0:
-            self._say(_t("TRUTH_NO_COLUMN"))
+            self._say(T.TRUTH_NO_COLUMN)
             return
-        self._say(_t("TRUTH_ADD_COL_DONE_FMT", names=name))
+        self._say(T.TRUTH_ADD_COL_DONE_FMT.format(names=name))
         self._sync_mux_header()
 
     # ── C-088 删列 ──
     def _do_del_col(self):
         cs = self.selected_columns()
         if not cs:
-            self._say(_t("TRUTH_NO_COLUMN"))
+            self._say(T.TRUTH_NO_COLUMN)
             return
         names = [self.model.all_names()[i] for i in cs]
         with self._bulk():
             gone = self.model.remove_columns(cs)
-        self._say(_t("TRUTH_DEL_COL_DONE_FMT", names="、".join(names), n=len(gone)))
+        self._say(T.TRUTH_DEL_COL_DONE_FMT.format(names="、".join(names), n=len(gone)))
         self._sync_mux_header()
 
     # ── C-091 / C-092 / C-093 重命名列 ──
     def _do_rename_col(self):
         c = self.current_column()
         if c < 0:
-            self._say(_t("TRUTH_NO_COLUMN"))
+            self._say(T.TRUTH_NO_COLUMN)
             return
         self._on_rename_column(c)
 
@@ -806,7 +726,7 @@ class TruthPanel(QtWidgets.QWidget):
         c = int(c)
         cols = self.model.cols()
         if not (0 <= c < len(cols)):
-            self._say(_t("TRUTH_NO_COLUMN"))
+            self._say(T.TRUTH_NO_COLUMN)
             return
         col = cols[c]
         if not col.get("user"):
@@ -826,7 +746,7 @@ class TruthPanel(QtWidgets.QWidget):
             return
         with self._bulk():
             self.model.clear_all()
-        self._say(_t("TRUTH_CLEAR_DONE"))
+        self._say(T.TRUTH_CLEAR_DONE)
         self._sync_mux_header()
 
     # ── C-096 / C-101 / C-122 加反例 ──
@@ -834,12 +754,12 @@ class TruthPanel(QtWidgets.QWidget):
         cs = self.selected_columns(fallback_current=False)
         note = ""
         if not cs:
-            note = _t("TRUTH_ADD_NEG_NO_SELECTION") + "；"     # 无选中 → 取首条正向（C-096）
+            note = T.TRUTH_ADD_NEG_NO_SELECTION + "；"     # 无选中 → 取首条正向（C-096）
         with self._bulk():
             n, skipped = self.model.add_negatives(cs)
-        msg = note + _t("TRUTH_ADD_NEG_DONE_FMT", n=n)
+        msg = note + T.TRUTH_ADD_NEG_DONE_FMT.format(n=n)
         if skipped:
-            msg += _t("TRUTH_ADD_NEG_SKIPPED_FMT", n=skipped)
+            msg += T.TRUTH_ADD_NEG_SKIPPED_FMT.format(n=skipped)
         self._say(msg)
         self._sync_mux_header()
 
@@ -852,7 +772,7 @@ class TruthPanel(QtWidgets.QWidget):
                 return
         with self._bulk():
             n = self.model.del_negatives()
-        self._say(_t("TRUTH_DEL_NEG_DONE_FMT", n=n))
+        self._say(T.TRUTH_DEL_NEG_DONE_FMT.format(n=n))
         self._sync_mux_header()
 
     # ── C-094 / C-095 auto→期望 ──
@@ -861,27 +781,24 @@ class TruthPanel(QtWidgets.QWidget):
             return
         with self._bulk():
             n = self.model.fill_expected()
-        self._say(_t("TRUTH_AUTO_FILL_DONE_FMT", n=n))
+        self._say(T.TRUTH_AUTO_FILL_DONE_FMT.format(n=n))
 
     # ── C-298 导入期望 ──
     def _do_import_exp(self):
         path, _f = QtWidgets.QFileDialog.getOpenFileName(
-            self, _t("TRUTH_IMPORT_EXP_TITLE"), "", _t("TRUTH_IMPORT_EXP_FILTER"))
+            self, T.TRUTH_IMPORT_EXP_TITLE, "", T.TRUTH_IMPORT_EXP_FILTER)
         if not path:
             return
         try:
             by_name, notes = TIO.read_expectations(path)
         except Exception as ex:                    # noqa: BLE001 —— 坏文件 / 占用中，绝不崩
-            self._say(_t("TRUTH_IMPORT_READ_FAILED_FMT", err=T.scrub(str(ex))))
+            self._say(T.TRUTH_IMPORT_READ_FAILED_FMT.format(err=T.scrub(str(ex))))
             return
         with self._bulk():
             n, missing = self.model.apply_expectations(by_name)
-        parts = [str(x) for x in (notes or ())]    # 逐条原因在前（跳过必有名字 + 原因）
-        if missing:
-            parts.append(_t("TRUTH_IMPORT_MISSING_FMT", names="、".join(missing),
-                            n=len(missing)))
-        parts.append(_t("TRUTH_IMPORT_DONE_FMT", n=n))     # 计数最后（I-20）
-        self._say("；".join(parts))
+        # 结果说明整句在 `truth/io.py`（C3-int 去重）：逐条原因 + 没对上的列名在前、计数在后
+        # （I-20）。`model.import_expectations` 走的是同一份，两条路说出来的话一字不差。
+        self._say(TIO.import_report_text(n, missing, notes))
 
     # ── C-298 批量填 ──
     def _do_batch_fill(self):
@@ -900,8 +817,8 @@ class TruthPanel(QtWidgets.QWidget):
         # 取 auto / 清空：没有专门的 model 方法，走唯一写入口 `setData` + 一个宏（仍是一步撤销）
         with self._bulk():
             n = self._fill_from(cs, auto=(spec.get("mode") == "auto"))
-        self._say(_t("TRUTH_BATCH_FILL_NOTHING") if not n
-                  else _t("TRUTH_BATCH_FILL_REPORT_FMT", n=n))
+        self._say(T.TRUTH_BATCH_FILL_NOTHING if not n
+                  else T.TRUTH_BATCH_FILL_REPORT_FMT.format(n=n))
 
     def _fill_from(self, cs, auto):
         """把选中列的期望格设成 auto_out（auto=True）或清空（auto=False）。一步撤销。"""
@@ -951,8 +868,8 @@ class TruthPanel(QtWidgets.QWidget):
     # ── C-136…C-140 导出 CSV ──
     def _do_export_csv(self):
         path, _f = QtWidgets.QFileDialog.getSaveFileName(
-            self, _t("TRUTH_EXPORT_CSV_TITLE"), "%s.csv" % (self._name or "truth"),
-            _t("TRUTH_EXPORT_CSV_FILTER"))
+            self, T.TRUTH_EXPORT_CSV_TITLE, "%s.csv" % (self._name or "truth"),
+            T.TRUTH_EXPORT_CSV_FILTER)
         if not path:
             return
         st = self.state
@@ -968,12 +885,12 @@ class TruthPanel(QtWidgets.QWidget):
             TIO.export_signal_csv(path, self.model, self._an, self._name,
                                   provider=provider, edited=edited, cov=cov)
         except Exception as ex:                    # noqa: BLE001 —— 盘满 / 文件被占用，绝不崩
-            self._say(_t("TRUTH_EXPORT_FAILED_FMT", err=T.scrub(str(ex))))
+            self._say(T.TRUTH_EXPORT_FAILED_FMT.format(err=T.scrub(str(ex))))
             return
         note = ""
         if self.model.editable_kind() == "mux" and self._is_editor_table(cols):
-            note = _t("TRUTH_EXPORT_MUX_NO_BUILD") + "；"      # C-136…C-140：没产物就照实说
-        self._say(note + _t("TRUTH_EXPORT_DONE_FMT", path=path, n=len(cols)))
+            note = T.TRUTH_EXPORT_MUX_NO_BUILD + "；"      # C-136…C-140：没产物就照实说
+        self._say(note + T.TRUTH_EXPORT_DONE_FMT.format(path=path, n=len(cols)))
 
     def _is_editor_table(self, cols):
         """这份 CSV 的列是不是「编辑器这张表」（= mux 产物没取到，`io` 退回了 model 的列）。
@@ -1023,7 +940,7 @@ class TruthPanel(QtWidgets.QWidget):
         self._menu_acts = {}
         for key in MENU_KEYS:
             act = menu.addAction(T.TRUTH_CONTEXT_MENU[key])
-            act.setObjectName(NAME_MENU_FMT % key)
+            act.setObjectName(N.fmt_truth_menu(key))
             act.setEnabled(bool(enabled[key]))
             act.triggered.connect(lambda _x=False, k=key, rr=int(r), cc=int(c):
                                   self._on_menu(k, rr, cc))
@@ -1066,9 +983,9 @@ class TruthPanel(QtWidgets.QWidget):
         elif key == "set_neg":
             with self._bulk():
                 n, skipped = self.model.add_negatives([c])
-            msg = _t("TRUTH_ADD_NEG_DONE_FMT", n=n)
+            msg = T.TRUTH_ADD_NEG_DONE_FMT.format(n=n)
             if skipped:
-                msg += _t("TRUTH_ADD_NEG_SKIPPED_FMT", n=skipped)
+                msg += T.TRUTH_ADD_NEG_SKIPPED_FMT.format(n=skipped)
             self._say(msg)
         elif key == "mux_data_col":
             self._set_mux_col_data(r, c)
@@ -1077,12 +994,12 @@ class TruthPanel(QtWidgets.QWidget):
 
     def _do_del_col_at(self, c):
         if not (0 <= c < self.model.columnCount()):
-            self._say(_t("TRUTH_NO_COLUMN"))
+            self._say(T.TRUTH_NO_COLUMN)
             return
         name = self.model.all_names()[c]
         with self._bulk():
             gone = self.model.remove_columns([c])
-        self._say(_t("TRUTH_DEL_COL_DONE_FMT", names=name, n=len(gone)))
+        self._say(T.TRUTH_DEL_COL_DONE_FMT.format(names=name, n=len(gone)))
         self._sync_mux_header()
 
     def _set_mux_col_data(self, r, c):

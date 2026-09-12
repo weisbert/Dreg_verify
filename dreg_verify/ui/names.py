@@ -155,6 +155,31 @@ TRUTH_LEGEND = "truth_legend"
 TRUTH_MUX_HEADER = "truth_mux_header"      # mux 头部条 C-124..C-126
 TRUTH_CONTEXT_MENU = "truth_context_menu"
 TRUTH_SUPPLEMENT_DOT = "truth_supplement_dot"   # RTL 补充琥珀标记（标题栏名字后，C-215）
+#: C3-int：以下整片从 `truth/panel.py` / `view.py` / `delegate.py` 的 PENDING_NAMES 搬进来
+TRUTH_SPLIT_NAMES_GRID = "truth_split_names_grid"   # 冻结列 ↔ 网格 的可拖分割（FROZEN_W）
+TRUTH_HINT_BAR = "truth_hint_bar"          # 提示条三行的容器
+TRUTH_EMPTY = "truth_empty"                # 空态文案（没选信号 / 分析失败）
+TRUTH_MUX_CASE = "truth_mux_case"          # C-124 case 结构 + 生效档 + 手填进度
+TRUTH_MUX_SHADOWED = "truth_mux_shadowed"  # C-125 被跳过的死分支
+TRUTH_MUX_GATED = "truth_mux_gated"        # C-126 受 dft 页 iddq 门控
+TRUTH_MUX_COLLISION_HINT = "truth_mux_collision"   # C-113 手填数据值撞值
+TRUTH_GRID_HEADER = "truth_grid_header"    # 网格列头（自绘：当前列 / 反例 / iddq 三种底）
+TRUTH_NAMES_HEADER = "truth_names_header"  # 冻结列表头
+TRUTH_CELL_EDITOR = "truth_cell_editor"    # 单元格编辑器 QLineEdit（C-083 红框）
+
+#: 前缀带 `_` = 不进 `all_names()`（值里有 `%s`，不是合法 objectName）
+_TRUTH_LEGEND_ITEM_FMT = "truth_legend_%s"   # 图例每一格（键 = theme.CELL_STATES 的键）
+_TRUTH_MENU_ITEM_FMT = "truth_menu_%s"       # 右键菜单每一项（键 = panel.MENU_KEYS）
+
+
+def fmt_truth_legend(key):
+    """真值表图例某一格的名字：truth_legend_<theme.CELL_STATES 的键>。"""
+    return _TRUTH_LEGEND_ITEM_FMT % key
+
+
+def fmt_truth_menu(key):
+    """真值表右键菜单某一项的名字：truth_menu_<panel.MENU_KEYS 的键>。"""
+    return _TRUTH_MENU_ITEM_FMT % key
 
 # ───────── ⑦ 电路图区 ─────────
 FLOW_PANEL = "flow_panel"

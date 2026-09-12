@@ -39,47 +39,20 @@ from .. import terms
 
 __all__ = ["PastePlan", "parse_tsv", "copy_tsv", "paste_plan", "paste_report_text",
            "plan_added_names", "read_expectations", "csv_input_rows", "signal_csv_columns",
-           "export_signal_csv", "COV_KEYS", "PENDING_TERMS"]
+           "export_signal_csv", "import_report_text", "COV_KEYS"]
 
 
-#: `ui/terms.py` 里还没有、但本模块要用的文案（C2-int 正在并行改 terms.py，这波不碰它）。
-#: C3-int 负责搬进 `terms.py` 并删掉这张表；取值一律经 `_t()`（terms 有就用 terms 的）。
-#: ⚠ 前两条与 `truth/model.py` 的 `PENDING_TERMS` 是**同名同值**的两份——两边各自兜底，
-#: 搬进 terms.py 之前谁改一边都会被 `test_c294_paste_plan_equivalent_to_model_paste`
-#: （逐字比报告文案）当场抓住。
-PENDING_TERMS = {
-    # 粘贴结果说明的两截尾巴（`terms.TRUTH_PASTE_REPORT_FMT` 的 {added} / {skipped} 占位）
-    "TRUTH_PASTE_ADDED_FMT": "，新增列 {names}",
-    "TRUTH_PASTE_SKIPPED_FMT": "，跳过 {n} 格（只读行/列）",
-    # 跳过某一格的原因（给用户逐格看的，不进汇总那句）
-    "TRUTH_PASTE_SKIP_READONLY": "只读格（auto_out 行 / 只读输入行 / 自检拍列）",
-    "TRUTH_PASTE_SKIP_PARSE_FMT": "写法没认出来：{text}",
-    # 导入期望（C-298）：读文件这半边的提示，逐条给名字 + 原因，不报「成功 N 条」了事
-    "TRUTH_IMPORT_NO_COLUMNS": "第一行是空的——第一行要是列名（导出的 CSV 原样改就行）",
-    "TRUTH_IMPORT_NO_EXP_ROW": "文件里没有「期望」行，也不止一行数据——没取到任何期望值",
-    "TRUTH_IMPORT_ONE_ROW_FMT": "文件里没有「期望」行，按唯一的那行「{label}」取值",
-    "TRUTH_IMPORT_BAD_CELL_FMT": "列「{name}」的写法没认出来：{text}（这一列跳过）",
-    "TRUTH_IMPORT_DUP_COL_FMT": "列名「{name}」在文件里出现了不止一次，只取第一处",
-    "TRUTH_IMPORT_EMPTY_FILE": "这个文件里一行都没有",
-}
+#: ⚠ C3-int 起本模块**不再有 `PENDING_TERMS` 影子表**：文案只在 `ui/terms.py`。
+#: 粘贴 / 导入期望的**结果说明整句**也收在本模块（`paste_report_text` /
+#: `import_report_text`）—— `truth/model.py` 与 `truth/panel.py` 都调这一份，
+#: 不再各拼各的（C3-int 去重；`test_c294_paste_plan_equivalent_to_model_paste`
+#: 逐字比两边的报告）。
 
 #: CSV / xlsx 里「期望」那一行的行名——按这个顺序找，第一个命中的算数。
 #: 与 `exports.signal_csv_text` 写出来的行名对齐（导出的表原样改回来就能导入）。
 EXP_ROW_PREFIXES = ("期望(进.sv)", "期望(bin)", "期望")
 #: 长得像「期望」但不是取值的行（`期望来源` 是 C-138 那行文字说明）
 EXP_ROW_EXCLUDE = ("期望来源",)
-
-
-def _t(_key, **fmt):
-    """文案取值：`terms` 里有就用 `terms` 的，没有退回 `PENDING_TERMS`（C3-int 搬完即一致）。
-
-    形参叫 `_key` 不叫 `name`：这里的占位符里就有一个 `{name}`（「列『T2』的写法没认出来」），
-    两者重名会直接 `TypeError: got multiple values`。
-    """
-    s = getattr(terms, _key, None)
-    if s is None:
-        s = PENDING_TERMS[_key]
-    return s.format(**fmt) if fmt else s
 
 
 # ═════════════════════════ 一、TSV（Excel 剪贴板）═════════════════════════
@@ -225,9 +198,9 @@ def paste_report_text(n_cells, added_names, n_skipped):
     """粘贴结果那一句（C-294）。`added_names` 给真实落下来的列名时文案就是最终态——
     C3-int 让 `model.paste_tsv` 调本函数时把 `append_test_column` 的返回值喂进来即可。"""
     added = list(added_names or ())
-    return _t("TRUTH_PASTE_REPORT_FMT", n=int(n_cells),
-              added=(_t("TRUTH_PASTE_ADDED_FMT", names=", ".join(added)) if added else ""),
-              skipped=(_t("TRUTH_PASTE_SKIPPED_FMT", n=int(n_skipped)) if n_skipped else ""))
+    return terms.TRUTH_PASTE_REPORT_FMT.format(n=int(n_cells),
+              added=(terms.TRUTH_PASTE_ADDED_FMT.format(names=", ".join(added)) if added else ""),
+              skipped=(terms.TRUTH_PASTE_SKIPPED_FMT.format(n=int(n_skipped)) if n_skipped else ""))
 
 
 def paste_plan(model, text, r0, c0):
@@ -268,12 +241,12 @@ def paste_plan(model, text, r0, c0):
             can = (_cell_editable(model, r, c) if c < n_old
                    else (c < n_have and _new_col_editable(model, r, ref_col)))
             if not can:
-                skipped.append((r, c, _t("TRUTH_PASTE_SKIP_READONLY")))
+                skipped.append((r, c, terms.TRUTH_PASTE_SKIP_READONLY))
                 continue
             try:
                 TE.parse_int(txt)                  # 空串 = 0 / 期望格的「清空」，都不算失败
             except ValueError:
-                skipped.append((r, c, _t("TRUTH_PASTE_SKIP_PARSE_FMT", text=txt)))
+                skipped.append((r, c, terms.TRUTH_PASTE_SKIP_PARSE_FMT.format(text=txt)))
                 continue
             cells.append((r, c, txt))
 
@@ -329,8 +302,8 @@ def _pick_exp_row(rows):
                 return r, lbl, None
     if len(data) == 1:
         lbl = _cell_text(data[0][0] if data[0] else "").strip()
-        return data[0], lbl, _t("TRUTH_IMPORT_ONE_ROW_FMT", label=lbl)
-    return None, "", _t("TRUTH_IMPORT_NO_EXP_ROW")
+        return data[0], lbl, terms.TRUTH_IMPORT_ONE_ROW_FMT.format(label=lbl)
+    return None, "", terms.TRUTH_IMPORT_NO_EXP_ROW
 
 
 def read_expectations(path):
@@ -355,10 +328,10 @@ def read_expectations(path):
     rows = [r for r in rows if any(_cell_text(v).strip() for v in (r or ()))]
     notes = []
     if not rows:
-        return {}, [_t("TRUTH_IMPORT_EMPTY_FILE")]
+        return {}, [terms.TRUTH_IMPORT_EMPTY_FILE]
     header = [_cell_text(v).strip() for v in rows[0]]
     if len(header) < 2 or not any(header[1:]):
-        return {}, [_t("TRUTH_IMPORT_NO_COLUMNS")]
+        return {}, [terms.TRUTH_IMPORT_NO_COLUMNS]
 
     row, _lbl, note = _pick_exp_row(rows)
     if note:
@@ -371,7 +344,7 @@ def read_expectations(path):
         if i == 0 or not nm:
             continue
         if nm in by_name:
-            notes.append(_t("TRUTH_IMPORT_DUP_COL_FMT", name=nm))
+            notes.append(terms.TRUTH_IMPORT_DUP_COL_FMT.format(name=nm))
             continue
         txt = _cell_text(row[i] if i < len(row) else "").strip()
         if txt == "":
@@ -379,8 +352,28 @@ def read_expectations(path):
         try:
             by_name[nm] = TE.parse_int(txt)
         except ValueError:
-            notes.append(_t("TRUTH_IMPORT_BAD_CELL_FMT", name=nm, text=txt))
+            notes.append(terms.TRUTH_IMPORT_BAD_CELL_FMT.format(name=nm, text=txt))
     return by_name, notes
+
+
+def import_report_text(n_applied, missing=(), notes=()):
+    """导入期望的结果说明整句（C-298 / **I-20：先点名、计数在后**）。
+
+    C3-int 之前这句有两份：`model.import_expectations` 拼的是「按列名回填了 N 列的期望；
+    这些列名在本信号里没有：…」（计数在前，违反 I-20），面板自己又拼了一份名字在前的。
+    现在只有这一份，两边都调：
+
+        逐条原因（读文件时的 notes）；没对上的列名 + 共几个；按列名回填了 N 列的期望
+
+    `missing` 为空、`notes` 为空时就只剩最后那半句。分号是 `terms` 之外的**结构符**，
+    和 `dialogs` / 面板提示条的分段一致。
+    """
+    parts = [str(x) for x in (notes or ()) if str(x).strip()]
+    miss = [str(x) for x in (missing or ())]
+    if miss:
+        parts.append(terms.TRUTH_IMPORT_MISSING_FMT.format(names="、".join(miss), n=len(miss)))
+    head = ("；".join(parts) + "；") if parts else ""
+    return terms.TRUTH_IMPORT_EXP_REPORT_FMT.format(missing=head, n=int(n_applied))
 
 
 # ═════════════════════════ 三、单信号真值表 CSV（C-136…C-139）═════════════════════════

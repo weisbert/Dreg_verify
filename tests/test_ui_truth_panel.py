@@ -158,7 +158,7 @@ def right_click(p, r, c):
 
 
 def menu_act(menu, key):
-    name = PANEL.NAME_MENU_FMT % key
+    name = N.fmt_truth_menu(key)
     return next(a for a in menu.actions() if a.objectName() == name)
 
 
@@ -224,7 +224,7 @@ def test_c089_c094_clear_and_auto_fill_apply_when_confirmed(qapp, monkeypatch):
                for c in range(m.columnCount()))
     click_btn(p, "clear")
     assert m.columnCount() == 0
-    assert hint(p) == PANEL.PENDING_TERMS["TRUTH_CLEAR_DONE"]
+    assert hint(p) == T.TRUTH_CLEAR_DONE
     assert "零用例" in hint(p), "清零之后要说清后果（导出时只记录、不产生断言）"
 
 
@@ -292,7 +292,7 @@ def test_c096_add_neg_without_selection_says_so(qapp, monkeypatch):
     p.grid.setCurrentIndex(QtCore.QModelIndex())
     click_btn(p, "add_neg")
     assert sum(1 for c in p.model.cols() if c["neg"]) == 1
-    assert PANEL.PENDING_TERMS["TRUTH_ADD_NEG_NO_SELECTION"] in hint(p)
+    assert T.TRUTH_ADD_NEG_NO_SELECTION in hint(p)
 
 
 @pytest.mark.contract("C-101", "C-122")
@@ -327,7 +327,7 @@ def test_c124_c125_c126_mux_header_strip(qapp):
     case = p.mux_labels["case"].text()
     assert "case(" in case and "%d 选 1" % len(exp["parsed_cases"]) in case
     label, _src = st.coverage().effective_label(p.current_name(), models=st.models())
-    assert label in case and PANEL.PENDING_TERMS["TRUTH_MUX_HOW"][label] in case
+    assert label in case and T.TRUTH_MUX_HOW[label] in case
     n, m, _k = p.model.fill_progress()
     assert "手填 %d/%d" % (n, m) in case
 
@@ -340,7 +340,7 @@ def test_c124_c125_c126_mux_header_strip(qapp):
     gated = p.mux_labels["gated"]
     assert an["dft_gate"] and gated.isVisible()
     assert an["dft_gate"]["label"] in gated.text()
-    assert PANEL.PENDING_TERMS["TRUTH_MUX_GATE_FORCEABLE"] in gated.text(), \
+    assert T.TRUTH_MUX_GATE_FORCEABLE in gated.text(), \
         "这个门的 binding.kind 是 RO，头部条要说「能 force」"
 
     # logic 信号上整条头部条都不该露头
@@ -500,8 +500,10 @@ def test_c298_import_and_batch_fill_report_names_first(qapp, monkeypatch, tmp_pa
     click_btn(p, "import_exp")
     txt = hint(p)
     assert bogus in txt and "1" in txt
-    assert txt.index(bogus) < txt.index(PANEL.PENDING_TERMS["TRUTH_IMPORT_DONE_FMT"]
-                                        .format(n=1)), "名字必须在计数前（I-20）"
+    # C3-int：这句现在由 `truth/io.import_report_text` 拼，model 与面板共用同一份
+    assert txt == TIO.import_report_text(1, [bogus], [])
+    assert txt.index(bogus) < txt.index(
+        T.TRUTH_IMPORT_EXP_REPORT_FMT.format(missing="", n=1)), "名字必须在计数前（I-20）"
     exp_r = m.rowCount() - 1
     assert m.data(m.index(exp_r, 0), int(TR.RAW_VALUE)) == 1
 
@@ -551,7 +553,7 @@ def test_c136_export_csv_passes_provider_edited_cov(qapp, monkeypatch, tmp_path)
     assert set(seen["cov"]) == set(TIO.COV_KEYS)
     assert os.path.exists(out) and os.path.getsize(out) > 0
     assert out in hint(p)
-    assert PANEL.PENDING_TERMS["TRUTH_EXPORT_MUX_NO_BUILD"] not in hint(p), \
+    assert T.TRUTH_EXPORT_MUX_NO_BUILD not in hint(p), \
         "产物取到了却还说「没产出」—— 那句提醒会天天弹，用户很快就不看了"
 
 
@@ -568,8 +570,8 @@ def test_c139_export_says_so_when_mux_product_missing(qapp, monkeypatch, tmp_pat
     H.auto_dialogs(monkeypatch, answers={"QFileDialog.getSaveFileName": (out, "")})
     click_btn(p, "export_csv")
     assert os.path.exists(out), "产物取不到也要把编辑器这张表导出来，不是什么都不写"
-    assert PANEL.PENDING_TERMS["TRUTH_EXPORT_MUX_NO_BUILD"] in hint(p)
-    assert hint(p).index(PANEL.PENDING_TERMS["TRUTH_EXPORT_MUX_NO_BUILD"]) < hint(p).index(out), \
+    assert T.TRUTH_EXPORT_MUX_NO_BUILD in hint(p)
+    assert hint(p).index(T.TRUTH_EXPORT_MUX_NO_BUILD) < hint(p).index(out), \
         "先说清这份 CSV 与 .sv 不一定对得上，再报写到哪儿了"
 
 
@@ -699,24 +701,27 @@ def test_c063_column_header_tooltip_has_drive_detail(qapp):
 
 
 def test_panel_names_all_set(qapp):
-    """I-14：面板上每个可测控件都有 objectName，且名字只来自 `names.py` / `PENDING_NAMES`。"""
+    """I-14：面板上每个可测控件都有 objectName，且名字**只来自 `names.py`**（C3-int 收口）。"""
     p, _st = make_panel(MUX_SIG)
     want = [N.TRUTH_PANEL, N.TRUTH_TOOLBAR, N.TRUTH_HINT_SELECTION, N.TRUTH_HINT_PASTE,
             N.TRUTH_HINT_CONTEXT, N.TRUTH_NAMES_VIEW, N.TRUTH_GRID_VIEW, N.TRUTH_LEGEND,
             N.TRUTH_MUX_HEADER, N.TRUTH_SUPPLEMENT_DOT, N.TRUTH_BTN_MAXIMIZE]
     want += [getattr(N, "TRUTH_BTN_%s" % k.upper()) for k in PANEL.TOOLBAR_KEYS]
-    want += list(PANEL.PENDING_NAMES.values())
-    want += [PANEL.NAME_LEGEND_FMT % k for k, _txt in T.TRUTH_LEGEND]
+    want += [N.TRUTH_SPLIT_NAMES_GRID, N.TRUTH_HINT_BAR, N.TRUTH_EMPTY, N.TRUTH_MUX_CASE,
+             N.TRUTH_MUX_SHADOWED, N.TRUTH_MUX_GATED, N.TRUTH_MUX_COLLISION_HINT]
+    want += [N.fmt_truth_legend(k) for k, _txt in T.TRUTH_LEGEND]
     assert H._find_opt(p, "no_such_object_name_xyz") is None      # 这条查找判得出「没有」
     missing = [x for x in want if H._find_opt(p, x) is None]
     assert not missing, "这些 objectName 在面板上找不到：%s" % missing
     menu = p.build_context_menu(0, 0)
     assert menu.objectName() == N.TRUTH_CONTEXT_MENU
-    assert all(a.objectName() == PANEL.NAME_MENU_FMT % k
+    assert all(a.objectName() == N.fmt_truth_menu(k)
                for a, k in zip(menu.actions(), PANEL.MENU_KEYS))
-    # PENDING 两张表不许与 names/terms 已有的撞名（C3-int 搬的时候才不会互相覆盖）
-    assert not [k for k in PANEL.PENDING_NAMES if hasattr(N, k)]
-    assert not [k for k in PANEL.PENDING_TERMS if hasattr(T, k)]
+    # C3-int：影子表不许再回来（文案在 terms.py、名字在 names.py，一处定义一处改）
+    for attr in ("PENDING_NAMES", "PENDING_TERMS", "NAME_LEGEND_FMT", "NAME_MENU_FMT"):
+        assert not hasattr(PANEL, attr), "panel.%s 还在，说明常量有两份" % attr
+    assert set(want) <= set(N.all_names().values()) | {N.fmt_truth_legend(k)
+                                                       for k, _t in T.TRUTH_LEGEND}
 
 
 def test_panel_empty_state_when_no_signal(qapp):
@@ -727,8 +732,8 @@ def test_panel_empty_state_when_no_signal(qapp):
     p.show()
     _ALIVE.append(p)
     H.app().processEvents()
-    empty = H.find(p, PANEL.PENDING_NAMES["TRUTH_EMPTY"], QtWidgets.QLabel)
-    assert empty.isVisible() and empty.text() == PANEL.PENDING_TERMS["TRUTH_EMPTY_NO_SIGNAL"]
+    empty = H.find(p, N.TRUTH_EMPTY, QtWidgets.QLabel)
+    assert empty.isVisible() and empty.text() == T.TRUTH_EMPTY_NO_SIGNAL
     assert p.model.columnCount() == 0 and p.model.rowCount() == 2
     assert all(not btn(p, k).isEnabled() for k in PANEL.TOOLBAR_KEYS)
     st.set_current(LOGIC_SIG[1])
@@ -743,7 +748,7 @@ def test_panel_legend_colors_come_from_theme(qapp):
     """图例六项（`terms.TRUTH_LEGEND`）按 `theme.CELL_STATES` 上色，面板不写裸十六进制。"""
     p, _st = make_panel(LOGIC_SIG)
     for key, text in T.TRUTH_LEGEND:
-        item = H.find(p, PANEL.NAME_LEGEND_FMT % key)
+        item = H.find(p, N.fmt_truth_legend(key))
         lb = item.findChild(QtWidgets.QLabel)
         sw = item.findChild(QtWidgets.QFrame)
         bg, border, fg, _line = TH.CELL_STATES[key]
