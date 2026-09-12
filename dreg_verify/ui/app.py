@@ -182,6 +182,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker = None
         self._retired = []             # 已经作废、但线程还没停下来的旧 worker（见 _retire_worker）
         self._run_id = 0               # 分析「第几趟」：旧趟迟到的信号按它丢掉
+        self._stopped_run = -1         # 被用户按停的那一趟（见 on_stop_analysis）：升级类信号一律作废
         # PERF-1：状态栏那一行计数（`_counts_of` 要扫全表两遍）逐信号算一次就是 O(N²)，
         # 合并成 100 ms 一发。写过状态栏（`set_status`）就把合并中的那一发作废。
         self._counts_timer = QtCore.QTimer(self)
@@ -997,16 +998,25 @@ class MainWindow(QtWidgets.QMainWindow):
         为什么光 disconnect 不够：`emit` 发生在 worker 线程，跨线程是**队列连接**——
         信号已经排进主线程事件队列之后再 disconnect，那一条照样会被投递
         （Qt 只保证接收方析构时清掉待投递事件，不保证断连能撤回已排队的）。
-        所以真正的闸门是趟号：`_retire_worker` 一加号，旧趟所有迟到的信号当场作废。"""
-        def gate(fn):
+        所以真正的闸门是趟号：`_retire_worker` 一加号，旧趟所有迟到的信号当场作废。
+
+        PERF-2 加的第二道闸门 `stoppable`：用户按下「停止分析」那一刻，**这一趟**之后到达的
+        `started / progress / signalDone / finished` 一律作废。理由和上面一模一样 —— 引擎比
+        清单刷新快几十倍，按下停止时 worker 线程往往早已跑完，几百条 `signalDone` 正排在主线程
+        队列里，`cancel()` 撤不回它们，清单会当着用户的面继续一路展开到底。收尾的
+        `cancelled / failed` **不**过这道闸（worker 真的还在跑时，收尾就该由它来报）。"""
+        def gate(fn, stoppable=False):
             def slot(*args):
-                if run == self._run_id:
-                    fn(*args)
+                if run != self._run_id:
+                    return
+                if stoppable and run == self._stopped_run:
+                    return
+                fn(*args)
             return slot
-        _connect(w, "started", gate(self._on_worker_started))
-        _connect(w, "progress", gate(self._on_worker_progress))
-        _connect(w, "signalDone", gate(self._on_worker_signal_done))
-        _connect(w, "finished", gate(self._on_worker_finished))
+        _connect(w, "started", gate(self._on_worker_started, True))
+        _connect(w, "progress", gate(self._on_worker_progress, True))
+        _connect(w, "signalDone", gate(self._on_worker_signal_done, True))
+        _connect(w, "finished", gate(self._on_worker_finished, True))
         _connect(w, "cancelled", gate(self._on_worker_cancelled))
         _connect(w, "failed", gate(self._on_worker_failed))
 
@@ -1040,12 +1050,50 @@ class MainWindow(QtWidgets.QMainWindow):
             self._retired.append(w)
 
     def on_stop_analysis(self):
-        """⑮「停止分析」：已展开完的保留，其余仍显示「分析中」（C-276）。"""
-        if self._worker is not None and self._worker.is_running():
-            self._worker.cancel()
+        """⑮「停止分析」：已展开完的保留，其余仍显示「分析中」（C-276 / C-269）。
+
+        PERF-2：以前这里**只在** `worker.is_running()` 时 `cancel()`，别的什么也不做 ——
+        于是 200 信号那张表上「停止」是个假按钮。引擎比清单刷新快几十倍（合成 200 信号表
+        实测：引擎 0.03 s 跑完，清单展开要 2 s），用户按下停止时 worker 线程早就退出了，
+        200 条 `signalDone` 全排在主线程队列里，而 `cancel()` 撤不回已排队的跨线程信号
+        （`_retire_worker` 的 docstring 自己写着这一点）：清单照样一路展开到底，最后还发一条
+        `analysisEnded(vid, True)` —— 从头到尾没人告诉用户「停了」，也确实没停。
+
+        现在无论线程还在不在跑，先把这一趟记进 `_stopped_run`（升级类信号的闸门，见
+        `_connect_worker`），已排队的 `signalDone / progress / finished` 到达时被丢掉；
+        线程还在跑就照旧 `cancel()`（收尾由它的 `cancelled` 报，语义不变，场景⑧ 的
+        「已完成行一行不回退」仍由 `_on_worker_cancelled` 的 partial 合并保证），
+        线程已经跑完就自己收尾：载入态收起 + 状态栏 `LOADING_STOPPED_FMT` + `analysisEnded(vid, False)`。"""
+        vid = str(self._analysis_vid or self._scope())
+        w = self._worker
+        if not (self.loading_panel.isVisibleTo(self) or (w is not None and w.is_running())):
+            self._set_loading(False)                   # 根本没有在跑的一趟：照旧什么都不报
+            return False
+        self._stopped_run = self._run_id
+        if w is not None and w.is_running():
+            w.cancel()
             return True
-        self._set_loading(False)
+        self._report_stopped(vid)
         return False
+
+    def _report_stopped(self, view_id):
+        """「停止」的收尾（PERF-2）：worker 已经跑完、`cancelled` 不会再来了，这一句得自己说。
+
+        `done` 按**清单里真的升级完的行数**数，不拿进度条上那个数 —— 进度条是 `progress`
+        刷的，而 `progress` 和 `signalDone` 是两条信号，停止那一刻它可能刚好多走一格。"""
+        _done, total = self.loading_bar.value()
+        n_done = self._upgraded_count(view_id)
+        self._set_loading(False)
+        self.set_status(terms.LOADING_STOPPED_FMT.format(done=n_done, total=int(total or 0)))
+        self.analysisEnded.emit(str(view_id), False)
+
+    def _upgraded_count(self, view_id):
+        """这个范围里已经展开完（不再是「分析中」）的行数。"""
+        try:
+            rows = list(self._state.models(view_id) or [])
+        except Exception:                             # noqa: BLE001
+            rows = []
+        return sum(1 for m in rows if terms.status_key_of(m) != "pending")
 
     def _on_worker_started(self, view_id="", total=0):
         self._set_loading(True, 0, int(total or 0), "")

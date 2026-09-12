@@ -9,6 +9,10 @@
          格式化全建一遍）——200 信号上是 O(N²)。合成 200 信号表实测 T2 = 2.0 s，
          其中 1.38 s（60%）是 58,875 次 `_row_data`；另有 0.47 s（18%）是 worker 收尾时
          「每一行都已逐条升级过了」却仍整表 `reload()`。
+  PERF-2 「停止分析」是个假按钮：引擎比清单刷新快几十倍（同一张表引擎 0.03 s 跑完、清单要
+         2 s 才展开完），用户按下停止时 worker 线程早已退出，200 条 `signalDone` 全排在主
+         线程队列里，`cancel()` 撤不回已排队的跨线程信号 —— 清单继续一路展开到底，最后还发
+         一条 `analysisEnded(vid, True)`。
 
 口径同别的 UI 用例：offscreen、真清单 / 真组合根、mirror 的真模型，不写死毫秒。
 """
@@ -22,6 +26,7 @@ pytest.importorskip("PySide6")
 from PySide6 import QtCore                                       # noqa: E402
 
 from dreg_verify.ui import contracts as CT                       # noqa: E402
+from dreg_verify.ui import names as N                            # noqa: E402
 from dreg_verify.ui import signal_list as SL                     # noqa: E402
 from dreg_verify.ui import terms as T                            # noqa: E402
 from dreg_verify.ui.app import MainWindow                        # noqa: E402
@@ -237,6 +242,65 @@ def test_c276_perf1_reload_still_happens_when_the_row_set_changes(qapp, tmp_path
     st.set_models(st.scope, make_models(5), False)    # 8 行 → 5 行
     assert calls["reload"] == 1, "行集合变了却没重建（reload 次数 %d）" % calls["reload"]
     assert w.list_panel.proxy.rowCount() == 5
+    w.close()
+
+
+# ═════════════════ PERF-2：停止真的停 ═════════════════
+def test_c276_c269_perf2_stop_ignores_queued_signal_done(qapp, tmp_path):
+    """排队的 `signalDone` 撵不动清单：点停止那一刻展开完几行，停下来就还是几行。
+
+    变异验证：
+      · 去掉 `_connect_worker` 的 `stoppable` 闸门 → 剩下 5 条照样落进清单（8 行全完），
+        而且收到的是 `analysisEnded(vid, True)`；
+      · 去掉 `on_stop_analysis` 的 `_report_stopped` → 一条收尾都没有，状态栏空着。
+    """
+    models = make_models(8)
+    st = FakeState(models=models)
+    w = MainWindow(state=st, worker_factory=lambda: _QueuedWorker(deliver_now=3))
+    ended = []
+    w.analysisEnded.connect(lambda vid, ok: ended.append((vid, ok)))
+    w.load_path(touch_xlsx(tmp_path))
+
+    # 线程「早跑完了」，清单才升级了 3 行，另外 5 条 + finished 排在主线程队列里
+    assert not w.worker.is_running()
+    assert len(_done(st)) == 3 and len(_pending(st)) == 5
+    assert H.find(w, N.LOADING_PANEL).isVisibleTo(w)
+    frozen = sorted(_done(st))
+
+    H.find(w, N.LOADING_BTN_STOP).click()             # ⑮ 停止分析（真按钮，不直接调槽）
+
+    assert ended == [(st.scope, False)], "停止没有收尾：%s" % (ended,)
+    assert H.find(w, N.STATUS_LEFT).text() == T.LOADING_STOPPED_FMT.format(done=3, total=8)
+    assert not H.find(w, N.LOADING_PANEL).isVisibleTo(w)
+
+    for _ in range(5):                                # 把排着的那 5 条 + finished 全放出来
+        qapp.processEvents()
+    assert sorted(_done(st)) == frozen, "排队的 signalDone 还是把清单推下去了：%s" % (_done(st),)
+    assert len(_pending(st)) == 5, "其余的行没有留在「分析中」：%s" % (_pending(st),)
+    assert ended == [(st.scope, False)], "排队的 finished 又发了一次收尾：%s" % (ended,)
+    assert H.find(w, N.STATUS_LEFT).text() == T.LOADING_STOPPED_FMT.format(done=3, total=8)
+    assert w.list_panel.proxy.rowCount() == 8         # 行还在，能点
+    w.close()
+
+
+def test_c276_perf2_stop_while_thread_still_runs_keeps_cancel_path(qapp, tmp_path):
+    """worker 真的还在跑时，`cancel()` 与 `cancelled` 收尾那一路原样不动（场景⑧ 的语义）。"""
+    from test_ui_app import FakeWorker
+
+    models = make_models(8)
+    st = FakeState(models=models)
+    w = MainWindow(state=st, worker_factory=lambda: FakeWorker(stop_after=2))
+    ended = []
+    w.analysisEnded.connect(lambda vid, ok: ended.append((vid, ok)))
+    w.load_path(touch_xlsx(tmp_path))
+    assert w.worker.is_running()
+
+    H.find(w, N.LOADING_BTN_STOP).click()
+    qapp.processEvents()
+    assert not w.worker.is_running()
+    assert ended == [(st.scope, False)]
+    assert H.find(w, N.STATUS_LEFT).text() == T.LOADING_STOPPED_FMT.format(done=2, total=8)
+    assert len(_pending(st)) == 6
     w.close()
 
 
