@@ -45,6 +45,9 @@ __all__ = ["WorkbenchState", "EngineLock", "STATUS_RESTORE_BAD_FMT"]
 #: 但定义只有 terms.py 那一份 —— 两份字面量迟早会漂开。
 STATUS_RESTORE_BAD_FMT = terms.STATUS_RESTORE_BAD_FMT
 
+#: 清单勾「反例」造出来的那条反例列的标号（C-023）——与 v1 `legacy_gui.py:1634` 一字不差（P-02）
+NEG_COL_NAME = "T0_NEG"
+
 #: legacy 覆盖度键（C-230）：只在缺 `cov_<view_id>` 时读一次作迁移，**永不回写**
 _LEGACY_COV_KEYS = {"logic": "coverage_logic", "mux": "coverage_mux"}
 _LEGACY_COV_FALLBACK = "coverage"
@@ -432,7 +435,13 @@ class WorkbenchState(QtCore.QObject):
 
         与 v1 `_toggle_signal_negative` 同语义（已有反例不重复加、只对正向列造），
         但错值走 `edits.add_negatives` —— 它会避开 auto_out 与 designer 手填期望两个「正确值」，
-        裸 `~auto` 恰好等于手填期望时反例会 PASS（NEG-BROKEN，静默假绿）。"""
+        裸 `~auto` 恰好等于手填期望时反例会 PASS（NEG-BROKEN，静默假绿）。
+
+        ⚠ 列名按 v1 钉死成 `NEG_COL_NAME`（P-02）：v1 `legacy_gui.py:1634` 这一路写死 `T0_NEG`，
+        而 `edits.add_negatives` 的 `new_col_name` 给的是 `U0_NEG` —— 同一张表同一个动作，
+        两代工具产出的 .sv 里断言标号不一样，红区按旧 log / diff 脚本回查就全落空。
+        **只有清单这一路**（第 2 列勾选 + 底部「全部加反例」）钉；真值表工具条「加负向(选中)」
+        照旧走 `new_col_name` 的 `U<n>_NEG`（那一路 v1 本来就是这么起名的）。"""
         vid = self._vid(view_id)
         an = self.analyze(name, vid)
         if an is None or not an.get("editable"):
@@ -446,6 +455,8 @@ class WorkbenchState(QtCore.QObject):
                 first = next((j for j, c in enumerate(cols) if not c["neg"]), None)
                 if first is not None:
                     made, skipped = ED.add_negatives(cols, [first], False)
+                    for c in made:
+                        c["name"] = NEG_COL_NAME          # P-02：清单这一路的标号与 v1 一字不差
                     cols = list(cols) + made
                     n = len(made)
         else:
