@@ -1102,7 +1102,8 @@ STATE_REQUIREMENTS = (
     ("coverage()", "★ `session.CoverageState`：`effective_label`（mux 头部条的生效档，C-124）+ "
                    "`mode_for`（导出 CSV 的 cov 五元组，与 `sv_preview._cov_args()` 同口径）"),
     ("models()", "★ `effective_label` / `mode_for` 查逻辑类型档要清单行（拿不到就当没单设）"),
-    ("record_export(kind, path)", "导出 CSV 记一次「上次导出」（N5；没有这个方法就跳过）"),
+    # ⚠ 不要 `record_export` —— 主控裁决（C3-int）：**单信号 CSV 不进「上次导出」**
+    # （`contracts.EXPORT_KINDS` 里没有这一档，硬塞会把导出中心那六行的“上次导到哪”带偏）。
     ("信号 currentChanged / coverageChanged / configChanged / scopeChanged / workbookChanged",
      "有哪条接哪条，缺的静默跳过。**刻意不接 `editsChanged`** —— 那是本模块自己发出去的，"
      "接了就是自激"),

@@ -151,23 +151,8 @@ def _tone_of(model):
     return terms.STATUS[key][1] if key in terms.STATUS else "note"
 
 
-def _placeholder(object_name, parent=None, min_w=0, min_h=0, bg=None):
-    """占位区：C1-int / C2 / C3 把它整块换掉。带 objectName，测试能 find 到区位。
-
-    画一层白底 + 细边框，只是为了让骨架截图读得出 Design 的分区（不是最终皮肤）。"""
-    w = QtWidgets.QWidget(parent)
-    w.setObjectName(object_name)
-    w.setProperty("placeholder", True)
-    w.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-    w.setStyleSheet("QWidget#%s{background:%s;border:1px solid %s;}"
-                    % (object_name, bg or theme.WHITE, theme.BORDER_LIGHT))
-    if min_w:
-        w.setMinimumWidth(min_w)
-    if min_h:
-        w.setMinimumHeight(min_h)
-    lay = QtWidgets.QVBoxLayout(w)
-    lay.setContentsMargins(0, 0, 0, 0)
-    return w
+# ⚠ C3-int 删掉了 `_placeholder(...)`：四个区全换成真件之后组合根里再没有占位块了。
+# （`ui/main_view.py` 自己那份 `placeholder()` 留着：单独起 `MainView` 不注入任何东西时要用。）
 
 
 # ═════════════════════════════════ MainWindow ═════════════════════════════════
