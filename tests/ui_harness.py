@@ -160,7 +160,12 @@ def isolate_settings(monkeypatch, tmp_path):
 
     两套门面**同名同义**的两个模块级常量一起 patch（v1 `legacy_gui` 与 v2 `ui.persist`）：
     v2 的落盘策略是「路径还是出厂默认值时 pytest 下 no-op」，所以不 patch 也不会污染真机，
-    但那样一来持久化本身就测不到了（写了等于没写）——指到 tmp 之后写入照常生效。"""
+    但那样一来持久化本身就测不到了（写了等于没写）——指到 tmp 之后写入照常生效。
+
+    ⚠ **pytest 外**（手工复现 / review 脚本直接起窗）这把锁是不生效的：不在 pytest 里、
+    路径又是出厂默认值，`save_settings` 照写不误，镜像表路径会进用户真机的「最近打开」
+    （D1 对抗 review 实证，P-22）。那种脚本请在起窗前设 `DREG_VERIFY_NO_PERSIST=1`
+    （`ui.persist.no_persist_env`）——v2 侧对真机那两份文件就一个字节都不写。"""
     import pytest
     pytest.importorskip("PySide6")
     from dreg_verify import legacy_gui as G

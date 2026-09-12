@@ -18,6 +18,7 @@
 依赖方向（§1.2）：只 import Qt-free 层（session / edits / exports），不 import PySide6、不 import 视图。
 """
 
+import os
 import sys
 
 from dreg_verify import edits as ED
@@ -28,7 +29,7 @@ from . import contracts
 
 __all__ = [
     "SETTINGS_PATH", "EDITS_PATH", "LEGACY_SEGMENTS", "V2_SEGMENTS",
-    "is_isolated", "may_read_machine_settings",
+    "NO_PERSIST_ENV", "no_persist_env", "is_isolated", "may_read_machine_settings",
     "load_settings", "save_settings", "patch_settings",
     "load_edits_all", "save_edits_all", "load_edits_bucket", "write_edits_bucket",
     "take_corrupt_backup",
@@ -64,15 +65,31 @@ PER_SIGNAL_SEGMENTS = ("view_edits", "view_mux_data")
 PRESETS_KEY = contracts.SETTINGS_PRESETS
 INCLUDE_RISKY_KEY = "include_risky"
 
+#: 「这一趟绝不碰我真机那两份文件」的环境变量（I-08 的第二把锁，值 = "1"）
+NO_PERSIST_ENV = "DREG_VERIFY_NO_PERSIST"
+
 
 # ═════════════════════ ① settings（界面偏好 + 诊断配置）═════════════════════
+def no_persist_env():
+    """`DREG_VERIFY_NO_PERSIST=1` 有没有设。
+
+    I-08 原本只有一把锁：「pytest + 出厂默认路径」。**pytest 外起窗的脚本**（review /
+    迁移 / 手工复现脚本）两个条件都不满足，于是它们打开的每张镜像表都被写进了用户真机
+    `~/.dreg_verify_gui.json` 的 `recent_excels`（D1 对抗 review 实证，P-22）。
+    这把锁给那类脚本用：设上它，`save_settings` / `save_edits_all` 对真机那两份一个字节都不写。"""
+    return str(os.environ.get(NO_PERSIST_ENV, "")).strip() == "1"
+
+
 def is_isolated():
-    """路径是不是已经被指到临时目录了（`tests/ui_harness.isolate_settings` 干的）。
+    """现在的读写是不是已经与用户真机那份**隔开**了。
+
+    两条都算隔开：① 路径被指到临时目录（`tests/ui_harness.isolate_settings` 干的）；
+    ② `DREG_VERIFY_NO_PERSIST=1`（pytest 外起窗的脚本，见 `no_persist_env`）。
 
     读设置这件事在 pytest 下本身是安全的，但**读用户真机那份**会让默认值断言随机红
     （同事机上存着 `include_risky: false` / `maxt_topout: 512`…）。凡是「只在隔离后才该
     生效」的恢复动作都问它一句，判据只此一处，不在各模块各写各的 `"pytest" in sys.modules`。"""
-    return SETTINGS_PATH != _SETTINGS_DEFAULT
+    return SETTINGS_PATH != _SETTINGS_DEFAULT or no_persist_env()
 
 
 def may_read_machine_settings():
@@ -96,7 +113,10 @@ def save_settings(d):
     """写设置。返回是否真落了盘。
 
     I-08 / C-246：`SETTINGS_PATH` 还是出厂默认值时，pytest 下 no-op；
-    测试把它 patch 到 tmp 之后照常写（否则持久化这件事根本测不到）。"""
+    测试把它 patch 到 tmp 之后照常写（否则持久化这件事根本测不到）。
+    `DREG_VERIFY_NO_PERSIST=1` 且路径仍是真机那份（= 隔离来自环境变量）→ 同样一个字节不写（P-22）。"""
+    if SETTINGS_PATH == _SETTINGS_DEFAULT and no_persist_env():
+        return False
     return session.save_settings(d, SETTINGS_PATH,
                                  skip_under_pytest=(SETTINGS_PATH == _SETTINGS_DEFAULT))
 
@@ -239,10 +259,13 @@ def take_corrupt_backup():
 
 
 def save_edits_all(d):
-    """整份写回。I-08 / C-246 的 no-op 规则与 settings 同（由 `edits.save_edits_file` 判）。
+    """整份写回。I-08 / C-246 的 no-op 规则与 settings 同（由 `edits.save_edits_file` 判）；
+    `DREG_VERIFY_NO_PERSIST=1` 且路径仍是真机那份时同样不写（P-22）。
 
     R2-07：文件**在**、却还读不出来（占用 / 权限 / 备份也改名失败）时**不写**。
     整份覆盖以一份空 `{}` 为基底，写下去就是把别的表的桶与 legacy 九段一起销毁。"""
+    if EDITS_PATH == _EDITS_DEFAULT and no_persist_env():
+        return False
     if ED.edits_file_unreadable(EDITS_PATH):
         return False
     return ED.save_edits_file(EDITS_PATH, d, _EDITS_DEFAULT)
