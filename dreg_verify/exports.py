@@ -22,6 +22,7 @@ import csv
 import io
 import json
 import os
+import re
 from dataclasses import dataclass, field
 
 from . import expr as E
@@ -113,6 +114,10 @@ COUNT_LABELS = {
     "n_rfwrite": "rfwrite claim",
     "n_columns": "测试列",
     "n_inputs": "输入行",
+    # N3 nets.txt 按用途三类（冲突⑤）——与按页类别并存，两套都往 counts 里塞
+    "topout_out": "顶层输出",
+    "force_target": "force 目标",
+    "guessed": "猜名的网",
 }
 
 
@@ -546,6 +551,118 @@ def export_nets(wb, path, pages):
         counts[p] = per[p]
     return nets, ExportOutcome(kind="nets", path=path, counts=counts,
                                note="按类别去重并集")
+
+
+# ── N3（冲突⑤）：**按用途**三类，与上面的「按页」类别并存 ──────────────────────────
+# 按页分类（logic/mux/dft/iddq/topout…）是工具内部视角；红区那位工程师问的其实是
+# 「我要扫的是哪些网」——顶层输出 / 要 force 的目标 / 名字是猜出来的。两套并存：
+# 旧 nets_pages 键继续读写（同事机器上已有值，不能删），新三类是叠加层。
+NETS_PURPOSES = ("topout_out", "force_target", "guessed")
+_NET_NAME_RE = re.compile(r"^[A-Za-z_]\w*$")     # 与 rtl_scan 同一道「像不像个网名」的关（位宽/层级已剥）
+NETS_PURPOSE_NOTE = {
+    "topout_out": "顶层输出（assert 探针贴的网）",
+    "force_target": "force 目标（cone 展到底的输入叶子 + iddq 门网）",
+    "guessed": "猜名的网（不在寄存器表里，按命名约定推出来的——最该先核对）",
+}
+
+
+def nets_purpose_categories():
+    """按用途的三类键（次序 = 导出中心的显示次序）。无参：三类恒定，不随表变。"""
+    return NETS_PURPOSES
+
+
+def _guessed_cone_nets(wb, probe_prefixes=None, resolver=None):
+    """cone 输入叶子里【名字是猜的】那些：found_in ∉ inputs_table.TRUSTED_FOUND_IN。
+
+    判据只用 binding 的 found_in（tmm/regmap 才算真查到），与输入信号表的 `trusted` 同一口径——
+    界面说「这根不是表里查到的」和 nets.txt 里导出来的那批必须是同一批，否则工程师核对时对不上账。
+    ⚠ 口径注意：本类别 = `not trusted`（**含** needs-prefix/mux-output），比输入行的 `guessed`
+      布尔宽一档（那个把「需前缀」单拆出去了）——因为要扫的网清单里，这两种都得让 scan_rtl 去核。
+    任何异常 → 已收的照返，绝不波及别的类别（与 rtl_scan 的容错口径一致）。
+    """
+    from . import topout as T
+    from . import resolver as R
+    from .excel_model import _strip_width
+    nets = {}
+    try:
+        rs = resolver if resolver is not None else R.Resolver(wb, wire_prefixes=probe_prefixes)
+        for t in (getattr(wb, "topout", None) or []):
+            try:
+                res = T.analyze_signal(wb, rs, t, mode="min", want_vectors=True)
+            except Exception:  # noqa: BLE001  单信号失败跳过，不连累整批
+                continue
+            if res.status != "ok":
+                continue
+            for b in (res.bindings or {}).values():
+                fi = getattr(b, "found_in", "") or ""
+                if not fi or fi in IT.TRUSTED_FOUND_IN:
+                    continue
+                raw = str(getattr(b, "wire", "") or getattr(b, "base", "") or "").split(".")[-1]
+                base = _strip_width(raw)[0]
+                if base and _NET_NAME_RE.match(base):
+                    nets.setdefault(base, "Topout %s 的输入 %s（%s：按命名约定猜的名字）"
+                                    % (t.name, getattr(b, "base", base),
+                                       IT.FOUND_IN_LABEL.get(fi, fi)))
+    except Exception:  # noqa: BLE001
+        return nets
+    return nets
+
+
+def collect_nets_by_purpose(wb, purposes, probe_prefixes=None, resolver=None):
+    """按用途收集网清单 + 每类计数（去重并集）。返回 (nets, {用途: 条数})——与 collect_nets 同形。
+
+    topout_out   = rtl_scan.collect_topout_nets（每个可验证 Topout 信号的 assert 探针网）
+    force_target = collect_topout_cone_nets 里【探针以外】的那批 = cone 展到底的 RO/force 输入叶子
+                   + iddq 门网（RW 输入走 RF_WRITE、按地址写，不是物理网，故不在内）
+    guessed      = 上面这些输入叶子里 found_in ∉ TRUSTED_FOUND_IN 的（与输入表的「猜名」同判据）
+
+    ⚠ 副作用同 collect_nets：收集过程会临时改 wb 上的尾缀标记，调用方收完须重建 Resolver 还原。
+    """
+    from . import rtl_scan
+    want = [p for p in NETS_PURPOSES if p in {str(x).strip().lower() for x in (purposes or [])}]
+    nets, per = {}, {}
+    try:
+        probe = rtl_scan.collect_topout_nets(wb) if want else {}
+        if "topout_out" in want:
+            per["topout_out"] = len(probe)
+            for k, v in probe.items():
+                nets.setdefault(k, v)
+        if "force_target" in want:
+            cone = rtl_scan.collect_topout_cone_nets(wb, probe_prefixes=probe_prefixes)
+            leaves = {k: v for k, v in cone.items() if k not in probe}
+            per["force_target"] = len(leaves)
+            for k, v in leaves.items():
+                nets.setdefault(k, v)
+        if "guessed" in want:
+            g = _guessed_cone_nets(wb, probe_prefixes=probe_prefixes, resolver=resolver)
+            per["guessed"] = len(g)
+            for k, v in g.items():
+                nets.setdefault(k, v)
+    except Exception as ex:  # noqa: BLE001
+        raise ExportError("收集网清单出错：\n%s" % ex) from ex
+    return nets, per
+
+
+def export_nets_by_purpose(wb, path, purposes, pages=None, probe_prefixes=None, resolver=None):
+    """导出 nets.txt（按用途三类）。pages 非空时**并上**旧的「按页」类别（两套口径可同时勾）。
+    返回 (nets, outcome)——与 export_nets 同形，GUI 的显示代码一份不必改。"""
+    from . import rtl_scan
+    nets, per = collect_nets_by_purpose(wb, purposes, probe_prefixes=probe_prefixes,
+                                        resolver=resolver)
+    if pages:
+        page_nets, page_per = collect_nets(wb, pages)
+        for k, v in page_nets.items():
+            nets.setdefault(k, v)
+        per.update(page_per)
+    write_text(path, rtl_scan.render_nets_text(nets))
+    counts = {"n_nets": len(nets)}
+    for k in NETS_PURPOSES:                      # 三类固定次序在前，按页类别排在后面
+        if k in per:
+            counts[k] = per[k]
+    for p in sorted(k for k in per if k not in NETS_PURPOSES):
+        counts[p] = per[p]
+    return nets, ExportOutcome(kind="nets", path=path, counts=counts,
+                               note="按用途去重并集" if not pages else "按用途 + 按页去重并集")
 
 
 # ═════════════════════════ 九、claims.json（红区 scan_rtl 校验器的输入契约） ═════════════════════════

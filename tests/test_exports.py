@@ -279,6 +279,79 @@ def test_export_nets_writes_and_counts_per_category(mirror_wb, tmp_path):
     assert out.counts["n_nets"] <= out.counts["topout"] + out.counts["logic"]   # 去重并集
 
 
+@pytest.mark.contract("C-186")
+def test_c186_nets_by_purpose_three_cats(mirror_wb, tmp_path):
+    """N3（冲突⑤）：nets.txt 多一套**按用途**三类，旧的按页类别与 nets_pages 键原样不动。
+
+    按页分类是工具内部视角；红区工程师问的是「我要扫的是哪些网」——
+    顶层输出 / 要 force 的目标 / 名字是猜出来的。"""
+    from dreg_verify import inputs_table as IT
+    from dreg_verify import rtl_scan
+
+    assert X.nets_purpose_categories() == ("topout_out", "force_target", "guessed")
+
+    # ① 三类的定义各自钉死（与 rtl_scan / 输入表的同一批产物对齐，不许另起一套判据）
+    probe = rtl_scan.collect_topout_nets(mirror_wb)
+    cone = rtl_scan.collect_topout_cone_nets(mirror_wb)
+    nets, per = X.collect_nets_by_purpose(mirror_wb, ("topout_out",))
+    assert set(nets) == set(probe) and per == {"topout_out": len(probe)}
+
+    nets, per = X.collect_nets_by_purpose(mirror_wb, ("force_target",))
+    assert set(nets) == set(cone) - set(probe)             # 探针以外的 = force 叶子 + iddq 门网
+    assert per["force_target"] == len(nets) > 0
+
+    nets, per = X.collect_nets_by_purpose(mirror_wb, ("guessed",))
+    assert per["guessed"] == len(nets)
+    # 「猜名」与输入信号表的 trusted 必须同一判据：btlp 镜像的输入全在寄存器表里查到 → 一根都不猜
+    assert set(IT.TRUSTED_FOUND_IN) == {"tmm", "regmap"}
+    assert nets == {}
+
+    # ② 三类一起勾 = 去重并集，每类计数照出
+    nets, per = X.collect_nets_by_purpose(mirror_wb, X.nets_purpose_categories())
+    assert set(per) == {"topout_out", "force_target", "guessed"}
+    assert set(nets) == set(cone)                          # 探针 + 叶子 = cone 全集
+    assert len(nets) <= sum(per.values())
+    assert X.collect_nets_by_purpose(mirror_wb, ()) == ({}, {})       # 一个都不勾 → 不干活
+
+    # ③ 导出：写盘 + counts 三类在前、n_nets 是去重后的总数
+    p = tmp_path / "nets_purpose.txt"
+    got, out = X.export_nets_by_purpose(mirror_wb, str(p), ("topout_out", "force_target"))
+    assert p.exists() and got and out.kind == "nets"
+    assert list(out.counts)[:3] == ["n_nets", "topout_out", "force_target"]
+    assert out.counts["n_nets"] == len(got) == len(set(cone))
+    assert "顶层输出" in out.counts_text() and "force 目标" in out.counts_text()
+    assert p.read_text(encoding="utf-8") == rtl_scan.render_nets_text(got)
+
+    # ④ pages 非空 → 与旧「按页」口径**并集**，两套计数并排出现；旧 export_nets 一字不动
+    p2 = tmp_path / "nets_both.txt"
+    both, out2 = X.export_nets_by_purpose(mirror_wb, str(p2), ("topout_out",), pages={"logic"})
+    page_nets, _ = X.collect_nets(mirror_wb, {"logic"})
+    assert set(both) == set(probe) | set(page_nets)
+    assert out2.counts["topout_out"] == len(probe) and out2.counts["logic"] == len(page_nets)
+    assert list(out2.counts).index("topout_out") < list(out2.counts).index("logic")
+
+
+@pytest.mark.contract("C-186")
+def test_c186_nets_by_purpose_guessed_is_not_empty_on_wl(tmp_path):
+    """N3 续：WL 镜像有真正「表里查不到」的输入 → guessed 类别非空，且严格是 force 目标的子集。
+
+    btlp 镜像的输入全在寄存器表里查到（guessed=0），只用它测等于没测到这条分支。"""
+    import make_mirror_excel
+    from dreg_verify import rtl_scan
+    p = tmp_path / "mirror_wl_dreg.xlsx"
+    make_mirror_excel.build(str(p))
+    wb = M.load_workbook(str(p))
+
+    nets, per = X.collect_nets_by_purpose(wb, X.nets_purpose_categories())
+    assert per["guessed"] > 0
+    guessed, _ = X.collect_nets_by_purpose(wb, ("guessed",))
+    force, _ = X.collect_nets_by_purpose(wb, ("force_target",))
+    assert set(guessed) <= set(force)                  # 猜名的必定也是要 force 的那批里的
+    assert set(nets) == set(rtl_scan.collect_topout_cone_nets(wb))
+    # 每条用途说明都点破「为什么这根网在清单里」（nets.txt 的注释行是工程师唯一的线索）
+    assert all("猜" in why for why in guessed.values())
+
+
 # ───────────── ⑧ claims.json：与 CLI 逐字节同构 ─────────────
 def test_export_claims_byte_identical_to_cli(mirror, mirror_wb, tmp_path, capsys):
     """同一 mirror、同一选项：GUI 函数 export_claims 与 CLI `--topout --export-claims`
