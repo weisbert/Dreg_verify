@@ -41,7 +41,7 @@
 | C-010 | 断言号列 + 悬停说明「仿真 log 报 assert_<号>_T<n> 时按它回查本信号」 | SV._populate_table（TOPO_AID tooltip） | topout.topout_view_models | 保留 | 清单「列设置…」可选列「断言号」（V2Spec §5 M2） | | 已落点 | 方案§4.1; gui:_populate_table |
 | C-011 | owner 列 | SV._populate_table（TOPO_OWNER） | topout.topout_view_models | 保留 | 清单 owner 列（默认可见，宽 76px） | | 已落点 | 方案§4.1; Design§10 |
 | C-012 | 分类列（选路/logic · mux · 直连寄存器 · RO回读(跳过) · 未解析） | SV._populate_table（TOPO_KIND_LABEL） | topout.topout_view_models | 保留 | 清单「列设置…」可选列「分类」；详情标题栏 curKind「选路/logic」 | | 已落点 | 方案§4.1; 清单§1 |
-| C-013 | 逻辑类型列（展开后表达式形态 F0–F4），覆盖度按它派发 | SV._populate_table（TOPO_FORM / m['form_label']） | topout.topout_view_models | 保留 | 清单「列设置…」可选列「逻辑类型」；覆盖度弹层 covRows 按它分档 | | 已落点 | 方案§4.1; 清单§1 |
+| C-013 | 逻辑类型列（展开后表达式形态 F0–F4），覆盖度按它派发 | SV._populate_table（TOPO_FORM / m['form_label']） | topout.topout_view_models | 保留 | 清单「列设置…」可选列「逻辑类型」；覆盖度弹层 covRows 按它分档 |  | 已落点 | 方案§4.1; 清单§1 |
 | C-014 | 状态列 4 档（✅可建 / ↷跳过(RO) / ✗未解析 / ✗error）带颜色 | SV._populate_table（TOPO_STATUS_LABEL/COLOR） | topout.topout_view_models | 保留 | 清单状态列 stS 四色（ok #eaf6ee / warn #fdf3e0 / bad #fdecea / note #eef0f3） | | 已落点 | 方案§4.1; 清单§1 |
 | C-015 | 有问题的信号状态列变橙、悬停列出全部问题原因 | SV._populate_table（m['issues'] tooltip） | topout.topout_view_models | 保留 | 清单状态列 warn 橙 + 虚线下划线；悬停改为点状态展开行内原因块（reasonBody 列全部原因） | | 已落点 | 审计B; gui:_populate_table |
 | C-016 | 状态 8 档逐档解释（clean / wire兜底 / 未解析 / 解析错 / 规格冲突 / 输入缺前缀·跳过 / 输出裸名·已生成 / 字段太窄·假绿） | MW._populate_table（STATUS_HELP，legacy 状态列 tooltip） | generator.analyze_signal | 保留 | 清单状态列 + 行内原因块；Design 给了 5 档实例（可建 / ⚠字段太窄·假绿 / ✗规格冲突·待核对 / ⚠缺前缀·跳过 / 输出裸名·已生成），余 3 档按同一模板补 | | 已落点 | 方案§4.1; Design§10; 审计B; 清单§6; gui:STATUS_HELP |
@@ -61,7 +61,7 @@
 | C-030 | 正则搜索：同时匹配信号名、断言号、表达式、输入信号名 | SV._apply_filter（search） | topout.topout_view_models | 保留 | 筛选行搜索框「搜索：信号名 / 表达式 / 输入信号名（支持正则）」 | | 已落点 | 方案§4.1; Design§10; 审计B |
 | C-031 | 搜索/筛选后状态栏报『可见 N / 共 M』，并单独点出有几个是因为输入信号名命中才列出来的 | MW.apply_filter（n_by_input） | — | 保留 | 主控补位: 筛选后在 statusLeft 追加「可见 N / 共 M（其中 K 个按输入信号名命中）」 | | 已落点(补位) | gui:apply_filter |
 | C-032 | 全选所有可见信号 | SV._check_all(True) | — | 保留 | 清单底部工具条「全选」 | | 已落点 | 方案§4.1; Design§10 |
-| C-033 | 清空全部勾选 | SV._check_all(False) | — | 保留 | 清单底部工具条「清空勾选」 | | 已落点 | 方案§4.1; Design§10 |
+| C-033 | 清空全部勾选（只作用当前可见行） | SV._check_all(False) | — | 保留 | 清单底部工具条「清空勾选」 |  | 已落点 | 方案§4.1; Design§10 |
 | C-034 | 把表里框选/Ctrl 多选的行一次勾上 | SV._check_selected / MW.on_check_selected_rows | — | 保留 | 清单底部工具条「勾选选中行」 | | 已落点 | 方案§4.1; Design§10; 审计B |
 | C-035 | 一键给一批信号各加 1 条反例（有勾选只作用勾选，否则作用于全部可见） | SV._bulk_neg(True) / MW.on_all_signals_neg(True) | vectors.add_negatives | 保留 | 清单底部工具条「全部加反例」 | | 已落点 | 方案§4.1; Design§10; 审计B |
 | C-036 | 一键清除一批信号的反例；含自定义命名/手填错值的先弹确认 | SV._bulk_neg(False) / MW.on_all_signals_neg(False) + MW._confirm_lose_named; MW.on_signal_table_item_changed（真正触达 _confirm_lose_named 的入口） | — | 保留 | 清单底部工具条「清除反例」；二次确认按 V2Spec §5 M22「三处确认」同款补 |  | 已落点 | 方案§4.1; 审计A; gui:_confirm_lose_named |
@@ -72,7 +72,7 @@
 | C-041 | 开了『缺前缀强制生成』后，状态列如实写成『⚠缺前缀·已强制生成』而不是『跳过』 | MW._populate_table（include_risky 分支） | generator.GenOptions(include_risky=) | 保留 | 主控补位: 状态列增加第 6 档「⚠ 缺前缀·已强制生成」（Design D 只给了「⚠ 缺前缀·跳过」），与诊断抽屉开关联动 | | 已落点(补位) | gui:_populate_table |
 | C-042 | 本表没有该页时给空态提示而不是空白表 | SV.refresh + provider.empty_hint / SV._guard | pageviews.page_available | 保留 | 范围开关上该页置灰 + 标「本表无 dft 页」（V2Spec §3 状态一：不弹窗不报错，状态栏写「本表无 dft / iddq 页，门控层跳过」） | | 已落点 | gui:empty_hint |
 | C-043 | 分析整表出错时在详情区写『分析失败（已捕获，未崩）』并留住原因，界面不崩 | SV.refresh（except 分支） | topout.topout_view_models | 保留 | 主控补位: 详情区写「分析失败（已捕获，未崩）」+ 原因全文（Design §3 只给了单信号未解析态） | | 已落点(补位) | gui:refresh |
-| C-044 | 刷新清单后自动选中第一个可见行（直接就能看到内容） | SV.refresh 末尾 | — | 保留 | 清单刷新后默认选中第一行（state 键 S.sel=0，选中底色 #dbe7f8） | | 已落点 | gui:refresh |
+| C-044 | 刷新清单后自动选中第一个可见行（直接就能看到内容） | SV.refresh 末尾 | — | 保留 | 清单刷新后默认选中第一行（state 键 S.sel=0，选中底色 #dbe7f8） |  | 已落点 | gui:refresh |
 | C-045 | 清单默认可见列必须包含『状态』和『用例』（现在 1600px 宽时它们在横滚条后面） | SV._build（split.setSizes([440,760])） | — | 保留 | V2Spec §4「默认可见列必须含 状态 与 用例，任何布局下都不准进横向滚动条」；清单默认宽 S.listW=560 | | 已落点 | Design§8-7; 清单§2; 清单§7; 方案§1 |
 | C-046 | 清单里直接看到表达式（不必逐个点开） | MW._populate_table（COL_EXPR，legacy 独有） | — | 保留 | 主控补位: 「表达式」做成「列设置…」里的可选列、默认隐藏（执行计划 §5 待拍板 4 默认值；Design 映射表未列） | | 已落点(补位) | 计划§5-4; 审计B; 原 status: 待拍板(默认=可选列、默认隐藏) |
 | C-047 | 按 Excel type 列筛（如只看喂 dft 的那一批） | MW.apply_filter（type_combo，legacy 独有） | — | 合并 | 主控补位: Excel type 筛并入筛选行正则搜索（支持 _to_dft 这类目的地后缀），不单独出控件（执行计划 §5 待拍板 4） | | 已落点(补位) | 计划§5-4; 审计B; 审计次要; 原 status: 待拍板(默认=并入正则搜索) |
