@@ -795,6 +795,63 @@ def test_e_addneg_names_survive_export(topo_win):
     assert len(names) == len(set(names)) and all(names)
 
 
+def _rename_to(monkeypatch, text, ok=True):
+    from PySide6 import QtWidgets
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: (text, ok)))
+    warned = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: warned.append(a[2] if len(a) > 2 else "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: warned.append(a[2] if len(a) > 2 else "")))
+    return warned
+
+
+def test_rename_col_validates_name(topo_win, monkeypatch):
+    """轨0-⑤：改列名此前只 .strip()——空/中文/T<编号> 保留名/与别的列重名 全放行，
+    直接做出撞标号的 .sv。现在接『排查(旧)』那套校验，失败弹「改名失败」。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    v._e_regen()
+    v._e_add(); v._e_add()                            # 造两条用户列（自动 T 列不可改名）
+    users = [i for i, c in enumerate(v.cur_cols) if c["user"]]
+    j, other = users[-1], v.cur_cols[users[0]]["name"]
+    before = v.cur_cols[j]["name"]
+
+    warned = _rename_to(monkeypatch, "   ")           # 空 → 拒
+    v._e_rename_col(j)
+    assert v.cur_cols[j]["name"] == before and warned
+
+    warned = _rename_to(monkeypatch, "T3")            # 自动测试保留名 → 拒
+    v._e_rename_col(j)
+    assert v.cur_cols[j]["name"] == before and any("T3" in str(x) for x in warned)
+
+    warned = _rename_to(monkeypatch, other)           # 与别的列重名（会撞 .sv 标号）→ 拒
+    v._e_rename_col(j)
+    assert v.cur_cols[j]["name"] == before and any("重复" in str(x) for x in warned)
+
+    _rename_to(monkeypatch, "my case!")               # 非法字符清成下划线 → 放行
+    v._e_rename_col(j)
+    assert v.cur_cols[j]["name"] == "my_case_"
+    assert len({c["name"] for c in v.cur_cols}) == len(v.cur_cols)
+
+
+def test_rename_negative_col_keeps_neg_suffix(topo_win, monkeypatch):
+    """轨0-⑤：负向列改名自动带 _NEG（.sv 日志一眼认得出是反例）；自动生成列拒绝改名。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    v._e_regen()
+    v.truth.setCurrentCell(0, 0)
+    v._e_addneg()
+    j = next(i for i, c in enumerate(v.cur_cols) if c["neg"])
+    _rename_to(monkeypatch, "MY_CASE")
+    v._e_rename_col(j)
+    assert v.cur_cols[j]["name"] == "MY_CASE_NEG"
+    auto = next(i for i, c in enumerate(v.cur_cols) if not c["user"])
+    nm = v.cur_cols[auto]["name"]
+    warned = _rename_to(monkeypatch, "WHATEVER")
+    v._e_rename_col(auto)
+    assert v.cur_cols[auto]["name"] == nm and warned          # 自动列不可改名
+
+
 def _ask_spy(monkeypatch, answer):
     """拦下确认框，记下标题+正文，返回预设答案。"""
     from PySide6 import QtWidgets

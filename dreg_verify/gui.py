@@ -1868,10 +1868,20 @@ class SignalView(QtWidgets.QWidget):
         if not col["user"]:
             QtWidgets.QMessageBox.information(self, "重命名列", "自动生成的 T 列不可改名；只有用户新增列可改名。")
             return
-        new, ok = QtWidgets.QInputDialog.getText(self, "重命名列", "新列名：", text=col["name"])
-        if ok and new.strip():
-            col["name"] = new.strip()
-            self._commit(); self._populate_truth()
+        new, ok = QtWidgets.QInputDialog.getText(self, "重命名列", "新列名(字母/数字/下划线)：",
+                                                 text=col["name"])
+        if not ok:
+            return
+        # 校验三道关（与『排查(旧)』同一套，实现在 truth_edit）：非法字符清成下划线且不得为空、
+        # 不许占 T<编号> 这个自动测试保留名、不得与其它列的最终标号重名(否则 .sv 里两块同名)。
+        others = [c["name"] for i, c in enumerate(self.cur_cols) if i != j]
+        good, info = TE.check_col_name(new, others, negative=bool(col["neg"]))
+        if not good:
+            QtWidgets.QMessageBox.warning(self, "改名失败", info)
+            return
+        col["name"] = info
+        self._commit(); self._populate_truth()
+        self.main.status.showMessage("测试列已改名为 %s" % info)
 
     def _set_edit_buttons(self, an):
         on = bool(an["editable"])
