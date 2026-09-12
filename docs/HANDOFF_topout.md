@@ -58,7 +58,12 @@
 
 ## 2. 怎么用
 
-### GUI（`python -m dreg_verify.gui`）
+### GUI（旧界面：`python -m dreg_verify.legacy_gui`）
+
+> ⚠ 下面这套标签页版面是 **v1 旧门面**。`python -m dreg_verify.gui` 这个入口没变，
+> 但落点已经换成 **v2 工作台**（版面不同，功能一一对应）。旧界面改名 `legacy_gui` 后原样保留，
+> 到 v2 真表验收通过为止。
+
 1. 打开即停在 **「Topout 视图」**（外层第一个标签，新默认门面）。
 2. 点上方 **「加载」** 载入 Excel（真表 或 `mirror_btlp_dreg.xlsx`）。
 3. 左侧列出 **Topout B 列要验信号 + 分类**：选路/logic、mux、直连寄存器、RO 回读(跳过)、未解析。

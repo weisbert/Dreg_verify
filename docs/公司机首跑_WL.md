@@ -76,7 +76,9 @@ python -m dreg_verify.cli --excel "Hi1108V100_WL_RFTRX_C0C1_DREG_to_dig_95P.xlsx
 ```
 这是**正常的**，不是错误。
 
-> 也可以开 GUI 看真值表：`python -m dreg_verify.gui "…95P.xlsx"`。mux 组现在都能渲染出 case 表；状态列「裸名探针」(蓝)=已生成、「需探针前缀」(橙)=force 网缺前缀真阻断、「✗未解析」(红)=表有问题。
+> 也可以开 GUI 看真值表：`python -m dreg_verify.gui "<你的表>.xlsx"`（入口没变，落点是 v2 工作台；命令行带表就直接进工作台，不停在空态）。mux 组现在都能渲染出 case 表；状态列区分「已生成」「缺探针前缀（真阻断）」「未解析（表有问题）」。
+>
+> 旧界面在验收期原样保留：`python -m dreg_verify.legacy_gui "<你的表>.xlsx"`，状态列是 v1 的老措辞（「裸名探针」蓝 / 「需探针前缀」橙 / 「✗未解析」红）。
 
 ---
 

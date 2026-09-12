@@ -107,6 +107,8 @@ python -m dreg_verify.cli --excel 核心文件.xlsx --diagnose
 python -m dreg_verify.gui
 ```
 
+入口没变，落点是 **v2 工作台**。旧界面：`python -m dreg_verify.legacy_gui`，验收期保留。
+
 加载 Excel → 信号表（按 owner / type / 名字 / **状态** 筛选，多选 + 全选/清空）→ 勾"负向"列加异常用例
 → "预览选中"看 .sv 片段 → "生成 .sv …"导出。后端与 CLI 同一套逻辑。
 
@@ -206,6 +208,8 @@ RO·RW 混合）的示例表：
 python make_sample_excel.py demo.xlsx
 python -m dreg_verify.gui demo.xlsx
 ```
+
+命令行带表 = 跳过空态直接进工作台。旧界面同样接这个参数：`python -m dreg_verify.legacy_gui demo.xlsx`。
 
 ## 测试
 
