@@ -43,6 +43,8 @@ from dreg_verify import sv_writer as W            # noqa: E402
 from dreg_verify import truth_edit as TE          # noqa: E402
 from dreg_verify import edits as ED               # noqa: E402
 from dreg_verify import session                   # noqa: E402  会话状态层(Qt-free)：设置IO/覆盖度/配置/诊断配置
+from dreg_verify import analysis_norm as AN       # noqa: E402  分析结果归一化(Qt-free)
+from dreg_verify import inputs_table as IT        # noqa: E402  驱动明细整族(Qt-free)
 
 # 记住上次加载的 Excel，下次启动自动加载（省去重复浏览/点击）
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_gui.json")
@@ -150,38 +152,15 @@ STATUS_LABEL = {"clean": "clean", "wire-fallback": "⚠wire兜底",
                 "spec-collision": "✗规格冲突·待designer核对",
                 "needs-prefix": "⚠输入缺前缀·跳过", "bare-probe": "输出裸名·已生成",
                 "false-green": "⚠字段太窄·假绿"}
-STATUS_HELP = {"clean": "输入都解析到具体 net，可正常 force/RF_WRITE 驱动",
-               "wire-fallback": "有输入回退成 wire 兜底；elaboration 可能在 ENV_RF 层找不到该 net",
-               "unresolved": "有输入未解析到 net（ENV_RF 探不到，仿真会 CUVUNF）",
-               "parse-err": "表达式或输入解析出错",
-               "spec-collision": "【表数据·非工具能修】mux 页有两行控制选择值相同却选不同数据源——"
-                                 "同一选择值 RTL 物理上只能输出一个，已整组跳过。两种成因都可能："
-                                 "①真规格矛盾→改数据源；②两个 mux 撞了同一输出名(『一个控制管多个 mux』本身合法，"
-                                 "designer 多半复制粘贴漏改名)→改输出名。源名孪生时明细会优先提示成因②。"
-                                 "tooltip/明细里有撞车的 Excel 行号、两个源、owner，请对应 designer 核对改表。",
-               "needs-prefix": "【输入侧·硬阻断】要 force 的某根输入网埋在子模块里（级联 _to_mux 衔接网 / "
-                               "wire 兜底），force 基名钉不住——没配前缀就 force 必 CUVUNF，所以默认【跳过】"
-                               "整组。先跑 scan_rtl 配好探针前缀，这组才会生成。",
-               "bare-probe": "【输出侧·软提示，已生成】输出 top_out=0（喂内部、非芯片顶层输出），"
-                             "工具照样用裸名探针 `ENV_RF.<输出名> 探、【照常生成】.sv。只有仿真 elaboration "
-                             "真报 CUVUNF（说明它埋在子模块）时，再跑 scan_rtl 配前缀重生成即可（不是错误）。"
-                             "—— 和『输入缺前缀』的区别：那个是输入 force 不到、硬阻断；这个是输出怎么探、不阻断。",
-               "false-green": "结构全解析通了，不是未解析——只是数据寄存器字段太窄、装不下每条 case "
-                              "的互异值，硬生成会变『RTL 接错路也 PASS』的假测试(假绿)。工具保护性跳过；"
-                              "要验得加宽字段或拆组（属设计层，不是工具/表的错）"}
+STATUS_HELP = IT.STATUS_HELP           # 实现已搬去 inputs_table（本名保留给老调用点）
 # 状态列颜色：红=信号坏掉(会 elaboration 失败)；橙=要前缀否则跳过；蓝=信息(裸名探针已生成,可选配前缀)；
 # 琥珀(false-green)=能解析但字段太窄、硬生成是假绿——保护性跳过，不是故障，刻意不用红
 STATUS_FG = {"needs-prefix": QtGui.QColor("#cc7a00"), "bare-probe": QtGui.QColor("#2a7ab0"),
              "false-green": QtGui.QColor("#9a5b00"),
              "spec-collision": QtGui.QColor("#b5179e")}
-# 输入来源(found_in)的中文标签——明细面板用；未映射的原样显示
-FOUND_IN_LABEL = {"tmm": "tmm命中", "regmap": "regmap命中", "logic": "级联前级",
-                  "logic-internal": "内部信号", "wire": "wire兜底",
-                  "prefixed-wire": "前缀wire", "self-input": "自引用前级",
-                  "needs-prefix": "需探针前缀(跑scan_rtl)",
-                  "logic-computed": "上游计算网(展开驱动)"}
-# 「输入信号」表(真值表上方)：把字母→信号/角色/驱动 集中成一张可读的小表(取代头部那行难读的图例)
-INPUT_COLS = ["字母", "信号(位宽)", "角色", "类型", "驱动"]
+# 输入来源(found_in)的中文标签 / 『输入信号』表列名——实现已搬去 inputs_table
+FOUND_IN_LABEL = IT.FOUND_IN_LABEL
+INPUT_COLS = IT.INPUT_COLS
 # 负向用 琥珀，刻意区别于"状态列红=信号坏掉/会 elaboration 失败"；红只留给真正的故障
 NEG_BG = QtGui.QColor("#fdeccb")        # 负向用例行底色（琥珀，能压过隔行底色）
 NEG_FG = QtGui.QColor("#9a5b00")        # 负向列头/标记文字色（深琥珀）
@@ -310,7 +289,7 @@ SV_HEADERS = TOPO_HEADERS              # 9 列：选/负向/信号/断言号/own
 SV_KIND_LABEL = dict(TOPO_KIND_LABEL)         # Topout 5 分类；子视图补 logic/mux 直观标签
 SV_KIND_LABEL.setdefault("logic", "logic")    # 子视图里 kind=logic/mux 直接显原词（Topout 用『选路/logic』）
 
-_SV_VAR_RE = _re.compile(r"(?<![A-Za-z0-9_])([A-J])(?![A-Za-z0-9_])")
+_SV_VAR_RE = AN.SV_VAR_RE              # 实现已搬去 analysis_norm（本名保留给老调用点/测试）
 _COVERAGE_HELP = (
     "覆盖度三档 = 测试用例的强度，对 logic 与 mux 两类信号【自动按各自算法】展开：\n\n"
     "【logic / 直连寄存器 / dft / iddq 表达式信号】\n"
@@ -330,79 +309,23 @@ _FORM_COV_ROWS = session.FORM_COV_ROWS
 
 
 def _subst_expr(expr, name_of):
-    """把单字母变量(A-J)替换成真实信号名，给展开链『字母代入』一行用（cone 多级链由分析结果直接给）。"""
-    return _SV_VAR_RE.sub(lambda m: name_of.get(m.group(1), m.group(1)), expr or "")
+    """薄委托 → analysis_norm.subst_expr（字母代入真实信号名，展开链用）。"""
+    return AN.subst_expr(expr, name_of)
 
 
 def _order_groups_fortest(groups, bindings, wb, out_base):
-    """输入分组按 for_test 行序排（寄存器地址+bit 位 / for_test 样例组）——与 generator.report/HTML/
-    for_test 同一口径(m4)，免 GUI 可编辑真表/CSV 与导出两套行序、人工核对/截图错位。groups 对象不变、
-    只换顺序 → 列 vals(按 group['key'] 绑)/真值表求值均不受影响(纯显示重排)。wb=None 或空 → 原序。"""
-    if not groups or wb is None:
-        return groups
-
-    def _name(g):
-        return excel_model._strip_width(g.get("base") or g.get("label") or "")[0].lower()
-
-    def _key(g):
-        b = (bindings or {}).get(g.get("rep"))
-        return ((b.address, b.reg_lsb) if (b is not None and getattr(b, "address", None) is not None)
-                else (None, None))
-    return generator.fortest_order_entries(groups, wb, out_base, _name, key_fn=_key)
+    """薄委托 → analysis_norm.order_groups_fortest（输入分组按 for_test 行序排，m4）。"""
+    return AN.order_groups_fortest(groups, bindings, wb, out_base)
 
 
 def _norm_topout_result(res, wb=None):
-    """topout.TopoutResult → SignalView 统一分析 dict（编辑/导出消费）。wb 传入则 logic 根输入按
-    for_test 行序排（m4，与报告/导出一致）。"""
-    kind = res.root.kind
-    sig = res.root.obj
-    an = {"kind": kind, "status": res.status, "issues": list(res.issues),
-          "note": res.note, "node": res.node, "bindings": res.bindings,
-          "expansion": res.expansion, "vectors": list(res.vectors),
-          "out_width": res.out_width, "chain": list(res.chain),
-          "name": res.topo.name, "sig": sig}
-    an["groups"] = (V.input_groups(res.node, res.bindings)
-                    if (kind in ("logic", "register") and res.node is not None
-                        and res.bindings is not None) else [])
-    if kind == "logic" and an["groups"]:        # m4：logic 根输入按 for_test 行序(register 报告本就原序)
-        an["groups"] = _order_groups_fortest(an["groups"], res.bindings, wb,
-                                             sig.out_base if sig is not None else res.topo.name)
-    # 编辑回流键：logic/mux → 源对象 out_name（generator.build 据此选）；register → Topout 名（reg_overrides）
-    an["src_out_name"] = (sig.out_name if (kind in ("logic", "mux") and sig is not None)
-                          else res.topo.name)
-    # ⭐只有 status==ok 才可编辑：error/skip/unresolved 的 mux 没有 expansion(None)，若仍判 editable=='mux'，
-    #   点选该行 _load_signal 会对 None 取 ['used_vars'] 崩（违『绝不崩』）。统一非可建=非可编辑。
-    an["editable"] = "" if res.status != "ok" else (
-        "logic" if kind in ("logic", "register") else ("mux" if kind == "mux" else ""))
-    an["renamed"] = bool(getattr(res.root, "renamed", False))   # dft 改名根：编辑走 reg 路按顶层名键
-    # 钉上的 iddq DFT 门 → 真值表只读输入行（门在向量 extra_forces 里、不在 cone groups，
-    # 否则 GUI 真值表看不见这根门，与 .sv/报告不一致，2026-06-25 d_en_vco_fc_ls 实证）
-    g = getattr(res, "dft_gate", None)
-    an["dft_gate"] = ({"key": "__dft_gate__", "label": g[0].base, "wire_lhs": g[0].wire_lhs,
-                       "transp": int(g[1]), "width": 1} if g else None)
-    return an
+    """薄委托 → analysis_norm.norm_topout_result（TopoutResult → 统一分析 dict an）。"""
+    return AN.norm_topout_result(res, wb)
 
 
 def _norm_page_result(res, wb=None):
-    """pageviews.PageResult → SignalView 统一分析 dict。wb 传入则 logic 形态输入按 for_test 行序(m4)。"""
-    an = {"kind": res.kind, "status": res.status, "issues": list(res.issues),
-          "note": res.note, "node": res.node, "bindings": res.bindings,
-          "expansion": res.expansion, "vectors": list(res.vectors),
-          "out_width": res.out_width, "chain": list(res.chain),
-          "name": res.name, "sig": res.sig}
-    an["groups"] = (res.groups or []) if res.kind == "logic" else []
-    if res.kind == "logic" and an["groups"]:    # m4：页 logic 视图输入按 for_test 行序，与页报告一致
-        an["groups"] = _order_groups_fortest(an["groups"], res.bindings, wb, res.sig.out_base)
-    an["src_out_name"] = res.sig.out_name
-    an["editable"] = "" if res.status != "ok" else (
-        "logic" if res.kind == "logic" else ("mux" if res.kind == "mux" else ""))
-    an["renamed"] = False               # 页本地子视图无 dft 改名根（每行就是本页声明名）
-    # M2：钉上的 iddq DFT 门 → 真值表只读输入行（与 Topout 视图 _norm_topout_result 同口径，门在向量
-    # extra_forces 里、不在 cone groups，否则页子视图真表看不见门、与同页 .sv 不一致）。
-    g = getattr(res, "dft_gate", None)
-    an["dft_gate"] = ({"key": "__dft_gate__", "label": g[0].base, "wire_lhs": g[0].wire_lhs,
-                       "transp": int(g[1]), "width": 1} if g else None)
-    return an
+    """薄委托 → analysis_norm.norm_page_result（PageResult → 统一分析 dict an）。"""
+    return AN.norm_page_result(res, wb)
 
 
 class _TopoutProvider:
@@ -4150,24 +4073,8 @@ class MainWindow(QtWidgets.QMainWindow):
         sig = self.signals[idx]
         if a is None:
             return
-        lines = ["信号: %s   (assert_%s, %s, top_output=%s)"
-                 % (sig.out_name, sig.assert_id, sig.suffix, sig.top_output),
-                 "表达式: %s" % sig.expr,
-                 "状态: %s" % STATUS_LABEL.get(a["status"], a["status"]),
-                 "断言: assert (%s == <期望>)" % a["out_net"], ""]
-        if a["error"]:
-            lines.append("解析错误: %s" % a["error"])
-        for inp in a["inputs"]:
-            flag = "" if inp["resolved"] else "  ✗"
-            src = FOUND_IN_LABEL.get(inp["found_in"], inp["found_in"])
-            lines.append("  %s=%s  [%s/%s]%s  ->  %s"
-                         % (inp["letter"], inp["base"], inp["kind"], src, flag, inp["net"]))
-            if inp["note"]:
-                lines.append("        note: %s" % inp["note"])
-        lines.append("")
-        lines.append("提示: elaboration 报 CUVUNF 找不到 net 时，对比这里的 force/输出 net 名是否真存在于 ENV_RF 层；"
-                     "⚠wire兜底/✗未解析 的最可疑。")
-        self.detail.setPlainText("\n".join(lines))
+        # 明细正文搬去 inputs_table（Qt-free、可单测）；这里只负责把它贴进面板
+        self.detail.setPlainText(IT.legacy_resolve_detail(sig, a, STATUS_LABEL))
         # 仅当信号变化时刷新测试项编辑表（避免同行换列时重建）
         if self._ti_loaded_idx != idx:
             self._ti_loaded_idx = idx
@@ -4664,20 +4571,17 @@ class MainWindow(QtWidgets.QMainWindow):
                             self._ti_sig.out_width, rd)
 
     def _drive_strs(self, rd):
-        """该行的 force / RF_WRITE 驱动文本（供表格与 CSV 展示）。"""
+        """该行的 force / RF_WRITE 驱动文本（供表格与 CSV 展示）——算法在 inputs_table.drive_pair。"""
         vec = rd.get("_vec")
         if vec is None and "correct" not in rd:
             self._ti_recompute(rd); vec = rd["_vec"]
         if vec is None:
             return "", ""
         try:
-            forces, writes, _unres = W.compute_drives(
-                vec, self._ti_bindings, E.collect_vars(self._ti_node))
+            used = E.collect_vars(self._ti_node)
         except Exception:  # noqa: BLE001
             return "", ""
-        fs = "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces)
-        ws = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
-        return fs, ws
+        return IT.drive_pair(vec, self._ti_bindings, used)
 
     def _update_ti_header(self, custom):
         tag = "   [已自定义★]" if custom else ""
@@ -5186,128 +5090,65 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _group_letters(g):
-        """该输入组的 Excel 来源坐标(可能多个，如同一物理信号占 A、B 两个字母)。
-        普通信号 = 表达式字母(A/B/C…)；cone 展开信号 = 叶子来源("上游行名.字母"，如 pll_n1.A)。"""
-        return ",".join(g.get("xl_letters") or g.get("letters") or [])
+        """薄委托 → inputs_table.group_letters（该输入组的 Excel 来源坐标 A/B/… 或『上游行名.字母』）。"""
+        return IT.group_letters(g)
 
     @classmethod
     def _vheader_label(cls, g):
-        """完整行表头：'A,B → d_xxx[14:14]'（CSV 导出用，保持自描述）。"""
-        ltr = cls._group_letters(g)
-        base_lbl = g.get("label", g["base"])
-        return "%s → %s" % (ltr, base_lbl) if ltr else base_lbl
+        """薄委托 → inputs_table.vheader_label（CSV 行表头 'A,B → d_xxx[14:14]'）。"""
+        return IT.vheader_label(g)
 
     @classmethod
     def _vheader_short(cls, g):
-        """真值表行表头(GUI 用)：信号名(带位宽)+控制标记（2026-06-03 用户拍板：直接用信号名，不用字母）。
-        字母→信号 的对照仍在上方『输入信号』表与 tooltip 里（对照表达式 A/B/C 时用）。"""
-        label = g.get("label", g["base"])
-        return "%s (控制)" % label if g.get("is_control") else label
+        """薄委托 → inputs_table.vheader_short（真值表行表头 = 信号名 + 控制标记）。"""
+        return IT.vheader_short(g)
 
     @staticmethod
     def _binding_meta(b):
-        """绑定 → (类型, 驱动机制) 文本：RO→force <net>；RW→RF_WRITE 0x<地址> bit<<<lsb>；
-        未解析→标红提示。logic 的『输入信号』表与 mux 的（_populate_mux_inputs）共用。"""
-        if b is None:
-            return ("?", "(无绑定)")
-        kind = b.kind or "?"
-        if not getattr(b, "resolved", True):
-            note = getattr(b, "note", "") or ""
-            return (kind, "✗未解析" + ("：" + note if note else ""))
-        if b.kind == "RW" and b.address is not None:
-            return (kind, "RF_WRITE 0x%X bit<<%d" % (b.address, b.reg_lsb or 0))
-        if b.kind == "RO":
-            drive = "force ENV_RF.%s" % b.wire_lhs
-            # force 级联网 / 内部衔接网（_to_mux/_to_logic）：resolved=True 但要 scan_rtl 配前缀，
-            # 否则 force 必 CUVUNF 被跳过——标出来，让切到 force 模式时一眼看见多了这道前缀要求。
-            if getattr(b, "found_in", "") in ("needs-prefix", "mux-output"):
-                drive += "  ⚠需探针前缀(内部衔接网，跑 scan_rtl 配前缀否则跳过)"
-            return (kind, drive)
-        return (kind, getattr(b, "note", "") or "?")
+        """薄委托 → inputs_table.binding_meta（绑定 → (类型, 驱动机制) 文本）。"""
+        return IT.binding_meta(b)
 
     def _input_meta(self, g):
         """该输入组的 (类型, 驱动机制) 文本，供『输入信号』表的『类型』『驱动』列。"""
         b = self._ti_bindings.get(g["rep"]) if self._ti_bindings else None
-        return self._binding_meta(b)
+        return IT.binding_meta(b)
 
-    def _populate_mux_inputs(self, grp, exp):
-        """mux 信号的『输入信号』表（修"mux 点开输入信号框空白"，2026-06-03 第十一轮；
-        第十四轮按控制三来源/数据三来源重排——WL 多控制·寄存器直出·mux 级联）。
+    def _dft_gate_entry(self, out_base):
+        """本输出在 dft 页的 iddq 门 → 与 an["dft_gate"] 同形的 dict（供 inputs_table 拼门行）。
+        不受门控 / 还没建 resolver → None。
 
-        行 = 各控制信号的驱动输入（按 exp['ctrl_drivers'] 三来源细分角色）+ 数据寄存器（d:*）：
-          『字母』列：寄存器直出控制显示 Excel 控制列字母(B/C/D/E)；logic 控制显示其表达式字母；
-                      mux 级联控制显示"经 mux<N>"；数据寄存器显示它对应的 case 值
-          『角色』列：寄存器直出=控制(寄存器直出)；logic=line路径/local路径/模式位(LPBT 不变)；
-                      mux 级联=控制(经上游mux驱动)，并把上游载体/上游控制各加一行(上游mux配方)；
-                      数据寄存器标"被哪个 case 选中"，RO 线控数据标"数据(线控,force)"
-        """
-        if not hasattr(self, "ti_inputs"):
-            return
-        tbl = self.ti_inputs
-        rows = []       # 每行 = {letter, label, role, kind, drive, bold}
-        # ── 控制信号：按 ctrl_drivers 三来源渲染 ──
-        for drv in exp.get("ctrl_drivers", []):
-            rows.extend(self._mux_ctrl_rows(drv, exp))
-        # ── 数据寄存器：按【物理寄存器】收拢（同一寄存器只显一行，与 used_vars 同口径）——
-        #    死分支重复行 / LUT 型同源多 case 不再刷成多行，与 for_test 一致(t0~t7 各一行)。
-        seen_bases = set()
-        for di, key in enumerate(exp.get("data_keys", [])):
-            b = exp["bindings"].get(key)
-            if b is None:
-                continue
-            bkey = (b.base or "").lower() or key
-            if bkey in seen_bases:
-                continue
-            seen_bases.add(bkey)
-            kind, drive = self._binding_meta(b)
-            case_raw = grp.cases[di].case_raw if di < len(grp.cases) else "?"
-            # RO 线控数据走 force（线控寄存器），其余是被该 case 选中的本地/lut 寄存器
-            if (b.kind or "") == "RO":
-                role = "数据(线控,force)"
-            else:
-                role = "数据寄存器(被该case选中)"
-            rows.append({"letter": "case %s" % case_raw, "label": self._mux_label(b),
-                         "role": role, "kind": kind, "drive": drive, "bold": False})
-        # ── DFT 门（dft 页）：受 iddq 门控的输出，把门网当输入亮出来（.sv 自动+1 条漏电态拍）──
-        dft_row = self._dft_gate_input_row(grp.out_base)
-        if dft_row:
-            rows.append(dft_row)
-        tbl.setRowCount(len(rows))
-        for i, rd in enumerate(rows):
-            for c, v in enumerate([rd["letter"], rd["label"], rd["role"],
-                                   rd["kind"], rd["drive"]]):
-                it = QtWidgets.QTableWidgetItem(v)
-                if rd.get("bold") and c == 0:         # 控制输入字母加粗（与 logic 行为呼应）
-                    f = it.font(); f.setBold(True); it.setFont(f)
-                if c == 4 and "未解析" in v:
-                    it.setForeground(QtGui.QColor("red"))
-                elif c == 4 and "需探针前缀" in v:
-                    it.setForeground(QtGui.QColor("#d97706"))   # 琥珀：需前缀(非阻断但要配)
-                tbl.setItem(i, c, it)
-        tbl.resizeColumnsToContents()
-        self._fit_inputs_height()
-
-    @staticmethod
-    def _mux_label(b):
-        """绑定 → 『信号(位宽)』列文本。"""
-        return b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
-
-    def _dft_gate_input_row(self, out_base):
-        """输出受 dft 页 iddq 门控 → 『输入信号』表追加一行门网；不受门控返回 None。
-
-        2026-06-10 Hi1108 实地反馈：iddq 门不在 cone/case 输入里（在 dft 页），编辑器真值表
-        从不显示它，用户对照 for_test 以为漏了这个源头控制。在输入表单独亮出（驱动列照常给
-        未解析/需探针前缀着色——它正是 IDDQ 漏电态拍的 force 目标）。"""
+        与 analysis_norm._gate_dict 字段一致，区别只在：那边由 generator.pin_dft_gate 产出，
+        门【解析不了或不是 RO】就不钉(None)；这里照钉——『排查(旧)』的输入表要把坏掉的门
+        也红着亮出来（2026-06-10 Hi1108：门不在表达式里，不亮用户以为漏了这个源头控制）。"""
         g = (getattr(self.wb, "dft", None) or {}).get((out_base or "").lower())
         if not g or self._resolver is None:
             return None
         info = {"raw": g["gate_base"], "base": g["gate_base"],
                 "width": 1, "msb": None, "lsb": None}
         b = self._resolver.resolve("dft_gate_" + g["gate_base"], info)
-        kind, drive = self._binding_meta(b)
-        return {"letter": "dft页", "label": g["gate_base"],
-                "role": "DFT门(iddq)·每条测试驱透传值", "kind": kind,
-                "drive": drive, "bold": True}
+        return {"key": "__dft_gate__", "label": g["gate_base"],
+                "wire_lhs": getattr(b, "wire_lhs", None),
+                "transp": int(g["transparent"]), "width": 1, "binding": b}
+
+    def _populate_mux_inputs(self, grp, exp):
+        """mux 信号的『输入信号』表：行由 inputs_table.input_rows 算，这里只负责画。
+
+        （修"mux 点开输入信号框空白"，2026-06-03 第十一轮；第十四轮按控制三来源/数据三来源重排
+        ——WL 多控制·寄存器直出·mux 级联。文案与分行规则见 inputs_table._mux_input_rows。）"""
+        if not hasattr(self, "ti_inputs"):
+            return
+        self._fill_inputs_table(IT.input_rows(
+            {"kind": "mux", "sig": grp, "expansion": exp,
+             "dft_gate": self._dft_gate_entry(grp.out_base)}))
+
+    @staticmethod
+    def _mux_label(b):
+        """薄委托 → inputs_table.mux_label（绑定 → 『信号(位宽)』列文本）。"""
+        return IT.mux_label(b)
+
+    def _dft_gate_input_row(self, out_base):
+        """薄委托 → inputs_table.dft_gate_row（『输入信号』表的 iddq 门行）；不受门控返回 None。"""
+        return IT.dft_gate_row(self._dft_gate_entry(out_base))
 
     def _dft_pin_display(self, out_base, input_bases=None):
         """真值表「DFT门」输入行的显示信息 (门基名, 透传值)；不被门控/门不可 force → None。
@@ -5331,68 +5172,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return (g["gate_base"], int(g["transparent"]), b.address, b.reg_lsb)
 
     def _mux_ctrl_rows(self, drv, exp):
-        """一个控制信号的驱动器 → 『输入信号』表的若干行（按三来源给角色文案）。"""
-        out = []
-        src = drv.get("source")
-        if src == "logic":
-            # LPBT 形态：保持 line路径/local路径/模式位 三分角色（文案与历史一致）
-            line_key = drv["line"]["key"] if drv.get("line") else None
-            local_key = drv["local"]["key"] if drv.get("local") else None
-            for key in drv.get("keys", []):
-                b = exp["bindings"].get(key) or drv["bindings"].get(key)
-                kind, drive = self._binding_meta(b)
-                if key == line_key:
-                    role = "控制·line路径(force线控)"
-                elif key == local_key:
-                    role = "控制·local路径(本地寄存器)"
-                else:
-                    role = "控制·模式位/门控"
-                out.append({"letter": key.split(":")[-1], "label": self._mux_label(b),
-                            "role": role, "kind": kind, "drive": drive, "bold": True})
-            return out
-        if src in ("reg", "mux-force"):
-            key = drv.get("key")
-            b = exp["bindings"].get(key) or drv["bindings"].get(key)
-            kind, drive = self._binding_meta(b)
-            role = ("控制(寄存器直出)" if src == "reg"
-                    else "控制(force上游mux衔接网)")
-            out.append({"letter": drv.get("letter") or "?", "label": self._mux_label(b),
-                        "role": role, "kind": kind, "drive": drive, "bold": True})
-            return out
-        if src == "mux":
-            # mux 级联控制：本控制行 + 上游配方（载体寄存器 + 上游各控制）
-            upstream = drv.get("upstream")
-            up_no = getattr(upstream, "group_no", "?")
-            out.append({"letter": drv.get("letter") or "?",
-                        "label": drv.get("base") or "?",
-                        "role": "控制(经上游mux%s驱动)" % up_no,
-                        "kind": "mux", "drive": "经上游 mux%s 输出选路" % up_no, "bold": True})
-            recipe = drv.get("recipe") or {}
-            carrier_key = recipe.get("carrier_key")
-            if carrier_key is not None:
-                b = exp["bindings"].get(carrier_key) or recipe.get("bindings", {}).get(carrier_key)
-                if b is not None:
-                    kind, drive = self._binding_meta(b)
-                    out.append({"letter": "经 mux%s" % up_no, "label": self._mux_label(b),
-                                "role": "上游mux配方(载体寄存器写目标值)",
-                                "kind": kind, "drive": drive, "bold": False})
-            for ud in recipe.get("ctrl_drivers", []):
-                for key in ud.get("keys", []):
-                    b = exp["bindings"].get(key) or ud["bindings"].get(key)
-                    if b is None:
-                        continue
-                    kind, drive = self._binding_meta(b)
-                    out.append({"letter": "经 mux%s" % up_no, "label": self._mux_label(b),
-                                "role": "上游mux配方(上游控制驱到载体case)",
-                                "kind": kind, "drive": drive, "bold": False})
-            return out
-        # unknown：来源没解析出来——照样列出，角色写明"无法驱动"
-        key = drv.get("key")
-        b = (exp["bindings"].get(key) or drv.get("bindings", {}).get(key)) if key else None
-        kind, drive = self._binding_meta(b)
-        out.append({"letter": drv.get("letter") or "?", "label": drv.get("base") or "?",
-                    "role": "控制(来源未知,无法驱动)", "kind": kind, "drive": drive, "bold": True})
-        return out
+        """薄委托 → inputs_table.mux_ctrl_rows（一个控制信号的驱动器 → 若干输入行）。"""
+        return IT.mux_ctrl_rows(drv, exp)
 
     def _populate_chain(self):
         """『展开链』面板：cone 信号显示展开过程，非 cone 信号隐藏(不占空间)。
@@ -5420,37 +5201,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ti_chain_cap.show(); self.ti_chain.show()
 
     def _populate_inputs(self):
-        """填『输入信号』表：每个输入一行(字母/信号(位宽)/角色/类型/驱动)。随信号变化，不随逐格编辑变。"""
+        """填『输入信号』表：行由 inputs_table.input_rows 算，这里只负责画。
+        随信号变化，不随逐格编辑变。"""
         if not hasattr(self, "ti_inputs"):
             return
-        tbl = self.ti_inputs
         # DFT 门行（dft 页）：logic 输出也可能被 iddq 门控，与 mux 侧同口径亮出
-        dft_row = self._dft_gate_input_row(self._ti_sig.out_base if self._ti_sig else "")
-        tbl.setRowCount(len(self._ti_groups) + (1 if dft_row else 0))
-        for i, g in enumerate(self._ti_groups):
-            kind, drive = self._input_meta(g)
-            role = "控制/选择位" if g["is_control"] else "数据位"
-            for c, v in enumerate([self._group_letters(g), g.get("label", g["base"]),
-                                   role, kind, drive]):
+        self._fill_inputs_table(IT.input_rows(
+            {"kind": "logic", "groups": self._ti_groups, "bindings": self._ti_bindings,
+             "sig": self._ti_sig,
+             "dft_gate": self._dft_gate_entry(self._ti_sig.out_base if self._ti_sig else "")}))
+
+    def _fill_inputs_table(self, rows):
+        """把 inputs_table 算好的输入行画进 ti_inputs（logic 与 mux 共用同一支画笔）：
+        每行 字母/信号(位宽)/角色/类型/驱动；控制位与 DFT 门的字母加粗，驱动列坏了就上色。"""
+        tbl = self.ti_inputs
+        tbl.setRowCount(len(rows))
+        for i, rd in enumerate(rows):
+            for c, v in enumerate(IT.row_cells(rd)):
                 it = QtWidgets.QTableWidgetItem(v)
-                if g["is_control"] and c == 0:           # 控制位字母加粗，与真值表行表头呼应
+                if rd.get("bold") and c == 0:            # 控制位/DFT门 字母加粗，与真值表行表头呼应
                     f = it.font(); f.setBold(True); it.setFont(f)
                 if c == 4 and "未解析" in v:
                     it.setForeground(QtGui.QColor("red"))
                 elif c == 4 and "需探针前缀" in v:
                     it.setForeground(QtGui.QColor("#d97706"))   # 琥珀：需前缀(非阻断但要配)
-                tbl.setItem(i, c, it)
-        if dft_row:
-            i = len(self._ti_groups)
-            for c, v in enumerate([dft_row["letter"], dft_row["label"], dft_row["role"],
-                                   dft_row["kind"], dft_row["drive"]]):
-                it = QtWidgets.QTableWidgetItem(v)
-                if c == 0:
-                    f = it.font(); f.setBold(True); it.setFont(f)
-                if c == 4 and "未解析" in v:
-                    it.setForeground(QtGui.QColor("red"))
-                elif c == 4 and "需探针前缀" in v:
-                    it.setForeground(QtGui.QColor("#d97706"))
                 tbl.setItem(i, c, it)
         tbl.resizeColumnsToContents()
         self._fit_inputs_height()
@@ -5575,7 +5349,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     % (pin[1], 1 - pin[1]))
                 _gr = self._ti_gate_row if self._ti_gate_row is not None else self._ti_G
                 self.ti_table.setItem(_gr, c, git)
-            drv_tip = ("\nforce: %s" % fs if fs else "") + ("\nRF_WRITE: %s" % ws if ws else "")
+            drv_tip = IT.cell_drive_tip(fs, ws)      # 单元格 tooltip 尾巴上的驱动两行
             # ── auto_out 行（只读）：程序按表达式算出的值 ──
             autoit = self._mk_item(self._cell_text(rd["correct"] & E.mask(w), w), False)
             autoit.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -5621,9 +5395,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 rename_hint = "双击列头可改名" if rd.get("user_added") else "自动生成，名字不可改"
                 exp_state = ("负向(故意填错)" if neg else
                              ("期望已手填" if de is not None else "期望未填(auto_out兜底)"))
-                hh.setToolTip("%s · %s · %s\nforce: %s\nRF_WRITE: %s"
+                hh.setToolTip("%s · %s · %s\n%s"                     # 末段=本列实下的 force/RF_WRITE
                               % ("负向(故意填错)" if neg else "正向(真实)", exp_state, rename_hint,
-                                 fs or "(无)", ws or "(无)"))
+                                 IT.header_drive_tip(fs, ws)))
                 hh.setForeground(NEG_FG if neg else QtGui.QColor("black"))   # 负向=琥珀，不与"状态红=坏掉"撞色
             # 列底色：负向=琥珀；当前选中列=淡蓝高亮；两者叠加=更深琥珀。其余列不设(留给隔行底色)。
             hl = (c == self._ti_hl_col)
@@ -6460,14 +6234,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage("已导出测试项 CSV：%s" % path)
 
     def _mux_drive_strs(self, vec, bindings, used_vars):
-        """mux 向量的 force / RF_WRITE 驱动文本（与 logic 的 _drive_strs 对称，供 CSV 展示）。"""
-        try:
-            forces, writes, _unres = W.compute_drives(vec, bindings, used_vars)
-        except Exception:  # noqa: BLE001
-            return "", ""
-        fs = "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces)
-        ws = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
-        return fs, ws
+        """薄委托 → inputs_table.drive_pair（mux 向量的 force / RF_WRITE 驱动文本，供 CSV 展示）。"""
+        return IT.drive_pair(vec, bindings, used_vars)
 
     def _export_mux_csv(self, grp):
         """导出 mux 信号测试项为真值表 CSV（给 designer 看 / 复制粘贴）。
