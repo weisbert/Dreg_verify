@@ -255,6 +255,82 @@ def test_p08_neg_all_covers_every_checked_signal_even_the_hidden_ones(monkeypatc
 
     assert len(neg1) > n_vis, "v1 应当连被筛掉的勾选信号一起加上，否则这条测试验不到作用域"
     assert neg2 == neg1
+    assert sv2 == sv1, ".sv 与 v1 不再逐字节相同（v1 %d / v2 %d 字符）" % (len(sv1), len(sv2))
     # 「清除反例」走同一个 `neg_targets`：信号全都还勾着 → 一次清光（v1 也是），两边同样空
     assert neg2b == neg1b == []
-    assert sv2 == sv1, ".sv 与 v1 不再逐字节相同（v1 %d / v2 %d 字符）" % (len(sv1), len(sv2))
+
+
+# ═════════════ P-21 / P-27：状态列排序次序 与 逻辑类型列标签按 v1 ═════════════
+def test_p21_status_column_sort_order_matches_v1(monkeypatch, tmp_path):
+    """C-037。v1 的状态列排的是格子里那四档标签的文字序；v2 排的是八档折下来的色档权重，
+    `bare-probe`（v1 status=ok）被算成 note、跟只读回读根排到了一起 —— btlp 上两代排序的
+    **唯一**差异就是这一行（P-21）。修法与状态筛 P-13 同一份判据（`terms` 那张 note 归属表）。
+
+    序列与 R1 复现脚本一致：先点「信号」、再点「owner」、最后点「状态」（前两下把平局序
+    也定死，否则比的是 Qt 的排序稳定性而不是排序键）。
+    """
+    from PySide6 import QtCore as QC                        # noqa: PLC0415
+    from dreg_verify.ui.contracts import ListCol as LC      # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.auto_dialogs(monkeypatch)
+    path = H.mirror_path("btlp")
+
+    w1, v1 = _v1_window(path)
+    try:
+        v1.sig_table.setSortingEnabled(True)
+        for col in (2, 4, 7):                    # legacy_gui: TOPO_NAME / TOPO_OWNER / TOPO_STATUS
+            v1.sig_table.sortItems(col, QC.Qt.AscendingOrder)
+        order1 = [v1.sig_table.item(r, 2).text() for r in range(v1.sig_table.rowCount())]
+        # v1 的四档标签序列（真正的排序键），一并钉住，免得只比到「名字碰巧一样」
+        st1 = [v1.sig_table.item(r, 7).text() for r in range(v1.sig_table.rowCount())]
+    finally:
+        w1.close()
+    H.app().processEvents()
+
+    w2 = _v2_window(path)
+    try:
+        lp = w2.list_panel
+        for col in (LC.NAME, LC.OWNER, LC.STATUS):
+            lp.sort_by(col, QC.Qt.AscendingOrder)
+            H.app().processEvents()
+        order2 = [lp.proxy.index(r, int(LC.NAME)).data() for r in range(lp.proxy.rowCount())]
+    finally:
+        w2.close()
+
+    assert len(set(st1)) >= 2, "这张镜像得同时有可建与非可建的行，否则排序验不到东西"
+    assert order2 == order1, "状态列排序与 v1 不同：\n  v1 %s\n  v2 %s" % (order1, order2)
+
+
+def test_p27_form_column_labels_match_v1(monkeypatch, tmp_path):
+    """C-013。v1 的「逻辑类型」列写的是引擎的 `form_label`（门控按内层形态分成
+    「门控·选路」/「门控·布尔/位运算」）；v2 拿 `form` 去查四档表，wl 镜像上 7 个门控信号
+    全塌成同一个标签，「这一批到底是哪种」在列上就没了（P-27）。"""
+    from dreg_verify.ui.contracts import ListCol as LC      # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.auto_dialogs(monkeypatch)
+    path = H.mirror_path("wl")
+
+    w1, v1 = _v1_window(path)
+    try:
+        labels1 = {v1.sig_table.item(r, 2).text().split("[")[0]:
+                   v1.sig_table.item(r, 6).text()             # legacy_gui: TOPO_FORM
+                   for r in range(v1.sig_table.rowCount())}
+    finally:
+        w1.close()
+    H.app().processEvents()
+
+    w2 = _v2_window(path)
+    try:
+        lp = w2.list_panel
+        labels2 = {str(lp.proxy.index(r, int(LC.NAME)).data() or "").split("[")[0]:
+                   str(lp.proxy.index(r, int(LC.FORM)).data() or "")
+                   for r in range(lp.proxy.rowCount())}
+    finally:
+        w2.close()
+
+    gated = [n for n, lab in labels1.items() if lab.startswith("门控")]
+    assert len(gated) >= 7, "wl 镜像上应有 7 个门控信号，实际 %d" % len(gated)
+    assert len({labels1[n] for n in gated}) >= 2, "v1 就该把门控信号分成不止一档"
+    assert labels2 == labels1
+    assert not any("F0" in s or "F1" in s or "F2" in s or "F3" in s or "F4" in s
+                   for s in labels2.values()), "逻辑类型列不得出现 F 编号"

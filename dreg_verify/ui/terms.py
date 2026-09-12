@@ -258,6 +258,21 @@ KIND_LABELS = {"logic": "选路/logic", "mux": "选路/mux", "register": "直连
                "ro-readback": "RO回读(跳过)", "unresolved": "未解析"}          # C-012
 FORM_LABELS = {"register": "直连寄存器", "boolean": "布尔/位运算", "select": "选路", "gated": "门控 iddq"}
 
+
+def form_label_of(model):
+    """模型行 → 清单「逻辑类型」列上写的那一档（C-013）。
+
+    引擎给了 `form_label` 就用它（先过 `scrub`）：门控信号在 v1 里按**内层形态**分成
+    「门控·选路」/「门控·布尔/位运算」，而 `FORM_LABELS` 只有 `gated` 一格 —— 直接查表会把
+    wl 镜像上 7 个门控信号塌成同一个标签，「这一批到底是哪种」在列上就看不出来了（P-27）。
+    `FORM_LABELS` 仍是覆盖度那四档的名字（每档一格，`coverage.py` 照用），也是这里的兜底。
+
+    `forms.form_label` 从不带 F 编号（门控写成「门控·<内层>」），这条路不会把 F0–F4 放上屏。"""
+    m = model or {}
+    lab = scrub(str(m.get("form_label") or "").strip())
+    return lab or FORM_LABELS.get(str(m.get("form") or ""), "")
+
+
 # ④ 详情标题栏
 HDR_META_FMT = "owner {owner} · {kind} · 用例 {n}"
 HDR_COV_FMT = "覆盖度 {label} （来自：{source}） ▾"

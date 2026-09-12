@@ -45,6 +45,20 @@ __all__ = ["SignalListModel", "SignalListProxy", "SignalListView", "SignalListDe
 #: 状态排序权重（升序 = 有问题的在前，一眼看见要处理的；降序 = 可建的在前）
 _TONE_ORDER = {"bad": 0, "warn": 1, "note": 2, "ok": 3}
 
+
+def _status_rank(model, tone):
+    """状态列的排序权重（C-037）。
+
+    权重按色档，但 note 色档跟着 `terms` 那份「v1 四档归属」分家（P-21，与状态筛 C-029
+    同一份判据）：`bare-probe` 在 v1 里 status=ok，按状态排序时它就该落在「可建」那一堆里，
+    而不是跟只读回读根挤在一起 —— btlp 上 v1/v2 状态列排序的**唯一**差异就是这一行。"""
+    key = T.status_key_of(model)
+    if key in T.NOTE_AS_OK_KEYS:
+        return _TONE_ORDER["ok"]
+    if key in T.NOTE_AS_PROBLEM_KEYS:
+        return _TONE_ORDER["note"]
+    return _TONE_ORDER.get(tone, 9)
+
 #: 「仅有问题」筛选口径 = 非 ok 档（note 的只读回读 / 裸名不算问题）；与筛选行共用一份（terms）
 _PROBLEM_TONES = T.PROBLEM_TONES
 
@@ -449,7 +463,7 @@ class SignalListModel(QtCore.QAbstractItemModel):
         if col == LC.KIND:
             return T.KIND_LABELS.get(str(m.get("kind") or ""), str(m.get("kind") or ""))   # C-012
         if col == LC.FORM:
-            return T.FORM_LABELS.get(str(m.get("form") or ""), _scrub(m.get("form_label")))  # C-013
+            return T.form_label_of(m)                                   # C-013（门控按内层分档）
         if col == LC.PREFIX:
             return "；".join(self._prefix_parts(m))                      # C-017 / C-019 / C-020
         if col == LC.EXPR:
@@ -511,7 +525,7 @@ class SignalListModel(QtCore.QAbstractItemModel):
         if col == LC.NEG:
             return 0 if self.is_neg(m.get("name", "")) else 1
         if col == LC.STATUS:
-            return _TONE_ORDER.get(tone, 9)
+            return _status_rank(m, tone)
         if col == LC.NTEST:
             n = m.get("n_vectors")
             return -1 if n in (None, "") else int(n)

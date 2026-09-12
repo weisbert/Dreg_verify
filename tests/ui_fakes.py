@@ -45,7 +45,9 @@ def lite_model(name, i=0, **over):
     m = {"name": name, "disp": name, "owner": "fake_owner", "width": 1,
          "kind": ("mux" if i % 2 else "logic"), "status": "ok", "status_detail": "clean",
          "note": "", "issues": [], "matched_name": name.lower(), "n_leaves": 1,
-         "n_vectors": 2 + i, "form": "boolean", "form_label": "布尔 (F1)",
+         # form_label 用引擎真给得出的那种串（`forms.form_label` 从不带 F 编号）：清单
+         # 「逻辑类型」列现在显示的就是它（C-013 / P-27），假数据带 F 编号会假红文案扫描
+         "n_vectors": 2 + i, "form": "boolean", "form_label": "布尔/位运算",
          "probe_net": name, "prefix": "", "assert_id": str(i + 1), "expr": "A & B",
          "input_names": ["d_fake_in_a", "d_fake_in_b"], "supplement": False,
          "normalized_note": "", "out_net": name,

@@ -375,8 +375,11 @@ def test_c013_form_column_labels():
     panel, _ = make_panel()
     panel.set_visible_columns(set(CT.LIST_DEFAULT_VISIBLE) | {LC.FORM})
     seen = {cell(panel, n, LC.FORM) for n in panel.visible_names() if cell(panel, n, LC.FORM)}
-    assert seen <= set(T.FORM_LABELS.values()), seen
-    assert seen & {T.FORM_LABELS["select"], T.FORM_LABELS["gated"], T.FORM_LABELS["register"]}
+    # 门控行按内层形态分档（「门控·选路」/「门控·布尔/位运算」，P-27），所以不是 FORM_LABELS
+    # 的子集；但每一档都得以四档表里的某个名字打头（覆盖度弹层按同一批名字派发）。
+    assert all(any(s.startswith(v) for v in T.FORM_LABELS.values()) or s.startswith("门控")
+               for s in seen), seen
+    assert seen & {T.FORM_LABELS["select"], T.FORM_LABELS["register"]}
     assert not any(re.search(r"\bF[0-4]\b", s) for s in seen), "逻辑类型列不得出现 F 编号"
 
 
@@ -754,9 +757,23 @@ def test_c037_header_sort_by_ntest_and_status_uses_sort_role():
     vals = [int(cell(panel, n, LC.NTEST) or -1) for n in panel.visible_names()]
     assert vals == sorted(vals), vals
     click_header(panel, LC.STATUS)
-    tones = [cell(panel, n, LC.STATUS, int(LR.TONE)) for n in panel.visible_names()]
+    names = panel.visible_names()
+    by_name = {m["name"]: m for m in all_models()}
+    # 权重按色档，但 note 色档跟着「v1 四档归属」分家（P-21）：`bare-probe` 在 v1 里
+    # status=ok，排序时就该落在可建那一堆里，而不是跟只读回读根挤在一起。
     order = {"bad": 0, "warn": 1, "note": 2, "ok": 3}
-    assert [order[t] for t in tones] == sorted(order[t] for t in tones), tones
+
+    def rank(n):
+        m = by_name[n]
+        key = T.status_key_of(m)
+        if key in T.NOTE_AS_OK_KEYS:
+            return order["ok"]
+        if key in T.NOTE_AS_PROBLEM_KEYS:
+            return order["note"]
+        return order[T.tone_of(m)]
+
+    ranks = [rank(n) for n in names]
+    assert ranks == sorted(ranks), [(n, cell(panel, n, LC.STATUS, int(LR.TONE))) for n in names]
 
 
 def test_c037_sort_menu_is_second_entry():
