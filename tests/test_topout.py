@@ -324,6 +324,143 @@ def test_c217_include_risky_param_default_true_bytes_equal(wb, wl_wb):
     assert T.topout_report(wl_wb, mode="min", max_tests=64, include_risky=False)["summary"]
 
 
+# ───────────────────────── N8：后台逐信号分析（progress / cancel / lite / 骨架） ─────────────────────────
+#: C0-a 之前 topout_view_models 每个模型的键【与顺序】——新键只准往后加，老键一个不许改
+_PRE_C0A_MODEL_KEYS = ("name", "disp", "owner", "width", "kind", "status", "note", "issues",
+                       "matched_name", "n_leaves", "n_vectors", "form", "form_label", "chain",
+                       "inputs", "tests", "auto_label", "exp_label", "probe_net", "prefix",
+                       "assert_id")
+#: 改前（main HEAD 1fae031）录的快照摘要：canon 化后投影回上面 21 个键（chain 条目只留
+#: out/expr/subst 三键，page/kind 是 N9 新加的）→ sort_keys 的紧凑 JSON → sha256[:16]
+_PRE_C0A_SNAPSHOT = {"btlp": "c03327e45262da40", "wl": "3ae4cf3964673c84"}
+
+
+def _canon(o):
+    """把模型里的任意值规范成可比对的纯数据（对象转 repr；带内存地址的 repr 直接判错）。"""
+    import re
+    if isinstance(o, dict):
+        return {str(k): _canon(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_canon(v) for v in o]
+    if o is None or isinstance(o, (str, int, float, bool)):
+        return o
+    r = repr(o)
+    assert not re.search(r"0x[0-9a-fA-F]{6,}", r), "repr 不确定（含地址）: %s" % r
+    return r
+
+
+def _model_snapshot_sha(models):
+    import hashlib
+    import json
+    proj = []
+    for m in models:
+        d = {k: _canon(m[k]) for k in _PRE_C0A_MODEL_KEYS}
+        d["chain"] = [{k: c[k] for k in ("out", "expr", "subst")} for c in m["chain"]]
+        proj.append(d)
+    txt = json.dumps(proj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()[:16]
+
+
+def test_c276_view_models_full_output_matches_pre_c0a_snapshot(wb, wl_wb):
+    """lite=False（默认）的输出 == C0-a 改前快照：老 21 键逐键同值、键序不变，新键只在后面追加。
+
+    N8 把模型构造抽成了 lite_model，这条是那次重构的安全网（对应 byte-gate 之于 .sv）。"""
+    for tag, wb_ in (("btlp", wb), ("wl", wl_wb)):
+        ms = T.topout_view_models(wb_, mode="max", max_tests=64)
+        assert list(ms[0].keys())[:len(_PRE_C0A_MODEL_KEYS)] == list(_PRE_C0A_MODEL_KEYS)
+        assert _model_snapshot_sha(ms) == _PRE_C0A_SNAPSHOT[tag], tag
+    # 新键 = LITE_MODEL_KEYS 里富表之外的那几个（清单不论拿 lite 还是 full 都只读一套键）
+    from dreg_verify.ui import contracts
+    ms = T.topout_view_models(wb, mode="min", max_tests=8)
+    assert set(contracts.LITE_MODEL_KEYS) <= set(ms[0])
+
+
+def test_c276_analyze_all_progress_and_cancel(wl_wb, wl_res):
+    """analyze_all 的 progress 每信号一次；should_cancel 在信号边界生效，返回部分列表。"""
+    n = len(wl_wb.topout)
+    seen = []
+    res = T.analyze_all(wl_wb, wl_res, mode="min", max_tests=8,
+                        progress=lambda d, t, nm, r: seen.append((d, t, nm, r.status)))
+    assert len(res) == n and len(seen) == n
+    assert [s[0] for s in seen] == list(range(1, n + 1))      # done 从 1 起、逐个递增
+    assert all(s[1] == n for s in seen)                       # total 恒为清单长度
+    assert [s[2] for s in seen] == [t.name for t in wl_wb.topout]   # 按 Topout B 列序
+    # 第 3 个信号之后取消 → 只返回 3 个（已分析的照常给，其余由调用方留 pending）
+    box = {"n": 0}
+
+    def _cancel():
+        return box["n"] >= 3
+
+    def _tick(d, t, nm, r):
+        box["n"] = d
+
+    part = T.analyze_all(wl_wb, wl_res, mode="min", max_tests=8,
+                         progress=_tick, should_cancel=_cancel)
+    assert len(part) == 3
+    assert [r.topo.name for r in part] == [t.name for t in wl_wb.topout[:3]]
+    # 不传新参 = 旧行为（零额外调用）
+    assert len(T.analyze_all(wl_wb, wl_res, mode="min", max_tests=8)) == n
+
+
+def test_c276_view_models_lite_equals_full_on_shared_keys(wb, wl_wb):
+    """lite=True 跳过联表，但共有键与 full 逐键同值；progress 第 4 参是 lite 模型本身。"""
+    from dreg_verify.ui import contracts
+    for wb_ in (wb, wl_wb):
+        full = T.topout_view_models(wb_, mode="max", max_tests=64)
+        lite = T.topout_view_models(wb_, mode="max", max_tests=64, lite=True)
+        assert len(lite) == len(full)
+        for a, b in zip(lite, full):
+            assert tuple(a.keys()) == tuple(contracts.LITE_MODEL_KEYS)   # lite = 契约那一套键
+            assert "chain" not in a and "tests" not in a and "inputs" not in a
+            for k in a:
+                assert _canon(a[k]) == _canon(b[k]), (a["name"], k)
+    # progress 逐信号发 lite 模型（worker 据此一行一行刷新清单）
+    got = []
+    ms = T.topout_view_models(wl_wb, mode="min", max_tests=8, lite=True,
+                              progress=lambda d, t, nm, m: got.append((nm, m)))
+    assert [g[0] for g in got] == [m["name"] for m in ms]
+    for (nm, m), final in zip(got, ms):
+        assert tuple(m.keys()) == tuple(contracts.LITE_MODEL_KEYS)
+        assert _canon(m) == _canon(final)      # 中途发的 = 最终那一行（含 assert_id）
+    # 取消：lite 与 full 都只给已分析的那几行
+    box = {"n": 0}
+    part = T.topout_view_models(wl_wb, mode="min", max_tests=8, lite=True,
+                                progress=lambda d, t, nm, m: box.__setitem__("n", d),
+                                should_cancel=lambda: box["n"] >= 2)
+    assert len(part) == 2
+    part_full = T.topout_view_models(wl_wb, mode="min", max_tests=8,
+                                     progress=lambda d, t, nm, m: box.__setitem__("n2", d),
+                                     should_cancel=lambda: box.get("n2", 0) >= 2)
+    assert len(part_full) == 2 and part_full[0]["tests"]      # 联表按已分析名限定，表还在
+
+
+def test_c276_skeleton_models_fast(wb, wl_wb):
+    """骨架清单：只走 resolve_root，秒出、无向量、状态 pending，键集与 lite 模型完全一致。"""
+    import time
+    from dreg_verify.ui import contracts
+    t0 = time.time()
+    sk = T.topout_skeleton_models(wb) + T.topout_skeleton_models(wl_wb)
+    dt = time.time() - t0
+    assert dt < 0.5, "两张 mirror 21 个信号的骨架应在 0.5s 内出来，实测 %.3fs" % dt
+    assert len(sk) == len(wb.topout) + len(wl_wb.topout) == 21
+    for m in sk:
+        assert tuple(m.keys()) == tuple(contracts.LITE_MODEL_KEYS)
+        assert m["status"] == "pending" and m["status_detail"] == "pending"
+        assert m["n_vectors"] is None and m["form"] == "" and m["assert_id"] == ""
+        assert m["name"] and m["disp"] and m["probe_net"]
+    # 骨架的稳定字段与分析完的 lite 模型一致（清单换 dict 时不跳名字/不跳类别）
+    lite = {m["name"]: m for m in T.topout_view_models(wb, mode="min", max_tests=8, lite=True)}
+    for m in T.topout_skeleton_models(wb):
+        f = lite[m["name"]]
+        for k in ("disp", "owner", "kind", "probe_net", "prefix", "out_net", "expr",
+                  "supplement", "normalized_note", "matched_name"):
+            assert m[k] == f[k], (m["name"], k)
+    # 探针前缀照样进骨架（清单第一趟就能显示『需前缀』列）
+    pp = {"d_logic_bt_lp_tsensor_to_mux": "U_BT_LP_PLL_DIG"}
+    sk2 = {m["name"]: m for m in T.topout_skeleton_models(wb, probe_prefixes=pp)}
+    assert sk2["d_logic_bt_lp_tsensor"]["prefix"] == "U_BT_LP_PLL_DIG"
+
+
 def test_view_models_carry_form_label(wb):
     """#2：视图模型带 form/form_label(展开后表达式形态 F0-F4)——信号清单『逻辑类型』列。"""
     ms = {m["name"]: m for m in T.topout_view_models(wb, mode="max")}

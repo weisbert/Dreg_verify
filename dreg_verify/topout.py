@@ -725,11 +725,18 @@ def _cov_for(sig_cov, name, mode, exhaustive, form_cov=None, shape=None):
 
 
 def analyze_all(wb, resolver, mode="min", max_tests=256, exhaustive=False,
-                want_vectors=True, sig_cov=None, form_cov=None):
+                want_vectors=True, sig_cov=None, form_cov=None,
+                progress=None, should_cancel=None):
     """对 wb.topout 全清单逐信号分析。返回 list[TopoutResult]（外层枚举源=Topout B 列）。
     sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，命中则该信号压全局档（N3）。
     form_cov(#3)：per-form 覆盖度 {形态键(register/boolean/select/gated): 档}，介于单点与全局之间。
-    配了 form_cov 时先 want_vectors=False 定形态、据形态选档再出向量(opt-in 双趟；无 form_cov→单趟、逐字节不变)。"""
+    配了 form_cov 时先 want_vectors=False 定形态、据形态选档再出向量(opt-in 双趟；无 form_cov→单趟、逐字节不变)。
+
+    progress / should_cancel（GUI v2 N8，additive，默认 None = 旧行为零额外调用）：
+      · `should_cancel()` 在【每个信号之前】问一次，返 True 就 break —— 返回的是**部分**列表
+        （已分析的那几个），调用方据此保留已出结果、其余留 pending（护栏3：不静默丢）。
+      · `progress(done, total, name, res)` 在每个信号分析完后调一次，done 从 1 起。
+      逐信号粒度也是 worker 与主线程共用 wb 的互斥粒度（I-21：锁在 provider 那层，信号之间放开）。"""
     logic_idx, mux_idx = build_index(wb)
     rename = _rename_map(wb)            # 合并改名表(dft+level_shift)，一次建好，逐信号复用
     shapes = {}
@@ -739,13 +746,18 @@ def analyze_all(wb, resolver, mode="min", max_tests=256, exhaustive=False,
             r0 = analyze_signal(wb, resolver, topo, root=root, want_vectors=False)
             shapes[topo.name.lower()] = result_form(wb, r0)
     out = []
+    total = len(wb.topout)
     for topo in wb.topout:
+        if should_cancel is not None and should_cancel():
+            break                       # 取消：信号边界生效，已分析的照常返回
         m, ex = _cov_for(sig_cov, topo.name, mode, exhaustive,
                          form_cov=form_cov, shape=shapes.get(topo.name.lower()))
         root = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
         out.append(analyze_signal(wb, resolver, topo, root=root, mode=m,
                                   max_tests=max_tests, exhaustive=ex,
                                   want_vectors=want_vectors))
+        if progress is not None:
+            progress(len(out), total, topo.name, out[-1])
     return out
 
 
@@ -1272,8 +1284,15 @@ def _logic_mux_aid_override(wb, results, row_aid):
     一源对多 Topout 行(dup-source)时取【首个】(=实际产出块的那行，与 build_for_topout seen_src 一致)。"""
     ov = {}
     for r in results:
-        if r.status == "ok" and r.root.kind in (LOGIC, MUX) and not r.root.renamed:
-            ov.setdefault(r.root.obj.out_name.lower(), row_aid.get(r.topo.name.lower(), ""))
+        _aid_override_add(ov, r, row_aid)
+    return ov
+
+
+def _aid_override_add(ov, r, row_aid):
+    """把一个结果并进 assert 标号覆盖表（增量版，供 N8 的逐信号回调用：结果按 B 列序到达，
+    setdefault 的『首行赢』语义与一次性算全表完全一致）。"""
+    if r.status == "ok" and r.root.kind in (LOGIC, MUX) and not r.root.renamed:
+        ov.setdefault(r.root.obj.out_name.lower(), (row_aid or {}).get(r.topo.name.lower(), ""))
     return ov
 
 
@@ -1572,24 +1591,130 @@ def _topout_probe_net(r):
     return r.topo.name
 
 
+def _assert_id_for(r, row_aid, aid_override):
+    """该信号在 .sv 里的 assert 标号（= Topout 行序 #7）；非产出行（RO/dup/未解析/error）为空串。
+
+    logic/mux 根取【同源首行】号（dup-source 共享、与 build 实际产出块标号一致）；
+    register / dft 改名根取本行号（各自产出一块）。"""
+    if r.status == "ok" and r.root.renamed:
+        _emit = r.node is not None and r.bindings is not None and bool(r.vectors)
+        return (row_aid or {}).get(r.topo.name.lower(), "") if _emit else ""
+    if r.status == "ok" and r.root.kind == REGISTER:
+        return (row_aid or {}).get(r.topo.name.lower(), "") if r.vectors else ""
+    if r.status == "ok" and r.root.kind in (LOGIC, MUX) and r.root.obj is not None:
+        return (aid_override or {}).get(r.root.obj.out_name.lower(), "")
+    return ""
+
+
+def _lite_input_names(r):
+    """清单搜索/悬停要的【输入信号名】列表（C-030/C-031）：logic/register 根取输入分组 label，
+    mux 根取 used_vars 对应绑定的物理基名。永不抛（拿不到就空列表，清单绝不因此崩）。"""
+    try:
+        if r.root.kind == MUX:
+            exp = r.expansion or {}
+            bindings = exp.get("bindings") or {}
+            out = []
+            for k in exp.get("used_vars") or []:
+                b = bindings.get(k)
+                nm = (getattr(b, "base", None) or k) if b is not None else k
+                if nm not in out:
+                    out.append(nm)
+            return out
+        if r.node is not None and r.bindings is not None:
+            return [g.get("label") or g.get("base") or "" for g in
+                    V.input_groups(r.node, r.bindings)]
+    except Exception:      # noqa: BLE001 —— 清单字段绝不连累分析
+        pass
+    return []
+
+
+def lite_model(wb, r, row_aid=None, aid_override=None, probe_prefixes=None, include_risky=True):
+    """一个 TopoutResult → **lite 视图模型**（字段 = `ui/contracts.py` 的 LITE_MODEL_KEYS）。
+
+    v2 信号清单只读这些键：它们全部只依赖【本信号自己的】分析结果，不需要 report_for_topout
+    那趟全表联表（chain/inputs/tests 三个重键都在那趟里），所以后台 worker 能逐信号发出来、
+    清单边分析边刷新。full 模型（topout_view_models 的默认输出）= 本函数的全部键 + 那三个重键，
+    两者在共有键上**逐键同值**（test_c276_view_models_lite_equals_full_on_shared_keys 守）。
+    """
+    obj = r.root.obj
+    shape = result_form(wb, r) if r.status == "ok" else None
+    pnet = _topout_probe_net(r)                       # assert LHS 探针网（不带前缀）
+    prefix = _probe_prefix_for_name(probe_prefixes, pnet)
+    from . import analysis_norm as AN                 # 惰性：AN 也 import 本模块，避免成环
+    return {
+        "name": r.topo.name, "disp": _topout_disp_name(r.topo, r.out_width),
+        "owner": r.topo.owner, "width": r.out_width,
+        "kind": r.root.kind, "status": r.status,
+        "status_detail": AN.status_detail(r, include_risky=include_risky, probe_prefix=prefix),
+        "note": r.note, "issues": list(r.issues), "matched_name": r.root.matched_name,
+        "n_leaves": r.n_leaves, "n_vectors": len(r.vectors),
+        # #2 逻辑类型(展开后表达式形态 F0-F4)：信号清单列 + #3 覆盖按它派发
+        "form": (shape.kind if shape else ""), "form_label": form_label(shape),
+        "probe_net": pnet, "prefix": prefix,
+        "assert_id": _assert_id_for(r, row_aid, aid_override),
+        "expr": str(getattr(obj, "expr", "") or ""),          # 源对象原式（清单表达式列/搜索）
+        "input_names": _lite_input_names(r),                  # 输入信号名（搜索 C-030/C-031）
+        "supplement": bool(getattr(obj, "_is_supplement", False)),   # RTL 补充逻辑（C-039）
+        "normalized_note": str(getattr(obj, "normalized_note", "") or ""),   # 嵌套 mux 折叠（C-040）
+        "out_net": pnet,          # = an["out_net"]（§7-1 同口径：Topout 视图里就是探针网本身）
+    }
+
+
+def topout_skeleton_models(wb, probe_prefixes=None, force_overrides=None, logic_overrides=None):
+    """**骨架清单**（N8 第一趟）：只走 build_index + resolve_root，不出向量、不联表。
+
+    给 v2 清单「秒出、立刻可点」用：每行 status="pending"、n_vectors=None，后台 worker 逐信号
+    分析完再把该行换成 lite 模型（键集与 lite_model 完全一致，视图换 dict 即可，不必判键）。
+    force_overrides 只为与 topout_view_models 的调用点同签名——骨架不解析叶子，用不到它。
+    """
+    with _with_logic_overrides(wb, logic_overrides):
+        logic_idx, mux_idx = build_index(wb)
+        rename = _rename_map(wb)
+        out = []
+        for topo in wb.topout:
+            root = resolve_root(wb, topo.name, logic_idx, mux_idx, rename=rename)
+            r = TopoutResult(topo, root)              # 空壳：只为复用探针网/显示名的同一口径
+            pnet = _topout_probe_net(r)
+            obj = root.obj
+            out.append({
+                "name": topo.name, "disp": _topout_disp_name(topo, topo.width),
+                "owner": topo.owner, "width": topo.width,
+                "kind": root.kind, "status": "pending", "status_detail": "pending",
+                "note": root.note, "issues": [], "matched_name": root.matched_name,
+                "n_leaves": 0, "n_vectors": None,
+                "form": "", "form_label": "",
+                "probe_net": pnet, "prefix": _probe_prefix_for_name(probe_prefixes, pnet),
+                "assert_id": "",
+                "expr": str(getattr(obj, "expr", "") or ""),
+                "input_names": [],                    # 还没解析叶子，分析完由 lite 模型补上
+                "supplement": bool(getattr(obj, "_is_supplement", False)),
+                "normalized_note": str(getattr(obj, "normalized_note", "") or ""),
+                "out_net": pnet,
+            })
+        return out
+
+
 def topout_view_models(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
                       force_overrides=None,
-                       sig_cov=None, logic_overrides=None, form_cov=None, include_risky=True):
+                       sig_cov=None, logic_overrides=None, form_cov=None, include_risky=True,
+                       progress=None, should_cancel=None, lite=False):
     """每信号视图模型（公共入口）。logic_overrides(M8)：分析期临时换 wb.logic(应用 RTL 补充)，
     使 GUI 真值表显示补充【后】逻辑（否则静默假绿）；无 → 逐字节不变。
     form_cov(#3)：per-form 覆盖度。include_risky(C-217)：『缺前缀是否强制生成』，默认 True =
-    此前写死值。详见 _topout_view_models_core。"""
+    此前写死值。progress/should_cancel/lite(N8)：后台逐信号分析。详见 _topout_view_models_core。"""
     with _with_logic_overrides(wb, logic_overrides):
         return _topout_view_models_core(wb, mode=mode, max_tests=max_tests,
                                         exhaustive=exhaustive, probe_prefixes=probe_prefixes,
                                         force_overrides=force_overrides,
                                         sig_cov=sig_cov, form_cov=form_cov,
-                                        include_risky=include_risky)
+                                        include_risky=include_risky,
+                                        progress=progress, should_cancel=should_cancel,
+                                        lite=lite)
 
 
 def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
                              sig_cov=None, form_cov=None, force_overrides=None,
-                             include_risky=True):
+                             include_risky=True, progress=None, should_cancel=None, lite=False):
     """每个 Topout 信号一个【视图模型】（GUI / 无头测试消费），按 Topout B 列序。
 
     干净 cone 默认（Topout 视图不放级联/尾缀/top_output——那些属『排查(旧)』）。
@@ -1598,15 +1723,41 @@ def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, pr
       · RO 回读 / 未解析 / error → 只记账（无真值表，note/issues 说明原因，绝不崩）。
     probe_prefixes：force 叶子(RO/iddq) + 探针层级前缀（与 .sv 同口径）。
     sig_cov：单点覆盖度 {Topout名低: min/max/exhaustive}，命中则清单『用例』数与编辑/导出同档（N3）。
-    每个模型：{name, owner, width, kind, status, note, issues, matched_name, n_leaves,
-              chain:[{out,expr,subst}], inputs:[…], tests:[…], auto_label, exp_label, n_vectors}。"""
+    每个模型：lite_model 的全部键（LITE_MODEL_KEYS）+ 富表五键
+              {chain:[{out,expr,subst,page,kind}], inputs:[…], tests:[…], auto_label, exp_label}。
+
+    N8（GUI v2，additive，三个新参默认 None/None/False = 旧行为）：
+      · lite=True   —— **跳过 report_for_topout 那趟全表联表**（v2 清单不要 chain/inputs/tests），
+                       模型 = lite_model(...)。后台 worker 走这条，逐信号发、清单边分析边刷新。
+      · progress(done, total, name, lite)  —— 每信号一次；第 4 个参数是该信号的 **lite 模型**
+                       （不是 TopoutResult：视图层拿到就能直接换行，不必认引擎对象）。
+      · should_cancel() —— 信号边界取消；返回的是已分析那几个的模型（**部分**列表，其余行由调用方
+                       保留骨架的 pending），lite=False 时联表用 only=[已分析名] 限定，绝不静默丢。"""
     from . import resolver as R
     resolver = R.Resolver(wb, wire_prefixes=probe_prefixes, force_overrides=force_overrides)
+    row_aid = topout_row_aids(wb)                            # #7：断言号 = Topout 行序 1..N
+    aid_ov = {}         # logic/mux 源→首行号：随结果增量建（与 _logic_mux_aid_override 同值）
+
+    def _on_one(done, total, name, r):
+        """analyze_all 的回调只给 TopoutResult；这里包一层换成 lite 模型再上交。"""
+        _aid_override_add(aid_ov, r, row_aid)
+        progress(done, total, name,
+                 lite_model(wb, r, row_aid, aid_ov, probe_prefixes, include_risky=include_risky))
+
     results = analyze_all(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                          sig_cov=sig_cov, form_cov=form_cov)
+                          sig_cov=sig_cov, form_cov=form_cov,
+                          progress=(_on_one if progress is not None else None),
+                          should_cancel=should_cancel)
+    aid_override = _logic_mux_aid_override(wb, results, row_aid)   # logic/mux 源→首行号(dup-source 共享)
+    if lite:
+        return [lite_model(wb, r, row_aid, aid_override, probe_prefixes,
+                           include_risky=include_risky) for r in results]
+
+    cancelled = len(results) < len(wb.topout)                # 取消 → 只联已分析的那几个的表
     rep = report_for_topout(wb, resolver, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                             probe_prefixes=probe_prefixes, sig_cov=sig_cov, form_cov=form_cov,
-                            include_risky=include_risky)
+                            include_risky=include_risky,
+                            only=([r.topo.name for r in results] if cancelled else None))
     tbl_by_topout = {}
     for t in rep.get("tables", []):
         nm = t.get("topout_name")
@@ -1614,34 +1765,23 @@ def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, pr
             tbl_by_topout.setdefault(nm.lower(), t)
 
     models = []
-    row_aid = topout_row_aids(wb)                            # #7：断言号 = Topout 行序 1..N
-    aid_override = _logic_mux_aid_override(wb, results, row_aid)   # logic/mux 源→首行号(dup-source 共享)
     for r in results:
-        _shape = result_form(wb, r) if r.status == "ok" else None
-        m = {"name": r.topo.name, "disp": _topout_disp_name(r.topo, r.out_width),
-             "owner": r.topo.owner, "width": r.out_width,
-             "kind": r.root.kind, "status": r.status, "note": r.note,
-             "issues": list(r.issues), "matched_name": r.root.matched_name,
-             "n_leaves": r.n_leaves, "n_vectors": len(r.vectors),
-             # #2 逻辑类型(展开后表达式形态 F0-F4)：信号清单列 + #3 覆盖按它派发
-             "form": (_shape.kind if _shape else ""),
-             "form_label": form_label(_shape),
+        lm = lite_model(wb, r, row_aid, aid_override, probe_prefixes,
+                        include_risky=include_risky)
+        # 键序与 C0-a 之前逐字相同（老消费方按名取值，但快照测试连顺序一起锁）：
+        m = {"name": lm["name"], "disp": lm["disp"], "owner": lm["owner"], "width": lm["width"],
+             "kind": lm["kind"], "status": lm["status"], "note": lm["note"],
+             "issues": lm["issues"], "matched_name": lm["matched_name"],
+             "n_leaves": lm["n_leaves"], "n_vectors": lm["n_vectors"],
+             "form": lm["form"], "form_label": lm["form_label"],
              "chain": [], "inputs": [], "tests": [], "auto_label": "", "exp_label": ""}
-        pnet = _topout_probe_net(r)                          # assert LHS 探针网 + 配的层级前缀
-        m["probe_net"] = pnet
-        m["prefix"] = _probe_prefix_for_name(probe_prefixes, pnet)
-        # 断言号 = .sv assert 标签的 <R> 部分（仿真 log 报 assert_<R>_T<n>，据此回查信号）= Topout 行序(#7)。
-        #   logic/mux 根：取同源【首行】号(dup-source 行共享、与 .sv 实际产出块标号一致)；
-        #   register/dft 改名根：本行号(各自产出一块)。非产出(RO/dup/未解析/error)→ 空。
-        if r.status == "ok" and r.root.renamed:
-            _emit = r.node is not None and r.bindings is not None and bool(r.vectors)
-            m["assert_id"] = row_aid.get(r.topo.name.lower(), "") if _emit else ""
-        elif r.status == "ok" and r.root.kind == REGISTER:
-            m["assert_id"] = row_aid.get(r.topo.name.lower(), "") if r.vectors else ""
-        elif r.status == "ok" and r.root.kind in (LOGIC, MUX) and r.root.obj is not None:
-            m["assert_id"] = aid_override.get(r.root.obj.out_name.lower(), "")
-        else:
-            m["assert_id"] = ""
+        m["probe_net"] = lm["probe_net"]
+        m["prefix"] = lm["prefix"]
+        m["assert_id"] = lm["assert_id"]
+        # full 模型也补齐 LITE_MODEL_KEYS 的其余键——清单不论拿到 lite 还是 full 都只读那一套
+        for _k in ("status_detail", "expr", "input_names", "supplement", "normalized_note",
+                   "out_net"):
+            m[_k] = lm[_k]
         t = tbl_by_topout.get(r.topo.name.lower())
         if t is not None:
             m["chain"] = t.get("chain", [])
