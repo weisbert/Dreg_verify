@@ -15,6 +15,8 @@
   · 术语 FORBIDDEN 里的词不得裸出现在界面上（tests/test_ui_terms_scan.py（C5）扫 ui/*.py 字面量）。
 """
 
+import re
+
 from dreg_verify.inputs_table import scrub_terms as scrub    # noqa: F401  统一入口别名
 from dreg_verify.inputs_table import STATUS_HELP, AN_STATUS_TEXT, FOUND_IN_TEXT, CUVUNF_FIRST  # noqa: F401
 
@@ -495,6 +497,9 @@ STATUS_NEG_ADDED_FMT = "已加 {n} 条反例，跳过 {skipped} 条（同输入�
 STATUS_NEG_NONE = "选中的用例都已有反例，未重复添加"
 STATUS_MUX_FLIPPED_FMT = "反例错值撞上正确值，已自动翻一位：{name}"                  # C-105
 STATUS_LOAD_FAILED_FMT = "表读不进来：{reason}"                                  # C-005
+#: R3-13 / C5b-1：整表展开这一趟炸了（worker.failed）。以前错误条上整条就是引擎异常的
+#: message（真表上是一串英文），而详情区那行「分析失败」压根没人去点亮（C-043 是空的）。
+STATUS_ANALYZE_FAILED_FMT = "整表展开中断了：{reason}。已展开完的信号还在，重新载入可再跑"
 STATUS_NO_ROWS_SELECTED = "先在清单里选中若干行（鼠标框选 / Ctrl·Shift 点），再点「勾选选中行」"
 
 # ⑭ 空态 / ⑮ 载入态
@@ -789,14 +794,30 @@ def short_path(path):
     return "/".join(parts[-2:])
 
 
+#: 「这句是引擎自己写给工程师看的中文原因」的判据：有中文、且不带 Python 自己的噪声
+#: （errno 码 / repr 出来的对象 / 盘符路径 / 异常类名）。引擎那些
+#: 「Topout 页缺 owner 列」「mux 页第 33 行与第 23 行…」才是真正有用的那一句，不能连它一起吞。
+_CJK_RE = re.compile(r"[一-鿿]")
+_PY_NOISE_RE = re.compile(r"\[Errno\b|Traceback|object has no attribute|"
+                          r"'[A-Za-z_][A-Za-z0-9_.]*' object|[A-Za-z]:[\\/]|\w+Error\b|"
+                          r"line \d+ column \d+")
+
+
 def exc_text(exc, path=None):
     """异常（或异常类名）→ 一句给 IC 工程师看的人话。**所有错误路径的唯一出口。**
 
-    `path` 给了就把「上级目录/文件名」缀在后面；没给就试 `exc.filename`（OSError 一族自带）。
-    查不到对应说法 → `EXC_FALLBACK`：宁可说「工具内部出错（其余不受影响）」，
-    也不把 Python 的英文异常原文摆到界面上。"""
+    三档：
+      ① 异常的 message 本身就是引擎写的中文原因（`_CJK_RE` 命中且没有 Python 噪声）
+         → 原样留住（过一道 `scrub`）—— 那句话才是工程师要的；
+      ② 认识这个异常类（`EXC_TEXT`，按 `__mro__` 逐级找）→ 定版人话
+         + 「上级目录/文件名」（`path` 没给就试 `exc.filename`，OSError 一族自带）；
+      ③ 都不是 → `EXC_FALLBACK`。宁可说「工具内部出错（其余不受影响）」，
+         也不把 Python 的英文异常原文摆到界面上。"""
     tpl = None
     if isinstance(exc, BaseException):
+        msg = str(exc).strip()
+        if msg and _CJK_RE.search(msg) and not _PY_NOISE_RE.search(msg):
+            return scrub(msg)
         for cls in type(exc).__mro__:
             tpl = EXC_TEXT.get(cls.__name__)
             if tpl:

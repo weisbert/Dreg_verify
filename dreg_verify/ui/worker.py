@@ -201,9 +201,9 @@ class _AnalysisThread(QtCore.QThread):
                 sig_cov=req.sig_cov, form_cov=req.form_cov,
                 progress=_cb, should_cancel=self._cancel.is_set, lite=True)
         except Exception as exc:                      # noqa: BLE001  整趟炸了也不许让窗口跟着走
-            # I-12 / C-272：只给一句人话（类名兜底，绝不把 traceback 发上界面）
-            msg = terms.scrub(str(exc).strip() or exc.__class__.__name__)
-            self._owner._emit(self._serial, "failed", vid, msg)
+            # I-12 / C-272 / R3-03：只给一句人话。`scrub` 换不掉英文异常原文，
+            # 一律走 `terms.exc_text`（引擎自己写的中文原因它会留住）。
+            self._owner._emit(self._serial, "failed", vid, terms.exc_text(exc))
             return
         finally:
             if self._holds_lock:

@@ -1056,9 +1056,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysisEnded.emit(str(view_id), False)
 
     def _on_worker_failed(self, view_id, message):
+        """整表展开这一趟炸了（C-043 / C-272 / R3-13 / C5b-1）。
+
+        三件事一起做，少一件用户就只看见「半张清单」而没人说为什么：
+          ① 错误条 + 状态栏写**同一句人话**（`STATUS_ANALYZE_FAILED_FMT`，原因已过
+             `terms.exc_text`）—— 以前状态栏整条就是引擎异常的 message；
+          ② 详情区那行「分析失败（已捕获，未崩）」点亮 —— C-043 要的就是它，
+             而这条路以前一直是空的：`hdr.set_error()` 能用，但真的 worker 失败时没人去调
+             （C5-b 把这件事钉成了 strict xfail，本次摘除）。"""
         self._set_loading(False)
-        self.error_bar.show_error(message)
-        self.set_status(self.error_bar.text())
+        reason = terms.scrub(str(message or "")) or terms.EXC_FALLBACK
+        text = terms.STATUS_ANALYZE_FAILED_FMT.format(reason=reason)
+        self.error_bar.show_error(text)
+        self.set_status(text)
+        self.detail_header.set_error("%s\n%s" % (terms.HDR_ANALYSIS_FAILED, reason))
         self.analysisEnded.emit(str(view_id), False)
 
     def _set_loading(self, on, done=0, total=0, name=""):
