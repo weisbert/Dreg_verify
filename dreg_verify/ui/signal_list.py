@@ -399,8 +399,11 @@ class SignalListModel(QtCore.QAbstractItemModel):
         key = CT.LIST_COL_KEYS.get(LC(section)) if section in [int(c) for c in LC] else None
         if role == Qt.DisplayRole:
             return T.LIST_HEADERS.get(key, "")
-        if role == Qt.ToolTipRole and key == "assert_id":
-            return T.LIST_ASSERT_TIP                                    # C-010
+        if role == Qt.ToolTipRole:
+            # C-303：「反例」「状态」「断言号」三个列头自带说明（v1 有、v2 漏了，C5a-6）。
+            # 以前只有「断言号」一列挂了 `LIST_ASSERT_TIP`（那还是 C-010 的**行内**说法，
+            # 带 {aid} 占位，挂在列头上就是一个填不上的花括号）。
+            return T.LIST_HEADER_TIPS.get(key)
         if role == Qt.TextAlignmentRole:
             return int(Qt.AlignVCenter | (Qt.AlignRight if key == "ntest" else Qt.AlignLeft))
         return None

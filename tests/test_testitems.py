@@ -7,9 +7,12 @@
 2026-09-12（GUI v2 C5-a）：本文件原有 77 条，其中 49 条打的是 v1 门面
 （`legacy_gui.MainWindow`）。它们的能力已由 v2 契约测试接手或随入口退役，逐条处置记在
 `docs/GUI_v2_测试迁移_C5a.csv`（含每条老断言原文 + 接手的 v2 nodeid）。
-剩下的 27 条是**不起窗**的引擎/报告断言，原样保留；另有 1 条
-`test_gui_header_tooltips_present` 是 legacy 独有、契约表里没有的能力，
-挂 `legacy_only` 标记留到主控裁决。
+剩下的 27 条是**不起窗**的引擎/报告断言，原样保留。
+
+2026-09-13（Phase D 修复波 F2）：`test_gui_header_tooltips_present`（legacy 独有的
+「清单列头自带说明」）**已删** —— 主控把这条能力补成契约 C-303，v2 侧由
+`tests/test_ui_signal_list.py::test_c303_list_header_tooltips_explain_three_columns`
+接手（三个列头都有，v1 只有两个）。处置记在 `docs/GUI_v2_测试迁移_C5a.csv` 同名行。
 """
 
 import os
@@ -433,32 +436,3 @@ def test_html_report_truth_table_value_filter(wb, tmp_path):
     assert "contains('ttf')" in shell                       # 委托接上 .ttf 输入框
     assert "contains('ttfclr')" in shell                    # click 委托接上「清除」
     assert "addEventListener('input'" in shell              # 边打边筛（live 输入）
-
-
-# ───────────── legacy 独有：清单列头 tooltip（C5-a 未裁决，留到 legacy 删除日） ─────────────
-@pytest.fixture(scope="module")
-def qapp():
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
-@pytest.mark.legacy_only
-def test_gui_header_tooltips_present(qapp, wb, tmp_path_factory):
-    """B2：'负向'/'状态'表头与状态单元格带说明 tooltip。
-
-    C5-a 处置：**保留·legacy独有（待主控裁决）**。v2 的清单 model 只给「断言号」列头挂了
-    tooltip（C-010），「反例 / 状态」两个列头没有；契约表里也没有「清单列头自带说明」这一条。
-    见 `docs/GUI_v2_测试迁移_C5a.csv` 同名行。"""
-    from dreg_verify import legacy_gui as gui
-    path = tmp_path_factory.mktemp("g_tips") / "synthetic_dreg.xlsx"
-    fixtures.build_workbook(str(path))
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path))
-    w.on_load()
-    try:
-        assert "负向" in w.table.horizontalHeaderItem(gui.COL_NEG).toolTip()
-        assert w.table.horizontalHeaderItem(gui.COL_STATUS).toolTip()
-        assert w.table.item(0, gui.COL_STATUS).toolTip()
-    finally:
-        w.close()

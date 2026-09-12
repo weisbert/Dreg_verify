@@ -345,8 +345,32 @@ def test_c010_assert_id_column_and_tooltip():
     m = all_models()[0]
     assert cell(panel, m["name"], LC.ASSERT_ID) == str(m["assert_id"])
     assert cell(panel, m["name"], LC.ASSERT_ID, Qt.ToolTipRole) == T.LIST_ASSERT_TIP
+    # C-303：列头挂的是**列头那一句**（不带 {aid} 占位），行内才是 C-010 那句
     hdr = panel.model.headerData(int(LC.ASSERT_ID), Qt.Horizontal, Qt.ToolTipRole)
-    assert hdr == T.LIST_ASSERT_TIP
+    assert hdr == T.LIST_HEADER_TIPS["assert_id"] and "{aid}" not in hdr
+
+
+@pytest.mark.contract("C-303")
+def test_c303_list_header_tooltips_explain_three_columns():
+    """C-303 / C5a-6：「反例」「状态」「断言号」三个列头自带说明 —— 不查文档就知道这一列是什么。
+
+    v2 以前只有「断言号」一列挂了 tooltip，而挂上去的还是 C-010 那句**行内**说法
+    （带 `{aid}` 占位，列头上就是一个填不上的花括号）；v1 的「负向 / 状态」两个列头都有说明。
+    """
+    panel, _ = make_panel()
+    panel.set_visible_columns(set(CT.LIST_DEFAULT_VISIBLE) | {LC.ASSERT_ID})
+    want = {LC.NEG: "neg", LC.STATUS: "status", LC.ASSERT_ID: "assert_id"}
+    for col, key in want.items():
+        tip = panel.model.headerData(int(col), Qt.Horizontal, Qt.ToolTipRole)
+        assert tip == T.LIST_HEADER_TIPS[key], "%s 列头没有说明" % key
+        assert tip and "{" not in tip, "列头说明里留了填不上的占位符：%r" % tip
+        assert len(tip) > 20, "说明太短，等于没说：%r" % tip
+    # 没登记的列不许乱挂（tooltip 是「这一列是什么」，不是每列都要有一句）
+    for col in (LC.NAME, LC.OWNER, LC.NTEST, LC.CHECK):
+        assert panel.model.headerData(int(col), Qt.Horizontal, Qt.ToolTipRole) is None
+    # 三句都过得了术语红线（列头是常驻文案，扫描要扫得到）
+    for tip in T.LIST_HEADER_TIPS.values():
+        assert not [w for w in T.FORBIDDEN if w in tip], tip
 
 
 def test_c011_owner_column_default_visible():

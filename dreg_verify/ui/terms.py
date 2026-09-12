@@ -292,6 +292,17 @@ LIST_BTN_NEG_ALL = "全部加反例"
 LIST_BTN_NEG_CLEAR = "清除反例"
 LIST_BTN_PASTE_NAMES = "粘贴名单勾选…"
 LIST_ASSERT_TIP = "仿真 log 报 assert_{aid}_T<n> 时按它回查本信号"           # C-010
+#: C-303：三个列头自带说明（v1 有、v2 漏了 —— C5a-6）。不查文档就知道这一列是什么。
+#: 「断言号」那一列的说明是 `LIST_ASSERT_TIP`（C-010 已有，带 {aid} 占位、逐行填），
+#: 这里给的是**列头**上那一句（不带具体标号）。
+LIST_HEADER_TIPS = {
+    "neg": "勾上 = 给这个信号加一条「故意填错」的用例，看自检 checker 抓不抓得到。"
+           "已自定义命名 / 手填过错值的反例，清除前会先问一声。",
+    "status": "这一行能不能生成断言、不能的话卡在哪。点信号名那一行左边的箭头展开原因块，"
+              "里面有点名到网的原因和「去诊断」直链。",
+    "assert_id": "本信号在 .sv 里的断言标号。仿真 log 报 assert_<标号>_T<第几条> 时，"
+                 "按这个号回查是哪一个信号、哪一条用例。",
+}
 LIST_PREFIX_TIP_SET_FMT = "探针网 {net}\n断言完整路径 ENV_RF.{prefix}.{net}"   # C-018
 LIST_PREFIX_TIP_UNSET_FMT = "探针网 {net}\n断言完整路径 ENV_RF.{net}（没配层级前缀）"
 LIST_PREFIX_LEVEL_SHIFT_FMT = "探针口={net} (level_shift)"                  # C-019
