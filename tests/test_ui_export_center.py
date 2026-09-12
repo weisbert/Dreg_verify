@@ -285,21 +285,39 @@ def test_c168_sv_preview_requested_after_done(st, rec, qapp):
 
 # ═══════════════ C-171：写文件失败要说清是不是被占用 ═══════════════
 @pytest.mark.contract("C-171")
-def test_c171_export_error_message_names_lock(st, qapp, tmp_path):
-    """.sv 正被仿真器/编辑器占用时写不进去 —— 弹层必须把这个可能性说出来，不是「导出失败」四个字。"""
+def test_c171_export_error_message_names_lock(st, qapp, tmp_path, monkeypatch):
+    """写不出去要说清**是哪一种**写不出去（C-171 / R3-05）。
+
+    R3-05 改口径：以前这一句无条件拼「（文件是否正被仿真器/编辑器占用？）」，
+    连「目录根本不存在」也这么说 —— 工具让人去关仿真器，而真正要做的是换个位置。
+    现在按 errno 分支，并且路径只给「上级目录/文件名」（红线①：不写本机全路径）。"""
+    # ① 目录不存在 → 说「这个文件夹不存在」，**不**说被占用
     rows = _enable(EC.default_rows(st), "sv")
     bad = str(tmp_path / "no_such_dir" / "wr_rf_tc.sv")       # 目录不存在 → 真 OSError
     res = _run(st, rows, tmp_path, path_of=lambda _r: bad)
     assert not res.outcomes
     assert len(res.errors) == 1 and res.errors[0][0] == "sv"
     msg = res.errors[0][1]
-    assert "占用" in msg and bad in msg
+    assert "文件夹不存在" in msg and terms.EXPORT_WRITE_BUSY not in msg
+    assert "no_such_dir" in msg and bad not in msg            # 只给上级目录 + 文件名
 
-    d = EC.ExportDoneDialog(res)
+    # ② 被占用 / 只读 → 才说那句「正被别的程序占着」
+    import errno as _errno
+    real_open = EC.X.write_text
+
+    def busy(path, *a, **k):
+        raise EC.X.ExportError("boom", path=path, errno=_errno.EACCES)
+    monkeypatch.setattr(EC.X, "write_text", busy)
+    res2 = _run(st, _enable(EC.default_rows(st), "sv"), tmp_path,
+                path_of=lambda _r: str(tmp_path / "wr_rf_tc.sv"))
+    monkeypatch.setattr(EC.X, "write_text", real_open)
+    assert res2.errors and terms.EXPORT_WRITE_BUSY in res2.errors[0][1]
+
+    d = EC.ExportDoneDialog(res2)
     d.show()
     qapp.processEvents()
     err = H.find(d, names.DONE_ERRORS)
-    assert err.isVisibleTo(d) and "占用" in err.text()
+    assert err.isVisibleTo(d) and terms.EXPORT_WRITE_BUSY in err.text()
     assert terms.EXPORT_ROWS["sv"][0] in err.text()            # 哪一种交付物失败了
     d.close()
 

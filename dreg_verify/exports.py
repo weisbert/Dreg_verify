@@ -83,7 +83,16 @@ def store_export_options(settings, opt):
 
 # ═════════════════════════ 二、统一结果对象 ═════════════════════════
 class ExportError(Exception):
-    """导出失败——message 已是给 IC 工程师看的中文原因（GUI 直接弹，不再二次加工）。"""
+    """导出失败——message 已是给 IC 工程师看的中文原因（GUI 直接弹，不再二次加工）。
+
+    R3-05：另带 `path` 与 `errno`（原 OSError 的 errno）。原来 message 里无条件拼着
+    「(文件是否正被仿真器/编辑器占用？)」—— 目录根本不存在时那句是错的（对抗 review 实证），
+    而 GUI 只拿到一个字符串没法分辨。带上 errno，界面那侧就能按 ENOENT / EACCES 分支说话。"""
+
+    def __init__(self, message, path="", errno=None):
+        super(ExportError, self).__init__(message)
+        self.path = str(path or "")
+        self.errno = errno
 
 
 KIND_LABEL = {
@@ -310,7 +319,7 @@ def write_text(path, text, encoding="utf-8", newline=None):
         with open(path, "w", encoding=encoding, newline=newline) as f:
             f.write(text)
     except OSError as ex:
-        raise ExportError("无法写入 %s：\n%s\n\n(文件是否正被仿真器/编辑器占用？)" % (path, ex)) from ex
+        raise ExportError("无法写入 %s：\n%s\n\n(文件是否正被仿真器/编辑器占用？)" % (path, ex), path=path, errno=getattr(ex, "errno", None)) from ex
     return path
 
 
@@ -320,7 +329,7 @@ def write_json(path, payload, indent=1):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=indent)
     except OSError as ex:
-        raise ExportError("无法写入 %s：\n%s" % (path, ex)) from ex
+        raise ExportError("无法写入 %s：\n%s" % (path, ex), path=path, errno=getattr(ex, "errno", None)) from ex
     return ExportOutcome(kind="config", path=path)
 
 
@@ -330,7 +339,7 @@ def read_json(path):
         with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError) as ex:
-        raise ExportError("无法读取/解析 %s：\n%s" % (path, ex)) from ex
+        raise ExportError("无法读取/解析 %s：\n%s" % (path, ex), path=path, errno=getattr(ex, "errno", None)) from ex
 
 
 # ═════════════════════════ 五、.sv ═════════════════════════
@@ -508,7 +517,7 @@ def export_report(path, rep, excel, selected_filter=None):
     try:
         written = cli.write_report(path, rep, excel or "excel")
     except OSError as ex:
-        raise ExportError("无法写出报告 %s：\n%s\n\n(文件是否正被 Excel/浏览器占用？)" % (path, ex)) from ex
+        raise ExportError("无法写出报告 %s：\n%s\n\n(文件是否正被 Excel/浏览器占用？)" % (path, ex), path=path, errno=getattr(ex, "errno", None)) from ex
     except Exception as ex:                # noqa: BLE001 —— 渲染器里的任何错都翻成人读原因
         raise ExportError("报告写出失败：\n%s" % ex) from ex
     detail = rep.get("detail") or []
@@ -570,7 +579,7 @@ def export_fortest(src, path, provider=None, wb=None, opts=None, mode="min", max
     except ExportError:
         raise
     except OSError as ex:
-        raise ExportError("无法写出 %s：\n%s\n\n(文件是否正被 Excel 占用？)" % (path, ex)) from ex
+        raise ExportError("无法写出 %s：\n%s\n\n(文件是否正被 Excel 占用？)" % (path, ex), path=path, errno=getattr(ex, "errno", None)) from ex
     except Exception as ex:                # noqa: BLE001
         raise ExportError("回填失败：\n%s" % ex) from ex
     out = ExportOutcome(kind="fortest", path=path, counts=counts, skipped=skipped, note=note)
@@ -770,7 +779,7 @@ def export_claims(source, path, excel, naming_model=None, only=None, mode="min",
         with contextlib.redirect_stdout(buf):     # CLI 写出器会 print 一行，GUI 里吞掉
             cli._export_claims(build, path, excel, naming_model=naming_model)
     except OSError as ex:
-        raise ExportError("无法写入 %s：\n%s" % (path, ex)) from ex
+        raise ExportError("无法写入 %s：\n%s" % (path, ex), path=path, errno=getattr(ex, "errno", None)) from ex
     claims = build.get("claims") or []
     counts = {"n_claims": len(claims),
               "n_probe": sum(1 for c in claims if c.get("kind") == "probe"),

@@ -264,3 +264,73 @@ def test_r3_17_bare_probe_reason_block_does_not_repeat_the_name(win):
     base = str(m["name"])
     assert body.count(base) == 1, "同一个名字写了 %d 遍：%r" % (body.count(base), body)
     assert base in body and "nets.txt" in body
+
+
+# ═══════ R3-04 / R3-05 / R3-14 / R3-15 / R3-16 / R2-12 / C-041：定版文案逐条 ═══════
+def test_r3_04_add_neg_hint_has_no_contract_id():
+    """R3-04：「按 C-096 给第一条正向列加反例」—— 契约 ID 是给维护者看的，不是给用户看的。"""
+    assert "C-096" not in T.TRUTH_ADD_NEG_NO_SELECTION
+    assert "默认给第一条正向列加反例" in T.TRUTH_ADD_NEG_NO_SELECTION
+
+
+def test_r3_05_export_write_failed_branches_on_errno():
+    """R3-05：目录不存在 ≠ 文件被占用 —— 两种要做的事完全不同，说错就是白查一轮。"""
+    import errno
+    from dreg_verify import exports as X
+    no_dir = X.ExportError("boom", path=r"C:\proj\没这个目录\wr_rf_tc.sv", errno=errno.ENOENT)
+    busy = X.ExportError("boom", path=r"C:\proj\out\wr_rf_tc.sv", errno=errno.EACCES)
+    full = X.ExportError("boom", path=r"C:\proj\out\wr_rf_tc.sv", errno=errno.ENOSPC)
+    assert "文件夹不存在" in T.export_write_failed(no_dir)
+    assert T.EXPORT_WRITE_BUSY not in T.export_write_failed(no_dir)
+    assert T.EXPORT_WRITE_BUSY in T.export_write_failed(busy)
+    assert T.EXPORT_WRITE_NO_SPACE in T.export_write_failed(full)
+    for exc in (no_dir, busy, full):                       # 路径只给上级目录 + 文件名
+        assert "C:\\" not in T.export_write_failed(exc)
+    # 引擎自己判出来的中文原因（没有 errno）留住，不被改写成「写不出去」
+    plain = X.ExportError("输出文件不能是源 Excel 本身(回填产物是新文件，源文件不动)")
+    assert "源 Excel 本身" in T.export_write_failed(plain)
+
+
+def test_r3_14_r3_15_r3_16_no_developer_voice():
+    """三条 MINOR：「已捕获，未崩」/「面板未调 set_reanalyzer」/「缺少 dreg_verify_config 段」。"""
+    blob = "\n".join(str(v) for v in T.all_copy().values() if isinstance(v, str))
+    for bad in ("已捕获", "未崩", "set_reanalyzer", "dreg_verify_config"):
+        assert bad not in blob, bad
+    assert T.HDR_ANALYSIS_FAILED == "分析失败（其余信号不受影响）"
+    assert "工具内部没接上" in T.TRUTH_MUX_DATA_NO_REANALYZER
+    assert "已还原" in T.TRUTH_MUX_DATA_NO_REANALYZER
+    assert T.EXPORT_IMPORT_BAD_FILE == "这不是本工具导出的配置文件（也不是旧版的测试项编辑文件）"
+
+
+def test_c041_status_badges_keep_the_input_word():
+    """C-041（主控裁决）：两档都写「输入缺前缀」—— 输入侧硬阻断 ≠ 输出侧裸名探针。"""
+    assert T.STATUS["needs-prefix"][0] == "⚠ 输入缺前缀·跳过"
+    assert T.STATUS["risky-generated"][0] == "⚠ 输入缺前缀·已强制生成"
+    assert T.STATUS["bare-probe"][0] == "输出裸名·已生成"
+
+
+def test_r2_12_newer_config_version_says_one_line(win, tmp_path):
+    """R2-12：`dreg_verify_config: 3` 以前当 v2 照单全收、一声不吭 —— 新版新增的段被静默忽略。"""
+    from dreg_verify import session
+    _load(win)
+    p = tmp_path / "未来版本.json"
+    p.write_text(json.dumps({"dreg_verify_config": session.CONFIG_VERSION + 1,
+                             "global": {}}, ensure_ascii=False), encoding="utf-8")
+    rep = EC.import_config(win.state, str(p))
+    assert rep.ok and T.EXPORT_IMPORT_NEWER_VERSION in rep.text()
+    # 认得的版本不说这句（不然每次导入都多一行噪声）
+    p2 = tmp_path / "本版.json"
+    p2.write_text(json.dumps({"dreg_verify_config": session.CONFIG_VERSION, "global": {}},
+                             ensure_ascii=False), encoding="utf-8")
+    assert T.EXPORT_IMPORT_NEWER_VERSION not in EC.import_config(win.state, str(p2)).text()
+
+
+def test_f1_two_new_strings_reviewed():
+    """F1 留给 F2 过目的两条：名字在前、不写本机全路径。"""
+    # `{names}（共 {n} 列）…` —— 名字在前、计数在后（I-20）
+    s = T.TRUTH_MUX_DATA_DROPPED_FMT
+    assert s.index("{names}") < s.index("{n}")
+    # 备份文件只给文件名（红线①），见 state.load 里的 short_path
+    assert "{path}" in T.EDITS_CORRUPT_BACKED_UP_FMT
+    assert T.short_path(r"C:\Users\me\.dreg_verify_edits.json.corrupt-2026") == \
+        "me/.dreg_verify_edits.json.corrupt-2026"

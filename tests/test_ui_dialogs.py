@@ -444,7 +444,9 @@ def test_dlg_import_report_c193_c195_notes_on_top(mk):
     dlg = _open(mk(D.ImportReportDialog, [], ["恢复了 4 个信号"], notes))
     lab = H.find(dlg, N.DLG_IMPORT_REPORT_NOTES)
     assert dlg.lay.indexOf(lab) < dlg.lay.indexOf(H.find(dlg, N.DLG_IMPORT_REPORT_HEAD))
-    assert "别人的表.xlsx" in lab.text() and "dreg_verify_config" in lab.text()
+    # R3-16：C-195 那句不再提内部段名（`dreg_verify_config` / `edits` / `mux_*`）
+    assert "别人的表.xlsx" in lab.text() and T.EXPORT_IMPORT_BAD_FILE in lab.text()
+    assert "dreg_verify_config" not in lab.text()
     assert os.path.exists(H.shot(dlg, "dlg_import_report_notes"))
 
 

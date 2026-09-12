@@ -704,6 +704,8 @@ def apply_config(payload, current_excel=""):
       ok / error           —— 不认这个文件时 ok=False，error 是提示文案(调用方前面拼上文件名)
       is_full / is_legacy  —— v2 完整配置 / v1 旧测试项编辑文件
       cfg_excel / cur_excel / excel_mismatch —— 源表核对(按【文件名】比，跨机器路径不同是正常用法)
+      cfg_version / newer_version —— 配置里写的版本号 / 它比本工具认识的还新(R2-12：照单
+                           全收但要说一句，否则新版新增的段会被静默忽略，界面上看不出来)
       global / probe_prefixes / force_signals / suffix_override / logic_overrides
                            —— 仅完整配置才有；值为 None 表示该段不套用(缺段/类型不对，保持当前)
     测试项编辑(edits/mux_*/view_*)不在这里——调用方自己从 payload 取，本层不碰其序列化。
@@ -712,11 +714,17 @@ def apply_config(payload, current_excel=""):
     out = {"ok": bool(is_full or is_legacy), "error": None,
            "is_full": is_full, "is_legacy": is_legacy,
            "cfg_excel": "", "cur_excel": "", "excel_mismatch": False,
+           "cfg_version": 0, "newer_version": False,
            "global": None, "probe_prefixes": None, "force_signals": None,
            "suffix_override": None, "logic_overrides": None}
     if not out["ok"]:
         out["error"] = CONFIG_BAD_FILE_MSG
         return out
+    ver = payload.get("dreg_verify_config") if isinstance(payload, dict) else None
+    if isinstance(ver, bool) or not isinstance(ver, int):     # 非整数版本号 = 不认，当 0
+        ver = 0
+    out["cfg_version"] = ver
+    out["newer_version"] = bool(ver > CONFIG_VERSION)         # R2-12
     cfg_excel = str(payload.get("excel")
                     or os.path.basename(str(payload.get("excel_path") or ""))).strip()
     cur_excel = os.path.basename((current_excel or "").strip())

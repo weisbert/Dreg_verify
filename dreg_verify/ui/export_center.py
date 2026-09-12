@@ -450,7 +450,8 @@ def run_plan(state, plan, ask_path):
         try:
             outs = _RUNNERS[row.kind](state, row, path, prov, cov)
         except X.ExportError as ex:
-            res.errors.append((row.kind, terms.scrub(str(ex))))
+            # C-171 / R3-05：按 errno 分支说话（目录不存在 ≠ 被占用），不贴引擎那句带全路径的原文
+            res.errors.append((row.kind, terms.export_write_failed(ex, path)))
             continue
         except Exception as ex:               # noqa: BLE001  任何一行炸了都不连累别的行
             res.errors.append((row.kind, terms.exc_text(ex, path)))     # R3-03
@@ -709,6 +710,8 @@ def import_config(state, path):
         rep.error = terms.EXPORT_IMPORT_BAD_FILE                       # C-195
         rep.notes.append(rep.error)
         return rep
+    if plan.get("newer_version"):                                      # R2-12：不静默全收
+        rep.notes.append(terms.EXPORT_IMPORT_NEWER_VERSION)
     if plan["excel_mismatch"]:                                         # C-193
         rep.notes.append(terms.EXPORT_IMPORT_MISMATCH_FMT.format(
             cfg=plan["cfg_excel"], cur=plan["cur_excel"]))

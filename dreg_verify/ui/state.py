@@ -192,7 +192,8 @@ class WorkbenchState(QtCore.QObject):
         self._bucket = persist.load_edits_bucket(path)      # C-236：按【已载入】路径分桶
         bak = persist.take_corrupt_backup()                 # R2-07：整份编辑文件读不出来
         if bak:
-            self.status(terms.EDITS_CORRUPT_BACKED_UP_FMT.format(path=bak))
+            # 只给文件名（红线①：界面上不出现本机全路径；F2 过目 F1 这条新文案时改的）
+            self.status(terms.EDITS_CORRUPT_BACKED_UP_FMT.format(path=terms.short_path(bak)))
         self._cfg_ver += 1
         persist.push_recent(path)                           # 顺带照写 last_excel（C-003 / C-228）
         self.workbookChanged.emit()

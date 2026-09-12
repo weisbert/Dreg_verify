@@ -900,7 +900,9 @@ def test_r2_07_corrupt_edits_file_is_backed_up_and_named(qapp, iso, btlp):
     bak = next(p for p in os.listdir(os.path.dirname(P.EDITS_PATH))
                if ".corrupt-" in p)
     bak = os.path.join(os.path.dirname(P.EDITS_PATH), bak)
-    assert bak in hit[0], "点名的路径不是那份备份：%s" % hit[0]
+    # R3-03 / 红线①：界面上只给「上级目录/文件名」，不给本机全路径
+    assert os.path.basename(bak) in hit[0], "点名的不是那份备份：%s" % hit[0]
+    assert bak not in hit[0], "状态栏上不该出现本机全路径：%s" % hit[0]
     with open(bak, encoding="utf-8") as f:
         assert f.read() == broken, "备份不是原文件的字节"
     assert not os.path.exists(P.EDITS_PATH), "原文件该被改名走了"

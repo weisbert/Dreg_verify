@@ -15,6 +15,7 @@
   · 术语 FORBIDDEN 里的词不得裸出现在界面上（tests/test_ui_terms_scan.py（C5）扫 ui/*.py 字面量）。
 """
 
+import os
 import re
 
 from dreg_verify.inputs_table import scrub_terms as scrub    # noqa: F401  统一入口别名
@@ -54,15 +55,18 @@ REDLINES = (
 STATUS_KEYS = ("clean", "wire-fallback", "needs-prefix", "risky-generated", "bare-probe", "false-green",
                "spec-collision", "parse-err", "unresolved", "skip", "error", "pending")
 #: 键 → (清单状态列标签, 色档 ok/warn/bad/note, 悬停解释)。8 档解释 = C-016（clean/wire兜底/未解析/解析错/
-#: 规格冲突/输入缺前缀·跳过/输出裸名·已生成/字段太窄·假绿）+ C-041 第 6 档「缺前缀·已强制生成」+ RO/pending。
+#: 规格冲突/输入缺前缀·跳过/输出裸名·已生成/字段太窄·假绿）+ C-041 第 6 档「输入缺前缀·已强制生成」
+#: + RO/pending。⚠ 前两档的「**输入**」二字不能省（主控裁决，v1 就这么写）：它用来把
+#: 「输入侧硬阻断（force 不到，跳过 / 强制生成）」与「输出侧裸名探针（bare-probe，不阻断）」
+#: 分开 —— 两档都写「缺前缀」的话，清单上看不出这一行到底要不要处理。
 STATUS = {
     "clean": ("可建", "ok", STATUS_HELP["clean"]),
     "wire-fallback": ("⚠ 名字是猜的·已生成", "warn",
                       "有输入表里没查到，按命名约定当线网 force 了——名字对不对要用 nets.txt 扫一次才知道。"),
-    "needs-prefix": ("⚠ 缺前缀·跳过", "warn",
+    "needs-prefix": ("⚠ 输入缺前缀·跳过", "warn",
                      "要 force 的某根输入网埋在子模块里，没配层级前缀 force 必然找不到这根网，所以整组跳过。"
                      "先跑 scan_rtl 配好探针前缀，这组才会生成。"),
-    "risky-generated": ("⚠ 缺前缀·已强制生成", "warn",
+    "risky-generated": ("⚠ 输入缺前缀·已强制生成", "warn",
                         "「缺前缀是否强制生成」开着：这组照样进了 .sv，裸名 force 交给仿真验证；"
                         "仿真过 = 此设计不需前缀，报找不到网则跑 scan_rtl 配前缀重生成。"),
     "bare-probe": ("输出裸名·已生成", "note",
@@ -77,7 +81,7 @@ STATUS = {
     "parse-err": ("✗ 解析出错", "bad", "表达式或输入名有问题，看行内原因块的告警全文。"),
     "unresolved": ("✗ 未解析", "bad", "有输入没解析出网名——照这样生成，仿真器会报找不到这根网。"),
     "skip": ("↷ 只读回读·跳过", "note", "这是只读回读信号，写不进去也就没什么好验的；只记录、不产生断言。"),
-    "error": ("✗ 解析异常", "bad", "分析这一个信号时出错（已捕获，其余信号不受影响）；行内原因块留有全文。"),
+    "error": ("✗ 解析异常", "bad", "分析这一个信号时出错（其余信号不受影响）；行内原因块留有全文。"),
     "pending": ("分析中", "note", "还在后台展开；清单已可点，展开完会自动更新。"),
 }
 #: 引擎只给 status 四档（ok/skip/unresolved/error）时的兜底映射
@@ -186,7 +190,7 @@ REASON_TEMPLATES = {
         "{detail}",
         "解析明细", "resolve_detail"),
     "error": (
-        "分析这个信号时出错（已捕获，未崩）",
+        "分析这个信号时出错（其余信号不受影响）",
         "{detail}",
         "解析明细", "resolve_detail"),
     "skip": (
@@ -311,7 +315,7 @@ HDR_PROGRESS_DIFF_FMT = "其中 {k} 条与程序算的不一致"
 HDR_RESOLVE = "解析明细"
 HDR_SIDE_HIDE = "隐藏右栏 ▶"
 HDR_SIDE_SHOW = "◀ 展开链 · 输入信号"
-HDR_ANALYSIS_FAILED = "分析失败（已捕获，未崩）"                              # C-043
+HDR_ANALYSIS_FAILED = "分析失败（其余信号不受影响）"                          # C-043 / R3-14
 HDR_PENDING = "还在后台展开这个信号……"
 HDR_NOT_EDITABLE = "这个信号不可建（见状态），真值表不可编辑"                   # C-134
 
@@ -399,7 +403,7 @@ TRUTH_UNDO_CLEAR_EXP = "清空期望"                                           
 # ── 工具条动作的反馈 ──
 TRUTH_NO_COLUMN = "先点一格或一列，再用这个按钮"
 TRUTH_COL_OUT_OF_RANGE = "没有选中的测试列"
-TRUTH_ADD_NEG_NO_SELECTION = "没选中列，按 C-096 给第一条正向列加反例"
+TRUTH_ADD_NEG_NO_SELECTION = "没选中列，默认给第一条正向列加反例"
 TRUTH_ADD_NEG_DONE_FMT = "加了 {n} 条反例"
 TRUTH_ADD_NEG_SKIPPED_FMT = "，跳过 {n} 条（那几条正向列已经有反例了，不叠第二条）"
 TRUTH_DEL_NEG_DONE_FMT = "删了 {n} 条反例（正向列都留着）"
@@ -430,7 +434,7 @@ TRUTH_MUX_DATA_DONE_FMT = "已按物理寄存器 {base} 同步整表数据值（
 #: 此前 `mux_resync_cols` 把它们静默丢掉：25 列变 9 列、手填期望 5 条变 2 条，屏幕上没人说话。
 TRUTH_MUX_DATA_DROPPED_FMT = "{names}（共 {n} 列）在新的数据值下没有对应的用例了，已从表里去掉——Ctrl+Z 可撤"
 TRUTH_MUX_DATA_NO_BASE_FMT = "本信号没有物理寄存器 {base} 的 mux 数据行"
-TRUTH_MUX_DATA_NO_REANALYZER = "整表 mux 数据值同步还没接上会话状态（面板未调 set_reanalyzer），这一格已还原"
+TRUTH_MUX_DATA_NO_REANALYZER = "这一格改不动（工具内部没接上），已还原"
 # ── C-298 导入期望 / 批量填 ──
 #: I-20 翻正（C3-int）：旧版是「按列名回填了 N 列的期望{没对上的}」= 计数在前。
 #: 新版把点名那截放到句首（`{missing}` 由 `truth/io.import_report_text` 拼好、自带分号尾巴），
@@ -673,6 +677,29 @@ def skip_reason_of(reason="", an=None):
     return txt
 
 
+def export_write_failed(exc, path=""):
+    """写产物失败 → 一句人话（C-171 / R3-05）。`exc` 是 `exports.ExportError`（自带 errno / path）。
+
+    分支按 errno：目录不存在 ≠ 文件被占用 —— 两种情况要做的事完全不同（一个去建目录 /
+    换位置，一个去关仿真器），说错等于让人白查一轮。"""
+    import errno as _errno
+    p = str(path or getattr(exc, "path", "") or "")
+    code = getattr(exc, "errno", None)
+    if code is None:
+        # 不是文件系统失败，是引擎自己判出来的中文原因（「输出文件不能是源 Excel 本身」
+        # 这类）—— 那句话本身就是要给工程师看的，留住。
+        return exc_text(exc, p)
+    if code in (_errno.ENOENT, _errno.ENOTDIR):
+        why = EXPORT_WRITE_NO_DIR_FMT.format(dir=short_path(os.path.dirname(p) or p))
+    elif code in (_errno.EACCES, _errno.EPERM, _errno.EBUSY, _errno.EROFS):
+        why = EXPORT_WRITE_BUSY
+    elif code in (_errno.ENOSPC, _errno.EDQUOT if hasattr(_errno, "EDQUOT") else _errno.ENOSPC):
+        why = EXPORT_WRITE_NO_SPACE
+    else:
+        why = EXPORT_WRITE_OTHER
+    return EXPORT_WRITE_FAILED_FMT.format(path=short_path(p) or EXPORT_LAST_NEVER, why=why)
+
+
 def humanize_skipped(pairs, analyze=None):
     """[(信号名, 引擎原因)] → [(信号名, 屏幕上那一句)]。
 
@@ -707,12 +734,19 @@ EXPORT_FILTER_NETS = "信号清单 (*.txt);;全部文件 (*)"
 EXPORT_FILTER_JSON = "JSON (*.json)"
 EXPORT_DUP_LABELS_TITLE = "重复 assert 标号（非法 SV）"
 EXPORT_DUP_LABELS_FMT = "以下 {n} 处 assert 标号重复，同一作用域内重复会让 elaboration 失败。仍要写出？\n{rows}"
-EXPORT_WRITE_FAILED_FMT = "无法写入 {path}：\n{err}\n\n（文件是否正被仿真器 / 编辑器占用？）"        # C-171
+#: C-171 / R3-05：写不出去。**按 errno 分支** —— 以前无条件拼「（文件是否正被仿真器 /
+#: 编辑器占用？）」，目录根本不存在时那句是错的（对抗 review 实证：选了一个不存在的目录，
+#: 工具让人去关仿真器）。路径只给「上级目录/文件名」（`short_path`），不给本机全路径。
+EXPORT_WRITE_FAILED_FMT = "{path} 写不出去：{why}"
+EXPORT_WRITE_NO_DIR_FMT = "这个文件夹不存在：{dir}（先建好，或换个位置）"
+EXPORT_WRITE_BUSY = "正被别的程序占着（仿真器 / 编辑器 / Excel 开着？），或者这个文件是只读的"
+EXPORT_WRITE_NO_SPACE = "这个盘写满了，换个位置再试"
+EXPORT_WRITE_OTHER = "写入失败，换个位置再试"
 EXPORT_IMPORT_MISMATCH_FMT = "这份配置是为《{cfg}》导出的，当前是《{cur}》"                          # C-193
 #: C-194 / C-270 / I-20 主控裁决：**名字在前、计数在后**（旧版是「（{n} 个）：{names}」，
 #: 计数先出现等于先让人看一个数字再去猜是哪些信号 —— 点名永远排在计数前面）
 EXPORT_IMPORT_MISSING_FMT = "配置里有、当前表没有的信号：{names}（共 {n} 个，这些跳过，其余照常导入）"
-EXPORT_IMPORT_BAD_FILE = "这不是本工具的配置文件：缺少 dreg_verify_config 段，也没有 edits / mux_* 段"   # C-195
+EXPORT_IMPORT_BAD_FILE = "这不是本工具导出的配置文件（也不是旧版的测试项编辑文件）"      # C-195 / R3-16
 EXPORT_IMPORT_KIND_FULL = "完整配置"
 EXPORT_IMPORT_KIND_LEGACY = "测试项编辑"
 EXPORT_IMPORT_DONE_FMT = "已导入{kind}：恢复了 {n} 个信号的手填编辑"
@@ -720,6 +754,10 @@ EXPORT_IMPORT_DONE_FMT = "已导入{kind}：恢复了 {n} 个信号的手填编�
 #: ⚠ 措辞不提退役前的旧叫法：那些说法连同入口一起没了，再写出来只会让人去找一个不存在的开关。
 EXPORT_IMPORT_IGNORED = ("这份配置里有四项当前版本已不再使用的旧设置（两项展开模式、两项输出引用尾缀），"
                          "已忽略；覆盖度档、用例上限、缺前缀是否强制生成照常套用")
+#: R2-12：配置写的版本号比本工具认识的还新 —— 照单套用认得的那几段，但要说一句。
+#: 静默全收的坏处是：新版新增的段被忽略了，界面上一点看不出来，用户以为整份都生效了。
+EXPORT_IMPORT_NEWER_VERSION = ("这份配置是更新版本的工具导出的：认得的几段照常套用，"
+                              "本版还不认识的设置已跳过")
 EXPORT_IMPORT_APPLIED_FMT = ("已套用：勾选 {k} 个 · 覆盖度档与用例上限 · 前缀 {np} 条 · "
                              "强制 force {nf} 个 · 补充逻辑 {no} 条")
 EXPORT_CONFIG_DONE_FMT = "配置已导出：勾选 {k} 个 · 全局档 {cov} · 前缀 {np} 条 · 强制 force {nf} 个 · 编辑 {ne} 个信号、手填期望 {nx} 条"   # C-191

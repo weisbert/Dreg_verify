@@ -480,13 +480,17 @@ def test_c040_normalized_gear_mark_and_tooltip():
 
 
 def test_c041_risky_generated_is_sixth_status_grade():
-    """C-041：开了「缺前缀强制生成」后状态列如实写「⚠ 缺前缀·已强制生成」而不是「跳过」。"""
+    """C-041：开了「缺前缀强制生成」后状态列如实写「⚠ 输入缺前缀·已强制生成」而不是「跳过」。"""
     models = all_models()
     m = first_with(models, "risky-generated")
     panel, _ = make_panel(models=models)
     assert cell(panel, m["name"], LC.STATUS) == T.STATUS["risky-generated"][0]
     assert "强制生成" in cell(panel, m["name"], LC.STATUS)
     assert T.STATUS["needs-prefix"][0] != T.STATUS["risky-generated"][0]
+    # C-041（主控裁决）：两档都带「输入」二字 —— 输入侧硬阻断 ≠ 输出侧裸名探针（bare-probe）
+    for key in ("needs-prefix", "risky-generated"):
+        assert T.STATUS[key][0].startswith("⚠ 输入缺前缀·"), T.STATUS[key][0]
+    assert "输入" not in T.STATUS["bare-probe"][0]
     w = expand_reason(panel, m["name"])
     assert w.diag_btn.text() == T.REASON_BTN_FMT.format(action=T.REASON_TEMPLATES["risky-generated"][2])
     assert w.risky_btn is None, "这一档主按钮本身就是跳全局开关，不该再放一个同文案的按钮"
