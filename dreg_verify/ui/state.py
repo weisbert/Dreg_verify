@@ -595,11 +595,17 @@ class WorkbenchState(QtCore.QObject):
         mode, exh = cov.mode_for(name, self.models(vid))
         data = self._mux_data_for(name, vid)
         data_key = repr(sorted((data or {}).items()))
-        key = (vid, str(name).lower(), fp, bool(want_graph), data_key)
+        # ⚠ 缓存键里必须带上**本信号这一趟真用的档**（mode/exh），不能只带视图指纹：
+        #   `mode_for` 的逻辑类型档要从**清单行**里取该信号的 `form`，而一趟分析里清单会从
+        #   骨架（`form` 还是空的）换成真模型 —— 同一个指纹下，同一个信号先后能算出两个档。
+        #   只按指纹缓存的话，骨架阶段算出的那份（退回全局档）会把后面正确的那份永久顶掉：
+        #   清单说 9 条、真值表画着 25 列，而且怎么点都不变（D1 P-18 实证）。
+        key = (vid, str(name).lower(), fp, bool(want_graph), data_key, mode, bool(exh))
         if key in self._an_cache:
             return self._an_cache[key]
         if not want_graph:
-            rich = self._an_cache.get((vid, str(name).lower(), fp, True, data_key))
+            rich = self._an_cache.get(
+                (vid, str(name).lower(), fp, True, data_key, mode, bool(exh)))
             if rich is not None:
                 return rich
         try:

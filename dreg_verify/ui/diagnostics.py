@@ -58,10 +58,16 @@ Qt = QtCore.Qt
 __all__ = [
     "DiagnosticsDrawer", "PrefixEditorDialog", "ForceEditorDialog",
     "SupplementEditorDialog", "LegacyImportDialog",
-    "LegacyPlan", "make_snapshot", "prefix_impact", "nets_summary",
+    "LegacyPlan", "make_snapshot", "prefix_impact", "prefix_snapshot", "nets_summary",
     "plan_legacy_import", "apply_legacy_import",
     "SYMPTOM_TARGETS", "STATE_REQUIREMENTS",
 ]
+
+#: 引擎 `binding.found_in` 里「这根网真带上了层级前缀」的那个键。**机器可读键，不上屏**
+#: （界面文案一律走 `inputs_table.FOUND_IN_TEXT` / `terms`）。v1 判「这份映射影响到谁」
+#: 认的就是它，不是「输入名在不在映射里」—— 后者是字符串交集，配了前缀但那根网压根没人
+#: force 时照样报命中（P-16 的假绿）。
+PREFIXED_WIRE = "prefixed-wire"
 
 
 # ═════════════════════════════ 名字 / 文案（唯一真相源在 names.py / terms.py）═══════════════
@@ -176,16 +182,54 @@ def nets_summary(state):
     return (len(_models(state)), n_net, n_guess)
 
 
-def prefix_impact(state, mapping=None):
+def _mp_of(state, mapping):
+    """要报影响面的那份映射（`None` = 用 state 里现存的那份）→ {信号名低: 路径}。"""
+    src = mapping if mapping is not None else (getattr(state, "probe_prefixes", {}) or {})
+    return {str(k).strip().lower(): v for k, v in (src or {}).items()}
+
+
+def prefix_snapshot(state, mapping=None):
+    """当前每个信号「**探到哪根网、force 哪几条路径**」的指纹（P-16）。
+
+    改探针前缀之前照一张、`state.set_probe_prefixes` 之后再照一张，两张不同的那几个信号
+    才是真被影响到的 —— 这是唯一不用猜的判据：`drive` 就是 .sv 里那句 force 的路径，
+    它变了 .sv 一定变，它没变 .sv 一定不变。
+
+    为什么不能只看「配了几条映射」或「名字在不在映射里」：R41 那条总根（工具不知道 RTL 真网名，
+    全靠命名约定 + cone 猜）在视图层的第二实例 —— 字符串交集当命中，配在一个根本没人用的
+    名字上也报「影响 2 个信号」（.sv 前后逐字节相同），配在 `_to_mux` 衔接网上 .sv 真变了
+    却一个都不报。"""
+    mp = _mp_of(state, mapping)
+    out = {}
+    for m in _models(state):
+        name = str(m.get("name") or "")
+        pnet = str(m.get("probe_net") or m.get("out_net") or "").strip().lower()
+        an = _an_of(state, name)
+        rows = (IT.input_rows(an) or []) if an else []
+        out[name.lower()] = (
+            mp.get(pnet, ""),                       # 输出探针这一侧：带不带前缀、带哪个
+            tuple((str(r.get("base") or ""), str(r.get("drive") or ""),
+                   str(r.get("found_in") or ""), bool(r.get("resolved", True)))
+                  for r in rows))                   # 输入这一侧：每根网的 force 路径原文
+    return out
+
+
+def prefix_impact(state, mapping=None, before=None):
     """改完探针前缀报影响面：`(共 N 条映射, 影响 M 个信号)`（C-204）。
 
-    「影响」的口径与 v1 `on_set_probe_prefix` 末尾一致 —— 一个信号只要
-    ① 它的**输出探针网**在映射里（assert 带层级前缀），或
-    ② 它的任一**输入**是 `prefixed-wire`（force 路径带了层级前缀），
-    就算被这份映射影响到。只数「配了几条」会把「配了但没人吃到」也算进去，那是假的影响面。"""
-    mp = {str(k).strip().lower(): v for k, v in (mapping or {}).items()}
-    if mapping is None:
-        mp = {str(k).strip().lower(): v for k, v in (getattr(state, "probe_prefixes", {}) or {}).items()}
+    `before` = 改之前的 `prefix_snapshot`（`PrefixEditorDialog.on_save` 会照一张）→ 影响面 =
+    **重分析前后指纹真变了**的信号数，假绿假阴都没得混（P-16）。
+
+    没给 `before`（比如只是想知道现存这份映射喂到了几个信号）时退回 v1
+    `on_set_probe_prefix` 末尾那个口径：一个信号只要 ① 它的**输出探针网**在映射里
+    （assert 带层级前缀），或 ② 它的任一**输入**的 `found_in` 是「需要层级前缀的网」
+    （force 路径真带上了层级），就算被这份映射影响到。
+    ⚠ v1 判的是**引擎给出的 found_in**，不是「输入名在不在映射里」—— 后者是字符串交集，
+    配了前缀但那根网压根没人 force 时照样报命中（假绿）。"""
+    mp = _mp_of(state, mapping)
+    if before is not None:
+        after = prefix_snapshot(state, mapping)
+        return (len(mp), sum(1 for k, v in after.items() if before.get(k) != v))
     n_sig = 0
     for m in _models(state):
         pnet = str(m.get("probe_net") or m.get("out_net") or "").strip().lower()
@@ -194,8 +238,7 @@ def prefix_impact(state, mapping=None):
             continue
         an = _an_of(state, m.get("name"))
         rows = (IT.input_rows(an) or []) if an else []
-        if any(str(r.get("found_in") or "") == "prefixed-wire"
-               or str(r.get("base") or "").strip().lower() in mp for r in rows):
+        if any(str(r.get("found_in") or "") == PREFIXED_WIRE for r in rows):
             n_sig += 1
     return (len(mp), n_sig)
 
@@ -576,10 +619,14 @@ class PrefixEditorDialog(_EditorDialog):
         """保存 → `state.set_probe_prefixes`（I-04 的唯一入口）→ 报影响面（C-204）。
 
         `state.set_probe_prefixes` 里 `_config_changed` 明写「勾选一个不动」——清单随后重建，
-        用户挑了半天的导出集还在（C-205，测试里拿真 state 证明）。"""
+        用户挑了半天的导出集还在（C-205，测试里拿真 state 证明）。
+
+        影响面（C-204）先照一张**改之前**的指纹再套用（P-16）：报出来的那个数 = 重分析前后
+        force 路径 / 探针路径真变了的信号数，不是「配了几条」也不是名字的字符串交集。"""
         mapping = self.mapping()
+        before = prefix_snapshot(self.state)         # ← 必须在 set_probe_prefixes 之前
         self.state.set_probe_prefixes(mapping)
-        n_map, n_sig = prefix_impact(self.state, mapping)
+        n_map, n_sig = prefix_impact(self.state, mapping, before=before)
         self.impact.setText(_t("DIAG_PREFIX_IMPACT_FMT", n=n_map, m=n_sig))
         self.saved.emit(int(n_map), int(n_sig))
         self.accept()
@@ -717,15 +764,20 @@ class SupplementEditorDialog(_EditorDialog):
         return text
 
     def unknown_names(self, norm):
-        """补充的基名不在当前 Excel logic 页的那些（C-214：允许，但要问一声）。
+        """补充的基名不在当前 Excel **logic 页**的那些（C-214：允许，但要问一声）。
 
-        「当前表有哪些 logic 基名」由 state 的清单说了算 —— 视图不 import excel_model / topout。"""
+        判据与 v1 `on_logic_overrides` 末尾一字不差：`{s.out_base.lower() for s in wb.logic}`。
+        以前拿的是**当前范围的清单**（Topout 范围下那是顶层名，dft 改名根还与基名根本不同名），
+        于是一条表里明明有的基名也会被报成「将作为纯新增合成信号生成」，用户以为自己写错了，
+        或者反过来：换到别的范围再存同一份补充，提示就没了（P-19）。
+
+        只做属性访问，不 import excel_model / topout（I-19 分层）；wb 还没载 → 全当不认识。"""
         have = set()
-        for m in _models(self.state):
-            for k in ("matched_name", "name"):
-                v = str(m.get(k) or "").strip().lower()
-                if v:
-                    have.add(v)
+        wb = getattr(self.state, "wb", None)
+        for sig in (getattr(wb, "logic", None) or ()):
+            v = str(getattr(sig, "out_base", "") or "").strip().lower()
+            if v:
+                have.add(v)
         return [n for n in sorted(norm or {}) if n not in have]
 
     def on_save(self):

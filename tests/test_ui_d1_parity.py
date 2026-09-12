@@ -466,3 +466,182 @@ def test_p04_a_full_config_does_not_go_down_the_legacy_migration_path(monkeypatc
     assert rep.ok and rep.is_full
     assert rep.n_restored == 0 and not restored, "完整配置的 legacy 段不该被 C-302 再迁一遍"
     assert not rep.missing
+
+
+# ═════════════ P-16：探针前缀的影响面按「.sv 真变了」算 ═════════════
+def _state_sv(st, vid="topout"):
+    """一份 state 当前配置下渲染出的 .sv 全文（不起窗）。"""
+    cov = st.coverage(vid)
+    mode, exh = cov.mode()
+    text, _ = X.render_sv(st.provider(vid), only=None, mode=mode,
+                          max_tests=int(cov.max_tests), exhaustive=exh,
+                          edited=st.compute_edited(vid))
+    return text
+
+
+def test_p16_prefix_impact_counts_exactly_the_signals_whose_sv_changed(monkeypatch, tmp_path):
+    """C-204。「影响 M 个信号」以前是**字符串交集**：输入名在映射里就算命中 —— 配在一个谁也
+    没 force 的名字上，.sv 前后逐字节相同却报「影响 2 个信号」（假绿）；配在真正的 `_to_mux`
+    衔接网上，.sv 真变了却一个都不报（假阴）。R41 那条总根在视图层的第二实例（P-16）。
+
+    裁决：命中只认引擎给的 `found_in`（v1 口径），影响面按**重分析前后真变了**的信号算。
+    这里把这条口径直接钉成等价关系：**报的数 > 0 ⟺ .sv 真变了**，一次盖掉假绿与假阴。
+    """
+    from dreg_verify import inputs_table as IT              # noqa: PLC0415
+    from dreg_verify.ui import diagnostics as D             # noqa: PLC0415
+    from dreg_verify.ui import state as ST                  # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.app()
+    st = ST.WorkbenchState()
+    assert st.load(H.mirror_path("wl"))
+    st.set_models("topout", st.provider("topout").skeleton_models(), True)
+
+    # 找一根**引擎明说要层级前缀**的网（真影响）和一根寄存器背书的输入基名（假绿的诱饵）
+    real_wire, decoy = "", ""
+    for m in st.models():
+        for r in IT.input_rows(st.analyze(m["name"])) or []:
+            base = str(r.get("base") or "").strip().lower()
+            if not base:
+                continue
+            if not real_wire and str(r.get("found_in") or "") in ("needs-prefix", "prefixed-wire"):
+                real_wire = base
+            elif not decoy and str(r.get("found_in") or "").startswith("reg"):
+                decoy = base
+    assert real_wire, "wl 镜像上应当有缺前缀的衔接网，否则这条测试验不到东西"
+
+    cases = [("谁也不认识的名字", {"d_no_such_net_anywhere_xyz": "U_A.U_B"}),
+             ("寄存器背书的输入基名（假绿的诱饵）", {decoy or "d_no_such_2": "U_A.U_B"}),
+             ("真要层级前缀的衔接网", {real_wire: "U_WL_RF_TOP.U_SUB"}),
+             ("清空映射", {})]
+    for tag, mapping in cases:
+        sv_before = _state_sv(st)
+        before = D.prefix_snapshot(st)
+        st.set_probe_prefixes(mapping)
+        n_map, n_sig = D.prefix_impact(st, mapping, before=before)
+        sv_after = _state_sv(st)
+        assert n_map == len(mapping), tag
+        assert (n_sig > 0) == (sv_after != sv_before), (
+            "%s：报「影响 %d 个信号」，.sv 却%s变" % (tag, n_sig, "" if sv_after != sv_before else "没"))
+
+
+def test_p16_hit_only_counts_the_engines_prefixed_wire(monkeypatch, tmp_path):
+    """不给「改之前」的快照时退回 v1 `on_set_probe_prefix` 末尾那个口径 —— 判据是引擎给的
+    `found_in`，**不是**「输入名在不在映射里」。后者会把「配了但没人 force」也算成命中。"""
+    from dreg_verify.ui import diagnostics as D             # noqa: PLC0415
+    from dreg_verify.ui import state as ST                  # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.app()
+    st = ST.WorkbenchState()
+    assert st.load(H.mirror_path("btlp"))
+    st.set_models("topout", st.provider("topout").skeleton_models(), True)
+    src = "dreg_verify/ui/diagnostics.py"
+    assert 'str(r.get("base") or "").strip().lower() in mp' not in open(
+        src, encoding="utf-8").read(), "字符串交集那条判据必须已经删掉（P-16）"
+
+    n_map, n_sig = D.prefix_impact(st, {"d_bt_lp_linectrl_rx_en": "U_A.U_B"})
+    assert (n_map, n_sig) == (1, 0), "寄存器背书的输入名配了前缀也不该算命中"
+
+    # 第二次、且不同：配在某个信号的**输出探针网**上 → 那一个信号确实被影响（assert 带前缀）
+    pnet = str(st.models()[0].get("probe_net") or st.models()[0]["name"])
+    assert D.prefix_impact(st, {pnet: "U_A.U_B"}) == (1, 1)
+
+
+# ═════════════ P-18：改覆盖度档之后保持当前选中 ═════════════
+def test_p18_changing_coverage_keeps_the_selected_signal(monkeypatch, tmp_path):
+    """改「本信号覆盖度」会重跑分析、推一遍骨架清单，而清单整表重建后无条件选第一行 ——
+    选中行当场跳走。紧接着那一下拧全局档，改的就是**跳过去那个信号**的档，而用户以为自己
+    还在原来那一行上（P-18）。"""
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.auto_dialogs(monkeypatch)
+    w2 = _v2_window(H.mirror_path("btlp"))
+    try:
+        lp, st = w2.list_panel, w2.state
+        names = lp.visible_names()
+        assert len(names) >= 3
+        target = names[2]                      # 刻意不是第一行
+        st.set_current(target)
+        H.app().processEvents()
+        assert lp.current_name() == target
+
+        def n_list():
+            return next(m["n_vectors"] for m in st.models() if m["name"] == target)
+
+        n0 = n_list()
+        done = []
+        w2.analysisEnded.connect(lambda vid, ok: done.append(1))
+        st.coverage("topout").set_sig_cov(target, "exhaustive")     # 「本信号覆盖度」
+        st.coverage_touched("topout")
+        H.wait_for(lambda: bool(done), timeout_ms=60000)
+        H.app().processEvents()
+        assert lp.current_name() == target, "改本信号覆盖度后选中行跳走了"
+        assert str(st.current_name) == target
+        # 选中行留住之后，「用户再点一次」那次重装表也没有了 —— 真值表得自己跟上（C-148）。
+        # 分析中那一瞬清单还是骨架（form 为空），那时算出来的 an 退回全局档，绝不能被缓存顶死。
+        assert n_list() >= n0
+        assert w2.truth_panel.model.columnCount() == n_list(), \
+            "清单说 %s 条、真值表画了 %s 列" % (n_list(), w2.truth_panel.model.columnCount())
+
+        # 第二次、且不同：拧全局档 —— 同样不许跳
+        done[:] = []
+        st.coverage("topout").persist_global_label("穷举")
+        st.coverage_touched("topout")
+        H.wait_for(lambda: bool(done), timeout_ms=60000)
+        H.app().processEvents()
+        assert lp.current_name() == target, "改全局档后选中行跳走了"
+        assert st.coverage("topout").sig_cov_of(target) == "exhaustive", \
+            "被清掉单点档的是跳过去那个信号（P-18 的真实后果）"
+        assert w2.truth_panel.model.columnCount() == n_list()
+    finally:
+        w2.close()
+
+
+def test_p18_first_row_is_still_the_fallback(monkeypatch, tmp_path):
+    """C-044 不变：找不回原来那一行（换表 / 那个名字没了）才退到第一个可见行。"""
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.auto_dialogs(monkeypatch)
+    w2 = _v2_window(H.mirror_path("btlp"))
+    try:
+        lp = w2.list_panel
+        assert lp.select_name("d_no_such_signal_at_all") is False
+        w2.state.set_current(lp.visible_names()[2])
+        H.app().processEvents()
+        lp.reload()
+        assert lp.current_name() == lp.visible_names()[2]
+        w2.state.set_current("")
+        lp.view.setCurrentIndex(lp.view.model().index(-1, -1))
+        lp.reload()
+        assert lp.current_name() == lp.visible_names()[0]
+    finally:
+        w2.close()
+
+
+# ═════════════ P-19：RTL 补充的基名比对用 logic 页 ═════════════
+def test_p19_supplement_unknown_names_compare_against_the_logic_page(monkeypatch, tmp_path):
+    """C-214 的判据在 v1 是 `{s.out_base.lower() for s in wb.logic}`；v2 拿的是**当前范围的
+    清单**（Topout 范围下那是顶层名）。两边差出来的是双向的（P-19）：
+
+      · `d_en_refbuf` 在 logic 页上有、Topout 清单里叫 `d_en_refbuf_ls` → 补一条它的逻辑
+        会被误报成「将作为纯新增合成信号生成」，用户以为自己名字写错了；
+      · `clk_force_on` 这种直连寄存器 / mux 根在 Topout 清单里有、logic 页上没有 → 补它
+        **确实**是纯新增合成信号，而以前一声不吭。
+    """
+    from dreg_verify.ui import diagnostics as D             # noqa: PLC0415
+    from dreg_verify.ui import state as ST                  # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.app()
+    st = ST.WorkbenchState()
+    assert st.load(H.mirror_path("btlp"))
+    st.set_models("topout", st.provider("topout").skeleton_models(), True)
+    dlg = D.SupplementEditorDialog(st)
+    try:
+        logic_bases = {s.out_base.lower() for s in st.wb.logic}
+        assert "d_en_refbuf" in logic_bases and "clk_force_on" not in logic_bases
+        assert "d_en_refbuf" not in {m["name"].lower() for m in st.models()}
+
+        norm = {"d_en_refbuf": {}, "clk_force_on": {}, "d_brand_new_eco_sig": {}}
+        assert dlg.unknown_names(norm) == ["clk_force_on", "d_brand_new_eco_sig"]
+
+        # 第二次、且不同：logic 页上真有的那几个，一个都不该被报
+        assert dlg.unknown_names({n: {} for n in sorted(logic_bases)}) == []
+    finally:
+        dlg.close()

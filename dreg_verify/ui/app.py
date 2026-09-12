@@ -773,13 +773,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         C-276 的语义在这一句上：清单先出 N 行「分析中」，用户当场点了其中一行 → 电路图
         `set_pending()`；等 worker 把这一条算完，`modelUpdated` 到，这里再喂真图。
-        不跟这一步的话，得等整表跑完（或用户再点一次）图才出来 —— 看着就是「点了没反应」。"""
+        不跟这一步的话，得等整表跑完（或用户再点一次）图才出来 —— 看着就是「点了没反应」。
+
+        ⑥ 真值表同理（C-148 / P-18）：`coverage.mode_for` 要从**清单行**里取该信号的逻辑类型
+        （`form`），而改档那一刻推给清单的是骨架（`form` 还是空的）—— ⑥ 听到 `coverageChanged`
+        就装表，装出来的是「查不到逻辑类型档、退回全局档」的那一版。以前它能对上纯属侥幸：
+        清单整表重建时选中行会跳到第一行，用户再点回来才触发第二次装表；P-18 把选中行按名字
+        留住之后，那次「点回来」没有了，真值表就一直停在旧档上（清单说 9 条、真值表画着 25 列）。"""
         if view_id not in ("", self._scope()):
             return
         self._refresh_status_counts()
         cur = str(getattr(self._state, "current_name", "") or "")
         if cur and (not name or str(name).lower() == cur.lower()):
             self._show_flow(cur)
+            self.truth_panel.refresh()                # 同一句话对 ⑥ 也成立，见下方注释
 
     def _on_current_changed(self, name=""):
         """C-149 / C-280：切信号 → 覆盖度回显 + 电路图换图。
@@ -1025,7 +1032,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._state.set_models(view_id, list(models or []), False)
         self._set_loading(False)
         self._refresh_status_counts()
+        self._refresh_truth_after_analysis(view_id)
         self.analysisEnded.emit(str(view_id), True)
+
+    def _refresh_truth_after_analysis(self, view_id):
+        """整表跑完 → 当前信号的真值表按**最终**清单再装一次（C-148 / P-18）。
+
+        与 `_on_model_updated` 里那一句是同一条理由（清单行的 `form` 是覆盖度派发的判据），
+        这里兜的是「当前信号那一行这一趟没被 `modelUpdated` 单独报过」的场合。"""
+        if view_id not in ("", self._scope()):
+            return
+        if str(getattr(self._state, "current_name", "") or ""):
+            self.truth_panel.refresh()
 
     def _on_worker_cancelled(self, view_id, models_partial):
         part = list(models_partial or [])

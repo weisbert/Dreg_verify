@@ -1162,12 +1162,19 @@ class SignalListPanel(QtWidgets.QWidget):
         self.reload()
 
     def reload(self):
-        """整表重建（换表 / 换范围 / worker finished）+ 默认选中第一个可见行（C-044）。"""
+        """整表重建（换表 / 换范围 / worker finished / 换覆盖度档）。
+
+        选中行**按名字找回**，找不到才退到第一个可见行（C-044 / P-18）。整表重建不只发生在
+        换表：改一次「本信号覆盖度」或全局档也会重跑分析、推一遍骨架清单 —— 那时候跳回第一行
+        意味着**紧接着那一下全局档改的是跳过去那个信号**，而用户以为自己还在原来那一行上
+        （对抗 review 实证：改完单点档再拧全局，被清掉的是别人的档）。"""
+        keep = self.current_name() or str(getattr(self.state, "current_name", "") or "")
         models = list(self.state.models(self._view_id) or [])
         self.model.set_prefix_map(getattr(self.state, "probe_prefixes", None) or {})
         self.model.load(models, self._checked_set(), self.state.negs(self._view_id))
         self.view.set_expanded(None)
-        self.select_first_visible()
+        if not (keep and self.select_name(keep)):
+            self.select_first_visible()
         self._refresh_counts()
 
     def _checked_set(self):
@@ -1177,7 +1184,21 @@ class SignalListPanel(QtWidgets.QWidget):
     def select_first_visible(self):
         if self.proxy.rowCount() <= 0:
             return False
-        idx = self.proxy.index(0, int(LC.NAME))
+        return self._select(self.proxy.index(0, int(LC.NAME)))
+
+    def select_name(self, name):
+        """按名字选回某一行（整表重建后找回原来那一行，P-18）。找不到 / 被筛掉 → False。"""
+        if not name:
+            return False
+        src = self.model.index_of(name)
+        if not src.isValid():
+            return False
+        idx = self.proxy.mapFromSource(src)
+        if not idx.isValid():
+            return False
+        return self._select(self.proxy.index(idx.row(), int(LC.NAME)))
+
+    def _select(self, idx):
         self.view.setCurrentIndex(idx)
         self.view.selectionModel().select(
             idx, QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows)
