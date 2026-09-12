@@ -246,6 +246,21 @@ QTFREE_ALLOWED = {
         "edits": "反例列的保护性判定（哪些是自定义命名 / 手调过错值的）",
         "truth_edit": "check_col_name / parse_int —— 重命名列与 mux 数据值的三道校验",
     },
+    # ── ui/truth/ 子包（C3；键带子目录）──
+    "truth/model.py": {
+        "edits": "列 schema 与全部列操作的 Qt-free 实现（cols_from_vectors / add_col / expected_cell_state …），model 只包撤销",
+        "inputs_table": "drive_ctx / vector_drives —— 列头驱动明细（C-063）按当前列向量算",
+        "truth_edit": "parse_int / check_col_name —— 八种数值写法与列名校验只此一份",
+    },
+    "truth/rows.py": {
+        "inputs_table": "vheader_display —— 输入行标签「真名　(角色 · 端口)」（C-074）",
+    },
+    "truth/view.py": {
+        "inputs_table": "input_rows —— 冻结左列的猜名 / 需前缀 / rw / note 元信息按 key 查（C-074 / C-075）",
+    },
+    "truth/delegate.py": {
+        "truth_edit": "parse_int —— 编辑器即时校验红框（C-083，不阻止提交）",
+    },
 }
 
 
@@ -272,7 +287,9 @@ def _ui_sources():
     for base, _dirs, files in os.walk(UI_DIR):
         for fn in sorted(files):
             if fn.endswith(".py") and not fn.startswith("__"):
-                yield fn, os.path.join(base, fn)
+                path = os.path.join(base, fn)
+                # 键 = 相对 ui/ 的路径（顶层文件就是文件名；子包写 "truth/model.py"），免得子包重名串号
+                yield os.path.relpath(path, UI_DIR).replace(os.sep, "/"), path
 
 
 def test_ui_layering():
