@@ -219,7 +219,7 @@
 | C-160 | 导出选项：末尾测试汇总 + 计数器（统计真 FAIL / NEG-broken 数） | SV._ask_export_options / MW._ask_export_options（sv_summary） | topout.render_topout_sv(sv_summary=) | 保留 | | | 待落点 | 方案§4.1; Design§10; 6月审计#3 |
 | C-161 | 导出选项：断言消息尾部追加 owner | SV._ask_export_options / MW._ask_export_options（owner_in_msg） | topout.render_topout_sv(owner_in_msg=) | 保留 | | | 待落点 | 方案§4.1; Design§10; 6月审计#3 |
 | C-162 | 导出选项记住上次选择，下次预选 | SV._ask_export_options / MW._ask_export_options（_save_settings） | — | 保留 | | | 待落点 | 清单§3; gui:_ask_export_options |
-| C-163 | 两个『导出 .sv 选项』对话框（默认值不同却共用同一份设置）合成一个 | SV._ask_export_options + MW._ask_export_options | — | 合并 | | | 待落点 | 方案§4.2; 清单§3; 清单§7 |
+| C-163 | 两个『导出 .sv 选项』对话框（默认值不同却共用同一份设置）合成一个 | SV._ask_export_options + MW._ask_export_options | — | 合并 | | | 待落点 | 方案§4.2; 清单§3; 清单§7; 主控裁决: 统一默认值=SignalView 版（sv_summary/owner_in_msg 默认关，exports.EXPORT_OPTION_DEFAULTS 唯一定义）；v2 预览与导出同读 exports.load_export_options；legacy _opts 的 True 兜底随旧门面删 |
 | C-164 | 重复 assert 标号（非法 SV）在写文件前弹确认，列出冲突的标号与两个信号 | MW._confirm_dup_labels（SV.on_export_sv / MW.on_generate 都调） | generator.build（dup_labels）/ topout.build_for_topout | 保留 | | | 待落点 | 方案§4.1; Design§10; 审计C; 6月审计N9 |
 | C-165 | 导出完成摘要：信号数 / 断言块数 / 测试用例数（其中反例几条、designer 手填期望几条）/ 只记账不产断言几个 | SV._export_summary_text | topout.render_topout_sv（summary） | 保留 | | | 待落点 | 方案§4.1; 6月审计#3 |
 | C-166 | 导出完成摘要点名有哪些信号只记账不产断言 | SV._export_summary_text（accounted） | topout.render_topout_sv（accounted） | 保留 | | | 待落点 | Design§8-2; 清单§7; gui:_export_summary_text |
