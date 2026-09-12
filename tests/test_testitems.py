@@ -1176,7 +1176,8 @@ def test_skipped_detail_text_lists_names_and_reasons():
     assert "close_ready_flag" in text and "wire" in text
     assert "d_logic_pll_n2" in text and "pll_n1" in text
     assert "C = int_n：不可驱动" in text       # 空原因 → 兜底文案
-    assert "--include-risky" in text           # 告诉用户如何强制生成
+    # 告诉用户怎么强制生成——指界面上的勾选框名字，不写 CLI 开关（那是维护者视角，轨0-⑦）
+    assert "缺前缀强制生成" in text and "CLI" not in text
 
 
 def test_gui_bulk_scope_excludes_hidden_checked(qapp, wb, tmp_path_factory):

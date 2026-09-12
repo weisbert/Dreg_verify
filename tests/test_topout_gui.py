@@ -795,6 +795,34 @@ def test_e_addneg_names_survive_export(topo_win):
     assert len(names) == len(set(names)) and all(names)
 
 
+def test_cascade_doc_window_reads_the_real_document(topo_win):
+    """轨0-⑦：级联「?」帮助窗此前在上一级目录找『级联模式说明.md』（文件其实在 docs/ 下）→
+    窗口永远只显示"没找到"的兜底摘要。现在要真读到那份文档。"""
+    w = topo_win
+    w._open_cascade_doc()
+    txt = w._cascade_doc_view.toPlainText()
+    assert "BT_LP_DREG" in txt                  # 真文档里的内容（兜底摘要没有）
+    assert "内置摘要" not in txt
+
+
+def test_gui_user_texts_have_no_cli_fragments(topo_win):
+    """轨0-⑦：界面上不出现 CLI 命令/命令行开关——验证工程师看的是行为，不是维护者的等价命令。"""
+    from PySide6 import QtWidgets
+    from dreg_verify import gui as G
+    w = topo_win
+    texts = []
+    for wid in w.findChildren(QtWidgets.QWidget):
+        texts.append(wid.toolTip() or "")
+        if hasattr(wid, "text"):
+            try:
+                texts.append(wid.text() or "")
+            except TypeError:                   # text(int) 之类的重载，跳过
+                pass
+    bad = [t for t in texts if "CLI" in t]
+    assert not bad, bad
+    assert "CLI" not in G._skipped_detail_text([("x", "1", [("A", "n", "r")])])
+
+
 _FORCE_LEAF = "d_bt_lp_rx_en_local"        # mirror 里 rx_en 的一个可写寄存器叶子（默认走 RF_WRITE）
 
 

@@ -197,7 +197,7 @@ def _skipped_detail_text(skipped):
                             for letter, base, note in risky)
         parts.append("%s\n%s" % (name, reasons))
     return ("跳过原因：以下输入在 ENV_RF 层探不到（force 会 elaboration 失败）。\n"
-            "如需强制生成：勾选工具栏「缺前缀强制生成」（或 CLI --include-risky）——\n"
+            "如需强制生成：勾选工具栏「缺前缀强制生成」——\n"
             "裸名 force 交给仿真验证；仿真过=此设计不需前缀，CUVUNF 则跑 scan_rtl 配前缀。\n\n"
             + "\n\n".join(parts))
 
@@ -271,7 +271,7 @@ DFT_BG = QtGui.QColor("#ede9fe")        # iddq 漏电态自检拍列的「期望
 CASCADE_DOC_FALLBACK = """\
 # 级联模式 — 展开上游 vs force级联网
 
-> 完整图解在仓库根目录『级联模式说明.md』，当前没找到该文件，以下为内置摘要。
+> 以下是内置摘要（完整图解文档没跟本程序一起装上）。
 
 当一个信号的输入引用了**另一行 logic 算出来的网**(级联)时，有两种驱动办法：
 
@@ -2579,8 +2579,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b_prefix.clicked.connect(self.on_set_probe_prefix)
         b_nets = QtWidgets.QPushButton("导出 nets.txt…")
         b_nets.setToolTip("把当前表需要在 ENV_RF 层级定位的网清单导出为 nets.txt，传到仿真服务器跑\n"
-                          "scan_rtl.py 扫 RTL → 得到 probe_prefixes.txt → 回来用『设置探针前缀 → 导入…』套用。\n"
-                          "（等价于 CLI：python redzone_tools/scan_rtl.py --excel 真表.xlsx --export-nets nets.txt）")
+                          "scan_rtl.py 扫 RTL → 得到 probe_prefixes.txt → 回来用『设置探针前缀 → 导入…』套用。")
         b_nets.clicked.connect(self.on_export_nets)
         b_force = QtWidgets.QPushButton("强制 force 信号")
         b_force.setToolTip("列出要『直接 force 顶层基名网、跳过 cone 展开』的信号基名(每行一个)。\n"
@@ -2739,7 +2738,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "断言探针网名补 _to_logic（pll_n→pll_n_to_logic）——这是这些内部网的 RTL 真名（LPBT 实证）。\n"
             "取消：探基名裸网。（顶层输出、_ls 不受影响。）\n\n"
             "个别 logic 输出的 <名>_to_logic 恰好撞了另一个真实输入网（如 lo2g5g）→ 左表「本信号探尾缀网」\n"
-            "单独取消，不必关全局。（= CLI --no-ref-suffix；mux 输出由旁边的「mux加尾缀」单独管。）")
+            "单独取消，不必关全局。（mux 输出由旁边的「mux加尾缀」单独管。）")
         if "pytest" not in sys.modules:
             self.append_to_logic_chk.setChecked(bool(_load_settings().get("append_to_logic", True)))
         self.append_to_logic_chk.stateChanged.connect(self.on_append_to_logic_changed)
@@ -2752,7 +2751,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "勾上：所有被下游引用的 mux 输出都补其去向尾缀（_to_logic/_to_mux）——用于端口真名带尾缀的设计\n"
             "（如 Hi1108 rxiq：2:1 mux 喂 sig_logic，RTL 端口本身叫 d_wl_rf_rxiq_phase_ctrl_to_logic）。\n\n"
             "为什么和 logic 分开：mux 输出端口带不带尾缀【设计相关、Excel 推不出】，所以不跟 logic 一起默认补。\n"
-            "勾上后个别真裸名的 mux 输出 → 左表「本信号探尾缀网」单独取消。（= CLI --mux-ref-suffix）")
+            "勾上后个别真裸名的 mux 输出 → 左表「本信号探尾缀网」单独取消。")
         if "pytest" not in sys.modules:
             self.append_to_mux_chk.setChecked(bool(_load_settings().get("append_to_mux", False)))
         self.append_to_mux_chk.stateChanged.connect(self.on_append_to_mux_changed)
@@ -2765,7 +2764,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "勾上 = 这类信号照常生成（force 用裸名 `ENV_RF.<网名>），用仿真验证本设计是否真需要前缀：\n"
             "  · elaboration 全过 = 此设计这些网顶层直达，不需要前缀，保持勾选即可\n"
             "  · 报 CUVUNF = 网确实埋在子模块，跑 scan_rtl 配前缀后重新生成\n"
-            "（与 CLI --include-risky 同义；左表状态列会显示「已强制生成」。）")
+            "（左表状态列会显示「已强制生成」。）")
         # pytest 下保持不勾(基线=按 LPBT 跳过 risky，测试不变)；生产默认勾(缺键=True)，settings 可改
         if "pytest" not in sys.modules:
             self.include_risky_chk.setChecked(bool(_load_settings().get("include_risky", True)))
@@ -2911,7 +2910,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "工具推不出→默认【不勾】(探裸名)。\n\n"
             "什么时候动它：① mux 输出仿真报 CUVUNF、scan_rtl 查到真名带 _to_logic/_to_mux→勾上(如 rxiq)；\n"
             "② logic 输出的 <名>_to_logic 恰好撞了另一根真实输入网(如 lo2g5g)→取消勾、探裸名。\n"
-            "(未被下游引用的信号无尾缀可补，本框禁用；= CLI --suffix-signals / --no-suffix-signals。)")
+            "(未被下游引用的信号无尾缀可补，本框禁用。)")
         self.suffix_chk.stateChanged.connect(self.on_suffix_changed)
         sigcov.addWidget(self.suffix_chk)
         sigcov.addSpacing(16)
@@ -3366,14 +3365,18 @@ class MainWindow(QtWidgets.QMainWindow):
             lay.addWidget(bb)
             dlg.resize(900, 720)
             self._cascade_doc_dlg = dlg
-        # 每次打开都重读文件：文档更新后无需重启 GUI；找不到文件则退化为内置摘要
-        doc = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "级联模式说明.md")
-        try:
-            with open(doc, encoding="utf-8") as f:
-                md = f.read()
-        except OSError:
-            md = CASCADE_DOC_FALLBACK
+        # 每次打开都重读文件：文档更新后无需重启 GUI；找不到文件才退化为内置摘要。
+        # 文档实际在 docs/ 下 —— 此前只找上一级目录，于是这个窗口永远只显示"没找到"的兜底摘要。
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        md = CASCADE_DOC_FALLBACK
+        for doc in (os.path.join(root, "docs", "级联模式说明.md"),
+                    os.path.join(root, "级联模式说明.md")):      # 老位置兜底
+            try:
+                with open(doc, encoding="utf-8") as f:
+                    md = f.read()
+                break
+            except OSError:
+                continue
         self._cascade_doc_view.setMarkdown(md)
         dlg = self._cascade_doc_dlg
         dlg.show(); dlg.raise_(); dlg.activateWindow()
