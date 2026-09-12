@@ -110,23 +110,6 @@ def _apply_plan(m, plan):
     return added
 
 
-#: 报告文案里【两边一定一致】的那一截：「粘贴落了 N 格」+「，新增列 …」
-_RE_REPORT_HEAD = re.compile(r"^粘贴落了 \d+ 格(，新增列 [^，]*)?")
-
-
-def _report_head(s):
-    """⚠ C3-a（2026-09-12）起「跳过」那一截两边口径不同，**只比得了这个头**。
-
-    `model.paste_tsv` 现在按原因分桶逐条点名（只读 / 右边没有测试列（原因）/ 自动生成列的
-    mux 数据值要整表改 / 写法没认出来 + 逐格名字）；`io.paste_plan` 还是一句「跳过 N 格
-    （只读行/列）」、把逐格原因留在 `plan.skipped` 里。**C3-int 把两个报告构造函数合成一份
-    之后，请把下面的 `_report_head(...)` 比较改回 `plan.report_text == msg` 逐字相等。**
-    行为等价（落了哪几格）照旧由 `_dump(ma) == _dump(mb)` 逐格钉死，没有放水。
-    """
-    m = _RE_REPORT_HEAD.match(str(s or ""))
-    return m.group(0) if m else str(s or "")
-
-
 # ═══════════════════ TSV：解析 / 复制 ═══════════════════
 def test_parse_tsv_excel_dialect():
     """Excel 口径：三种换行都认、制表符分列、**中间空串格保留**、只剔末尾空行。"""
@@ -222,9 +205,9 @@ def test_c294_paste_plan_equivalent_to_model_paste(btlp, wl):
     """**等价性**：按 plan 用 model 公开方法落格 == 直接 `model.paste_tsv`，逐格 + 报告文案。
 
     覆盖：落在活动格 / 超列追加 / 超行拒绝 / 只读格跳过 / 认不出来的写法 / 空串清期望 /
-    锯齿行（行长不齐）/ 空文本，两条信号（普通 logic + 带 iddq 门的 logic）各跑一遍。
+    行长不齐 / 空文本；四条信号 —— logic / logic+iddq 门 / **mux** / **mux+iddq 门**（后两条是 C3-int 加的，走 `mux_whole` 那一桶）。
     """
-    for wb, sig in ((btlp, LOGIC_SIG), (wl, GATED_SIG)):
+    for wb, sig in ((btlp, LOGIC_SIG), (wl, GATED_SIG), (btlp, MUX_SIG), (wl, MUX_GATED_SIG)):
         m0, _an, _p = _fresh(wb, sig)
         n_rows, n_cols = m0.rowCount(), m0.columnCount()
         r_in = _first_editable_input_row(m0)
@@ -248,15 +231,27 @@ def test_c294_paste_plan_equivalent_to_model_paste(btlp, wl):
             _apply_plan(ma, plan)
             ok, msg = mb.paste_tsv(text, r0, c0)
             assert plan.ok == ok, (sig, text, r0, c0)
-            assert _report_head(plan.report_text) == _report_head(msg), \
-                (sig, text, r0, c0, plan.report_text, msg)
-            assert bool(plan.skipped) == (_report_head(msg) != msg), \
-                "一边说跳过了、另一边没说：%r / %r" % (plan.report_text, msg)
+            assert plan.report_text == msg, (sig, text, r0, c0, plan.report_text, msg)
+            assert len(plan.skipped) == plan.tally.n, (sig, text, plan.skipped, plan.tally)
+            if plan.ok:        # 超行拒绝那一档报的是 OVERFLOW 句，不是「粘贴落了 N 格」
+                assert bool(plan.skipped) == (msg != IO.paste_report_text(
+                    len(plan.cells), plan.added_names, 0, plan.kind)), \
+                    "一边说跳过了、另一边没说：%r / %r" % (plan.report_text, msg)
             assert _dump(ma) == _dump(mb), (sig, text, r0, c0)
     # 确实测到了「追加列」和「拒绝」两条路，不是全走了平凡分支
     m, _an, _p = _fresh(btlp, LOGIC_SIG)
     assert IO.paste_plan(m, "1\t0\t1\t0\t1\t0", 0, 0).new_cols > 0
     assert IO.paste_plan(m, "\n".join(["1"] * (m.rowCount() + 2)), 0, 0).rejected_rows
+    # 四个跳过桶确实都走到过（不是「两边都没跳所以恰好相等」）
+    mm, _man, _mp = _fresh(btlp, MUX_SIG)
+    r_data = next((r for r in range(mm.rowCount()) if mm.is_mux_auto_data_cell(r, 0)), None)
+    assert r_data is not None, "mirror 的 mux 信号没有自动列数据值格，换夹具"
+    assert IO.paste_plan(mm, "1", r_data, 0).tally.mux_whole == 1
+    lg, _lan, _lp = _fresh(btlp, LOGIC_SIG)
+    assert IO.paste_plan(lg, "1", lg.rowCount() - 2, 0).tally.ro == 1        # auto_out 行
+    assert IO.paste_plan(lg, "零", _exp_row(lg), 0).tally.bad, "写法没认出来的格要点名"
+    mm.clear_all()                                   # mux 清零 = 一条列都加不出来
+    assert IO.paste_plan(mm, "1", 0, 0).tally.no_col == 1
 
 
 @pytest.mark.contract("C-294")
@@ -277,9 +272,8 @@ def test_c294_paste_plan_equivalent_on_cleared_table(btlp, wl):
         _apply_plan(ma, plan)
         ok, msg = mb.paste_tsv(text, 0, 0)
         assert plan.ok == ok, sig
-        assert _report_head(plan.report_text) == _report_head(msg), \
-            (sig, plan.report_text, msg)
-        assert bool(plan.skipped) == (_report_head(msg) != msg), (sig, plan.report_text, msg)
+        assert plan.report_text == msg, (sig, plan.report_text, msg)
+        assert len(plan.skipped) == plan.tally.n, (sig, plan.skipped, plan.tally)
         assert _dump(ma) == _dump(mb), sig
     # 清零后的 logic 确实落进去了东西（不是两边都空所以恰好相等）
     m, _an, _p = _fresh(btlp, LOGIC_SIG)

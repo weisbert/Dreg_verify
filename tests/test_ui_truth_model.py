@@ -1413,15 +1413,19 @@ def test_c294_paste_names_the_cells_it_could_not_read(btlp):
             "没点名第 %d 列那一格" % c
     assert "2" in msg
 
-    # 规划（纯函数）与落格拆开了：规划一次不改任何东西
+    # C3-int：规划整块搬去 `truth/io.paste_plan`（model 里那份重复实现已删），
+    # 「规划一次不改任何东西」这条改在 io 上验 —— 落格仍然只有 model 一条路。
     before = _dump(m)
     n_undo = m.undo_stack().index()
-    plan = m._paste_plan("1\t1\t1\t1\t1\t1", exp_r, 0)
-    assert plan["ok"] is True and plan["need"] == max(0, 6 - m.columnCount())
+    plan = TIO.paste_plan(m, "1\t1\t1\t1\t1\t1", exp_r, 0)
+    assert plan.ok is True and plan.new_cols == max(0, 6 - m.columnCount())
     assert _dump(m) == before and m.undo_stack().index() == n_undo
     tall = "\n".join(["1"] * (m.rowCount() + 1))
-    assert m._paste_plan(tall, 0, 0)["ok"] is False
-    assert m._paste_plan("", 0, 0)["rows"] is None
+    assert TIO.paste_plan(m, tall, 0, 0).ok is False
+    empty = TIO.paste_plan(m, "", 0, 0)
+    assert empty.ok is True and empty.cells == [] and empty.new_cols == 0
+    assert not hasattr(m, "_paste_plan") and not hasattr(m, "_paste_cells"), \
+        "model 里又长出第二份规划实现了"
 
 
 @pytest.mark.contract("C-110", "C-112", "C-294")

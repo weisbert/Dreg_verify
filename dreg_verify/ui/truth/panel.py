@@ -877,13 +877,13 @@ class TruthPanel(QtWidgets.QWidget):
         edited = st.compute_edited() if (st is not None and hasattr(st, "compute_edited")) else None
         cov = self._cov_args()
         try:
-            # 先问一次列（C-139：mux 要的是**产物**的列），再写 —— 两次各 render 一遍 .sv
-            # （单信号 only=[name]，实测 ~5ms）。要省掉这一遍得让 `io.export_signal_csv` 收
-            # 现成的 cols，那是 C3-d 的接口，本波不改（已记进交付报告）。
+            # 先问一次列（C-139：mux 要的是**产物**的列，拿它判「这次有没有产物」），
+            # 再把**同一份列**交给写文件 —— C3-int 给 `export_signal_csv` 加了 `cols=`，
+            # 不用为了同一件事 render 两遍 .sv，也不会出现「判断用 A 份、写出去 B 份」。
             cols = TIO.signal_csv_columns(self.model, self._an, self._name,
                                           provider=provider, edited=edited, cov=cov)
             TIO.export_signal_csv(path, self.model, self._an, self._name,
-                                  provider=provider, edited=edited, cov=cov)
+                                  provider=provider, edited=edited, cov=cov, cols=cols)
         except Exception as ex:                    # noqa: BLE001 —— 盘满 / 文件被占用，绝不崩
             self._say(T.TRUTH_EXPORT_FAILED_FMT.format(err=T.scrub(str(ex))))
             return

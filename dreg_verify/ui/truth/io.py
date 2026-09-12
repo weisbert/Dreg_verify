@@ -37,7 +37,8 @@ from ... import truth_edit as TE
 from .. import contracts
 from .. import terms
 
-__all__ = ["PastePlan", "parse_tsv", "copy_tsv", "paste_plan", "paste_report_text",
+__all__ = ["PastePlan", "PasteTally", "BAD_NAMES_MAX",
+           "parse_tsv", "copy_tsv", "paste_plan", "paste_report_text",
            "plan_added_names", "read_expectations", "csv_input_rows", "signal_csv_columns",
            "export_signal_csv", "import_report_text", "COV_KEYS"]
 
@@ -95,6 +96,31 @@ def copy_tsv(model, indexes):
     return "\n".join(lines)
 
 
+#: 粘贴结果说明里最多点名几个「没认出写法」的格子（再多就 …，一行提示条塞不下）
+BAD_NAMES_MAX = 6
+
+
+@dataclass
+class PasteTally:
+    """跳过的格子按**原因**分桶（C-270 / C3-a 的护栏：跳过必有名字 + 原因，
+    不能一律说成「只读」）。汇总那一句按这四桶逐条拼，见 `paste_report_text`。
+
+    ro        只读格（auto_out 行 / 只读输入行 / iddq 自检拍列）
+    no_col    落点右边没有测试列了，而且这个信号**加不出**新列
+    mux_whole 自动生成列的 mux 数据值（C-110：只能整表一起改，逐格粘会把前一格覆盖掉）
+    bad       写法没认出来的格子【名字】（`行标签×列名`，C-083 的粘贴面）
+    """
+    ro: int = 0
+    no_col: int = 0
+    mux_whole: int = 0
+    bad: list = field(default_factory=list)
+
+    @property
+    def n(self):
+        """一共跳了几格。"""
+        return int(self.ro) + int(self.no_col) + int(self.mux_whole) + len(self.bad)
+
+
 @dataclass
 class PastePlan:
     """一次粘贴的**规划**（不落格）。
@@ -102,14 +128,22 @@ class PastePlan:
     cells         [(行, 列, 该写的文本)] —— 能落的格子，**含「值没变」的那些**
                   （`len(cells)` 就是报告里那个「落了 N 格」，与 model 的 n_ok 同口径）
     new_cols      要先追加几条测试列（超出现有列数的部分，C-294「超列自动追加」）
+    added_names   追加那几条列的【最终标号】**预测**（`plan_added_names`，与
+                  `model.append_test_column` 的返回值相同；报告先按它报、落格后 model 用真值覆盖）
+    kind          规划时的 `model.editable_kind()`（"" / "logic" / "mux"）——
+                  「加不出新列」那句的原因按它分档
     rejected_rows 被拒的**源行**下标（超出真值表行数的那些）；非空 = 整次粘贴不做
-    skipped       [(行, 列, 原因)] —— 只读格 / 写法没认出来的格子
+    skipped       [(行, 列, 原因)] —— 逐格原因（给需要点名到格的调用方）
+    tally         同一批跳过按原因分桶（汇总那一句按它拼）
     report_text   给用户看的那一句（`terms.TRUTH_PASTE_REPORT_FMT` / OVERFLOW）
     """
     cells: list = field(default_factory=list)
     new_cols: int = 0
+    added_names: list = field(default_factory=list)
+    kind: str = ""
     rejected_rows: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
+    tally: PasteTally = field(default_factory=PasteTally)
     report_text: str = ""
 
     @property
@@ -138,7 +172,7 @@ def _cell_editable(model, r, c):
     return model.cell_state(r, c) == "editable"
 
 
-def _new_col_editable(model, r, ref_col):
+def _new_col_editable(model, r, ref_col, new_is_dft=False):
     """**还没加出来的那条列**里第 r 行能不能写。
 
     输入行的可写性只跟【行】走（`edits.input_cell_editable` 只看输入行的角色），列只在
@@ -150,15 +184,21 @@ def _new_col_editable(model, r, ref_col):
     每个分组 `editable=True`，只有门行是 False）—— 门行按行标签里的
     `inputs_table.ROLE_DFT_GATE` 认（那一行的标签就是 `vheader_display` 用这个常量拼的）。
 
-    ⚠ 残留假设：新加出来的那条列不是自检拍列。`edits.add_col` 给新列的门值是 0，
-    只有 iddq **透传值 = 1** 的信号会让它变成自检拍列（两张 mirror 上透传值都是 0，
-    没有实例）；真出现时 model 会整列跳过、比这里算的少落几格。
+    `new_is_dft` = 「新加出来那条列本身就是 iddq 自检拍列」（C-129/C-130 整列只读，
+    **期望行也只读**）。mux 的加列 = 克隆**最后一列**（`edits.copy_cols` 不传 sel 时取
+    `cols[-1]`），最后一列恰好是自检拍列时克隆出来的也是——C3-int 之前这里按「表上任一条
+    非自检拍列」当参照，于是把这几格算成可写、model 落格时才发现整列只读，两边差几格。
+
+    ⚠ 残留假设（logic）：`edits.add_col` 给新列的门值是 0，只有 iddq **透传值 = 1** 的信号
+    会让它变成自检拍列（两张 mirror 上透传值都是 0，没有实例）。
     """
     if not model.editable_kind():
         return False
     kind = model.row_kind(r)
     if kind == contracts.TruthRowKind.AUTO:
         return False
+    if new_is_dft:
+        return False                      # C-129/C-130：自检拍列整列只读（期望行也是）
     if kind == contracts.TruthRowKind.EXP:
         return True
     if ref_col is not None:
@@ -194,35 +234,64 @@ def plan_added_names(model, n):
     return [TE.final_col_name(nm, neg) for nm in out]
 
 
-def paste_report_text(n_cells, added_names, n_skipped):
-    """粘贴结果那一句（C-294）。`added_names` 给真实落下来的列名时文案就是最终态——
-    C3-int 让 `model.paste_tsv` 调本函数时把 `append_test_column` 的返回值喂进来即可。"""
+def paste_report_text(n_cells, added_names, skipped=0, kind=""):
+    """粘贴结果那一句（C-294）—— **`truth/model.py` 与本模块共用这一份**（C3-int 去重）。
+
+    `added_names` 给真实落下来的列名时文案就是最终态：`model._paste_land` 把
+    `append_test_column` 的返回值喂进来，规划期那份预测名只用于 `plan.report_text`。
+
+    `skipped` 两种都吃：
+      · `int`        —— 只知道跳了几格（等价于全算「只读格」）；
+      · `PasteTally` —— 四桶逐条点名（只读 / 右边没列（原因）/ mux 整表 / 写法没认出来 + 格名）。
+    `kind` = `model.editable_kind()`，只用来分「加不出新列」那句的原因档（mux 是「清零后
+    没有 case 可克隆」，logic 才是「这个信号加不出新列」）。
+    """
     added = list(added_names or ())
-    return terms.TRUTH_PASTE_REPORT_FMT.format(n=int(n_cells),
-              added=(terms.TRUTH_PASTE_ADDED_FMT.format(names=", ".join(added)) if added else ""),
-              skipped=(terms.TRUTH_PASTE_SKIPPED_FMT.format(n=int(n_skipped)) if n_skipped else ""))
+    tally = skipped if isinstance(skipped, PasteTally) else PasteTally(ro=int(skipped or 0))
+    tail = ""
+    if tally.ro:
+        tail += terms.TRUTH_PASTE_SKIPPED_FMT.format(n=int(tally.ro))
+    if tally.no_col:
+        why = (terms.TRUTH_PASTE_NO_NEW_COL_MUX if kind == "mux"
+               else terms.TRUTH_PASTE_NO_NEW_COL)
+        tail += terms.TRUTH_PASTE_NO_COL_FMT.format(n=int(tally.no_col), why=why)
+    if tally.mux_whole:
+        tail += terms.TRUTH_PASTE_MUX_WHOLE_FMT.format(n=int(tally.mux_whole))
+    if tally.bad:
+        shown = list(tally.bad)[:BAD_NAMES_MAX]
+        tail += terms.TRUTH_PASTE_BAD_FMT.format(
+            n=len(tally.bad),
+            names="、".join(shown) + ("…" if len(tally.bad) > BAD_NAMES_MAX else ""))
+    return terms.TRUTH_PASTE_REPORT_FMT.format(
+        n=int(n_cells),
+        added=(terms.TRUTH_PASTE_ADDED_FMT.format(names=", ".join(added)) if added else ""),
+        skipped=tail)
 
 
 def paste_plan(model, text, r0, c0):
     """TSV 粘贴的规划（C-294）：落在活动格 (r0, c0)；**超列追加列、超行整次拒绝**。
 
     超行为什么拒绝而不是追加：真值表的行是【输入信号】，凭空加一行等于凭空多一根输入，
-    那是 Excel 表的事，不是这里能补的。只读格（auto_out 行 / 只读输入行 / 自检拍列）与
-    写法认不出来的格子逐个跳过并给原因，**整次粘贴照常落别的格**（C-083 的同一条原则：
-    认不出来绝不静默吞成 0）。
+    那是 Excel 表的事，不是这里能补的。跳过的格子**按四种原因分桶**（只读 / 右边没列 /
+    自动生成列的 mux 数据值 / 写法没认出来），逐格给原因、汇总逐条点名，
+    **整次粘贴照常落别的格**（C-083 的同一条原则：认不出来绝不静默吞成 0）。
+
+    判据顺序与 `model._paste_cells` **必须一模一样**（`test_c294_paste_plan_equivalent_to_model_paste`
+    逐格 + 逐字比）：没有列 → mux 整表数据值 → 只读 → 写法 → 落。
 
     返回 `PastePlan`。本函数**一格都不写**、一步撤销都不占。
     """
+    kind = model.editable_kind()
     rows = parse_tsv(text)
     if not rows:
-        return PastePlan(report_text=paste_report_text(0, [], 0))
+        return PastePlan(kind=kind, report_text=paste_report_text(0, [], 0, kind))
     r0, c0 = max(0, int(r0)), max(0, int(c0))
     n_rows = model.rowCount()
     if r0 + len(rows) > n_rows:
         # 拒掉的是【落不下的那些源行】—— 报给用户的是整次拒绝（与 model 同），
         # 但把具体哪几行落不下留在 plan 里，面板要点名时不用自己再算一遍。
         rejected = [i for i in range(len(rows)) if r0 + i >= n_rows]
-        return PastePlan(rejected_rows=rejected,
+        return PastePlan(kind=kind, rejected_rows=rejected,
                          report_text=terms.TRUTH_PASTE_OVERFLOW_ROWS_FMT.format(
                              rows=len(rows), max=n_rows))
 
@@ -233,25 +302,47 @@ def paste_plan(model, text, r0, c0):
     n_have = n_old + len(added)                    # 追加之后一共有几列（落点判定按这个）
     ref_col = next((j for j in range(n_old)
                     if model.col_state(j) != contracts.TruthColState.DFT), None)
+    # mux 的「加列」= 克隆最后一列（`edits.copy_cols` 不传 sel 时取 `cols[-1]`）：
+    # 最后一列是 iddq 自检拍列时，克隆出来的整列只读（`edits.is_dft_pitch_col` 按门值判，
+    # 门值是跟着 vals 一起复制走的）。不看这一条就会把新列算成可写、比 model 多落几格。
+    new_is_dft = bool(kind == "mux" and n_old
+                      and model.col_state(n_old - 1) == contracts.TruthColState.DFT)
+    #: 追加之后的列名（写法没认出来的格子要报 `行标签×列名`，新列也得报得出名字）
+    names_after = list(model.all_names()) + list(added)
 
-    cells, skipped = [], []
+    cells, skipped, tally = [], [], PasteTally()
     for dr, line in enumerate(rows):
         for dc, txt in enumerate(line):
             r, c = r0 + dr, c0 + dc
+            if not (0 <= c < n_have):
+                tally.no_col += 1
+                skipped.append((r, c, terms.TRUTH_PASTE_SKIP_NO_COL))
+                continue
+            # 新追加的那几列是**手编列**（`edits.copy_cols` 置 user=True），
+            # 按定义不会是「自动生成列的 mux 数据值」，所以只问表上已有的列。
+            if c < n_old and model.is_mux_auto_data_cell(r, c):
+                tally.mux_whole += 1
+                skipped.append((r, c, terms.TRUTH_PASTE_SKIP_MUX_WHOLE))
+                continue
             can = (_cell_editable(model, r, c) if c < n_old
-                   else (c < n_have and _new_col_editable(model, r, ref_col)))
+                   else _new_col_editable(model, r, ref_col, new_is_dft))
             if not can:
+                tally.ro += 1
                 skipped.append((r, c, terms.TRUTH_PASTE_SKIP_READONLY))
                 continue
             try:
                 TE.parse_int(txt)                  # 空串 = 0 / 期望格的「清空」，都不算失败
             except ValueError:
+                tally.bad.append(terms.TRUTH_PASTE_BAD_CELL_FMT.format(
+                    row=model.row_label(r),
+                    col=(names_after[c] if c < len(names_after) else "")))
                 skipped.append((r, c, terms.TRUTH_PASTE_SKIP_PARSE_FMT.format(text=txt)))
                 continue
             cells.append((r, c, txt))
 
-    return PastePlan(cells=cells, new_cols=new_cols, skipped=skipped,
-                     report_text=paste_report_text(len(cells), added, len(skipped)))
+    return PastePlan(cells=cells, new_cols=new_cols, added_names=list(added), kind=kind,
+                     skipped=skipped, tally=tally,
+                     report_text=paste_report_text(len(cells), added, tally, kind))
 
 
 # ═════════════════════════ 二、导入期望（C-298）═════════════════════════
@@ -475,7 +566,7 @@ def signal_csv_columns(model, an, name, provider=None, edited=None, cov=None):
     return list(model.cols())
 
 
-def export_signal_csv(path, model, an, name, provider=None, edited=None, cov=None):
+def export_signal_csv(path, model, an, name, provider=None, edited=None, cov=None, cols=None):
     """导出【本信号】真值表 CSV（C-136），返回写出的文本。
 
     转置排版（第一列 = 信号/字段名，其后每列一条测试）与行序全在
@@ -485,9 +576,15 @@ def export_signal_csv(path, model, an, name, provider=None, edited=None, cov=Non
     `provider` / `edited` / `cov` 只有 mux 用得上（C-139，见 `signal_csv_columns`）：面板传
     `state.provider()`、`state.compute_edited()`、以及算 `an` 用的那一档覆盖度 —— 与
     .sv 预览 / 导出中心喂给 `exports.render_sv` 的是同几样东西，所以 CSV 与 .sv 必然同一份产物。
+
+    `cols` 收**现成的列**（C3-int）：面板导出前要先问一次列才判得出「mux 这次有没有产物」
+    （C-139 要照实说一句），传进来就不用再 `render_sv` 第二遍 —— 同一份列，写出来的
+    CSV 与那次判断说的是同一件事。不传就自己问（`signal_csv_columns`）。
     """
     out_w = int((an or {}).get("out_width") or 1)
-    cols = signal_csv_columns(model, an, name, provider=provider, edited=edited, cov=cov)
+    if cols is None:
+        cols = signal_csv_columns(model, an, name, provider=provider, edited=edited, cov=cov)
+    cols = list(cols)
     rows = csv_input_rows(an)
     drive_fn = X.make_drive_fn(*X.drive_context(an))
     text = X.signal_csv_text(cols, rows, out_width=out_w, drive_fn=drive_fn)

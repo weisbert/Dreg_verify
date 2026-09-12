@@ -363,9 +363,11 @@ TRUTH_PASTE_NO_NEW_COL = "这个信号加不出新列"
 TRUTH_PASTE_MUX_WHOLE_FMT = "，{n} 格是自动生成列的 mux 数据值（要整表一起改：工具条的「设置 mux 数据值」）"
 TRUTH_PASTE_BAD_FMT = "，{n} 格没认出写法：{names}"                            # C-083 的粘贴面：逐格点名
 TRUTH_PASTE_BAD_CELL_FMT = "{row}×{col}"
-#: 跳过某一格的原因（给用户逐格看的，不进汇总那句）
+#: 跳过某一格的原因（给用户逐格看的，不进汇总那句；四桶各一条，跳过必有原因）
 TRUTH_PASTE_SKIP_READONLY = "只读格（auto_out 行 / 只读输入行 / 自检拍列）"
 TRUTH_PASTE_SKIP_PARSE_FMT = "写法没认出来：{text}"
+TRUTH_PASTE_SKIP_NO_COL = "这一格右边没有测试列了，而且这个信号加不出新列"
+TRUTH_PASTE_SKIP_MUX_WHOLE = "自动生成列的 mux 数据值，要整表一起改（工具条的「设置 mux 数据值」）"
 # ── C-110 / C-112 整表 mux 数据值同步 ──
 TRUTH_MUX_DATA_DONE_FMT = "已按物理寄存器 {base} 同步整表数据值（清空该格可恢复自动分配）"
 TRUTH_MUX_DATA_NO_BASE_FMT = "本信号没有物理寄存器 {base} 的 mux 数据行"

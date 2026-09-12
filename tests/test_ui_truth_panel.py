@@ -534,9 +534,9 @@ def test_c136_export_csv_passes_provider_edited_cov(qapp, monkeypatch, tmp_path)
     seen = {}
     real = TIO.export_signal_csv
 
-    def _spy(path, model, an, name, provider=None, edited=None, cov=None):
-        seen.update(path=path, name=name, provider=provider, edited=edited, cov=cov)
-        return real(path, model, an, name, provider=provider, edited=edited, cov=cov)
+    def _spy(path, model, an, name, provider=None, edited=None, cov=None, cols=None):
+        seen.update(path=path, name=name, provider=provider, edited=edited, cov=cov, cols=cols)
+        return real(path, model, an, name, provider=provider, edited=edited, cov=cov, cols=cols)
 
     monkeypatch.setattr(TIO, "export_signal_csv", _spy)
     out = str(tmp_path / "sig.csv")
@@ -551,6 +551,9 @@ def test_c136_export_csv_passes_provider_edited_cov(qapp, monkeypatch, tmp_path)
     assert seen["cov"] == {"mode": mode, "max_tests": int(cov.max_tests),
                            "exhaustive": bool(exh), "sig_cov": None, "form_cov": None}
     assert set(seen["cov"]) == set(TIO.COV_KEYS)
+    # C3-int：面板先问一次列（判 mux 有没有产物），再把**同一份**交给写文件 ——
+    # 不传 cols 的话同一件事要 render 两遍 .sv，而且判断用的那份与写出去的那份可能不是同一个。
+    assert seen["cols"] is not None, "面板没把现成的列传给 io，等于又 render 了一遍"
     assert os.path.exists(out) and os.path.getsize(out) > 0
     assert out in hint(p)
     assert T.TRUTH_EXPORT_MUX_NO_BUILD not in hint(p), \

@@ -781,80 +781,74 @@ class TruthModel(QAbstractTableModel):
     def paste_tsv(self, text, r0, c0):
         """TSV 粘贴（C-294）：落在活动格 (r0, c0)；超列自动追加列；**超行拒绝**；整次一步撤销。
 
-        超行为什么拒绝而不是追加：真值表的行是【输入信号】，凭空加一行等于凭空多一根输入，
-        那是 Excel 表的事，不是这里能补的。只读格（auto 行 / 只读输入行 / DFT 拍列）跳过不写。
+        ⚠ C3-int 去重：**规划全在 `truth/io.paste_plan`**（哪一格该写什么、哪一格为什么
+        跳过、要追加几条列、追加出来叫什么名），本方法只做 io 做不了的两件事——
+        开撤销宏、按 model 的唯一写入口落值。以前 model 里那份 `_paste_plan` /
+        `_paste_cells` 是同一套规则的第二份实现（连「跳过分四桶」都各写一遍）。
 
-        「规划」（`_paste_plan`，纯函数、不改表）与「落格」（`_paste_land`）刻意拆开：
-        C3-d 会在 `truth/io.paste_plan` 写一份同规则的纯函数给视图预览用，C3-int 去重时
-        直接把 `_paste_plan` 换成它就行，落格这半边不用动。
+        返回 `(做没做成, 结果说明)`。结果说明也由 io 拼（`paste_report_text`），
+        只是把规划期预测的新列名换成 `append_test_column` 真给的那批。
         """
-        plan = self._paste_plan(text, r0, c0)
-        if not plan["ok"]:
-            self.pasteReport.emit(plan["report"])
-            return False, plan["report"]
-        if plan["rows"] is None:                       # 空剪贴板：照实报一句，不占撤销步
-            self.pasteReport.emit(plan["report"])
-            return True, plan["report"]
-        msg = self._paste_land(plan)
+        from . import io as TIO           # noqa: PLC0415  惰性（与 import_expectations 同）
+        plan = TIO.paste_plan(self, text, r0, c0)
+        if not plan.ok:                                # 超行 = 整次拒绝，不占撤销步
+            self.pasteReport.emit(plan.report_text)
+            return False, plan.report_text
+        msg = self._paste_land(plan)                   # 空剪贴板走到这里也只是「落了 0 格」
         self.pasteReport.emit(msg)
         return True, msg
 
-    def _paste_plan(self, text, r0, c0):
-        """TSV + 落点 → 规划（**只读，不改任何东西**）。
-
-        返回 `{"ok", "report", "rows", "r0", "c0", "need"}`：`ok=False` 时 `report` 就是拒绝
-        原因（目前只有超行一种）；`rows is None` = 剪贴板是空的。`need` = 还差几列要追加。
-        """
-        rows = [ln.split("\t") for ln in str(text or "").replace("\r\n", "\n")
-                .replace("\r", "\n").split("\n")]
-        while rows and rows[-1] == [""]:
-            rows.pop()
-        r0, c0 = max(0, int(r0)), max(0, int(c0))
-        if not rows:
-            return {"ok": True, "rows": None, "r0": r0, "c0": c0, "need": 0,
-                    "report": terms.TRUTH_PASTE_REPORT_FMT.format(n=0, added="", skipped="")}
-        if r0 + len(rows) > self.rowCount():
-            return {"ok": False, "rows": rows, "r0": r0, "c0": c0, "need": 0,
-                    "report": terms.TRUTH_PASTE_OVERFLOW_ROWS_FMT.format(rows=len(rows), max=self.rowCount())}
-        need = max(0, c0 + max(len(x) for x in rows) - len(self._cols))
-        return {"ok": True, "rows": rows, "r0": r0, "c0": c0, "need": need, "report": ""}
-
     def _paste_land(self, plan):
-        """把规划落进表里（追加列 + 一批格子），整次一步撤销（C-294）。返回结果说明。"""
-        rows, r0, c0, need = plan["rows"], plan["r0"], plan["c0"], plan["need"]
+        """把 `io.PastePlan` 落进表里（追加列 + 一批格子），整次一步撤销（C-294）。返回结果说明。"""
+        from . import io as TIO           # noqa: PLC0415
         # 加不出列时**别开宏**：`beginMacro` 一调就压进撤销栈了，空宏照样占一步
         # （用户看到的是「什么都没发生，但 Ctrl+Z 得按两下」）。
-        if need > 0 and self._can_append():   # 追加列 + 落值 = 两个命令 → 裹成一步（C-294）
+        if plan.new_cols > 0 and self._can_append():   # 追加列 + 落值 = 两个命令 → 裹成一步
             self._undo.beginMacro("粘贴")
-            added = self.append_test_column(int(need))
-            cells, tally = self._paste_cells(rows, r0, c0)
+            added = self.append_test_column(int(plan.new_cols))
+            cells, dropped = self._cells_from_plan(plan)
             if cells:
                 self._undo.push(SetCells(self, cells, "粘贴取值"))
             self._undo.endMacro()
         else:                              # 只落值 = 本来就一个命令，不用空宏占一步撤销
             added = []
-            cells, tally = self._paste_cells(rows, r0, c0)
+            cells, dropped = self._cells_from_plan(plan)
             if cells:
                 self._undo.push(SetCells(self, cells, "粘贴取值"))
-        # 加不出那么多列时说清**为什么**（mux 清零过就没有 case 可克隆了，不是「只读」）
-        why = ("TRUTH_PASTE_NO_NEW_COL_MUX" if self.editable_kind() == "mux"
-               else "TRUTH_PASTE_NO_NEW_COL")
-        skipped = ""
-        if tally["ro"]:
-            skipped += terms.TRUTH_PASTE_SKIPPED_FMT.format(n=tally["ro"])
-        if tally["no_col"]:
-            skipped += terms.TRUTH_PASTE_NO_COL_FMT.format(n=tally["no_col"], why=getattr(terms, why))
-        if tally["mux_whole"]:
-            skipped += terms.TRUTH_PASTE_MUX_WHOLE_FMT.format(n=tally["mux_whole"])
-        if tally["bad"]:
-            names = tally["bad"][:_BAD_NAMES_MAX]
-            skipped += terms.TRUTH_PASTE_BAD_FMT.format(
-                n=len(tally["bad"]),
-                names="、".join(names) + ("…" if len(tally["bad"]) > _BAD_NAMES_MAX else ""))
-        return terms.TRUTH_PASTE_REPORT_FMT.format(
-            n=tally["ok"],
-            added=(terms.TRUTH_PASTE_ADDED_FMT.format(names=", ".join(added)) if added else ""),
-            skipped=skipped)
+        # 报告用**真实**列名（规划期那份是预测；两者相等由 test_plan_added_names_matches_model 钉死）
+        t = plan.tally
+        tally = (t if not dropped else
+                 TIO.PasteTally(ro=t.ro + dropped, no_col=t.no_col,
+                                mux_whole=t.mux_whole, bad=list(t.bad)))
+        return TIO.paste_report_text(len(plan.cells) - dropped, added, tally,
+                                     self.editable_kind())
+
+    def _cells_from_plan(self, plan):
+        """规划里「能落的格子」→ `SetCells` 的 `(行, 列, 旧值, 新值)` 清单（只留真变了的）。
+
+        返回 `(cells, 被本方法挡下几格)`。挡下的那几格照实并进报告的「只读」桶 ——
+        **护栏在写入口这一侧**：io 是按「追加之后的表会长什么样」预测的（`_new_col_editable`
+        的残留假设见那边的 docstring），万一预测与实物不符，宁可少落几格并如实报数，
+        也不能把值写进一条只读列（C-129/C-130 的 iddq 自检拍列 `setData` 本来就会拒）。
+        正常情况下 `dropped == 0`，`test_c294_paste_plan_equivalent_to_model_paste` 逐字比
+        两边的报告 —— 一旦不是 0，那条当场红。
+
+        规划期已经用 `truth_edit.parse_int` 过了一遍写法，这里再解析一次是**按格的口径**
+        （期望行是 `(值, 是否反例)` 元组、输入行按该行位宽掩码）。
+        """
+        out, dropped = [], 0
+        for (r, c, txt) in plan.cells:
+            if not self._is_editable(r, c):
+                dropped += 1
+                continue
+            v = self._parse_for_cell(r, c, txt)
+            if v is _BAD:                              # pragma: no cover —— 规划期已过一遍
+                dropped += 1
+                continue
+            old = self._get_cell(r, c)
+            if old != v:
+                out.append((r, c, old, v))
+        return out, dropped
 
     def _can_append(self):
         """现在还加得出测试列吗（`append_test_column` 会不会白跑一趟）。
@@ -867,8 +861,11 @@ class TruthModel(QAbstractTableModel):
             return False
         return bool(self._cols) if kind == "mux" else True
 
-    def _is_mux_auto_data_cell(self, r, c):
+    def is_mux_auto_data_cell(self, r, c):
         """这一格是不是【自动生成列】的 mux 数据值格（C-110：只能整表一起改）。
+
+        **公开**（C3-int）：`truth/io.paste_plan` 要按同一判据把这种格子分进 `mux_whole`
+        桶 —— 判据只此一处，io 不自己按 `cols()[c]["user"]` 再猜一遍。
 
         `flags()` 上它照旧可编辑 —— 单格编辑由 `setData` 路由去整表同步（与 v1 同）。但
         **粘贴不能走那条路**：一片格子逐个触发整表重分析，后一格把前一格覆盖掉，落下来的是
@@ -880,39 +877,6 @@ class TruthModel(QAbstractTableModel):
         if not (0 <= c < len(self._cols)) or not (0 <= r < len(self._e_inputs)):
             return False
         return bool(self._e_inputs[r]["mux_data_base"]) and not self._cols[c].get("user")
-
-    def _paste_cells(self, rows, r0, c0):
-        """把 TSV 二维表折算成 `SetCells` 的清单。返回 `(cells, tally)`。
-
-        `tally` = `{"ok", "ro", "no_col", "mux_whole", "bad": [格名…]}` —— 跳过的格子按
-        **原因分桶**，结果说明逐条点名（护栏：跳过必有名字 + 原因）。C-083 的粘贴面：
-        认不出写法的格子报行标签×列名，不是只报个数——一次粘 150 格、报「跳过 3 格」
-        等于让人自己去找那三格在哪。
-        """
-        cells = []
-        tally = {"ok": 0, "ro": 0, "no_col": 0, "mux_whole": 0, "bad": []}
-        for dr, line in enumerate(rows):
-            for dc, txt in enumerate(line):
-                r, c = r0 + dr, c0 + dc
-                if not (0 <= c < len(self._cols)):
-                    tally["no_col"] += 1
-                    continue
-                if self._is_mux_auto_data_cell(r, c):
-                    tally["mux_whole"] += 1
-                    continue
-                if not self._is_editable(r, c):
-                    tally["ro"] += 1
-                    continue
-                v = self._parse_for_cell(r, c, txt)
-                if v is _BAD:
-                    tally["bad"].append(terms.TRUTH_PASTE_BAD_CELL_FMT.format(row=self.row_label(r),
-                                           col=self.all_names()[c]))
-                    continue
-                old = self._get_cell(r, c)
-                if old != v:
-                    cells.append((r, c, old, v))
-                tally["ok"] += 1
-        return cells, tally
 
     def _parse_for_cell(self, r, c, txt):
         """粘贴用的单格解析：认不出来 → `_BAD`（那一格跳过，整次粘贴照常落别的格）。"""
@@ -1022,5 +986,3 @@ class _Bad(object):
 
 _BAD = _Bad()
 
-#: 粘贴结果说明里最多点名几个「没认出写法」的格子（再多就 …，一行提示条塞不下）
-_BAD_NAMES_MAX = 6
