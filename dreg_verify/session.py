@@ -289,6 +289,45 @@ class CoverageState:
             return COV_TO_LABEL[fc], "逻辑类型·%s" % FORM_LABELS.get(form_key, form_key)
         return self.global_label, "全局默认"
 
+    def effective_chain(self, name, models=None, form_key=None):
+        """N7（GUI v2 冲突⑧）：整条**三层继承链**，给覆盖度弹层的蓝条与「生效行高亮」用。
+
+        `effective_label` 只回赢的那一层，画不出 Design 要的
+        「本信号「跟随上级」→ 逻辑类型「选路 (F2)」= 全面 → 全局默认 = 全面」——它不动，本方法另给。
+
+        返回**恒定三行**（次序 = 优先级从高到低：本信号 > 逻辑类型 > 全局默认），每行：
+            {"level": 层名(中文),        # "本信号" / "逻辑类型·选路 (F2)" / "全局默认"
+             "label": 该层的档(中文),    # 没单设 → "跟随上级"(本信号) / "跟随全局"(逻辑类型)
+             "active": 该层是否参与生效,  # 见下
+             "key":   该层的档位键}       # min/max/exhaustive；没单设 → ""
+
+        `active` 规则（冲突⑧原文：「本信号『跟随上级』时，逻辑类型层与全局层**都**算参与了生效」）：
+            本信号有单点档 → (True, False, False)   本层一锤定音，下面两层被跨过
+            本信号跟随上级 → (False, True, True)    逻辑类型层与全局层都参与（Design 的两行高亮）
+        即 active 只由「本信号这层有没有单设」决定，不看逻辑类型层设没设——
+        逻辑类型层没设时它把全局档透传下去，两层仍都在生效链上。
+
+        form_key 可直接给；没给就用 models(清单 view_models)现查——与 effective_label 同口径。
+        """
+        sig = self.sig_cov.get(str(name).lower())
+        sig_set = sig in COV_MODES
+        if form_key is None and models is not None:
+            form_key = form_key_of(models, name)
+        fc = self.form_cov.get(form_key) if form_key else None
+        form_set = fc in COV_MODES
+        form_level = ("逻辑类型·%s" % FORM_LABELS.get(form_key, form_key)) if form_key else "逻辑类型"
+        return [
+            {"level": "本信号", "active": sig_set,
+             "label": COV_TO_LABEL[sig] if sig_set else "跟随上级",
+             "key": sig if sig_set else ""},
+            {"level": form_level, "active": not sig_set,
+             "label": COV_TO_LABEL[fc] if form_set else "跟随全局",
+             "key": fc if form_set else ""},
+            {"level": "全局默认", "active": not sig_set,
+             "label": self.global_label,
+             "key": LABEL_TO_COV.get(self.global_label, "max")},
+        ]
+
 
 # ───────────────────────── 配置导入导出 ─────────────────────────
 CONFIG_VERSION = 2

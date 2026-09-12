@@ -148,6 +148,48 @@ def test_coverage_effective_label_says_where_it_came_from():
     assert st.effective_label("sig_sel", models=models) == ("穷举", "本信号")
 
 
+@pytest.mark.contract("C-150")
+def test_c150_effective_chain_three_levels():
+    """N7（冲突⑧）：effective_chain 给整条三层继承链，effective_label 原样不动。
+
+    Design 蓝条要的是「本信号「跟随上级」→ 逻辑类型「选路 (F2)」= 全面 → 全局默认 = 全面」，
+    active 按冲突⑧：本信号没单设 → 逻辑类型层与全局层都算参与生效（两行高亮）。"""
+    st = session.CoverageState("topout", global_label="全面")
+    models = [{"name": "sig_sel", "form": "select"}]
+
+    ch = st.effective_chain("sig_sel", models=models)
+    assert [r["level"] for r in ch] == ["本信号", "逻辑类型·选路 (F2)", "全局默认"]
+    assert [r["label"] for r in ch] == ["跟随上级", "跟随全局", "全面"]
+    assert [r["active"] for r in ch] == [False, True, True]
+    assert [r["key"] for r in ch] == ["", "", "max"]
+    assert all(set(r) == {"level", "label", "active", "key"} for r in ch)
+
+    st.set_form_cov({"select": "min"})                     # 逻辑类型层单设 → 它决定，但两层仍都 active
+    ch = st.effective_chain("sig_sel", models=models)
+    assert [r["label"] for r in ch] == ["跟随上级", "精简", "全面"]
+    assert [r["active"] for r in ch] == [False, True, True]
+    assert [r["key"] for r in ch] == ["", "min", "max"]
+    assert st.effective_label("sig_sel", models=models) == ("精简", "逻辑类型·选路 (F2)")
+
+    st.set_sig_cov("sig_sel", "exhaustive")                # 本信号单设 → 只有它 active
+    ch = st.effective_chain("sig_sel", models=models)
+    assert [r["label"] for r in ch] == ["穷举", "精简", "全面"]
+    assert [r["active"] for r in ch] == [True, False, False]
+    assert [r["key"] for r in ch] == ["exhaustive", "min", "max"]
+    # 赢的那层 = chain 里第一个 active 行，与 effective_label 同口径（两个 API 不许分叉）
+    win = next(r for r in ch if r["active"])
+    assert win["label"] == st.effective_label("sig_sel", models=models)[0]
+
+    # 定不出形态（清单里没这个名）→ 逻辑类型层退化成通用层名 + 跟随全局，恒三行不塌
+    ch = st.effective_chain("查无此信号", models=models)
+    assert [r["level"] for r in ch] == ["本信号", "逻辑类型", "全局默认"]
+    assert [r["label"] for r in ch] == ["跟随上级", "跟随全局", "全面"]
+
+    # form_key 直接给（不查 models）与查 models 同结果
+    assert st.effective_chain("sig_sel", form_key="select") == \
+        st.effective_chain("sig_sel", models=models)
+
+
 def test_coverage_persist_and_restore_per_view():
     """全局档/上限按 view_id 分桶存盘、下次恢复；单点档与形态档【不】存盘(R25)。"""
     store = {}
