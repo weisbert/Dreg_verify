@@ -42,6 +42,7 @@ from dreg_verify import vectors as V              # noqa: E402
 from dreg_verify import sv_writer as W            # noqa: E402
 from dreg_verify import truth_edit as TE          # noqa: E402
 from dreg_verify import edits as ED               # noqa: E402
+from dreg_verify import session                   # noqa: E402  会话状态层(Qt-free)：设置IO/覆盖度/配置/诊断配置
 
 # 记住上次加载的 Excel，下次启动自动加载（省去重复浏览/点击）
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_gui.json")
@@ -91,26 +92,19 @@ def _deserialize_mux_vecs(lst):
 
 
 def _load_settings():
-    """读取持久化配置(上次的 Excel、上次的导出选项等)。返回 dict。"""
-    try:
-        with open(SETTINGS_PATH, encoding="utf-8") as f:
-            d = json.load(f)
-            return d if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001
-        return {}
+    """读取持久化配置(上次的 Excel、上次的导出选项等)。返回 dict。
+    ⚠ 薄委托 session.load_settings：路径【调用时】才读模块常量 SETTINGS_PATH，测试 monkeypatch
+    gui.SETTINGS_PATH（或直接 patch 本函数）仍然生效。"""
+    return session.load_settings(SETTINGS_PATH)
 
 
 def _save_settings(d):
-    # 测试环境(pytest)下不落盘，避免把临时状态污染到用户的真实配置
-    if "pytest" in sys.modules:
-        return
-    try:
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(d, f)
-    except Exception:  # noqa: BLE001
-        pass
+    # 测试环境(pytest)下不落盘，避免把临时状态污染到用户的真实配置（守卫在 session 层）
+    session.save_settings(d, SETTINGS_PATH)
 
 
+# 上次加载的 Excel（v2 侧等价函数：session.load_last_excel / save_last_excel）。这里特意走本模块的
+# _load_settings/_save_settings 而非 session 的同名函数——既有测试 monkeypatch 的是这两个。
 def _load_last_excel():
     return _load_settings().get("last_excel")
 
@@ -291,18 +285,8 @@ class FlowLayout(QtWidgets.QLayout):
 
 
 def _code_version():
-    """工具代码版本（git 短 HEAD，拿不到给空）——进窗口标题。
-
-    2026-06-10 实地教训：用户机器上可能同时存在旧拷贝/旧进程，「改了却看不到」排查
-    了一整轮才怀疑到版本——标题带 HEAD 后一眼可辨跑的是哪份代码。"""
-    try:
-        import subprocess
-        return subprocess.run(
-            ["git", "-C", os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-             "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5).stdout.strip()
-    except Exception:  # noqa: BLE001
-        return ""
+    """工具代码版本（git 短 HEAD，拿不到给空）——进窗口标题。委托 session.code_version。"""
+    return session.code_version()
 
 
 class _CheckableMenu(QtWidgets.QMenu):
@@ -341,19 +325,8 @@ _COVERAGE_HELP = (
 
 # #3 『覆盖度·按逻辑类型』功能区每行：(形态键, 显示名, 例子表达式, 各档说明 tooltip)。
 # 覆盖方案据【展开后表达式形态 F0-F4】派发(用户第一性原理)，与设计稿② 一致。
-_FORM_COV_ROWS = [
-    ("register", "直连寄存器 (F0)", "out = d_reg[3:0]",
-     "单字段透传：精简/全面/穷举均验【全0 + 各位异值】(约 2 条，位宽取字段全宽)。"),
-    ("boolean", "布尔/位运算 (F1)", "out = (A & ~B) | C",
-     "精简=控制位关键组合各 1 组数据；全面=控制位全组合 × 多组数据(全0/全1/反码/走步)；"
-     "穷举=所有输入位全组合(≤10 位，否则退『全面』)。"),
-    ("select", "选路 (F2)", "out = sel ? A : B",
-     "精简=每条路 1 个代表值；全面=精简 + x 位展开 + 每路反码数据轮(抓数据通路坏位)；"
-     "穷举=全面 + 换另一条物理控制路径(line/local)全扫。mux 八选一同理。"),
-    ("gated", "门控·iddq (F3/F4)", "out = iddq ? 0 : (sel ? A : B)",
-     "= 内层形态(选路/布尔)覆盖 × iddq 透传(功能向量门=0) + 追加 1 条 DFT 漏电拍(门=1 压输出到 0)。"
-     "档位作用于内层，DFT 拍恒 1 条。"),
-]
+# 纯数据，已移进会话状态层（v2 界面画同一张表）——这里只保留别名。
+_FORM_COV_ROWS = session.FORM_COV_ROWS
 
 
 def _subst_expr(expr, name_of):
@@ -644,16 +617,37 @@ class SignalView(QtWidgets.QWidget):
         self.e_inputs = []             # 当前真值表输入行 [{key,label,width,editable}]
         # 逐信号编辑：name_low -> {'kind','src_out_name','name','cols'} ；不在=自动(未编辑)
         self.edits = {}
+        # 覆盖度三层状态(全局档/上限/逻辑类型档/单点档)搬进会话状态层，v2 界面复用同一份口径。
         # 单点覆盖度(N3，R25)：name_low -> 'min'/'max'/'exhaustive'；不在=跟随全局。
-        # ⚠ 仅【会话内】临时档：不存盘、不导出（否则上次留的单点档静默盖全局下拉，R25 实测 bug）。
-        self._sig_cov = {}
-        # #3 per-form 覆盖度：形态键(register/boolean/select/gated) -> 档；介于全局与单点之间
-        # （优先级 单点>form>全局）。会话内临时档(同 sig_cov，不存盘以免静默盖全局)。
-        self._form_cov = {}
+        # ⚠ 单点档/形态档仅【会话内】临时档：不存盘、不导出（否则上次留的单点档静默盖全局下拉，
+        # R25 实测 bug）；全局档与上限按 view_id 存盘（N2）。
+        # load/save 用 lambda late-bind 本模块的 _load_settings/_save_settings：测试 monkeypatch
+        # 它们（或 SETTINGS_PATH）时，构造之后的存取仍走被 patch 的那份。
+        self._cov = session.CoverageState(self.view_id,
+                                          load=lambda: _load_settings(),
+                                          save=lambda d: _save_settings(d))
         # mux 数据值手填(N8/B2)：cur_name_low -> {"src":mux源名低,"name":顶层名,"data":{物理基名低:int}}。
         # 会话内（改后即在编辑器/预览/导出生效）；data_overrides 经 make_mux_vectors 整表同步。
         self._mux_data = {}
         self._build()
+
+    # 单点档/形态档的门面：真身在 self._cov(session.CoverageState)，这里保持老属性名不动，
+    # 既有调用点(provider 传参、测试直接读写 v._sig_cov / v._form_cov)一律照旧。
+    @property
+    def _sig_cov(self):
+        return self._cov.sig_cov
+
+    @_sig_cov.setter
+    def _sig_cov(self, d):
+        self._cov.sig_cov = dict(d or {})
+
+    @property
+    def _form_cov(self):
+        return self._cov.form_cov
+
+    @_form_cov.setter
+    def _form_cov(self, d):
+        self._cov.form_cov = dict(d or {})
 
     # ───────────── 覆盖度功能区（全局默认 + 按逻辑类型，全部覆盖度控件归一处）─────────────
     def _build_coverage_panel(self):
@@ -666,8 +660,7 @@ class SignalView(QtWidgets.QWidget):
         gr = QtWidgets.QHBoxLayout()
         gr.addWidget(QtWidgets.QLabel("全局默认:"))
         self.cov = QtWidgets.QComboBox(); self.cov.addItems(["精简", "全面", "穷举"])
-        _saved_cov = _load_settings().get("cov_%s" % self.view_id)   # N2：本视图全局覆盖度持久化
-        self.cov.setCurrentText(_saved_cov if _saved_cov in ("精简", "全面", "穷举") else "全面")
+        self.cov.setCurrentText(self._cov.restore_global_label())    # N2：本视图全局覆盖度持久化
         self.cov.setToolTip("【全局默认】覆盖度——所有信号的基线档。被『按逻辑类型』整批覆盖、再被信号页"
                             "『本信号覆盖度』单点覆盖（优先级：本信号 > 逻辑类型 > 全局）。\n\n" + _COVERAGE_HELP)
         self.cov.currentIndexChanged.connect(self.refresh)
@@ -685,8 +678,8 @@ class SignalView(QtWidgets.QWidget):
         self.maxt_spin.setValue(256)
         self.maxt_spin.setToolTip("用例数上限（安全阀，防穷举/全面产生过多用例）。穷举位数过多时由引擎"
                                   "自动退化为『全面』；该上限对各档都生效。")
-        _saved_mt = _load_settings().get("maxt_%s" % self.view_id)   # 本视图上限持久化，下次恢复
-        if "pytest" not in sys.modules and isinstance(_saved_mt, int) and 1 <= _saved_mt <= 100000:
+        _saved_mt = self._cov.restore_max_tests()   # 本视图上限持久化，下次恢复(pytest 下不恢复)
+        if _saved_mt is not None:
             self.maxt_spin.setValue(_saved_mt)
         self.maxt_spin.valueChanged.connect(self.refresh)
         self.maxt_spin.valueChanged.connect(self._persist_maxt)
@@ -726,12 +719,8 @@ class SignalView(QtWidgets.QWidget):
         return box
 
     def _mode(self):
-        t = self.cov.currentText()
-        if t == "穷举":
-            return "max", True
-        if t == "精简":
-            return "min", False
-        return "max", False
+        """全局默认档（下拉控件是本视图的真相源）→ (mode, exhaustive)。"""
+        return session.decompose_label(self.cov.currentText())
 
     def _maxt(self):
         try:
@@ -742,22 +731,9 @@ class SignalView(QtWidgets.QWidget):
     def _mode_for(self, name):
         """本信号有效覆盖度：优先级 单点档(sig_cov) > 逻辑类型档(form_cov,#3) > 全局。返回 (mode, exhaustive)。
         ⚠ 必须与左侧清单 view_models 同口径(topout._effective_cov_str)——否则真值表用例数与清单『用例』列
-        对不上(用户实证：清单 5、真值表 32)。form 取该信号在清单里的形态(self.models 的 m['form'])。"""
-        low = str(name).lower()
-        c = self._sig_cov.get(low)
-        if c not in ("min", "max", "exhaustive"):       # 单点没命中 → 看本信号逻辑类型档
-            m = next((mm for mm in (self.models or []) if str(mm.get("name", "")).lower() == low), None)
-            fk = (m.get("form") if m else None)          # m['form']=形态键(register/boolean/select/gated)
-            fc = self._form_cov.get(fk) if fk else None
-            if fc in ("min", "max", "exhaustive"):
-                c = fc
-        if c == "min":
-            return "min", False
-        if c == "max":
-            return "max", False
-        if c == "exhaustive":
-            return "max", True
-        return self._mode()
+        对不上(用户实证：清单 5、真值表 32)。form 取该信号在清单里的形态(self.models 的 m['form'])。
+        口径本身在 session.CoverageState.mode_for；全局档从本视图下拉现取。"""
+        return self._cov.mode_for(name, models=self.models, global_mode=self._mode())
 
     # ───────────── UI ─────────────
     def _build(self):
@@ -949,15 +925,11 @@ class SignalView(QtWidgets.QWidget):
 
     def _persist_cov(self, *_):
         """本视图全局覆盖度下拉改动 → 存盘（按 view_id），下次打开恢复（N2）。"""
-        st = _load_settings()
-        st["cov_%s" % self.view_id] = self.cov.currentText()
-        _save_settings(st)
+        self._cov.persist_global_label(self.cov.currentText())
 
     def _persist_maxt(self, *_):
         """本视图用例上限改动 → 存盘（按 view_id），下次打开恢复。"""
-        st = _load_settings()
-        st["maxt_%s" % self.view_id] = int(self.maxt_spin.value())
-        _save_settings(st)
+        self._cov.persist_max_tests(int(self.maxt_spin.value()))
 
     def on_export_nets(self):
         """导出 nets.txt（委托 MainWindow 现成 handler，与视图/勾选无关，N5）。"""
@@ -1217,7 +1189,7 @@ class SignalView(QtWidgets.QWidget):
         """切信号时把『本信号覆盖度』下拉回显到该信号的单点档（无则=跟随全局），不触发重算。"""
         if self.sig_cov_combo is None:
             return
-        data = self._sig_cov.get(self.cur_name, "")
+        data = self._cov.sig_cov_of(self.cur_name)
         idx = self.sig_cov_combo.findData(data)
         self.sig_cov_combo.blockSignals(True)
         self.sig_cov_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -1228,11 +1200,7 @@ class SignalView(QtWidgets.QWidget):
         已自定义编辑的信号：单点档对编辑器无效(编辑冻结)，但仍影响该信号导出/清单——故仍记档。"""
         if self.cur_name is None or self.sig_cov_combo is None:
             return
-        val = self.sig_cov_combo.currentData() or ""
-        if val:
-            self._sig_cov[self.cur_name] = val
-        else:
-            self._sig_cov.pop(self.cur_name, None)
+        self._cov.set_sig_cov(self.cur_name, self.sig_cov_combo.currentData() or "")
         real = next((m["name"] for m in self.models if m["name"].lower() == self.cur_name),
                     self.cur_name)
         if self.cur_name not in self.edits:      # 未编辑→按新档重生成真值表；已编辑→保留编辑(冻结)
@@ -1245,8 +1213,7 @@ class SignalView(QtWidgets.QWidget):
         (形态覆盖影响该形态所有信号的用例数/导出/报告)。优先级：本信号单点 > 此处形态 > 全局下拉。"""
         if not getattr(self, "_form_cov_combos", None):
             return
-        self._form_cov = {k: cb.currentData() for k, cb in self._form_cov_combos.items()
-                          if cb.currentData()}
+        self._cov.set_form_cov({k: cb.currentData() for k, cb in self._form_cov_combos.items()})
         _cur = self.cur_name                     # 重建清单会清 cur_name，先存
         self.refresh()                           # 全量重建清单：形态覆盖影响一批信号的用例数
         if _cur and _cur not in self.edits:      # 当前信号未编辑 → 按新形态档重载真值表
@@ -1697,11 +1664,7 @@ class SignalView(QtWidgets.QWidget):
         if self.cur_an is None or not self.cur_cols:
             self.cov_hint.setText("")
             return
-        n = len(self.cur_cols)
-        nn = sum(1 for c in self.cur_cols if c["neg"])
-        tag = "，含 %d 负向" % nn if nn else ""
-        tag += "（已自定义）" if self.cur_name in self.edits else ""
-        self.cov_hint.setText("→ 当前信号 %d 条%s" % (n, tag))
+        self.cov_hint.setText(session.cov_hint_text(self.cur_cols, self.cur_name in self.edits))
 
     # ───────────── 信号表『负向』勾选 ─────────────
     def _has_negatives(self, name):
@@ -2855,17 +2818,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_logic_overrides(self):
         """RTL 补充逻辑按 Excel 路径写入 settings（pytest 下 no-op，同 suffix_override 策略）。"""
-        if "pytest" in sys.modules:
-            return
-        st = _load_settings()
-        all_maps = st.get("logic_overrides", {})
-        path = self.path_edit.text().strip()
-        if self._logic_overrides:
-            all_maps[path] = {k: dict(v) for k, v in self._logic_overrides.items()}
-        else:
-            all_maps.pop(path, None)
-        st["logic_overrides"] = all_maps
-        _save_settings(st)
+        session.save_path_map("logic_overrides", self.path_edit.text().strip(),
+                              {k: dict(v) for k, v in self._logic_overrides.items()},
+                              load=_load_settings, save=_save_settings,
+                              skip_under_pytest=True)
 
     def _persist_coverage(self):
         """持久化两侧覆盖档（第二十二轮解耦）+ 用例上限（第二十六轮），下次启动恢复。pytest 下 no-op。"""
@@ -3613,15 +3569,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_probe_prefixes(self):
         """探针前缀按 Excel 路径写入 settings（pytest 下 no-op，与其它持久化策略一致）。"""
-        st = _load_settings()
-        all_maps = st.get("probe_prefixes", {})
-        path = self.path_edit.text().strip()
-        if self._probe_prefixes:
-            all_maps[path] = dict(self._probe_prefixes)
-        else:
-            all_maps.pop(path, None)
-        st["probe_prefixes"] = all_maps
-        _save_settings(st)
+        session.save_path_map("probe_prefixes", self.path_edit.text().strip(),
+                              dict(self._probe_prefixes),
+                              load=_load_settings, save=_save_settings)
 
     def on_set_probe_prefix(self):
         """探针前缀映射编辑器：每行『信号名=ENV_RF 下的层级路径』，可导入/导出复用。
@@ -3646,7 +3596,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "删除行 = 清除映射；# 开头 = 注释。")
         lay.addWidget(hint)
         edit = QtWidgets.QPlainTextEdit()
-        edit.setPlainText(generator.render_probe_prefix_grouped(self._probe_prefixes))
+        edit.setPlainText(session.render_probe_prefix_text(self._probe_prefixes))
         self._mono(edit)
         lay.addWidget(edit)
 
@@ -3668,14 +3618,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if not path:
                 return
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    text = f.read()
+                text = session.read_text_file(path)
             except OSError as ex:
                 QtWidgets.QMessageBox.critical(dlg, "导入失败", str(ex))
                 return
-            merged = generator.parse_probe_prefix_lines(edit.toPlainText())
-            merged.update(generator.parse_probe_prefix_lines(text))
-            edit.setPlainText(generator.render_probe_prefix_grouped(merged))
+            edit.setPlainText(session.merge_probe_prefix_text(edit.toPlainText(), text))
 
         def do_export():
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -3683,8 +3630,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not path:
                 return
             try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(edit.toPlainText().rstrip() + "\n")
+                session.write_mapping_text(path, edit.toPlainText())
             except OSError as ex:
                 QtWidgets.QMessageBox.critical(dlg, "导出失败", str(ex))
                 return
@@ -3695,7 +3641,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.resize(620, 460)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
-        mapping = generator.parse_probe_prefix_lines(edit.toPlainText())
+        mapping = session.parse_probe_prefix_text(edit.toPlainText())
         self._probe_prefixes = mapping
         self._save_probe_prefixes()
         self._reanalyze_all()
@@ -3836,15 +3782,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_force_signals(self):
         """强制 force 基名按 Excel 路径写入 settings（pytest 下 no-op，与其它持久化策略一致）。"""
-        st = _load_settings()
-        all_maps = st.get("force_signals", {})
-        path = self.path_edit.text().strip()
-        if self._force_signals:
-            all_maps[path] = sorted(self._force_signals)
-        else:
-            all_maps.pop(path, None)
-        st["force_signals"] = all_maps
-        _save_settings(st)
+        session.save_path_map("force_signals", self.path_edit.text().strip(),
+                              sorted(self._force_signals),
+                              load=_load_settings, save=_save_settings)
 
     def on_set_force_signals(self):
         """强制 force 信号编辑器：每行一个基名，列进来的信号直接 force 顶层基名网、跳过 cone 展开。
@@ -3864,7 +3804,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "前提：该基名在 ENV_RF 顶层真实存在（tmm/regmap 里有这个寄存器/网），否则仿真会 CUVUNF。\n"
             "留空 = 清除。cone 成环时工具已会自动回退到 force，这里是手动覆盖别的信号。"))
         edit = QtWidgets.QPlainTextEdit()
-        edit.setPlainText("\n".join(sorted(self._force_signals)))
+        edit.setPlainText(session.render_force_signal_text(self._force_signals))
         self._mono(edit)
         lay.addWidget(edit)
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
@@ -3874,11 +3814,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.resize(560, 380)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
-        names = set()
-        for line in edit.toPlainText().splitlines():
-            s = line.split("#", 1)[0].strip().lower()    # # 开头/行尾 = 注释
-            if s:
-                names.add(s)
+        names = session.parse_force_signal_text(edit.toPlainText())   # # 开头/行尾 = 注释
         self._force_signals = names
         self._save_force_signals()
         self._reanalyze_all()
@@ -3888,60 +3824,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _supplement_template(self):
         """为【当前编辑器里的 logic 信号】生成一份补充 spec 模板：预填原表达式+原输入映射，
         用户/Claude 只需把 ECO 级包在外面、加新输入。无选中信号 → 通用空模板。"""
-        sig = getattr(self, "_ti_sig", None)
-        if sig is not None and not isinstance(sig, excel_model.MuxGroup):
-            name = sig.out_base.lower()
-            inputs = [{"var": k, "raw": info.get("raw", "")}
-                      for k, info in sig.inputs.items()]
-            return {name: {
-                "_提示": "把 ECO 级(如 2:1 mux/二级 iddq)包在原表达式外面，并在 inputs 里加新输入；理由填 note",
-                "enabled": True,
-                "note": "（填理由：SE 说 RTL 顶层口后多了什么级）",
-                "expr": sig.expr,
-                "inputs": inputs,
-            }}
-        return {"<信号基名>": {
-            "_提示": "var=表达式里的变量名(大小写无关)，raw=真实网名(可带[msb:lsb])；理由填 note",
-            "enabled": True, "note": "（理由）",
-            "expr": "ECO_IDDQ ? 1'b0 : (VCO_FC_SEL ? VCO_EN_FASTON : (EN & ~IDDQ))",
-            "inputs": [{"var": "EN", "raw": "<原使能寄存器>"},
-                       {"var": "IDDQ", "raw": "iddq"},
-                       {"var": "VCO_FC_SEL", "raw": "d_vco_fc_sel_ls[0]"},
-                       {"var": "VCO_EN_FASTON", "raw": "d_vco_en_faston"},
-                       {"var": "ECO_IDDQ", "raw": "<ECO 二级 iddq 网>"}]}}
+        return session.supplement_template(getattr(self, "_ti_sig", None))
 
     def _validate_supplements(self, data):
         """校验 {信号: spec} 映射：返回 (规范化后的 dict, [错误串])。错误非空时不应保存。"""
-        if not isinstance(data, dict):
-            return {}, ["顶层必须是 JSON 对象 {信号基名: {expr, inputs, ...}}"]
-        out, errs = {}, []
-        for raw_name, spec in data.items():
-            name = str(raw_name).strip().lower()
-            if not name or name.startswith("<"):
-                errs.append("信号名 %r 无效(占位符未替换?)" % raw_name); continue
-            if not isinstance(spec, dict):
-                errs.append("%s: spec 必须是对象" % name); continue
-            expr = str(spec.get("expr", "") or "").strip()
-            if not expr:
-                errs.append("%s: 缺 expr" % name); continue
-            ins = spec.get("inputs")
-            if not isinstance(ins, list) or not ins:
-                errs.append("%s: inputs 应为非空列表 [{var,raw},...]" % name); continue
-            try:
-                node = E.parse(expr)
-            except Exception as ex:  # noqa: BLE001
-                errs.append("%s: 表达式解析失败 — %s" % (name, ex)); continue
-            try:
-                sigobj = generator.make_supplement_signal(name, spec, None)
-            except Exception as ex:  # noqa: BLE001
-                errs.append("%s: inputs 解析失败 — %s" % (name, ex)); continue
-            missing = set(E.collect_vars(node)) - set(sigobj.inputs.keys())
-            if missing:
-                errs.append("%s: 表达式用到的变量没有 input 映射: %s"
-                            % (name, ", ".join(sorted(missing))))
-                continue
-            out[name] = spec
-        return out, errs
+        return session.validate_supplements(data)
 
     def on_logic_overrides(self):
         """RTL 补充逻辑编辑器：Excel 真表缺某信号 ECO 级时，手工补一条等价 logic 式扫真值表。
@@ -3964,7 +3851,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "（补充在【生成/.sv 预览/报告】里生效并扫真值表；左表与右侧测试项编辑器仍显示 Excel 原逻辑。）"))
         edit = QtWidgets.QPlainTextEdit()
         cur = {k: dict(v) for k, v in self._logic_overrides.items()}
-        edit.setPlainText(json.dumps(cur, ensure_ascii=False, indent=2) if cur else "")
+        edit.setPlainText(session.render_supplements_json(cur))
         edit.setPlaceholderText("（空 = 没有补充。点「插入模板」或粘贴 Claude 写好的 JSON）")
         self._mono(edit)
         lay.addWidget(edit)
@@ -3974,18 +3861,12 @@ class MainWindow(QtWidgets.QMainWindow):
         b_file = QtWidgets.QPushButton("从文件导入…")
 
         def _insert_tmpl():
-            tmpl = self._supplement_template()
-            txt = edit.toPlainText().strip()
-            if not txt:
-                edit.setPlainText(json.dumps(tmpl, ensure_ascii=False, indent=2))
-            else:
-                try:
-                    cur2 = json.loads(txt)
-                    if isinstance(cur2, dict):
-                        cur2.update(tmpl)
-                        edit.setPlainText(json.dumps(cur2, ensure_ascii=False, indent=2))
-                except ValueError:
-                    QtWidgets.QMessageBox.warning(dlg, "提示", "当前内容不是合法 JSON，无法合并模板；请先修好或清空。")
+            text, ok = session.merge_supplements_text(edit.toPlainText(),
+                                                      self._supplement_template())
+            if not ok:
+                QtWidgets.QMessageBox.warning(dlg, "提示", "当前内容不是合法 JSON，无法合并模板；请先修好或清空。")
+                return
+            edit.setPlainText(text)
 
         def _from_file():
             fp, _ = QtWidgets.QFileDialog.getOpenFileName(dlg, "导入补充 JSON", "",
@@ -3993,8 +3874,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not fp:
                 return
             try:
-                with open(fp, encoding="utf-8") as f:
-                    edit.setPlainText(f.read())
+                edit.setPlainText(session.read_text_file(fp))
             except OSError as ex:
                 QtWidgets.QMessageBox.critical(dlg, "读取失败", str(ex))
         b_tmpl.clicked.connect(_insert_tmpl)
@@ -4009,14 +3889,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
         txt = edit.toPlainText().strip()
-        if not txt:
+        if not txt:                          # 空文本 = 清空补充
             self._logic_overrides = {}
             self._save_logic_overrides()
             self._refresh_after_logic_overrides()
             self.status.showMessage("RTL 补充逻辑已清空")
             return
         try:
-            data = json.loads(txt)
+            data = session.parse_supplements_json(txt)
         except ValueError as ex:
             QtWidgets.QMessageBox.critical(self, "JSON 解析失败",
                                            "不是合法 JSON：\n%s" % ex)
@@ -5070,13 +4950,9 @@ class MainWindow(QtWidgets.QMainWindow):
         信号勾选 + 全局工具栏设置 + 探针前缀 + 强制force + 全部 per-signal 测试编辑(含 mux 删除/清空)。
         单点覆盖度【不含】——会话内临时档(见 _persist_edits 注释)。
         excel/excel_path：记下这份配置对应的源表(全路径+文件名)，导入时按文件名核对、配错表给提示。"""
-        excel = (self.path_edit.text() or "").strip()
-        return {
-            "dreg_verify_config": 2,
-            "excel": os.path.basename(excel),     # 文件名（跨机器比对用，路径常不同）
-            "excel_path": excel,                  # 全路径（本机来源参考）
-            "signals_checked": self._collect_checked(),
-            "global": {
+        return session.collect_config(
+            (self.path_edit.text() or "").strip(),
+            {
                 "coverage_logic": self.coverage.currentText(),
                 "coverage_mux": self.coverage_mux.currentText(),
                 "max_tests": self.max_tests.value(),
@@ -5085,81 +4961,65 @@ class MainWindow(QtWidgets.QMainWindow):
                 "append_to_mux": bool(self.append_to_mux_chk.isChecked()),
                 "include_risky": self._include_risky_on(),   # 缺前缀强制生成（改产物→须随配置带走）
             },
-            "probe_prefixes": dict(self._probe_prefixes),
-            "force_signals": sorted(self._force_signals),
-            "suffix_override": dict(self._suffix_override),
-            # RTL 补充逻辑：Excel 缺级时手工补的等价 logic 式（Claude 代写、用户导入复核）
-            "logic_overrides": {k: dict(v) for k, v in self._logic_overrides.items()},
-            "edits": {name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
-            "neg_only": dict(self._neg_only),
-            "mux_expected": {name: dict(m) for name, m in self._mux_expected.items() if m},
-            "mux_neg": sorted(self._mux_neg),
-            "mux_data": {name: dict(d) for name, d in self._mux_data.items() if d},
-            "mux_dropped": {name: sorted(s) for name, s in self._mux_dropped.items() if s},
-            "mux_cleared": sorted(self._mux_cleared),
-            "mux_user_vecs": {name: _serialize_mux_vecs(vv)
-                              for name, vv in self._mux_user_vecs.items() if vv},
+            signals_checked=self._collect_checked(),
+            probe_prefixes=self._probe_prefixes,
+            force_signals=self._force_signals,
+            suffix_override=self._suffix_override,
+            logic_overrides=self._logic_overrides,
+            edits={name: _serialize_rows(ed["rows"]) for name, ed in self._edited.items()},
+            neg_only=self._neg_only,
+            mux_expected=self._mux_expected,
+            mux_neg=self._mux_neg,
+            mux_data=self._mux_data,
+            mux_dropped=self._mux_dropped,
+            mux_cleared=self._mux_cleared,
+            mux_user_vecs={name: _serialize_mux_vecs(vv)
+                           for name, vv in self._mux_user_vecs.items() if vv},
             # SignalView（Topout + 子视图）逐信号编辑/勾选——让 Topout 视图的手填期望随配置跨机器迁移
-            "view_edits": self._collect_view_edits(),
-            "view_checks": self._collect_view_checks(),
-        }
+            view_edits=self._collect_view_edits(),
+            view_checks=self._collect_view_checks())
 
     def _apply_global_settings(self, g):
         """导入：套用全局工具栏设置(覆盖度/上限/级联/输出引用尾缀/缺前缀强制生成)。blockSignals 设值，
-        避免逐项触发联动(resolver 重建/编辑器重载由调用方统一做一次)；并写入 settings 持久化。"""
+        避免逐项触发联动(resolver 重建/编辑器重载由调用方统一做一次)；并写入 settings 持久化。
+        「哪个键缺了该复位默认、哪个该保持当前」的版本兼容口径在 session.normalize_global_settings。"""
         if not isinstance(g, dict):
             return
+        n = session.normalize_global_settings(g)
         for combo, key in ((self.coverage, "coverage_logic"), (self.coverage_mux, "coverage_mux")):
-            v = g.get(key)
-            if v in ("精简", "全面", "穷举"):
-                combo.blockSignals(True); combo.setCurrentText(v); combo.blockSignals(False)
-        mt = g.get("max_tests")
-        if isinstance(mt, int) and 1 <= mt <= 100000:
-            self.max_tests.blockSignals(True); self.max_tests.setValue(mt); self.max_tests.blockSignals(False)
-        # 级联模式 logic/mux（缺新键时回退旧 cascade_mode；都缺=cone）
-        cm = g.get("cascade_mode")
+            if n[key] is not None:
+                combo.blockSignals(True); combo.setCurrentText(n[key]); combo.blockSignals(False)
+        if n["max_tests"] is not None:
+            self.max_tests.blockSignals(True); self.max_tests.setValue(n["max_tests"])
+            self.max_tests.blockSignals(False)
         for combo, key in ((self.cascade_logic_combo, "cascade_logic"),
                            (self.cascade_mux_combo, "cascade_mux")):
-            v = g.get(key, cm)
             combo.blockSignals(True)
-            combo.setCurrentIndex(1 if v == "force" else 0)
+            combo.setCurrentIndex(1 if n[key] == "force" else 0)
             combo.blockSignals(False)
-        atl = g.get("append_to_logic")
-        # 缺键(旧配置/含已删的 dft_observe)→ 复位到默认 True(=生产默认勾，2026-06-11 翻回)，使「导入这份
-        # 工作状态」确定性，不残留本会话先前的手动切换。
-        atl = atl if isinstance(atl, bool) else True
-        self.append_to_logic_chk.blockSignals(True); self.append_to_logic_chk.setChecked(atl)
+        self.append_to_logic_chk.blockSignals(True)
+        self.append_to_logic_chk.setChecked(n["append_to_logic"])
         self.append_to_logic_chk.blockSignals(False)
-        atm = g.get("append_to_mux")
-        # 缺键 → 复位默认 False(=mux 默认探裸名)，确定性。
-        atm = atm if isinstance(atm, bool) else False
-        self.append_to_mux_chk.blockSignals(True); self.append_to_mux_chk.setChecked(atm)
+        self.append_to_mux_chk.blockSignals(True)
+        self.append_to_mux_chk.setChecked(n["append_to_mux"])
         self.append_to_mux_chk.blockSignals(False)
-        ir = g.get("include_risky")
-        # include_risky(缺前缀强制生成)：与上面几个开关不同——【缺键时保持当前】而非复位默认。
-        # 这是较新字段，旧配置/pytest 基线本就无此键，不该翻动用户(或测试基线)刻意设的本机选择；
-        # 新配置必带此键，「整份载入」对它们仍确定。本字段会改产物(skip vs force 生成)，故 present 即套用。
-        if isinstance(ir, bool) and hasattr(self, "include_risky_chk"):
-            self.include_risky_chk.blockSignals(True); self.include_risky_chk.setChecked(ir)
+        if n["include_risky"] is not None and hasattr(self, "include_risky_chk"):
+            self.include_risky_chk.blockSignals(True)
+            self.include_risky_chk.setChecked(n["include_risky"])
             self.include_risky_chk.blockSignals(False)
         self._persist_coverage()                 # coverage_logic/mux + max_tests
-        st = _load_settings()
-        st["cascade_logic"] = self._logic_cascade(); st["cascade_mux"] = self._mux_cascade()
-        st["append_to_logic"] = bool(self.append_to_logic_chk.isChecked())
-        st["append_to_mux"] = bool(self.append_to_mux_chk.isChecked())
+        vals = {"cascade_logic": self._logic_cascade(), "cascade_mux": self._mux_cascade(),
+                "append_to_logic": bool(self.append_to_logic_chk.isChecked()),
+                "append_to_mux": bool(self.append_to_mux_chk.isChecked())}
         if hasattr(self, "include_risky_chk"):
-            st["include_risky"] = bool(self.include_risky_chk.isChecked())
-        _save_settings(st)
+            vals["include_risky"] = bool(self.include_risky_chk.isChecked())
+        session.persist_global_settings(vals, load=_load_settings, save=_save_settings)
 
     def _reset_all_config_state(self):
         """导入【完整配置】前清空全部可编辑状态(= 加载这份工作状态，而非叠加在现有之上)。
-        不碰已加载的 wb/signals/解析画像——只清用户配置层。"""
-        self._edited = {}; self._customized = set(); self._neg_only = {}
-        self._mux_expected = {}; self._mux_neg = set(); self._mux_data = {}
-        self._mux_dropped = {}; self._mux_cleared = set(); self._mux_user_vecs = {}
-        self._sig_cov = {}; self._sig_cascade = {}
-        self._probe_prefixes = {}; self._force_signals = set(); self._suffix_override = {}
-        self._logic_overrides = {}
+        不碰已加载的 wb/signals/解析画像——只清用户配置层（字段清单见 session.blank_config_state）。"""
+        for _attr, _blank in session.blank_config_state().items():
+            setattr(self, _attr, _blank)
 
     def on_export_edits(self):
         """导出【完整配置】为 .json（给同事/版本库/跨机器）：信号勾选 + 全局设置 + 探针前缀 +
@@ -5168,15 +5028,14 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "请先加载 Excel")
             return
         excel = (self.path_edit.text() or "").strip()
-        default = os.path.splitext(os.path.basename(excel) or "dreg")[0] + "_config.json"
+        default = session.default_config_filename(excel)
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出完整配置", default,
                                                         "JSON (*.json)")
         if not path:
             return
         payload = self._collect_config()   # 内含 excel/excel_path（源表文件名 + 全路径）
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=1)
+            session.write_config_file(path, payload)
         except OSError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
@@ -5205,50 +5064,35 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            with open(path, encoding="utf-8") as f:
-                payload = json.load(f)
+            payload = session.read_config_file(path)
         except (OSError, ValueError) as ex:
             QtWidgets.QMessageBox.critical(self, "导入失败", "无法读取/解析 %s：\n%s" % (path, ex))
             return
-        is_full = isinstance(payload, dict) and bool(payload.get("dreg_verify_config"))
-        is_legacy = isinstance(payload, dict) and (
-            payload.get("dreg_verify_edits")
-            or any(k in payload for k in ("edits", "mux_expected", "mux_data")))
-        if not (is_full or is_legacy):
-            QtWidgets.QMessageBox.critical(
-                self, "导入失败",
-                "%s 不是 dreg_verify 配置/编辑文件(缺少 dreg_verify_config 或 edits/mux_* 段)。" % path)
+        # 认版本 + 源表核对(按【文件名】比对而非全路径——跨机器/跨同事路径不同是正常用法，不该误报)
+        # + 各段规范化：全在 session.apply_config，这里只负责把结果套到控件/状态上。
+        plan = session.apply_config(payload, current_excel=(self.path_edit.text() or "").strip())
+        if not plan["ok"]:
+            QtWidgets.QMessageBox.critical(self, "导入失败", "%s %s" % (path, plan["error"]))
             return
-        # 源表核对：配置里记的 excel 文件名与当前加载的不一致 → 末尾提示(仍照常导入)。
-        # 按【文件名】比对而非全路径——跨机器/跨同事路径不同是正常用法，不该误报。
-        cfg_excel = str(payload.get("excel")
-                        or os.path.basename(str(payload.get("excel_path") or ""))).strip()
-        cur_excel = os.path.basename((self.path_edit.text() or "").strip())
-        excel_mismatch = bool(cfg_excel and cur_excel and cfg_excel.lower() != cur_excel.lower())
+        is_full = plan["is_full"]
+        cfg_excel, cur_excel = plan["cfg_excel"], plan["cur_excel"]
+        excel_mismatch = plan["excel_mismatch"]     # 不一致 → 末尾提示(仍照常导入)
         if is_full:
             # 完整配置：清空全部可编辑状态后照单恢复(= 加载这份工作状态)；先套全局/探针/force 并
             # 重建 resolver，再恢复编辑(编辑重算依赖正确的 resolver)，最后恢复勾选。
             self._reset_all_config_state()
             self._apply_global_settings(payload.get("global") or {})
-            pp = payload.get("probe_prefixes")
-            if isinstance(pp, dict):
-                self._probe_prefixes = {str(k).strip().lower(): str(v).strip()
-                                        for k, v in pp.items() if v and str(v).strip()}
+            if plan["probe_prefixes"] is not None:
+                self._probe_prefixes = plan["probe_prefixes"]
                 self._save_probe_prefixes()
-            fs = payload.get("force_signals")
-            if isinstance(fs, list):
-                self._force_signals = {str(x).strip().lower() for x in fs if str(x).strip()}
+            if plan["force_signals"] is not None:
+                self._force_signals = plan["force_signals"]
                 self._save_force_signals()
-            so = payload.get("suffix_override")
-            if isinstance(so, dict):
-                self._suffix_override = {str(k).strip().lower(): bool(v)
-                                         for k, v in so.items() if str(k).strip()}
+            if plan["suffix_override"] is not None:
+                self._suffix_override = plan["suffix_override"]
                 self._save_suffix_override()
-            lo = payload.get("logic_overrides")
-            if isinstance(lo, dict):
-                self._logic_overrides = {str(k).strip().lower(): dict(v)
-                                         for k, v in lo.items()
-                                         if str(k).strip() and isinstance(v, dict)}
+            if plan["logic_overrides"] is not None:
+                self._logic_overrides = plan["logic_overrides"]
                 self._save_logic_overrides()
             self._resolver = R.Resolver(self.wb, wire_prefixes=self._probe_prefixes,
                                         force_overrides=self._force_signals,
