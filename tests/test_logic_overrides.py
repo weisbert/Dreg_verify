@@ -181,93 +181,52 @@ def test_dft_gate_still_pins_when_not_an_explicit_input(wbx):
     assert any(i.get("letters") == "dft门" for i in t["inputs"])   # 门不是输入 → 照常单列 DFT 门行
 
 
-# ───────────── GUI：校验 / 配置导出导入 / _opts 透传 ─────────────
-@pytest.fixture(scope="module")
-def qapp():
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+# ───── 补充逻辑：校验 / 模板 / 进 build / 进配置（C5-b：原「起个 v1 窗」的 2 条 → 1 条 Qt-free）─────
+# 原 `test_gui_logic_overrides_validate_config_and_opts` 起一台 v1 `MainWindow`，
+# 调的却是 `session.validate_supplements` / `session.supplement_template` /
+# `session.collect_config` 这三个 Qt-free 函数加一次 `generator.build` —— 窗口只是个壳。
+# 原 `test_gui_supplement_syncs_truth_table_and_marks`（补充后真值表同步 + 清单标注）在 v2 由
+# `tests/test_ui_diagnostics.py::test_c215_c216_supplement_visible_in_topout_expand`（新输入成维度）、
+# `tests/test_ui_signal_list.py::test_c039_supplement_amber_dot_and_tooltip`（清单琥珀标记）与
+# `tests/test_ui_migrated_c5b.py::test_c216_supplement_does_not_dirty_wb_logic_and_still_renders_sv`
+# （补充/撤销两个方向 + wb.logic 不被改脏）三条合起来守。
 
 
-def test_gui_logic_overrides_validate_config_and_opts(qapp, tmp_path_factory):
-    from dreg_verify import legacy_gui as gui
+def test_supplements_validate_template_and_reach_build(tmp_path_factory):
+    """校验器挡住坏 spec；模板预填原式原输入；好 spec 一路进 build 与完整配置。"""
+    from dreg_verify import session
+
     path = tmp_path_factory.mktemp("glo") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path))
-    w.on_load()
+    wbx = excel_model.load_workbook(str(path))
 
-    # 校验器：好 spec 通过；表达式用了没映射的变量 → 报错（不保存）
-    good, errs = w._validate_supplements(SUPP)
+    # ① 校验器：好 spec 通过；表达式用了没映射的变量 → 报错（不保存）
+    good, errs = session.validate_supplements(SUPP)
     assert not errs and "d_logic_bt_lp_lna_agc" in good
     bad = {"d_logic_bt_lp_lna_agc": {"enabled": True, "expr": "NOPE ? A : B",
                                      "inputs": [{"var": "A", "raw": "d_bt_lp_iddq"}]}}
-    _g, errs2 = w._validate_supplements(bad)
+    _g, errs2 = session.validate_supplements(bad)
     assert errs2 and any("NOPE" in e or "变量" in e for e in errs2)
     # 表达式语法错也被挡
-    _g2, errs3 = w._validate_supplements(
+    _g2, errs3 = session.validate_supplements(
         {"x": {"enabled": True, "expr": "A ? ", "inputs": [{"var": "A", "raw": "d_bt_lp_iddq"}]}})
     assert errs3
 
-    # 模板：当前编辑器信号 → 预填原表达式+原输入
-    sig = next(s for s in w.signals if s.out_name == "d_logic_bt_lp_reserve")
-    w._load_test_items(sig)
-    tmpl = w._supplement_template()
+    # ② 模板：给一条 logic 信号 → 预填原表达式 + 原输入映射
+    sig = next(s for s in wbx.logic if s.out_name == "d_logic_bt_lp_reserve")
+    tmpl = session.supplement_template(sig)
     assert "d_logic_bt_lp_reserve" in tmpl and tmpl["d_logic_bt_lp_reserve"]["expr"] == sig.expr
 
-    # 进 _opts → build 生效（GUI 配置 → 合成扫真值表）
-    w._logic_overrides = {k: dict(v) for k, v in SUPP.items()}
-    res = G.build(w.wb, w._opts(["d_logic_bt_lp_lna_agc"]))
+    # ③ 进 GenOptions → build 真的按补充后的逻辑扫真值表
+    res0 = G.build(wbx, G.GenOptions(signals=["d_logic_bt_lp_lna_agc"]))
+    assert res0["summary"].get("n_supplement", 0) == 0
+    res = G.build(wbx, G.GenOptions(signals=["d_logic_bt_lp_lna_agc"],
+                                    logic_overrides={k: dict(v) for k, v in SUPP.items()}))
     assert res["summary"]["n_supplement"] == 1
 
-    # 完整配置导出带 logic_overrides；reset 清空
-    cfg = w._collect_config()
+    # ④ 完整配置带 logic_overrides（同事之间靠这份文件传补充逻辑）
+    cfg = session.collect_config(str(path), {}, logic_overrides=SUPP)
     assert "logic_overrides" in cfg and "d_logic_bt_lp_lna_agc" in cfg["logic_overrides"]
-    w._reset_all_config_state()
-    assert w._logic_overrides == {}
-
-
-def test_gui_supplement_syncs_truth_table_and_marks(qapp, tmp_path_factory):
-    """加补充后 GUI 真值表【同步刷新】+ 左表/编辑器【明显标注】(用户报的两个问题)。"""
-    from dreg_verify import legacy_gui as gui
-    from PySide6 import QtCore
-    path = tmp_path_factory.mktemp("gsync") / "synthetic_dreg.xlsx"
-    fixtures.build_workbook(str(path))
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path))
-    w.on_load()
-    target = "d_logic_bt_lp_lna_agc"
-
-    # 加载时该信号是原始 3 输入
-    sig0 = next(s for s in w.signals if s.out_name.startswith(target))
-    assert not getattr(sig0, "_is_supplement", False)
-    w._load_test_items(sig0)
-    base_inputs = len(w._ti_groups)
-
-    # 加补充 → 触发刷新（模拟 on_logic_overrides 保存后那步）
-    w._logic_overrides = {k: dict(v) for k, v in SUPP.items()}
-    w._refresh_after_logic_overrides()
-
-    # ① self.signals 换成了合成信号（带补充 expr/_is_supplement）
-    sig1 = next(s for s in w.signals if s.out_name.startswith(target))
-    assert getattr(sig1, "_is_supplement", False)
-    assert "EXTRA" in sig1.expr
-
-    # ② 编辑器真值表同步刷新出新 ECO 输入维度（比原来多）
-    w._load_test_items(sig1)
-    assert len(w._ti_groups) > base_inputs
-    in_bases = {str(g.get("base", "")).lower() for g in w._ti_groups}
-    assert any("d_bt_lp_iddq" in b for b in in_bases)
-    assert getattr(w._ti_sig, "_is_supplement", False)
-
-    # ③ 左表明显标注：表达式列加 ⚠[RTL补充] 前缀
-    row = next(r for r in range(w.table.rowCount())
-               if w.table.item(r, gui.COL_K)
-               and w.table.item(r, gui.COL_K).text().startswith(target))
-    assert w.table.item(row, gui.COL_EXPR).text().startswith("⚠[RTL补充]")
-
-    # ④ 清空补充 → 信号还原、标注消失
-    w._logic_overrides = {}
-    w._refresh_after_logic_overrides()
-    sig2 = next(s for s in w.signals if s.out_name.startswith(target))
-    assert not getattr(sig2, "_is_supplement", False)
+    # 空补充 → 桶被剔掉（`_reset_all_config_state` 之后导出的就是这一份）
+    cfg0 = session.collect_config(str(path), {}, logic_overrides={})
+    assert not cfg0.get("logic_overrides")

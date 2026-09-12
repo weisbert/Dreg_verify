@@ -356,41 +356,43 @@ def test_coverage_state_matches_topout_effective_cov(mirrors, sig_cov, form_cov)
                 "%s/%s (mode,exhaustive) 与 topout 不一致" % (tag, name)
 
 
-def test_coverage_state_matches_signal_view(tmp_path_factory):
-    """⭐⭐ 与【现在这套界面】逐信号对照：SignalView._mode_for(已委托本层) 的结果，
-    == 独立构造的 CoverageState.mode_for。起一次 offscreen GUI 取现值即可。
-    两张 mirror × 全部 SignalView(Topout + 子视图) × 每个信号。"""
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    from dreg_verify import legacy_gui as G
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])   # noqa: F841
-    d = tmp_path_factory.mktemp("sess_gui")
+def test_coverage_state_matches_engine_on_every_view_id(mirrors):
+    """⭐⭐ 五个范围逐个对照：`CoverageState(view_id)` 的生效档 / (mode, exhaustive)
+    == 引擎的 `topout._effective_cov_str` / `topout._cov_for`。
+
+    原 `test_coverage_state_matches_signal_view` 起一台 v1 `MainWindow`，把每个 `SignalView`
+    的 `_mode_for` 拿来比 —— 而 `SignalView._mode_for` 早已**委托**给本层，比的其实就是
+    「本层 == 引擎」。改成直接对着引擎比，并把范围从「窗口上现有的几个 SignalView」扩成
+    `topout + logic/mux/dft/iddq` 五个都跑（上一条 `..._matches_topout_effective_cov`
+    只跑 topout），不起窗、覆盖的信号更多。
+    口径分叉的后果是清单『用例』列与真值表列数对不上（#3 实证：清单 5 / 真值表 32）。
+    """
+    from dreg_verify import pageviews as PVW
+
+    form_cov = {"select": "exhaustive", "register": "min"}
     checked = 0
-    for mod, fn in ((make_mirror_btlp, "mirror_btlp_dreg.xlsx"),
-                    (make_mirror_excel, "mirror_wl_dreg.xlsx")):
-        p = str(d / fn)
-        mod.build(p)
-        w = G.MainWindow()
-        w.path_edit.setText(p)
-        w.on_load()
-        try:
-            for vid, v in w._all_signal_views().items():
-                v.cov.setCurrentText("精简")                      # 全局=精简
-                v._form_cov = {"select": "exhaustive", "register": "min"}
-                v.refresh()
-                names = [m["name"] for m in v.models]
-                for nm, c in zip(names[:2], ("exhaustive", "min")):
-                    v._sig_cov[nm.lower()] = c
-                st = session.CoverageState(vid, global_label="精简")
-                st.set_form_cov(dict(v._form_cov))
-                st.sig_cov.update(dict(v._sig_cov))
-                for nm in names:
-                    assert st.mode_for(nm, models=v.models) == v._mode_for(nm), \
-                        "%s/%s/%s 覆盖档与 SignalView 不一致" % (fn, vid, nm)
-                    checked += 1
-        finally:
-            w.close()
+    for tag, _path, wb, _res in mirrors:
+        by_view = [("topout", T.topout_view_models(wb, mode="min", form_cov=form_cov))]
+        for page in ("logic", "mux", "dft", "iddq"):
+            by_view.append((page, PVW.page_view_models(wb, page, mode="min")))
+        for vid, models in by_view:
+            if not models:
+                continue                       # 本表没有这一页（iddq 常空）
+            st = session.CoverageState(vid, global_label="精简")
+            st.set_form_cov(form_cov)
+            for nm, c in zip([m["name"] for m in models][:2], ("exhaustive", "min")):
+                st.set_sig_cov(nm, c)          # 再叠一层单点档：验单点压形态
+            for m in models:
+                name = m["name"]
+                shape = FORMS.Shape(m["form"]) if m["form"] else None
+                assert st.mode_for(name, models=models) == \
+                    T._cov_for(st.sig_cov, name, "min", False,
+                               form_cov=st.form_cov, shape=shape), \
+                    "%s/%s/%s (mode,exhaustive) 与引擎不一致" % (tag, vid, name)
+                assert st.effective_cov(name, models=models) == \
+                    T._effective_cov_str(st.sig_cov, st.form_cov, shape, name), \
+                    "%s/%s/%s 生效档与引擎不一致" % (tag, vid, name)
+                checked += 1
     assert checked >= 40, "对照的信号太少(%d)，夹具没载进来？" % checked
 
 

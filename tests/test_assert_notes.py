@@ -377,105 +377,52 @@ def test_cli_main_full_flow(tmp_path):
     text.encode("ascii")
 
 
-# ───────────── GUI ─────────────
-def _make_gui(tmp_path_factory, name, pll=False):
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import legacy_gui as gui
-    path = tmp_path_factory.mktemp(name) / "synthetic.xlsx"
-    fixtures.build_workbook(str(path), with_pll_chain=pll)
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path)); w.on_load()
-    return gui, w
+# ───────────── 导出选项 → 产物（C5-b：原「起个 v1 窗读预览框」的 3 条改成 Qt-free）─────────────
+# 原来这几条起一台 v1 `MainWindow`，勾一行、点导出/预览，再读 `preview.toPlainText()`。
+# 断言的其实是 `GenOptions.owner_in_msg` / `sv_summary` 这两个开关**改不改产物**——
+# 那是生成器的事，直接拿 `generator.build/render` 问它，不起窗。
+# 「界面上的勾选真的变成 exports 的参数」由 v2 的
+# `tests/test_ui_export_center.py::test_c157_c158_c159_c160_c161_sv_row_options_to_exports` 守；
+# 「两个入口共用同一套默认值」由 `test_ui_state.py::test_c231_c232_export_option_keys` 与
+# `test_ui_export_center.py::test_i03_export_options_single_source` 守。
+_OWNER_SIG = "d_en_refbuf"          # 夹具里 owner=Alice 的那一条（顶层口走 level_shift → _ls）
 
 
-def test_gui_export_dialog_new_checkboxes(tmp_path_factory, monkeypatch, tmp_path):
-    """导出对话框含 owner/汇总复选框，返回 dict 带两个新键；无历史配置时用【统一默认值】。
-
-    ⚠ 2026-09-12 契约变更：本对话框与 SignalView 的导出对话框共用同一批 settings 键
-    (export_owner_in_msg/export_sv_summary/…)，默认值却一边 True 一边 False ——"没配过"时
-    两个入口产物不同（静默不一致）。现统一到 exports.EXPORT_OPTION_DEFAULTS（以 SignalView
-    版为准 = 全 False）。断言随之改成"两个入口给同一套默认值"，比原来只钉一边更严。"""
-    from dreg_verify import exports as X
-    gui, w = _make_gui(tmp_path_factory, "gui_dlg")
-    from PySide6 import QtWidgets
-    monkeypatch.setattr(gui, "SETTINGS_PATH", str(tmp_path / "no_settings.json"))
-    monkeypatch.setattr(QtWidgets.QDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
-    opt = w._ask_export_options("test")
-    assert opt is not None
-    assert opt["owner_in_msg"] is X.EXPORT_OPTION_DEFAULTS["owner_in_msg"] is False
-    assert opt["sv_summary"] is X.EXPORT_OPTION_DEFAULTS["sv_summary"] is False
-    assert opt["comments"] is X.EXPORT_OPTION_DEFAULTS["comments"] is False
-    assert opt["scope"] == "all"
-    # 两个导出入口的默认值必须一致（本次统一的靶子）
-    sv_opt = w.topout_view._ask_export_options()
-    assert sv_opt == opt
+def _sv(wb, **kw):
+    opts = generator.GenOptions(signals=[_OWNER_SIG], top_output_only=False, **kw)
+    return generator.render(generator.build(wb, opts))
 
 
-def test_gui_opts_maps_settings(tmp_path_factory, monkeypatch):
-    """_opts() 把导出设置映射到 GenOptions；无配置时默认 True；显式实参优先于设置。"""
-    gui, w = _make_gui(tmp_path_factory, "gui_opts")
-    monkeypatch.setattr(gui, "_load_settings",
-                        lambda: {"export_owner_in_msg": False, "export_sv_summary": True})
-    o = w._opts(None)
-    assert o.owner_in_msg is False and o.sv_summary is True
-    monkeypatch.setattr(gui, "_load_settings", lambda: {})
-    o2 = w._opts(None)
-    assert o2.owner_in_msg is True and o2.sv_summary is True
-    # 显式实参(对话框返回值)优先，不受设置影响
-    o3 = w._opts(None, owner_in_msg=False, sv_summary=False)
-    assert o3.owner_in_msg is False and o3.sv_summary is False
+def test_sv_options_off_leave_no_owner_and_no_summary_block(wb):
+    """两个开关都关 → 产物照常有断言，但既无 owner 尾巴也无命名汇总块。
+
+    原 `test_gui_generate_uses_dialog_choices`：它盯的是「on_generate 以对话框返回值为准，
+    不靠先写盘再读回」——写盘失败时老逻辑会静默用错选项。选项→产物这一跳在这里钉死，
+    「对话框返回值不经磁盘直接用」那一跳在 v2 是 `export_center` 的 row.options（上面两条测试）。
+    """
+    text = _sv(wb, owner_in_msg=False, sv_summary=False)
+    assert "assert (`ENV_RF.d_en_refbuf_ls==" in text     # 正常生成
+    assert "owner" not in text                            # 关了 owner → 没有
+    assert "dreg_rf_test" not in text                     # 关了汇总 → 无包裹/计数器
 
 
-def test_gui_generate_uses_dialog_choices(tmp_path_factory, monkeypatch, tmp_path):
-    """回归(审查发现)：on_generate 必须以对话框返回值为准，不能依赖『先写盘再读回』——
-    写盘失败/测试环境下设置不落盘，老逻辑会静默用错选项。
-    对话框取消勾选 owner/汇总 → 产物里就不能有。"""
-    from PySide6 import QtCore, QtWidgets
-    gui, w = _make_gui(tmp_path_factory, "gui_gen_e2e")
-    # 磁盘设置(默认 True) 与对话框返回值(False) 故意相反
-    monkeypatch.setattr(gui, "SETTINGS_PATH", str(tmp_path / "no_settings.json"))
-    out_sv = tmp_path / "out.sv"
-    monkeypatch.setattr(w, "_ask_export_options",
-                        lambda title: {"scope": "all", "comments": False,
-                                       "owner_in_msg": False, "sv_summary": False})
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
-                        lambda *a, **k: (str(out_sv), "SystemVerilog (*.sv)"))
-    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *a, **k: 0)
-    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
-                        lambda *a, **k: QtWidgets.QMessageBox.Ok)
-    row = next(r for r in range(w.table.rowCount())
-               if w._sig_of_row(r).out_base == "d_en_refbuf")
-    w.table.item(row, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
-    w.on_generate()
-    text = out_sv.read_text(encoding="utf-8")
-    assert "assert (`ENV_RF.d_en_refbuf_ls==" in text    # 正常生成
-    assert "owner" not in text                           # 对话框取消了 owner → 没有
-    assert "dreg_rf_test" not in text                    # 对话框取消了汇总 → 无包裹/计数器
+def test_sv_options_on_put_owner_in_message_and_summary_block(wb):
+    """两个开关都开 → owner 追加在消息尾部 + 末尾命名汇总块（与上一条同一份表，结果必须不同）。
 
-
-def test_gui_preview_reflects_options(tmp_path_factory, monkeypatch, tmp_path):
-    """预览=导出(所见即所得)：默认设置下整体预览含 owner 尾巴 + 汇总包裹。"""
-    from PySide6 import QtCore
-    gui, w = _make_gui(tmp_path_factory, "gui_prev")
-    monkeypatch.setattr(gui, "SETTINGS_PATH", str(tmp_path / "no_settings.json"))
-    row = next(r for r in range(w.table.rowCount())
-               if w._sig_of_row(r).out_base == "d_en_refbuf")
-    w.table.item(row, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
-    w.on_preview(switch_tab=False)
-    text = w.preview.toPlainText()
+    原 `test_gui_preview_reflects_options`（预览=导出，所见即所得）。
+    """
+    off = _sv(wb, owner_in_msg=False, sv_summary=False)
+    text = _sv(wb, owner_in_msg=True, sv_summary=True)
     assert "owner:%s" in text and '"Alice"' in text
     assert "begin : dreg_rf_test" in text
+    assert text != off
 
 
-def test_gui_signal_preview_owner_no_counters(tmp_path_factory, monkeypatch, tmp_path):
-    """单信号预览带 owner(跟随导出设置)；但不含计数器(片段没有声明包裹，显示了反而困惑)。"""
-    gui, w = _make_gui(tmp_path_factory, "gui_ti_owner")
-    monkeypatch.setattr(gui, "SETTINGS_PATH", str(tmp_path / "no_settings.json"))
-    sig = next(s for s in w.signals if s.out_base == "d_en_refbuf")
-    w._load_test_items(sig)
-    w.on_ti_preview_signal(switch_tab=False)
-    text = w.preview.toPlainText()
+def test_single_signal_sv_has_owner_but_no_counters(wb):
+    """单信号片段：带 owner（跟随导出设置），但不含计数器——片段没有声明包裹，显示了反而困惑。
+
+    原 `test_gui_signal_preview_owner_no_counters`（起 v1 窗点『预览本信号.sv』）。
+    """
+    text = _sv(wb, owner_in_msg=True, sv_summary=False)
     assert "owner:%s" in text and '"Alice"' in text
     assert "dreg_n_" not in text

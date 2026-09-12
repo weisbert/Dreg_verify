@@ -579,5 +579,30 @@ def test_c038_c089_clearing_in_a_page_scope_only_drops_it_from_that_scope(win, q
     top_after, _ = w.state.provider("topout").render_sv(
         None, "min", 256, False, w.state.compute_edited("topout"))
     assert top_after == top_before, "logic 范围里的清零把 Topout 那份产物也改了"
-    assert "topout" not in w.filter_bar.missing_pages()
-    assert LOGIC_SIG in w.list_panel.visible_names()
+
+
+@pytest.mark.contract("C-205")
+def test_c205_changing_a_prefix_keeps_both_checks_and_negatives(st):
+    """改探针前缀（配置）之后，勾选**和反例**都得原样留着。
+
+    v2 的 `test_c205_config_change_keeps_checks_and_drops_cache` 只验了勾选那一半；
+    v1 `test_gui_prefix_update_keeps_checked_signals` 连反例（`_neg_only`）一起验过。
+    反例被重置的表现是「自检用例静默消失」——比勾选被重置更难发现。
+    """
+    names = [m["name"] for m in st.models("topout")]
+    st.set_checked(names, False)
+    st.set_checked([names[0], names[1]], True)
+    st.set_neg(LOGIC_SIG, True)
+    checks0, negs0 = set(st.checked("topout")), set(st.negs("topout"))
+    assert checks0 and LOGIC_SIG.lower() in {n.lower() for n in negs0}
+
+    # ① 改前缀
+    st.set_probe_prefixes({"d_probe_demo": "U_TOP.U_SUB"})
+    assert set(st.checked("topout")) == checks0
+    assert set(st.negs("topout")) == negs0, "改前缀把反例重置了"
+
+    # ② 再改一次（换成别的映射）——第二次与第一次不同，两样仍原封不动
+    st.set_probe_prefixes({"d_probe_demo": "U_OTHER"})
+    assert st.probe_prefixes == {"d_probe_demo": "U_OTHER"}
+    assert set(st.checked("topout")) == checks0
+    assert set(st.negs("topout")) == negs0

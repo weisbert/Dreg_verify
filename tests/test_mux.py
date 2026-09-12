@@ -591,107 +591,123 @@ def test_cli_no_mux_sheet_unchanged(tmp_path):
     assert "assert_mux" not in out.read_text(encoding="utf-8")
 
 
-# ───────────── ⑦ GUI（离屏冒烟）─────────────
-@pytest.fixture(scope="module")
-def gui_app():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    yield app
+# ───── ⑦ mux 在门面上的可见结果（C5-b：原「起个 v1 窗看结果」的 5 条 → 1 删 + 4 条 Qt-free）─────
+# 原来这几条起一台 v1 `MainWindow`，点 mux 行再读 `ti_table` / `ti_inputs` 的单元格文字。
+# 断言的是引擎与 Qt-free 层的输出：mux 组的标号/表达式/状态、case 表的列数与行数、
+# 输入表的角色 / case 字母 / 驱动串、三档覆盖度的列数递增、勾选 + 反例进 build。
+# 全部改成直接问 `providers.PageProvider` / `inputs_table.input_rows` / `generator.build`。
+# 界面那一层由 v2 各自的契约测试守：
+#   清单列（分类 / 断言号 / 状态）—— `tests/test_ui_signal_list.py::test_c012_kind_column_labels` 等；
+#   mux 输入表角色 / case 收拢 / 驱动串 —— `tests/test_ui_side_panel.py::test_c060_…` / `test_c061_…` / `test_c057_…`；
+#   mux 真值表语义（加列 / 复制 / 删列 / 清零 / 重生成 / 改名 / 反例）—— `tests/test_ui_truth_model.py::test_c115_to_c123_mux_semantics`；
+#   覆盖度三档 —— `tests/test_ui_coverage.py::test_c142_c143_global_and_maxt_persist_per_view`。
+# 被删的那条是 `test_gui_mux_test_items_readonly`：「mux 在编辑器里只读」是**旧门面**独有的
+# 限制（C-252），v2 的 mux 明确可编辑（C-115…C-123），留着就是在守一条已经退役的行为。
+
+
+class _MuxCfg(object):
+    """`ConfigSourceProto` 的最小实现（与 `tests/test_providers.py::_Cfg` 同一份形状）。"""
+
+    def __init__(self, wb):
+        self.wb = wb
+        self.probe_prefixes = {}
+        self.force_signals = set()
+        self.logic_overrides = {}
+        self.include_risky = True
 
 
 @pytest.fixture()
-def gui_win(gui_app, tmp_path):
-    from dreg_verify import legacy_gui as G
+def mux_wb(tmp_path):
     excel = tmp_path / "gui_mux.xlsx"
     fixtures.build_workbook(str(excel), with_mux=True)
-    w = G.MainWindow()
-    w.path_edit.setText(str(excel))
-    w.on_load()
-    yield w
-    w.close()
+    return excel_model.load_workbook(str(excel))
 
 
-def test_gui_mux_in_signal_table(gui_win):
-    """mux 信号混排进信号表：type=mux、R 列=mux<N>、表达式列=case 文本、状态=可验证。"""
-    w = gui_win
-    assert len(w.signals) == 5                            # 3 logic + 2 mux
-    mux_rows = [i for i, s in enumerate(w.signals)
-                if getattr(s, "suffix", "") == "mux"]
-    assert len(mux_rows) == 2
-    grp = w.signals[mux_rows[0]]
+def _mux_provider(wb):
+    from dreg_verify import providers as PV
+    return PV.PageProvider(_MuxCfg(wb), "mux")
+
+
+def test_mux_groups_carry_assert_id_expr_and_ok_status(mux_wb):
+    """mux 组与 logic 行混排进同一份清单：标号 mux<N>、表达式是 case 文本、状态可建。
+
+    原 `test_gui_mux_in_signal_table`（起 v1 窗读 `w.signals` / `w._analysis`）。
+    """
+    wb = mux_wb
+    assert len(wb.logic) + len(wb.mux) == 5                 # 3 logic + 2 mux
+    assert len(wb.mux) == 2
+    grp = wb.mux[0]
+    assert getattr(grp, "suffix", "") == "mux"
     assert grp.assert_id == "mux1"
     assert "case(" in grp.expr
-    # 状态分析: mux 组应为 clean（fixture 数据完整可解析）
-    assert w._analysis[mux_rows[0]]["status"] == "clean"
+    models = _mux_provider(wb).view_models("min", 64, False)
+    assert [m["status"] for m in models] == ["ok"] * len(wb.mux)   # 夹具数据完整 → 全可建
 
 
-def test_gui_mux_test_items_readonly(gui_win):
-    """点击 mux 信号 → case 表（_ti_sig=None 屏蔽列编辑按钮，_ti_mux_sig 记录当前 mux；
-    输入行只读，期望行可手填——见 test_designer_expected.py 的 mux 专项测试）。"""
-    w = gui_win
-    grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
-    w._load_test_items(grp)
-    assert w._ti_sig is None                              # 编辑路径安全屏蔽
-    assert w._ti_mux_sig is grp
-    assert w.ti_table.columnCount() == 4                  # 3 case(min) + 1 local 路径
-    assert w.ti_table.rowCount() == 8                     # 3 控制输入 + 3 数据寄存器 + auto_out + 期望
-    assert "mux" in w.ti_header.text()
+def test_mux_input_rows_split_roles_case_letters_and_drives(mux_wb):
+    """⭐用户问题回归：点 mux 信号后『输入信号』表不该空白——控制输入 + 数据寄存器都列出来。
 
-
-def test_gui_mux_inputs_box_populated(gui_win):
-    """⭐ 用户问题回归: 点 mux 信号后『输入信号』表不再空白——控制输入+数据寄存器都列出来。"""
-    w = gui_win
-    grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
-    w._load_test_items(grp)
-    # 3 控制行输入(c:A/c:B/c:C) + 3 数据寄存器(d:0/d:1/d:2) = 6 行
-    assert w.ti_inputs.rowCount() == 6
-    roles = [w.ti_inputs.item(r, 2).text() for r in range(6)]
-    # 控制输入细分 line/local/模式位；数据寄存器标"被该 case 选中"
+    控制输入按三来源细分（模式位 / line 路径 / local 路径）；数据寄存器的字母列写
+    「被哪个 case 选中」（不是 d:0 这种内部键）；驱动列 RF_WRITE 与 force 各自出现。
+    原 `test_gui_mux_inputs_box_populated`（起 v1 窗读 `ti_inputs` 的四列）。
+    """
+    from dreg_verify import inputs_table as IT
+    prov = _mux_provider(mux_wb)
+    name = prov.view_models("min", 64, False)[0]["name"]
+    an = prov.analyze(name, "min", 64, False)
+    rows = IT.input_rows(an)
+    assert len(rows) == 6                                   # 3 控制输入 + 3 数据寄存器
+    roles = [r["role"] for r in rows]
     assert any("line路径" in x for x in roles)
     assert any("local路径" in x for x in roles)
     assert sum(1 for x in roles if "数据寄存器" in x) == 3
-    # 数据寄存器的『字母』列显示对应的 case 值（不是 d:0 这种内部键）
-    letters = [w.ti_inputs.item(r, 0).text() for r in range(6)]
+    letters = [r["letter"] for r in rows]
     assert "case 3'b010" in letters and "case 3'b10x" in letters
-    # 驱动列：数据寄存器 = RF_WRITE，line 线控 = force
-    drives = [w.ti_inputs.item(r, 4).text() for r in range(6)]
+    drives = [r["drive"] for r in rows]
     assert any(x.startswith("RF_WRITE") for x in drives)
     assert any(x.startswith("force ENV_RF") for x in drives)
+    # 真值表行数 = 输入行 + auto_out + 期望（旧门面 `ti_table.rowCount()==8` 的那一句）
+    assert len(rows) + 2 == 8
 
 
-def test_gui_mux_coverage_levels_differ(gui_win):
-    """⭐ 用户问题回归: GUI 覆盖度三档下 mux 测试列数必须递增（精简<全面<穷举）。"""
-    w = gui_win
-    grp = next(s for s in w.signals if getattr(s, "suffix", "") == "mux")
+def test_mux_coverage_levels_increase_monotonically(mux_wb):
+    """⭐用户问题回归：三档覆盖度下 mux 的测试列数必须递增（精简 < 全面 < 穷举）。
+
+    原 `test_gui_mux_coverage_levels_differ`（起 v1 窗切 `coverage_mux` 再数 `ti_table` 列）。
+    """
+    prov = _mux_provider(mux_wb)
+    name = prov.view_models("min", 64, False)[0]["name"]
     counts = {}
-    for level in ("精简", "全面", "穷举"):
-        w.coverage_mux.setCurrentText(level)              # mux 侧档位（第二十二轮起与 logic 解耦）
-        w._load_test_items(grp)
-        counts[level] = w.ti_table.columnCount()
+    for label, (mode, maxt, exh) in (("精简", ("min", 64, False)),
+                                     ("全面", ("max", 256, False)),
+                                     ("穷举", ("max", 100000, True))):
+        an = prov.analyze(name, mode, maxt, exh)
+        counts[label] = len(an["vectors"])
     assert counts["精简"] < counts["全面"] < counts["穷举"], "三档必须递增: %s" % counts
-    # 表头标明当前档位生成内容
-    assert "覆盖度=穷举" in w.ti_header.text()
-    w.coverage_mux.setCurrentText("精简")                 # 还原默认，不影响其它用例
 
 
-def test_gui_mux_generate(gui_win, tmp_path):
-    """GUI 勾选 mux 信号 → build 产出 mux 块（名字匹配路径）+ 负向勾选经 neg_signals 生效。"""
-    w = gui_win
-    from PySide6 import QtCore
-    G_COL_SEL, G_COL_NEG = 0, 1
-    # 勾选全部行（含 mux）+ 给 mux 行勾负向
-    for r in range(w.table.rowCount()):
-        w.table.item(r, G_COL_SEL).setCheckState(QtCore.Qt.Checked)
-        sig = w._sig_of_row(r)
-        if getattr(sig, "suffix", "") == "mux":
-            w.table.item(r, G_COL_NEG).setCheckState(QtCore.Qt.Checked)
-    sel = w._collect()
+def test_mux_selection_and_negatives_reach_build(mux_wb):
+    """勾选（含 mux 行）→ build 产出 mux 块；反例勾选经 `neg_signals` 每组各追一条 _NEG。
+
+    原 `test_gui_mux_generate`（起 v1 窗逐行点勾选框再 `w._opts(sel)`）。
+    界面上「勾选 / 反例两列真写回 state」由
+    `tests/test_ui_signal_list.py::test_c022_c023_check_and_neg_columns_write_state` 守。
+    """
+    wb = mux_wb
+    sel = [s.out_name for s in list(wb.logic) + list(wb.mux)]
     assert len(sel) == 5
-    assert len(w._mux_neg_checked()) == 2                 # 两个 mux 都勾了负向
-    res = generator.build(w.wb, w._opts(sel))
+    mux_names = [m.out_name for m in wb.mux]
+    assert len(mux_names) == 2
+
+    # ① 不勾反例：产出 2 个 mux 块、一条 _NEG 都没有
+    base = generator.build(wb, generator.GenOptions(signals=sel, top_output_only=False))
+    assert base["summary"]["n_mux_generated"] == 2
+    assert "_NEG:" not in generator.render(base)
+
+    # ② 两个 mux 都勾反例（第二次，与第一次不同）→ 每组各追一条 _NEG
+    res = generator.build(wb, generator.GenOptions(signals=sel, neg_signals=mux_names,
+                                                   top_output_only=False))
     assert res["summary"]["n_mux_generated"] == 2
-    # mux 负向真的生效（每组追加 1 条 _NEG）
+    assert res["summary"]["n_negative"] == 2
     text = generator.render(res)
     assert "assert_mux1_T4_NEG:" in text

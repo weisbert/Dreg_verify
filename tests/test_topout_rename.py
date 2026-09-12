@@ -383,28 +383,43 @@ def test_dft_fanout_post_gate_consumer_is_gated(fanout_path):
     assert _iddq_evidence(res) == (True, True, 1)
 
 
-def test_renamed_signal_gui_edit_threads_to_export(renamed_path, monkeypatch):
-    """GUI 编辑改名信号 → 走 reg 路按顶层名键回流（否则编辑落源名键被改名路忽略=静默不生效）。"""
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    from dreg_verify import legacy_gui as G
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    monkeypatch.setattr(QtWidgets.QMessageBox, "question",       # 「清零」确认框答"是"
-                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
-    w = G.MainWindow(); w.path_edit.setText(renamed_path); w.on_load()
-    try:
-        v = w.topout_view
-        r = next(i for i in range(v.sig_table.rowCount())
-                 if v.sig_table.item(i, G.TOPO_NAME).text() == "a_top")
-        v.sig_table.setCurrentCell(r, G.TOPO_NAME)
-        assert v.cur_an["renamed"] is True and v.cur_an["editable"] == "logic"
-        base, _ = v.provider.render_sv(None, "max", 32, False, {})
-        assert "`ENV_RF.a_top==" in base
-        v._e_clear()                                 # 清零改名信号
-        text, _ = v.provider.render_sv(None, "max", 32, False, v._compute_edited())
-        assert "`ENV_RF.a_top==" not in text         # 编辑生效：断言消失
-        assert "用户已清空" in text                   # 记账(不静默丢)
-    finally:
-        w.close()
+class _Cfg(object):
+    """`ConfigSourceProto` 的最小实现（与 `tests/test_providers.py::_Cfg` 同一份形状）。"""
+
+    def __init__(self, wb):
+        self.wb = wb
+        self.probe_prefixes = {}
+        self.force_signals = set()
+        self.logic_overrides = {}
+        self.include_risky = True
+
+
+def test_renamed_signal_edit_threads_to_export(renamed_path):
+    """改名信号的编辑按**顶层名**键回流（落源名键会被改名路忽略 = 静默不生效）。
+
+    原 `test_renamed_signal_gui_edit_threads_to_export` 起一台 v1 `MainWindow` 点清零按钮；
+    断言的是「编辑记录 → provider.render_sv」这一跳，和窗口无关，改成直接问 Qt-free 层：
+    `providers.TopoutProvider` + `edits.compute_edited`（= v2 `state.compute_edited` 调的那一个）。
+    「点清零按钮真的把列清空」在 v2 由
+    `tests/test_ui_truth_panel.py::test_c089_c094_clear_and_auto_fill_apply_when_confirmed` 守。
+    """
+    from dreg_verify import edits as ED
+    from dreg_verify import providers as PV
+
+    wb = M.load_workbook(renamed_path)
+    prov = PV.TopoutProvider(_Cfg(wb))
+    an = prov.analyze("a_top", "max", 32, False)
+    assert an is not None and an["renamed"] is True and an["editable"] == "logic"
+
+    base, _ = prov.render_sv(None, "max", 32, False, {})
+    assert "`ENV_RF.a_top==" in base
+
+    # 清零 = 该信号零用例（cols 空）——编辑桶按【顶层名】键
+    bucket = {"a_top": {"kind": an["kind"], "src_out_name": an["src_out_name"],
+                        "name": an["name"], "renamed": an["renamed"], "cols": [], "an": an}}
+    edited = ED.compute_edited(bucket, {})
+    assert edited["a_top"]["cleared"] is True
+    text, _ = prov.render_sv(None, "max", 32, False, edited)
+    assert "`ENV_RF.a_top==" not in text         # 编辑生效：断言消失
+    assert "用户已清空" in text                   # 记账（不静默丢）
+    assert text != base

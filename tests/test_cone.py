@@ -682,256 +682,156 @@ def test_probe_prefix_analyze_signal(wb, resolver):
     assert a["status"] == "clean"
 
 
-# ───────────── GUI 冒烟（离屏） ─────────────
-def test_gui_cone_signal_editor(tmp_path_factory):
-    """GUI 点 pll_n → 测试项编辑器显示 6 个叶子寄存器列；状态=clean；生成不抛异常。"""
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import legacy_gui as gui
-    path = tmp_path_factory.mktemp("gui_cone") / "synthetic_pll.xlsx"
-    fixtures.build_workbook(str(path), with_pll_chain=True)
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path)); w.on_load()
-    sig = next(s for s in w.signals if s.out_base == "pll_n")
-    w._load_test_items(sig)
-    # 输入分组 = 6 个叶子寄存器（不是 pll_n2 切片）
-    bases = {g["base"].lower() for g in w._ti_groups}
-    assert bases == {"int_n", "frac_n_msb", "frac_n_lsb",
-                     "d_xo_freq_sel", "en_dig_clk_div2", "en_dig_clk_div4"}
-    # 状态列：cone 展开后输入全部可驱动 → clean
-    row = next(r for r in range(w.table.rowCount()) if w._sig_of_row(r).out_base == "pll_n")
-    assert w._analysis[row]["status"] == "clean"
-    assert w._analysis[row]["cone"] is True
-    # 全选导出（全部范围）能产出 pll_n 的块
-    res = generator.build(w.wb, w._opts(["pll_n"]))
-    assert res["summary"]["n_generated"] == 1 and res["summary"]["n_skipped"] == 0
+# ───────────── cone 展开的可见结果（C5-b：原「起个 v1 窗看结果」的 4 条改成 Qt-free）─────────────
+# 这 4 条原来是起一台 v1 `MainWindow`、点开测试项编辑器再读控件文字（`_ti_groups` /
+# `ti_inputs` / `ti_chain` / `preview`）。断言的其实全是**引擎的输出**——cone 展开的叶子分组、
+# Excel 来源坐标、展开链、探针前缀进 out_net 与 .sv。改成直接问引擎（`generator.expand_signal`
+# / `vectors.input_groups` / `generator.analyze_signal` / `generator.build`），不起窗，
+# 同一句断言在 v1 退役后依然成立。界面上怎么画那一层由 v2 的
+# `tests/test_ui_side_panel.py`（C-050/C-056/C-057）与 `tests/test_ui_signal_list.py`
+# （C-017…C-020）各自守着。
 
 
-def test_gui_cone_inputs_table_shows_excel_sources(tmp_path_factory):
-    """⭐GUI 显示回归(2026-06-03 用户报告)：cone 信号的『输入信号』表字母列 = Excel 来源坐标。
-
-    修复前：字母列显示大写基名(INT_N/EN_DIG_CLK_DIV4…)，与信号列重复、对不回 Excel；
-    修复后：根行直接输入=列字母(E)；上游行叶子="行名.字母"(pll_n1.A)；头部带展开标记。
-    非 cone 信号(d_pfd_en_lnmode)仍显示 A/B/C… 不变。"""
-    gui, w = _pll_window(tmp_path_factory, "gui_cone_sources")
-    # ── cone 信号 pll_n ──
-    sig = next(s for s in w.signals if s.out_base == "pll_n")
-    w._load_test_items(sig)
-    ti = w.ti_inputs
-    letter_by_signal = {ti.item(r, 1).text(): ti.item(r, 0).text() for r in range(ti.rowCount())}
-    assert letter_by_signal["int_n[8:0]"] == "pll_n1.A"
-    assert letter_by_signal["en_dig_clk_div4"] == "E"
-    assert letter_by_signal["en_dig_clk_div2"] == "pll_n2.E"
-    assert letter_by_signal["frac_n_lsb[15:0]"] == "pll_n1.C,pll_n1.D"
-    # 大写基名(修复前的显示)不再出现在字母列
-    assert "INT_N" not in letter_by_signal.values()
-    assert "EN_DIG_CLK_DIV4" not in letter_by_signal.values()
-    # 真值表行表头 = 信号名(2026-06-03 用户拍板：不用字母/坐标)——cone 信号即叶子寄存器名；
-    # Excel 来源坐标(pll_n1.A)仍在『输入信号』表字母列与行表头 tooltip 里
-    headers = [w.ti_table.verticalHeaderItem(i).text() for i in range(len(w._ti_groups))]
-    assert any(h.startswith("int_n") for h in headers)        # 叶子寄存器名(小写、带位宽)
-    assert not any(h.startswith("INT_N") for h in headers)    # 不是大写变量基名(修复前的显示)
-    tips = [w.ti_table.verticalHeaderItem(i).toolTip() for i in range(len(w._ti_groups))]
-    assert any("pll_n1.A" in t for t in tips)                 # 来源坐标在 tooltip
-    # 头部带"已展开上游"标记，提示字母列为什么不是本行 A/B/C
-    assert "已展开上游" in w.ti_header.text()
-    # ── 非 cone 信号对照：显示不变、无展开标记 ──
-    sig2 = next(s for s in w.signals if s.out_base == "d_pfd_en_lnmode")
-    w._load_test_items(sig2)
-    letters = {w.ti_inputs.item(r, 0).text() for r in range(w.ti_inputs.rowCount())}
-    assert letters >= {"A", "B", "C"}
-    assert "已展开上游" not in w.ti_header.text()
-
-
-def test_gui_cone_chain_panel(tmp_path_factory):
-    """⭐『展开链』面板(2026-06-03 用户功能)：cone 信号显示展开过程，非 cone/mux 隐藏。
-
-    每个链节两行：『① 行名 = Excel 原式』+『(对齐) = 字母代入真实信号名』。"""
-    gui, w = _pll_window(tmp_path_factory, "gui_chain")
-    # ── cone 信号 pll_n：面板可见，链=本行→pll_n2→pll_n1 ──
-    sig = next(s for s in w.signals if s.out_base == "pll_n")
-    w._load_test_items(sig)
-    # 用 isHidden()（widget 自身 show/hide 状态，由 _populate_chain 显式设）而非 isVisibleTo(w)：
-    # 2026-06-23 重构后旧视图住『排查(旧)』分页（非默认 tab），isVisibleTo 会被外层 tab 连累；
-    # isHidden() 直接验 _populate_chain 的 show/hide 逻辑，与外层 tab 无关（更精准、不弱化）。
-    assert not w.ti_chain.isHidden() and not w.ti_chain_cap.isHidden()
-    text = w.ti_chain.toPlainText()
-    lines = text.splitlines()
-    assert len(lines) == 6                                   # 3 链节 × (原式+代入) 2 行
-    assert lines[0] == "① pll_n = E?{B,C,D,1'b0}:{A,B,C,D}"  # Excel 原式
-    assert lines[1].lstrip().startswith("= en_dig_clk_div4?{pll_n2[30:23]")   # 代入信号名
-    assert lines[2].startswith("② pll_n2 = ")
-    assert lines[4].startswith("③ pll_n1 = ")
-    assert "d_xo_freq_sel?{1'b0,int_n[8:0]" in lines[5]
-    # 链数据与 _ti_chain 一致
-    assert [c["out"] for c in w._ti_chain] == ["pll_n", "pll_n2", "pll_n1"]
-    # ── 非 cone 信号：面板隐藏 ──
-    sig2 = next(s for s in w.signals if s.out_base == "d_pfd_en_lnmode")
-    w._load_test_items(sig2)
-    assert w.ti_chain.isHidden() and w.ti_chain_cap.isHidden()
-    # ── 再切回 cone 信号：面板恢复显示(状态切换无残留) ──
-    w._load_test_items(sig)
-    assert not w.ti_chain.isHidden()
-
-
-def test_gui_probe_prefix_flows_to_sv(tmp_path_factory):
-    """GUI 设置探针前缀 → 状态列 out_net 带前缀 → 生成的 .sv 探针带前缀 → 持久化结构正确。"""
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import legacy_gui as gui
-    path = tmp_path_factory.mktemp("gui_pfx") / "synthetic_pll.xlsx"
-    fixtures.build_workbook(str(path), with_pll_chain=True)
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path)); w.on_load()
-    sig = next(s for s in w.signals if s.out_base == "pll_n")
-    idx = w.signals.index(sig)
-    # 模拟『设置探针前缀』(绕过输入对话框直接走数据路径)
-    w._probe_prefixes[sig.out_name.lower()] = "U_BT_LP_PLL_DIG"
-    w._analysis[idx] = gui.generator.analyze_signal(w._resolver, sig, wb=w.wb,
-                                                    probe_prefix=w._prefix_of(sig))
-    w._populate_table()
-    assert w._analysis[idx]["out_net"].startswith("`ENV_RF.U_BT_LP_PLL_DIG.")
-    # 前缀列显示（输出前缀 → 带"输出→"标识）
-    row = next(r for r in range(w.table.rowCount()) if w._sig_of_row(r).out_base == "pll_n")
-    assert w.table.item(row, gui.COL_PREFIX).text() == "输出→U_BT_LP_PLL_DIG"
-    # 生成走 _opts → .sv 探针带前缀
-    res = generator.build(w.wb, w._opts(["pll_n"]))
-    text = generator.render(res)
-    assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in text
-
-
-def _pll_window(tmp_path_factory, sub):
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import legacy_gui as gui
+def _pll_wb(tmp_path_factory, sub):
+    """cone 三层链夹具（pll_n ← pll_n2 ← pll_n1）—— Qt-free，不起窗。"""
     path = tmp_path_factory.mktemp(sub) / "synthetic_pll.xlsx"
     fixtures.build_workbook(str(path), with_pll_chain=True)
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path)); w.on_load()
-    return gui, w
+    wb2 = excel_model.load_workbook(str(path))
+    return wb2, R.Resolver(wb2)
 
 
-def test_gui_search_by_input_signal(tmp_path_factory):
-    """按输入信号搜索：搜 mon_active → 只列出用它做输入的输出信号(d_pfd_en_lnmode)。"""
-    gui, w = _pll_window(tmp_path_factory, "gui_search")
-    w.name_edit.setText("mon_active")
-    visible = [w._sig_of_row(r).out_name for r in range(w.table.rowCount())
-               if not w.table.isRowHidden(r)]
-    assert visible == ["d_pfd_en_lnmode"]
-    # 输入名正则同样支持
-    w.name_edit.setText("^mon_act.*e$")
-    visible = [w._sig_of_row(r).out_name for r in range(w.table.rowCount())
-               if not w.table.isRowHidden(r)]
-    assert visible == ["d_pfd_en_lnmode"]
-    # 清空搜索 → 全部显示
-    w.name_edit.setText("")
-    assert all(not w.table.isRowHidden(r) for r in range(w.table.rowCount()))
+def _expand(wb2, res, base):
+    """(node, bindings, groups, chain) —— 与旧门面 `MainWindow._expand_sig` 同一条路。"""
+    sig = next(s for s in wb2.logic if s.out_base == base)
+    chain = []
+    node, bindings, _exp = generator.expand_signal(wb2, res, sig, chain_out=chain)
+    return sig, node, bindings, V.input_groups(node, bindings), chain
 
 
-def test_gui_prefix_column_shows_input_effect(tmp_path_factory):
-    """输入信号配置前缀后，『探针前缀』列显示 mon_active→U_BT_LP_PLL_DIG（蓝色）。"""
-    gui, w = _pll_window(tmp_path_factory, "gui_pfxcol")
-    # 配置输入前缀 + 输出前缀
-    w._probe_prefixes = {"mon_active": "U_BT_LP_PLL_DIG", "pll_n": "U_BT_LP_PLL_DIG"}
-    w._reanalyze_all()
-    # d_pfd_en_lnmode：输入 mon_active 受影响
-    row = next(r for r in range(w.table.rowCount())
-               if w._sig_of_row(r).out_base == "d_pfd_en_lnmode")
-    cell = w.table.item(row, gui.COL_PREFIX)
-    assert "mon_active→U_BT_LP_PLL_DIG" in cell.text()
-    assert "U_BT_LP_PLL_DIG.mon_active" in cell.toolTip()   # 完整 force 路径
-    # pll_n：输出受影响
-    row2 = next(r for r in range(w.table.rowCount())
-                if w._sig_of_row(r).out_base == "pll_n")
-    assert "输出→U_BT_LP_PLL_DIG" in w.table.item(row2, gui.COL_PREFIX).text()
-    # 不相关的信号前缀列为空
-    row3 = next(r for r in range(w.table.rowCount())
-                if w._sig_of_row(r).out_base == "d_logic_bt_lp_reserve")
-    assert w.table.item(row3, gui.COL_PREFIX).text() == ""
+def test_cone_leaf_groups_status_and_build(tmp_path_factory):
+    """cone 信号 pll_n 的输入分组 = 6 个**叶子寄存器**（不是 pll_n2 切片）；状态 clean；能出块。
+
+    原 `test_gui_cone_signal_editor`（起 v1 窗读 `_ti_groups` / `_analysis[row]`）。
+    """
+    wb2, res = _pll_wb(tmp_path_factory, "cone_editor")
+    sig, _node, _b, groups, chain = _expand(wb2, res, "pll_n")
+    bases = {g["base"].lower() for g in groups}
+    assert bases == {"int_n", "frac_n_msb", "frac_n_lsb",
+                     "d_xo_freq_sel", "en_dig_clk_div2", "en_dig_clk_div4"}
+    # 状态：cone 展开后输入全部可驱动 → clean，且确实做过展开
+    a = generator.analyze_signal(res, sig, wb=wb2)
+    assert a["status"] == "clean"
+    assert bool(chain) is True
+    # 全选导出（全部范围）能产出 pll_n 的块
+    res2 = generator.build(wb2, generator.GenOptions(signals=["pll_n"], top_output_only=False))
+    assert res2["summary"]["n_generated"] == 1 and res2["summary"]["n_skipped"] == 0
 
 
-def test_gui_prefix_update_keeps_checked_signals(tmp_path_factory):
-    """配置探针前缀(OK)后整表重建：用户已勾选的『选』/『负向』必须原样保留。"""
-    from PySide6 import QtCore
-    gui, w = _pll_window(tmp_path_factory, "gui_keep_checks")
-    row_pll = next(r for r in range(w.table.rowCount())
-                   if w._sig_of_row(r).out_base == "pll_n")
-    row_res = next(r for r in range(w.table.rowCount())
-                   if w._sig_of_row(r).out_base == "d_logic_bt_lp_reserve")
-    w.table.item(row_pll, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
-    w.table.item(row_res, gui.COL_NEG).setCheckState(QtCore.Qt.Checked)   # 同时触发负向定制
-    # 模拟『设置探针前缀』点 OK 后的数据路径
-    w._probe_prefixes = {"mon_active": "U_BT_LP_PLL_DIG"}
-    w._save_probe_prefixes()
-    w._reanalyze_all()
-    # 勾选保持（行可能因排序变化，按信号重新定位）
-    row_pll2 = next(r for r in range(w.table.rowCount())
-                    if w._sig_of_row(r).out_base == "pll_n")
-    row_res2 = next(r for r in range(w.table.rowCount())
-                    if w._sig_of_row(r).out_base == "d_logic_bt_lp_reserve")
-    assert w.table.item(row_pll2, gui.COL_SEL).checkState() == QtCore.Qt.Checked
-    assert w.table.item(row_res2, gui.COL_NEG).checkState() == QtCore.Qt.Checked
-    # 负向定制状态也未丢
-    assert "d_logic_bt_lp_reserve" in w._neg_only
+def test_cone_input_letters_are_excel_source_coordinates(tmp_path_factory):
+    """⭐显示回归（2026-06-03 用户报告）：cone 信号输入的**字母列** = Excel 来源坐标。
+
+    修复前字母列显示大写变量基名（INT_N / EN_DIG_CLK_DIV4…），与信号列重复、对不回 Excel；
+    修复后根行直接输入 = 列字母（E），上游行叶子 = 「行名.字母」（pll_n1.A）。
+    坐标由引擎的 `xl_letters` 给（`letters` 仍是变量名，供表达式代入用）——这里钉的就是
+    「界面该拿哪一个」：拿 `letters` 就是修复前那副样子。
+    原 `test_gui_cone_inputs_table_shows_excel_sources`（起 v1 窗读 `ti_inputs` 两列）。
+    """
+    wb2, res = _pll_wb(tmp_path_factory, "cone_sources")
+    _sig, _node, _b, groups, chain = _expand(wb2, res, "pll_n")
+    xl_by_label = {g["label"]: ",".join(g["xl_letters"]) for g in groups}
+    assert xl_by_label["int_n[8:0]"] == "pll_n1.A"
+    assert xl_by_label["en_dig_clk_div4"] == "E"
+    assert xl_by_label["en_dig_clk_div2"] == "pll_n2.E"
+    assert xl_by_label["frac_n_lsb[15:0]"] == "pll_n1.C,pll_n1.D"
+    # 大写变量基名（修复前的显示）不再是坐标
+    assert "INT_N" not in xl_by_label.values()
+    assert "EN_DIG_CLK_DIV4" not in xl_by_label.values()
+    # 行表头 = 信号名（2026-06-03 用户拍板：不用字母/坐标）—— cone 信号即叶子寄存器名（小写带位宽）
+    labels = [g["label"] for g in groups]
+    assert any(h.startswith("int_n") for h in labels)
+    assert not any(h.startswith("INT_N") for h in labels)
+    assert bool(chain), "『已展开上游』标记的判据就是 bool(chain)"
+    # ── 非 cone 信号对照：字母仍是本行 A/B/C，且没有展开链 ──
+    _s2, _n2, _b2, groups2, chain2 = _expand(wb2, res, "d_pfd_en_lnmode")
+    letters2 = {x for g in groups2 for x in g["xl_letters"]}
+    assert letters2 >= {"A", "B", "C"}
+    assert chain2 == []
 
 
-def test_gui_preview_refreshes_after_prefix_change(tmp_path_factory):
-    """回归(2026-06-02)：改探针前缀后，已打开的 .sv 预览必须自动按新前缀重算——
-    之前预览是旧快照，导致『导出有前缀、预览没有』的困惑。"""
-    from PySide6 import QtCore
-    gui, w = _pll_window(tmp_path_factory, "gui_preview_sync")
-    # 勾选 pll_n + 打开预览（此时无前缀）
-    row = next(r for r in range(w.table.rowCount()) if w._sig_of_row(r).out_base == "pll_n")
-    w.table.item(row, gui.COL_SEL).setCheckState(QtCore.Qt.Checked)
-    w.on_preview()
-    assert "`ENV_RF.pll_n[31:0]==" in w.preview.toPlainText()
-    # 配置前缀（模拟映射编辑器点 OK 的数据路径）→ 预览自动刷新为带前缀
-    w._probe_prefixes = {"pll_n": "U_BT_LP_PLL_DIG"}
-    w._save_probe_prefixes()
-    w._reanalyze_all()
-    assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in w.preview.toPlainText()
-    assert "`ENV_RF.pll_n[31:0]==" not in w.preview.toPlainText()
+def test_cone_chain_lists_each_layer_expr_and_substitution(tmp_path_factory):
+    """⭐『展开链』（2026-06-03 用户功能）：cone 信号逐层给『Excel 原式』+『代入真实信号名』。
+
+    原 `test_gui_cone_chain_panel`（起 v1 窗读 `ti_chain.toPlainText()` 的 6 行）；
+    界面上怎么排版（①②③ + 两行 + 页标签）由 v2 的
+    `tests/test_ui_side_panel.py::test_c050_chain_layers_have_marks_page_tags_and_two_lines` 守。
+    """
+    wb2, res = _pll_wb(tmp_path_factory, "cone_chain")
+    _sig, _node, _b, _g, chain = _expand(wb2, res, "pll_n")
+    assert [c["out"] for c in chain] == ["pll_n", "pll_n2", "pll_n1"]      # 3 链节
+    assert chain[0]["expr"] == "E?{B,C,D,1'b0}:{A,B,C,D}"                  # Excel 原式
+    assert chain[0]["subst"].startswith("en_dig_clk_div4?{pll_n2[30:23]")  # 代入信号名
+    assert chain[1]["out"] == "pll_n2" and chain[1]["expr"]
+    assert chain[2]["out"] == "pll_n1"
+    assert "d_xo_freq_sel?{1'b0,int_n[8:0]" in chain[2]["subst"]
+    # 非 cone 信号：一条链节都没有（面板据此隐藏）
+    _s2, _n2, _b2, _g2, chain2 = _expand(wb2, res, "d_pfd_en_lnmode")
+    assert chain2 == []
+    # 再问一次 cone 信号：链照旧（展开无残留状态）
+    _s3, _n3, _b3, _g3, chain3 = _expand(wb2, res, "pll_n")
+    assert [c["out"] for c in chain3] == ["pll_n", "pll_n2", "pll_n1"]
 
 
-def test_gui_single_signal_preview_has_prefix(tmp_path_factory):
-    """回归(2026-06-02)：编辑器『预览本信号.sv』漏传 probe_prefix/node → 单信号预览无前缀。"""
-    gui, w = _pll_window(tmp_path_factory, "gui_ti_preview")
-    w._probe_prefixes = {"pll_n": "U_BT_LP_PLL_DIG"}
-    w._reanalyze_all()
-    sig = next(s for s in w.signals if s.out_base == "pll_n")
-    w._load_test_items(sig)
-    w.on_ti_preview_signal()
-    text = w.preview.toPlainText()
-    assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in text
-    # cone 信号的驱动也要正常（RF_WRITE 不能因漏传 node 而缺失）
-    assert "`RF_WRITE(10'h1," in text
+def test_probe_prefix_reaches_out_net_and_sv(tmp_path_factory):
+    """探针前缀 → `analyze_signal` 的 out_net 带前缀 → 生成的 .sv 探针带前缀（驱动不受影响）。
+
+    原 `test_gui_probe_prefix_flows_to_sv` + `test_gui_single_signal_preview_has_prefix`
+    （两条都起 v1 窗，一条读状态列一条读预览框）。「前缀列怎么显示」在 v2 由
+    `tests/test_ui_signal_list.py::test_c017_c018_prefix_column_and_tooltip` 等四条守；
+    「改了前缀预览要重算」由 `tests/test_ui_sv_preview.py::test_c072_c132_dirty_on_edit_and_config` 守。
+    """
+    wb2, res = _pll_wb(tmp_path_factory, "cone_prefix_sv")
+    sig = next(s for s in wb2.logic if s.out_base == "pll_n")
+    # ① 没配前缀：探针裸名
+    a0 = generator.analyze_signal(res, sig, wb=wb2)
+    assert a0["out_net"] == "`ENV_RF.pll_n[31:0]"
+    text0 = generator.render(generator.build(
+        wb2, generator.GenOptions(signals=["pll_n"], top_output_only=False)))
+    assert "`ENV_RF.pll_n[31:0]==" in text0
+
+    # ② 配上前缀：out_net 与产物一起变（第二次与第一次不同）
+    a1 = generator.analyze_signal(res, sig, wb=wb2, probe_prefix="U_BT_LP_PLL_DIG")
+    assert a1["out_net"].startswith("`ENV_RF.U_BT_LP_PLL_DIG.")
+    text1 = generator.render(generator.build(wb2, generator.GenOptions(
+        signals=["pll_n"], top_output_only=False,
+        probe_prefixes={"pll_n": "U_BT_LP_PLL_DIG"})))
+    assert "`ENV_RF.U_BT_LP_PLL_DIG.pll_n[31:0]==" in text1
+    assert "`ENV_RF.pll_n[31:0]==" not in text1
+    # cone 信号的驱动照常（RF_WRITE 不能因为配了前缀就缺）
+    assert "`RF_WRITE(10'h1," in text1
 
 
-def test_gui_prefix_mapping_covers_input_wire(tmp_path_factory):
-    """GUI 映射编辑器数据路径：配置 mon_active 前缀 → _reanalyze_all → 信号变 clean，force 带前缀。"""
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import legacy_gui as gui
-    path = tmp_path_factory.mktemp("gui_wire_pfx") / "synthetic_pll.xlsx"
-    fixtures.build_workbook(str(path), with_pll_chain=True)
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path)); w.on_load()
-    sig = next(s for s in w.signals if s.out_base == "d_pfd_en_lnmode")
-    idx = w.signals.index(sig)
-    # 无前缀: mon_active wire 兜底 → 非 clean
-    assert w._analysis[idx]["status"] == "wire-fallback"
-    # 配置前缀并全表重析（与映射编辑器保存后路径一致）
-    w._probe_prefixes = {"mon_active": "U_BT_LP_PLL_DIG"}
-    w._reanalyze_all()
-    assert w._analysis[idx]["status"] == "clean"
-    nets = {i["base"]: i["net"] for i in w._analysis[idx]["inputs"]}
+def test_probe_prefix_on_input_wire_turns_status_clean(tmp_path_factory):
+    """配 mon_active 的前缀 → 该信号从 wire-fallback 变 clean，force 路径带前缀。
+
+    原 `test_gui_prefix_mapping_covers_input_wire`（起 v1 窗走 `_reanalyze_all`）。
+    """
+    wb2, res = _pll_wb(tmp_path_factory, "cone_wire_pfx")
+    sig = next(s for s in wb2.logic if s.out_base == "d_pfd_en_lnmode")
+    # ① 无前缀：mon_active 走 wire 兜底 → 非 clean
+    a0 = generator.analyze_signal(res, sig, wb=wb2)
+    assert a0["status"] == "wire-fallback"
+    assert not any("U_BT_LP_PLL_DIG" in (i["net"] or "") for i in a0["inputs"])
+
+    # ② 配上前缀（与旧门面 `_reanalyze_all` 同一条路：前缀进 Resolver 的 wire_prefixes）→ clean
+    pfx = {"mon_active": "U_BT_LP_PLL_DIG"}
+    res2 = R.Resolver(wb2, wire_prefixes=pfx)
+    a1 = generator.analyze_signal(res2, sig, wb=wb2)
+    assert a1["status"] == "clean"
+    nets = {i["base"]: i["net"] for i in a1["inputs"]}
     assert "U_BT_LP_PLL_DIG.mon_active" in nets["mon_active"]
-    # 导出路径同样生效
-    text = generator.render(generator.build(w.wb, w._opts([sig.out_name])))
+    # ③ 导出路径同样生效
+    text = generator.render(generator.build(wb2, generator.GenOptions(
+        signals=[sig.out_name], top_output_only=False, probe_prefixes=pfx)))
     assert "force `ENV_RF.U_BT_LP_PLL_DIG.mon_active=" in text
 
 
@@ -1119,21 +1019,3 @@ def test_cone_cycle_no_register_still_errors():
     wb2 = excel_model.DregWorkbook(logic=[s], regmap={}, tmm={}, sheet_names=[])
     with pytest.raises(cone.ConeError):
         generator.expand_signal(wb2, R.Resolver(wb2), s)
-
-
-def test_gui_force_signals_flows_to_resolver_and_opts(tmp_path_factory):
-    """GUI『强制 force 信号』：force_signals 流进 resolver.force_overrides 与 _opts(GenOptions)
-    （= 生成/.sv 路径都按 force 顶层基名处理；状态列与产物一致）。"""
-    pytest.importorskip("PySide6")
-    from PySide6 import QtWidgets
-    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import legacy_gui as gui
-    path = tmp_path_factory.mktemp("gui_force") / "synthetic_pll.xlsx"
-    fixtures.build_workbook(str(path), with_pll_chain=True)
-    w = gui.MainWindow()
-    w.path_edit.setText(str(path)); w.on_load()
-    assert "pll_n2" not in w._resolver.force_overrides       # 初始没有
-    w._force_signals = {"pll_n2"}
-    w._reanalyze_all()
-    assert "pll_n2" in w._resolver.force_overrides            # 流进 resolver（GUI 状态/分析）
-    assert "pll_n2" in w._opts(["pll_n"]).force_overrides     # 流进 GenOptions（build/预览/.sv）

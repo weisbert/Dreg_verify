@@ -159,12 +159,16 @@ def test_dup_label_text_lists_pairs_and_total():
     assert "R0  ←  a0 / b0" in t and "共 20 处" in t
 
 
-def test_skipped_detail_text_moved_but_wording_kept():
-    """老 gui._skipped_detail_text 搬进来：措辞不变（GUI 里仍按它给『怎么强制生成』的下一步）。"""
+def test_skipped_detail_text_wording_kept():
+    """老 gui._skipped_detail_text 搬进来：措辞不变（界面上仍按它给『怎么强制生成』的下一步）。
+
+    C5-b：原测试末尾还断言 `gui._skipped_detail_text is X.skipped_detail_text`（旧门面侧的
+    别名还在、老调用点不破）。那句只对**尚未退役的旧门面**有意义（C-252），退役日随
+    `legacy_gui.py` 一起消失，故随本次迁移去掉；措辞这一半原样留下，v2 侧读同一个函数
+    （`tests/test_ui_export_center.py::test_accounted_classifier_uses_exports_labels`）。
+    """
     t = X.skipped_detail_text([("d_x", "1", [("A", "d_leaf", "wire 兜底")])])
     assert "d_x" in t and "d_leaf" in t and "缺前缀强制生成" in t
-    from dreg_verify import legacy_gui as gui  # noqa: F401 —— gui 侧别名仍在（老调用点不破）
-    assert gui._skipped_detail_text is X.skipped_detail_text
 
 
 # ───────────── ④ .sv：outcome 计数 + 记账点名 ─────────────

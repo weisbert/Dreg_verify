@@ -657,113 +657,70 @@ def _tip_drives(tip):
 _FILL_ROLE = "控制(line 路径，未展开)"
 
 
+class _Cfg(object):
+    """`ConfigSourceProto` 的最小实现（与 `tests/test_providers.py::_Cfg` 同一份形状）。"""
+
+    def __init__(self, wb):
+        self.wb = wb
+        self.probe_prefixes = {}
+        self.force_signals = set()
+        self.logic_overrides = {}
+        self.include_risky = True
+
+
 @pytest.mark.parametrize("fixture_name,least,least_filled",
                          [("btlp_path", 9, 0), ("wl_path", 9, 1)])
-def test_legacy_inputs_table_equals_input_rows(gui_app, request, fixture_name, least,
-                                               least_filled):
-    """**等价性对照 · 输入信号表**：offscreen 起『排查(旧)』，对每个既在旧 logic/mux 表、
-    又在 Topout 清单里的信号，逐格比较三样东西：
+def test_input_rows_fill_missing_ctrl_keys_on_real_mirrors(request, fixture_name,
+                                                           least, least_filled):
+    """§7-4（C-060）在**真镜像表**上：`an["ctrl_keys_missing"]` 里的每个控制键，
+    `input_rows` 都殿后补且只补一行，角色写「控制(line 路径，未展开)」。
 
-      ① 『排查(旧)』真画出来的 `ti_inputs` 五列文本（走 `_expand_sig` 那条老路：
-         LogicSignal + bindings + groups / MuxGroup + exp，门由 GUI 的 resolver 现场解）；
-      ② 拿**旧对象**直接喂 `input_rows` 的结果；
-      ③ 拿 **Topout 的 an** 喂 `input_rows` 的结果。
-
-    ①==② 证明 gui 的委托没有画错；②==③ 才是真正要证的那句：**an 携带的信息足以复刻
-    旧门面的驱动明细**——两边的输入分组、绑定、mux 展开、门，全都对得上。
-    （逐格文本本身另有金标准单测钉死，见 test_input_rows_*_golden_cells。）
-
-    实测：两张镜像各 9 个信号（logic / mux / 带 iddq 门 / 上游 mux 级联都覆盖到），
-    **五列文本零差异**。以下是仍存在、但在镜像夹具上不显形的【允许差异】：
-
-    | # | 场景 | 『排查(旧)』 | `input_rows(an)` | 根因 |
-    |---|------|-------------|------------------|------|
-    | 1 | iddq 门解析不了 / 不是 RO | 照样出一行、驱动列标红『✗未解析』 | 不出这一行 | an 的门由 `generator.pin_dft_gate` 钉，它过滤掉解析不了/非 RO 的门 |
-    | 2 | iddq 门已是本信号的显式输入 | 重复出一行 | 只出显式输入那一行 | 同上，`pin_dft_gate` 带 `input_bases` 去重 |
-    | 3 | 断言探针名 | 带会话里配的层级前缀 | 不带前缀 | an 里没有 probe_prefix 字段（v2 待补） |
-    | 4 | 测试列数 | 旧编辑器的正向列 | 末尾多一条 iddq 漏电态拍 | Topout 流水线自动补 DFT 拍 |
-    | 5 | `used_vars` 里没人点到名的控制键 | **少一行**（真值表有、输入表没有） | 殿后补一行 | §7-4：`an["ctrl_keys_missing"]`（C-060）。WL 4 个级联 mux 各有一个备用载体 `m<N>.d:<i>` 落在这里；btlp 全空 |
-
-    1/2 只在门坏掉或与显式输入撞名时出现，镜像夹具两者都不触发，故本测试断言严格相等。
-    3/4 不影响输入信号表（只影响解析明细的探针行与列数），见下一个测试。
-    5 是**有意的补齐**（旧门面那一行是缺的，C-060 的 bug），所以只把这几行摘出来单比，
-      其余行仍逐格严格相等；`least_filled` 保证这条差异在 WL 上真的发生过（不是空跳过）。
+    原 `test_legacy_inputs_table_equals_input_rows` 起『排查(旧)』逐格比三样：
+    ①旧门面真画出来的 `ti_inputs` 五列、②旧对象喂 `input_rows`、③Topout 的 an 喂 `input_rows`。
+    ①==② 是**旧门面**的委托有没有画错（C-252，随旧门面退役）；②==③ 在 v2 由
+    `tests/test_ui_side_panel.py::test_c056_inputs_rows_match_engine_for_every_mirror_signal`
+    （两张 mirror 的 21 个信号逐行零差异对照 `input_rows`）接过去。
+    这里留下的是**只有这条测试在真表上验过**的那一半：§7-4 补行规则 ——
+    `least_filled` 保证它在 WL 上真的发生过（不是空跳过）；手工 an 的两种分支由
+    `test_c060_mux_ctrl_binding_and_missing_keys` 钉。
     """
-    from dreg_verify import legacy_gui as G
-    w = _open(gui_app, request.getfixturevalue(fixture_name))
-    try:
-        ans = _topout_ans(w)
-        compared = filled = 0
-        for r in range(w.table.rowCount()):
-            sig = w.signals[w._idx_of_row(r)]
-            an = ans.get(sig.out_name.lower())
-            if an is None:
-                continue
-            w.on_row_focus(r, G.COL_K, -1, -1)
-            painted = _legacy_input_cells(w)
-            an_rows = IT.input_rows(an)
-            # 【允许差异 5】§7-4 殿后补的那几行：旧门面根本没有（C-060 少一行的那个 bug），
-            # 摘出来单独钉住内容，其余行照旧逐格严格相等——不是放宽，是把新增的一块分开钉。
-            missing = set(an.get("ctrl_keys_missing") or [])
-            fill_rows = [x for x in an_rows if x.get("key") in missing]
-            assert all(x["role"] == _FILL_ROLE and x["is_control"] and x["key"] in missing
-                       for x in fill_rows), sig.out_name
-            assert len(fill_rows) == len(missing), sig.out_name      # 每个缺口补且只补一行
-            from_an = [IT.row_cells(x) for x in an_rows if x.get("key") not in missing]
-            from_legacy_objects = [IT.row_cells(x) for x in IT.input_rows(_legacy_an(w, sig))]
-            assert painted, "%s 的输入信号表不该是空的" % sig.out_name
-            assert painted == from_legacy_objects, "委托画错了：%s" % sig.out_name
-            assert from_legacy_objects == from_an, \
-                "an 复刻不出旧对象那份驱动明细：%s" % sig.out_name
-            compared += 1
-            filled += len(fill_rows)
-        assert compared >= least, "对照到的信号太少(%d)，夹具或匹配规则退化了" % compared
-        assert filled >= least_filled, \
-            "§7-4 补行在本夹具上一条都没发生(%d)，允许差异 5 成了空跳过" % filled
-    finally:
-        w.close()
+    from dreg_verify import providers as PV
+
+    wb = M.load_workbook(request.getfixturevalue(fixture_name))
+    prov = PV.TopoutProvider(_Cfg(wb))
+    compared = filled = 0
+    for t in (wb.topout or []):
+        an = prov.analyze(t.name, "min", 256, False)
+        if not an:
+            continue
+        rows = IT.input_rows(an)
+        missing = set(an.get("ctrl_keys_missing") or [])
+        fill_rows = [x for x in rows if x.get("key") in missing]
+        assert all(x["role"] == _FILL_ROLE and x["is_control"] and x["key"] in missing
+                   for x in fill_rows), t.name
+        assert len(fill_rows) == len(missing), t.name       # 每个缺口补且只补一行
+        if an.get("status") == "ok":
+            assert rows, "%s 的输入信号表不该是空的" % t.name
+        for x in rows:                                       # 五列文本一格都不许缺
+            for k in _ROW_KEYS:
+                assert k in x, (t.name, k)
+        compared += 1
+        filled += len(fill_rows)
+    assert compared >= least, "对照到的信号太少(%d)，夹具或匹配规则退化了" % compared
+    assert filled >= least_filled, \
+        "§7-4 补行在本夹具上一条都没发生(%d)，这条对照成了空跳过" % filled
 
 
-@pytest.mark.parametrize("fixture_name,least", [("btlp_path", 20), ("wl_path", 14)])
-def test_legacy_column_tooltip_equals_drive_pair(gui_app, request, fixture_name, least):
-    """**等价性对照 · 每列驱动**：旧门面列头 tooltip 里的 `force:` / `RF_WRITE:` 两行，
-    与 `inputs_table.drive_pair(an['vectors'][c], ...)` 逐列相等。
-
-    只比两边都有的列：Topout 的 an 末尾会多一条 iddq 漏电态拍（旧编辑器没有），
-    mux 信号的旧编辑器列头不带驱动 tooltip（跳过，mux 的驱动走 CSV 那条路）。
-    `column_drives` 比 tooltip 多给一条 iddq 门的 force——那是 extra_forces，
-    产出 .sv 里真有，旧 tooltip 漏了（见 test_column_drives_includes_the_iddq_gate_force）。
-    """
-    from dreg_verify import legacy_gui as G
-    w = _open(gui_app, request.getfixturevalue(fixture_name))
-    try:
-        ans = _topout_ans(w)
-        compared = 0
-        for r in range(w.table.rowCount()):
-            sig = w.signals[w._idx_of_row(r)]
-            an = ans.get(sig.out_name.lower())
-            if an is None:
-                continue
-            w.on_row_focus(r, G.COL_K, -1, -1)
-            bind, used = IT.drive_ctx(an)
-            for c in range(min(w.ti_table.columnCount(), len(an["vectors"]))):
-                hh = w.ti_table.horizontalHeaderItem(c)
-                if hh is None:
-                    continue
-                fs, ws = _tip_drives(hh.toolTip())
-                if fs is None and ws is None:
-                    continue                       # mux 列头不带驱动 tooltip
-                want = IT.header_drive_tip(*IT.drive_pair(an["vectors"][c], bind, used))
-                assert "force: %s\nRF_WRITE: %s" % (fs, ws) == want, \
-                    "第 %d 列驱动对不上：%s" % (c, sig.out_name)
-                compared += 1
-        assert compared >= least, "对照到的列太少(%d)" % compared
-    finally:
-        w.close()
-
-
+@pytest.mark.legacy_only
 def test_legacy_resolve_detail_still_renders_the_old_text(gui_app, btlp_path):
-    """左下『解析明细』搬进模块后，旧门面的文案逐字不变（信号/表达式/状态/断言/提示 五段）。"""
+    """左下『解析明细』搬进模块后，旧门面的文案逐字不变（信号/表达式/状态/断言/提示 五段）。
+
+    ⚠ C5-b 判为 **legacy 独有 · 待主控裁决**：`inputs_table.legacy_resolve_detail` 与
+    `legacy_gui.STATUS_LABEL` 只服务旧门面，能力契约表里没有对应行（C-064…C-066 记的是
+    v2 的『解析明细』面板 = `inputs_table.resolve_detail`，另有
+    `tests/test_ui_detail_header.py::test_c064_c065_c066_resolve_detail_panel_text` 守）。
+    故本条**不删**，随 `legacy_gui.py` 的退役日一起处理。
+    """
     from dreg_verify import legacy_gui as G
     w = _open(gui_app, btlp_path)
     try:
@@ -775,30 +732,5 @@ def test_legacy_resolve_detail_still_renders_the_old_text(gui_app, btlp_path):
         sig = w.signals[w._idx_of_row(0)]
         a = w._analysis[w._idx_of_row(0)]
         assert txt == IT.legacy_resolve_detail(sig, a, G.STATUS_LABEL)
-    finally:
-        w.close()
-
-
-@pytest.mark.parametrize("fixture_name", ["btlp_path", "wl_path"])
-def test_signalview_an_feeds_input_rows(gui_app, request, fixture_name):
-    """**新门面 smoke**：SignalView 每个信号的 an 喂 `input_rows` 都不抛错；
-    非 mux 信号的行数 == 真值表的输入行数；mux 至少给齐每个输入（上游配方会多列几行）。"""
-    w = _open(gui_app, request.getfixturevalue(fixture_name))
-    try:
-        v = w.topout_view
-        assert v.models
-        for m in v.models:
-            v._load_signal(m["name"])
-            an = v.cur_an
-            assert an is not None, m["name"]
-            rows = IT.input_rows(an)
-            for r in rows:
-                for k in _ROW_KEYS:
-                    assert k in r
-            if an["kind"] == "mux":
-                assert len(rows) >= len(an["expansion"]["used_vars"])
-            else:
-                assert len(rows) == len(v.e_inputs), m["name"]
-            assert IT.resolve_detail(an)          # 明细文本也得出得来
     finally:
         w.close()
