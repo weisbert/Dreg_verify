@@ -78,6 +78,7 @@
 | C-047 | 按 Excel type 列筛（如只看喂 dft 的那一批） | MW.apply_filter（type_combo，legacy 独有） | — | 合并 | 主控补位: Excel type 筛并入筛选行正则搜索（支持 _to_dft 这类目的地后缀），不单独出控件（执行计划 §5 待拍板 4） | | 已落点(补位) | 计划§5-4; 审计B; 审计次要; 原 status: 待拍板(默认=并入正则搜索) |
 | C-048 | 只看 top_output=1 的信号 | MW.apply_filter（self.top_only） | — | 删除 | | | 待落点 | 方案§4.4; 方案§5-2; 用户2026-06-23; 清单§1 |
 | C-049 | 清单列头直接写 Excel 列字母 R / K / top / type | gui.HEADERS（legacy 列头） | — | 删除 | | | 待落点 | 方案§4.4; 方案§5-2; 用户2026-06-23; 清单§6 |
+| C-303 | 清单「反例」「状态」「断言号」三个列头自带说明 tooltip（不查文档就知道这一列是什么） | MW 清单列头 tooltip（旧测试 test_gui_header_tooltips_present） | — | 新增 | signal_list 列头 ToolTipRole，文案进 terms.LIST_HEADER_TIPS；F2 落地 |  | 待落点 | C5-a 迁移 §2（legacy_only 待裁决 → 加契约行） | 落地后删 legacy_only 测试 test_gui_header_tooltips_present |
 
 ## 详情（23 条：保留 23）
 
@@ -152,7 +153,7 @@
 | C-107 | 当前测试列整列淡蓝高亮（30 列横滚时不丢『我在哪一列』）；反例列被选中时用更深的琥珀 | MW._ti_on_current_col + MW._ti_render_col（HL_BG / HL_NEG_BG） | — | 保留 | 当前列整列高亮：列头 #c9dcf5、列体 #eef5fd、左右 1px #2f6fd0、期望格 outline 2px #2f6fd0（样例列 ACT=T13） | | 已落点 | 方案§4.1; 审计A; 审计次要 |
 | C-108 | 列宽拖过之后重建表格保留手动宽度，换信号才恢复自动适应 | MW._on_ti_section_resized + MW._ti_fit_columns | — | 保留 | 主控补位: 列宽拖过后重建保留手动宽度、换信号才恢复自动（A5 已断言列宽在重绘/插列后不动）；Design 只画了冻结列宽 S.frozenW=288 可拖 | | 已落点(补位) | 方案§4.1; 审计A; 审计次要 |
 | C-109 | Ctrl+D 复制列；单元格正在编辑时不触发（不打断输入） | MW._build_testitems_tab（QShortcut WidgetShortcut on ti_table） | — | 保留 | 真值表工具条「复制列 Ctrl+D」角标；单元格编辑中不触发（WidgetShortcut 范围） | | 已落点 | 方案§4.1; Design§9; 审计A; 审计次要 |
-| C-110 | mux 数据值整表手填：按物理寄存器同步整行，清空恢复自动分配 | SV._set_mux_data / MW._on_mux_data_changed | mux_gen.make_mux_vectors(data_overrides=) | 保留 | 真值表工具条整表入口（V2Spec §5 M26「工具条整表」） | | 已落点 | 方案§4.1; Design§10; 审计A; 6月审计N8 |
+| C-110 | mux 数据值整表手填：按物理寄存器同步整行，清空恢复自动分配 | SV._set_mux_data / MW._on_mux_data_changed | mux_gen.make_mux_vectors(data_overrides=) | 保留 | 真值表工具条整表入口（V2Spec §5 M26「工具条整表」） | | 已落点 | 方案§4.1; Design§10; 审计A; 6月审计N8 主控 2026-09-12：mux 数据值随 view_edits 落盘（R2-01 / F1） |
 | C-111 | mux 单列数据值手填（只改本列，auto_out 按路由 case 的数据源重算） | SV._set_mux_user_data / MW._on_mux_user_data_changed | mux_gen.expand_mux_group（data_keys） | 保留 | 真值表右键列菜单「设置本列 mux 数据值」（V2Spec §5 M26；提示条「右键行/列：插入 · 删除 · 复制 · 设为反例」） | | 已落点 | 方案§4.1; Design§10; 审计A; 审计Top10-8 |
 | C-112 | 已编辑过的 mux 信号改数据值后屏幕值与内部/导出值一致（所见即所得） | SV._mux_resync_cols | mux_gen.make_mux_vectors | 保留 | 主控补位: mux 改数据值后屏幕值与内部/导出值一致（edits.mux_resync_cols） | | 已落点(补位) | 审计bug②; 方案§3-轨0-2 |
 | C-113 | mux 手填数据值撞值时提示『≥2 条数据路取到相同值=选错路也测不出（假绿）』 | MW._load_mux_test_items（meta['override_collision']） | mux_gen.make_mux_vectors | 保留 | 主控补位: mux 手填数据值撞值时提示「≥2 条数据路取到相同值 = 选错路也测不出（假绿）」 | | 已落点(补位) | gui:_load_mux_test_items |
@@ -281,9 +282,9 @@
 | C-215 | 用了 RTL 补充逻辑的信号，真值表头部挂琥珀横幅 + 理由 | MW._update_ti_header（supp_tag + setStyleSheet） | — | 保留 | V2Spec §5 M11「横幅改成状态栏一行」+ 清单信号名后琥珀圆点（真值表头部琥珀横幅降级） | | 已落点 | 方案§4.1; 审计A; 审计次要 |
 | C-216 | Topout 视图的展开也看得到 RTL 补充信号（补充的新输入自动成为真值表维度） | _TopoutProvider._supplemented（swap-and-restore） | generator._logic_with_overrides | 保留 | 主控补位: Topout 视图的展开也看得到补充信号（补充输入自动成为真值表维度）；无界面元素 | | 已落点(补位) | 6月审计N4; gui:_supplemented |
 | C-217 | 『缺前缀是否强制生成』做成可见开关（现在 Topout 路径写死开着） | MW.include_risky_chk / MW.on_include_risky_changed（legacy 独有） | generator.GenOptions(include_risky=) / topout.py 写死 True | 降级(诊断抽屉) | 诊断抽屉 otherSymptoms 第 4 条「还有网没有前缀，要不要照样生成 → 缺前缀是否强制生成　当前：是」（默认必须仍 True，与 A3 审计一致 ✓） | | 已落点 | 方案§4.3; Design§10; 审计C; 清单§7; 主控裁决: 默认仍 True（A3§1.5） |
-| C-218 | 级联模式说明窗（展开上游 vs force级联网 的图解与选择建议） | MW._open_cascade_doc | — | 降级(诊断抽屉) | 主控补位: 级联模式说明窗随三处级联下拉（C-223/C-224）一并退役，docs/级联模式说明.md 留作背景资料；Design 映射表未给落点 | | 已落点(补位) | 方案§4.1; 清单§3 |
-| C-219 | 级联说明窗真的读到 docs/级联模式说明.md（现在永远显示『仓库根目录没找到该文件』） | MW._open_cascade_doc（路径已修为 docs/） | — | 降级(诊断抽屉) | 主控补位: 同 C-218，随入口一并退役（不再有「读不到文件」这条路径） | | 已落点(补位) | 方案§3-轨0-7; 清单§7; 方案§7 |
-| C-220 | 级联说明每次打开重读文件，文档更新不用重启工具 | MW._open_cascade_doc | — | 降级(诊断抽屉) | 主控补位: 同 C-218，随入口一并退役 | | 已落点(补位) | gui:_open_cascade_doc |
+| C-218 | 级联模式说明窗（展开上游 vs force级联网 的图解与选择建议） | MW._open_cascade_doc | — | 删除 | 主控补位: 级联模式说明窗随三处级联下拉（C-223/C-224）一并退役，docs/级联模式说明.md 留作背景资料；Design 映射表未给落点 | | 已落点(补位) | 方案§4.1; 清单§3 |
+| C-219 | 级联说明窗真的读到 docs/级联模式说明.md（现在永远显示『仓库根目录没找到该文件』） | MW._open_cascade_doc（路径已修为 docs/） | — | 删除 | 主控补位: 同 C-218，随入口一并退役（不再有「读不到文件」这条路径） | | 已落点(补位) | 方案§3-轨0-7; 清单§7; 方案§7 |
+| C-220 | 级联说明每次打开重读文件，文档更新不用重启工具 | MW._open_cascade_doc | — | 删除 | 主控补位: 同 C-218，随入口一并退役 | | 已落点(补位) | gui:_open_cascade_doc |
 | C-221 | 『仿真器找不到这根网』按症状组织成三步：导 nets.txt → 红区跑 scan_rtl → 导入前缀 | 旧为一排孤立按钮 | rtl_scan.collect_nets | 新增 | 诊断抽屉蓝框「仿真报『找不到这根网』（CUVUNF）」+ steps 三步（导 nets.txt → 红区跑 scan_rtl → 导入前缀），每步带结果框与主按钮 | | 已落点 | Design§3-Q6; Design§5-H5; Design§11-2-⑦ |
 | C-222 | 逻辑展开说明（工具怎么从顶层输出回溯到源寄存器） | 无 | — | 新增 | 右侧常驻栏「逐层展开」标题行右侧帮助文「从顶层输出往回到源寄存器 · 每层：Excel 原式 = 代入真实信号名」+ V2Spec §5 M44 | | 已落点 | Design§10 |
 | C-223 | logic 级联 / mux 级联下拉（展开上游 vs force级联网） | MW.cascade_logic_combo / MW.cascade_mux_combo / MW.on_cascade_mode_changed | resolver.Resolver(cascade_mode=) / generator.GenOptions(logic_cascade=,mux_cascade=) | 删除 | | | 待落点 | 方案§4.4; 方案§5-2; 用户2026-06-23; 清单§1 |
@@ -539,15 +540,15 @@ RTL 补充逻辑 `.json`、完整配置 `.json`（`dreg_verify_config: 2`）、`
 |---|---|
 | 保留 | 228 |
 | 合并 | 9 |
-| 降级(诊断抽屉) | 22 |
-| 删除 | 8 |
-| 新增 | 33 |
+| 降级(诊断抽屉) | 19 |
+| 删除 | 11 |
+| 新增 | 34 |
 | 延期 | 2 |
-| **合计** | **302** |
+| **合计** | **303** |
 
 | 分节 | 条数 |
 |---|---|
-| 清单 | 49 |
+| 清单 | 50 |
 | 详情 | 23 |
 | 真值表编辑 | 69 |
 | 覆盖度 | 15 |
