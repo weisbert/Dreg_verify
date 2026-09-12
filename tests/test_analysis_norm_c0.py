@@ -147,6 +147,23 @@ def test_c060_an_ctrl_keys_missing(wb, wl_wb):
     assert all(not a["ctrl_keys_missing"] for a in _ans(wb).values())
 
 
+# ───────────────────────────── want_graph：an["graph"] ─────────────────────────────
+def test_c278_an_carries_graph(wb, wl_wb):
+    """want_graph=True 时 an 带门级图；默认 False 时恒 None（不拖慢批量路径）。"""
+    for wb_, name in ((wb, "d_logic_bt_lp_rx_en"), (wb, "d_bt_lp_lna_itrim"),
+                      (wb, "clk_force_on"), (wl_wb, "d_wl_rf_lo2g5g_bias_en")):
+        topo = next(t for t in wb_.topout if t.name == name)
+        rr = R.Resolver(wb_)
+        assert AN.norm_topout_result(T.analyze_signal(wb_, rr, topo, mode="min"),
+                                     wb_)["graph"] is None
+        g = AN.norm_topout_result(
+            T.analyze_signal(wb_, rr, topo, mode="min", want_graph=True), wb_)["graph"]
+        assert g is not None and getattr(g, "nodes", None), name
+    # 页本地结果没有图能力 → 键在、值为 None（消费方一律读同一个键）
+    pr = next(iter(P.analyze_all(wl_wb, "logic", mode="min", max_tests=8)))
+    assert AN.norm_page_result(pr, wl_wb)["graph"] is None
+
+
 def test_c016_status_detail_probe_prefix_clears_bare_probe(wb):
     """配了探针前缀 = 用户给了「这根网在哪」的证据 → 输出侧不再算裸名猜测。"""
     topo = next(t for t in wb.topout if t.name == "d_logic_bt_lp_tsensor")
