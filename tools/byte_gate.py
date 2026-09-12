@@ -9,9 +9,10 @@
     .venv/Scripts/python.exe tools/byte_gate.py --print    # 只打印当前 6 值（重录基线时用）
 
 基线历史（改了 .sv 输出的功能 commit 之后要重录，并把旧值留在这里）：
-    2026-09-12 HEAD 6859453（880 过）：
-        btlp min=4c1410b7 max=f977cc7c exh=26fa5d05
-        wl   min=fb34bb65 max=c359e1a1 exh=c129244d
+    2026-09-12 HEAD c1b0ae1（880 过；render_topout_sv 返回 (text, build)，只 hash text）：
+        btlp min=61a3cc83 max=06bc2194 exh=76646b70
+        wl   min=54c06776 max=41e47830 exh=ac03a474
+    ⚠ c1b0ae1 那版脚本误把整个 tuple 转 str 再 hash（含对象地址→每次不同），其 6 值作废。
     2026-06 S1 t1 后（记忆 refactor-form-driven-pipeline，已被后续断言标号/dft 门修复等 commit 改掉）：
         btlp 5a0d5d75/3ee55056/d2b7e2da  wl aee1cf80/2315685c/c82bf24e
 """
@@ -27,8 +28,8 @@ from dreg_verify import excel_model as M   # noqa: E402
 from dreg_verify import topout as T        # noqa: E402
 
 GOLD = {
-    ("btlp", "min"): "4c1410b7", ("btlp", "max"): "f977cc7c", ("btlp", "exh"): "26fa5d05",
-    ("wl", "min"): "fb34bb65", ("wl", "max"): "c359e1a1", ("wl", "exh"): "c129244d",
+    ("btlp", "min"): "61a3cc83", ("btlp", "max"): "06bc2194", ("btlp", "exh"): "76646b70",
+    ("wl", "min"): "54c06776", ("wl", "max"): "41e47830", ("wl", "exh"): "ac03a474",
 }
 FILES = {"btlp": "mirror_btlp_dreg.xlsx", "wl": "mirror_wl_dreg.xlsx"}
 
@@ -38,10 +39,9 @@ def digests():
     for tag, fn in FILES.items():
         wb = M.load_workbook(os.path.join(_ROOT, fn))
         for mode in ("min", "max", "exh"):
-            sv = T.render_topout_sv(wb, max_tests=100000,
-                                    mode=("max" if mode == "max" else "min"),
-                                    exhaustive=(mode == "exh"))
-            text = sv if isinstance(sv, str) else str(sv)
+            text, _build = T.render_topout_sv(wb, max_tests=100000,
+                                              mode=("max" if mode == "max" else "min"),
+                                              exhaustive=(mode == "exh"))
             out[(tag, mode)] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
     return out
 
