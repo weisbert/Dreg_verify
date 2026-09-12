@@ -215,7 +215,7 @@ C-213,诊断,RTL 补充逻辑六道校验（信号名占位符未替换 / spec �
 C-214,诊断,补充的基名不在当前 Excel logic 页时提示『将作为纯新增合成信号生成』,降级(诊断抽屉),MW.on_logic_overrides（unknown）,—,,,待落点,gui:on_logic_overrides,文档没写代码里有：补一个表里没有的基名是合法用法，但也可能是名字打错了，必须问一声
 C-215,诊断,用了 RTL 补充逻辑的信号，真值表头部挂琥珀横幅 + 理由,保留,MW._update_ti_header（supp_tag + setStyleSheet）,—,,,待落点,方案§4.1; 审计A; 审计次要,
 C-216,诊断,Topout 视图的展开也看得到 RTL 补充信号（补充的新输入自动成为真值表维度）,保留,_TopoutProvider._supplemented（swap-and-restore）,generator._logic_with_overrides,,,待落点,6月审计N4; gui:_supplemented,
-C-217,诊断,『缺前缀是否强制生成』做成可见开关（现在 Topout 路径写死开着）,降级(诊断抽屉),MW.include_risky_chk / MW.on_include_risky_changed（legacy 独有）,generator.GenOptions(include_risky=) / topout.py 写死 True,,,待落点,方案§4.3; Design§10; 审计C; 清单§7,
+C-217,诊断,『缺前缀是否强制生成』做成可见开关（现在 Topout 路径写死开着）,降级(诊断抽屉),MW.include_risky_chk / MW.on_include_risky_changed（legacy 独有）,generator.GenOptions(include_risky=) / topout.py 写死 True,,,待落点,方案§4.3; Design§10; 审计C; 清单§7,主控裁决: 默认仍 True（A3§1.5）
 C-218,诊断,级联模式说明窗（展开上游 vs force级联网 的图解与选择建议）,降级(诊断抽屉),MW._open_cascade_doc,—,,,待落点,方案§4.1; 清单§3,
 C-219,诊断,级联说明窗真的读到 docs/级联模式说明.md（现在永远显示『仓库根目录没找到该文件』）,降级(诊断抽屉),MW._open_cascade_doc（路径已修为 docs/）,—,,,待落点,方案§3-轨0-7; 清单§7; 方案§7,
 C-220,诊断,级联说明每次打开重读文件，文档更新不用重启工具,降级(诊断抽屉),MW._open_cascade_doc,—,,,待落点,gui:_open_cascade_doc,文档没写代码里有：文档更新后不用重启工具，说明窗永远是最新的
@@ -298,3 +298,6 @@ C-296,新增,真值表右键行列菜单,新增,无（审计实测两边都没�
 C-297,新增,放大到接近全屏的编辑覆盖层,新增,无,—,,,待落点,方案§5-5; Design§5-H6,
 C-298,新增,从 CSV / xlsx 批量导入期望值（一个信号 25 列、一张表上百次单元格编辑）,新增,无,—,,,待落点,方案§5-5; Design§3-Q4; Design§10; 清单§5,
 C-299,新增,撤销 / 重做（真值表编辑）,新增,无,—,,,待落点,方案§5-5; Design§5-H6,
+C-300,持久化与兼容,v2 写 ~/.dreg_verify_edits.json 时按路径桶【合并】：先读旧桶再更新自己管的键；legacy 段与其它 view_id 段逐字节不动（整桶重建会静默抹掉同事的手填期望）,新增,MW._persist_edits（整桶重建 allbuckets[path]=bucket，靠内存里还有 legacy 状态才没丢）,—,,,待落点,A3§2-坑④,硬护栏
+C-301,持久化与兼容,序列化保住错值/期望为 0 的负向列（wrong_value: 0 / exp: 0 不能被真值判断当成空丢掉）,保留,gui._serialize_rows（v is not False 身份比较）,—,,,待落点,A3§3.2,v2 重写序列化时的回归点
+C-302,诊断,『导入旧版真值表编辑』一次性显式动作：把 legacy 桶里 logic/直连寄存器根的手填期望/负向迁到 v2（键空间相同，auto 重算）；mux 根点名列出不迁的原因；legacy 段只读不删,新增,无（A3 实测可行）,topout.resolve_root（源名→Topout 顶层名）,,,待拍板(默认=做，进诊断抽屉),A3§3.2-D,同事在旧门面填的期望不用重填

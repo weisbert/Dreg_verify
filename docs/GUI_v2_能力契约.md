@@ -280,7 +280,7 @@
 | C-214 | 补充的基名不在当前 Excel logic 页时提示『将作为纯新增合成信号生成』 | MW.on_logic_overrides（unknown） | — | 降级(诊断抽屉) | | | 待落点 | gui:on_logic_overrides |
 | C-215 | 用了 RTL 补充逻辑的信号，真值表头部挂琥珀横幅 + 理由 | MW._update_ti_header（supp_tag + setStyleSheet） | — | 保留 | | | 待落点 | 方案§4.1; 审计A; 审计次要 |
 | C-216 | Topout 视图的展开也看得到 RTL 补充信号（补充的新输入自动成为真值表维度） | _TopoutProvider._supplemented（swap-and-restore） | generator._logic_with_overrides | 保留 | | | 待落点 | 6月审计N4; gui:_supplemented |
-| C-217 | 『缺前缀是否强制生成』做成可见开关（现在 Topout 路径写死开着） | MW.include_risky_chk / MW.on_include_risky_changed（legacy 独有） | generator.GenOptions(include_risky=) / topout.py 写死 True | 降级(诊断抽屉) | | | 待落点 | 方案§4.3; Design§10; 审计C; 清单§7 |
+| C-217 | 『缺前缀是否强制生成』做成可见开关（现在 Topout 路径写死开着） | MW.include_risky_chk / MW.on_include_risky_changed（legacy 独有） | generator.GenOptions(include_risky=) / topout.py 写死 True | 降级(诊断抽屉) | | | 待落点 | 方案§4.3; Design§10; 审计C; 清单§7; 主控裁决: 默认仍 True（A3§1.5） |
 | C-218 | 级联模式说明窗（展开上游 vs force级联网 的图解与选择建议） | MW._open_cascade_doc | — | 降级(诊断抽屉) | | | 待落点 | 方案§4.1; 清单§3 |
 | C-219 | 级联说明窗真的读到 docs/级联模式说明.md（现在永远显示『仓库根目录没找到该文件』） | MW._open_cascade_doc（路径已修为 docs/） | — | 降级(诊断抽屉) | | | 待落点 | 方案§3-轨0-7; 清单§7; 方案§7 |
 | C-220 | 级联说明每次打开重读文件，文档更新不用重启工具 | MW._open_cascade_doc | — | 降级(诊断抽屉) | | | 待落点 | gui:_open_cascade_doc |
@@ -437,6 +437,16 @@ RTL 补充逻辑 `.json`、完整配置 `.json`（`dreg_verify_config: 2`）、`
 | C-298 | 从 CSV / xlsx 批量导入期望值（一个信号 25 列、一张表上百次单元格编辑） | 无 | — | 新增 | | | 待落点 | 方案§5-5; Design§3-Q4; Design§10; 清单§5 |
 | C-299 | 撤销 / 重做（真值表编辑） | 无 | — | 新增 | | | 待落点 | 方案§5-5; Design§5-H6 |
 
+## 主控追加（A3 删除安全审计后，3 条：新增 2，保留 1）
+
+| ID | 能力 | 旧入口 | 后端 API | 类别 | v2 落点 | 测试 ID | 状态 | 来源 |
+|---|---|---|---|---|---|---|---|---|
+| C-300 | v2 写 ~/.dreg_verify_edits.json 时按路径桶【合并】：先读旧桶再更新自己管的键；legacy 段与其它 view_id 段逐字节不动（整桶重建会静默抹掉同事的手填期望） | MW._persist_edits（整桶重建 allbuckets[path]=bucket，靠内存里还有 legacy 状态才没丢） | — | 新增 | | | 待落点 | A3§2-坑④ |
+| C-301 | 序列化保住错值/期望为 0 的负向列（wrong_value: 0 / exp: 0 不能被真值判断当成空丢掉） | gui._serialize_rows（v is not False 身份比较） | — | 保留 | | | 待落点 | A3§3.2 |
+| C-302 | 『导入旧版真值表编辑』一次性显式动作：把 legacy 桶里 logic/直连寄存器根的手填期望/负向迁到 v2（键空间相同，auto 重算）；mux 根点名列出不迁的原因；legacy 段只读不删 | 无（A3 实测可行） | topout.resolve_root（源名→Topout 顶层名） | 新增 | | | 待拍板(默认=做，进诊断抽屉) | A3§3.2-D |
+
+另：C-217『缺前缀是否强制生成』可见开关的**默认值必须仍为 True**（A3 实测改 False 会改 Topout .sv 字节、页本地 dft 视图整页空掉）；C-235 legacy 桶策略经 A3 确认。
+
 ## 待拍板项 → 契约 ID 对照
 
 执行计划 §5 的 5 个待拍板项，逐个落到具体能力行上（不拍板就按默认走，不停工）：
@@ -527,12 +537,12 @@ RTL 补充逻辑 `.json`、完整配置 `.json`（`dreg_verify_config: 2`）、`
 
 | 类别 | 条数 |
 |---|---|
-| 保留 | 227 |
+| 保留 | 228 |
 | 合并 | 9 |
 | 降级(诊断抽屉) | 22 |
 | 删除 | 8 |
-| 新增 | 33 |
-| **合计** | **299** |
+| 新增 | 35 |
+| **合计** | **302** |
 
 | 分节 | 条数 |
 |---|---|
@@ -547,7 +557,8 @@ RTL 补充逻辑 `.json`、完整配置 `.json`（`dreg_verify_config: 2`）、`
 | 反馈与文案 | 9 |
 | 信号流图 | 12 |
 | 新增 | 10 |
-| **合计** | **299** |
+| 主控追加 | 3 |
+| **合计** | **302** |
 
 其它口径：
 
