@@ -503,6 +503,115 @@ def test_r2_04_mux_data_is_merged_per_signal_too(qapp, iso, wl):
     assert b.lower() in seg
 
 
+# ═══════════════ R2-11：编辑过的信号换覆盖度档（C-085 / C-148 / C-153）═══════════════
+COV_LABELS = ("精简", "全面", "穷举")
+
+
+def _sv_block_names(st, name, vid=VID):
+    """这一份 `edited` 下该信号在 .sv 里的**测试块标号**（屏幕上那些列的对照物）。"""
+    import re
+    from dreg_verify import exports as X
+    cov = st.coverage(vid)
+    mode, exh = cov.mode_for(name, st.models(vid))
+    text, build = X.render_sv(st.provider(vid), only=[name], mode=mode,
+                              max_tests=int(cov.max_tests), exhaustive=exh,
+                              edited=st.compute_edited(vid))
+    aid = next((b[1]["assert_id"] for b in build["blocks"]
+                if (b[1].get("topout_name") or "").lower() == name.lower()), None)
+    if aid is None:
+        return []
+    return re.findall(r"assert_%s_(\S+):" % re.escape(aid), text)
+
+
+def _set_cov(st, label, vid=VID):
+    st.coverage(vid).persist_global_label(label)
+    st.coverage_touched(vid)
+
+
+@pytest.mark.contract("C-085", "C-148", "C-153")
+@pytest.mark.parametrize("edit_at", COV_LABELS)
+def test_r2_11_edited_signal_screen_matches_sv_across_all_coverages(qapp, iso, btlp, wl, edit_at):
+    """R2-11：mux + 任一编辑 + 换覆盖度档 → **屏幕上有几列，.sv 里就得有几块**。
+
+    用户看到的：在全面档手填了期望（屏幕 25 列），把全局档拧回精简，导出的 .sv 里
+    只有 9 块；拧到穷举又变成 40 块 —— 屏幕一列没动，产物却跟着档走，两边都不吭声。
+    designer 拿 .sv 去仿真，手填的那些用例根本没生成。
+
+    根因：`compute_edited` 用的是编辑记录里**冻结的那份 an**（写记录那一刻的档），
+    而生成器按**现在这一档**出 case 清单，`mux_derive` 拿冻结的 an 算 `dropped`
+    自然算不出该丢哪几条。修法（R2-11 选的路 = 变体 a）：`state.compute_edited` 逐条把
+    `an` 换成现在这一档的分析结果；`edits.mux_derive` 再把「屏幕上有、生成期那一档没有」
+    的列当手编列补出去。**列集一列不动**（C-153：手填过的信号拧全局档不许被冲掉）。
+
+    logic 路一并验（它本来就一致，这条是防回归）。
+    """
+    n_mux = 0
+    for path in (btlp, wl):
+        st = loaded(path)
+        cases = []
+        for m in st.models(VID):
+            an = st.analyze(m["name"], VID)
+            if an and an.get("editable"):
+                cases.append((m["name"], an["editable"]))
+        assert cases
+        for nm, ek in cases[:6]:
+            _set_cov(st, edit_at)
+            an = st.analyze(nm, VID)
+            cols = ED.cols_from_vectors(an, e_inputs_from_an(an))
+            if not cols:
+                continue
+            n_mux += 1 if ek == "mux" else 0
+            cols[0]["exp"] = cols[0]["auto"] ^ 1           # 一处编辑（= 冻结这份列集）
+            st.put_edit(nm, rec_of(st, nm, cols), VID)
+            screen = [c["name"] for c in cols]
+            for lab in COV_LABELS:                        # 四档：编辑档 + 三档来回拧
+                _set_cov(st, lab)
+                blocks = _sv_block_names(st, nm)
+                assert len(blocks) == len(screen), \
+                    "%s（%s，%s 档编辑）看 %s 档：屏幕 %d 列 / .sv %d 块" % (
+                        nm, ek, edit_at, lab, len(screen), len(blocks))
+            st.drop_edit(nm, VID)
+    assert n_mux >= 4, "只对了 %d 条 mux 信号，覆盖太窄" % n_mux
+
+
+@pytest.mark.contract("C-154")
+def test_r2_11_c154_neg_only_follows_coverage_but_handfilled_stays_frozen(qapp, wl):
+    """R2-11 / C-154 的分界：**只加过反例**的信号正向随档重算；**手填过期望**的冻结不动。
+
+    两边各走一遍才说得清这条分界 —— 只验一半的话，要么是「改档把用户的活冲掉了」，
+    要么是「勾个反例就把这个信号永远钉死在那一档」。
+    """
+    st = loaded(wl)
+    nm = next((m["name"] for m in st.models(VID)
+               if (st.analyze(m["name"], VID) or {}).get("editable")), None)
+    _set_cov(st, "精简")
+    an = st.analyze(nm, VID)
+    e_in = e_inputs_from_an(an)
+    lo = ED.cols_from_vectors(an, e_in)
+
+    # ① 只加过反例 → 正向跟着档走
+    made, _s = ED.add_negatives(lo, [0], False)
+    neg_cols = list(lo) + made
+    assert ED.neg_only_cols(an, neg_cols) is True
+    _set_cov(st, "穷举")
+    hi_an = st.analyze(nm, VID)
+    hi_ei = e_inputs_from_an(hi_an)
+    fresh = ED.cov_resync_cols(hi_an, hi_ei, an, neg_cols)
+    assert fresh is not None, "只加过反例的信号没跟着档重算（C-154）"
+    n_pos = sum(1 for c in fresh if not c["neg"])
+    assert n_pos == len(ED.cols_from_vectors(hi_an, hi_ei)), "正向没按新档重算"
+    assert sum(1 for c in fresh if c["neg"]) >= 1, "重算后反例没补回来"
+
+    # ② 手填过期望 → 冻结不动（C-153）
+    hand = list(lo)
+    hand[0] = dict(hand[0], exp=(hand[0]["auto"] ^ 1))
+    assert ED.neg_only_cols(an, hand) is False
+    assert ED.cov_resync_cols(hi_an, hi_ei, an, hand) is None, "手填过的信号被改档冲掉了"
+    # ③ 加过列 / 删过列同样算「动过正向」
+    assert ED.cov_resync_cols(hi_an, hi_ei, an, list(lo) + ED.copy_cols(lo, [0])) is None
+    assert ED.cov_resync_cols(hi_an, hi_ei, an, neg_cols[1:]) is None
+
+
 # ═══════════════ R2-05：同一个文件的不同路径写法（I-04 / C-233 / C-236）═══════════════
 def _spellings(path):
     """同一个文件的几种写法：原样 / 正斜杠 / 盘符小写 / 绕一圈的相对写法。"""

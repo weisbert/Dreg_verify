@@ -78,6 +78,7 @@ __all__ = [
     # ② 列模型 ↔ 向量
     "cols_from_vectors", "cols_to_vectors", "mux_derive", "mux_resync_cols",
     "is_dft_pitch_col", "recompute_col_an", "recompute_mux_user_auto",
+    "neg_only_cols", "cov_resync_cols",
     "compute_edited", "topout_edit_overrides", "page_edit_overrides",
     # ③ 编辑操作（纯逻辑）
     "col_names", "new_col_name", "add_col", "copy_cols", "del_cols",
@@ -478,12 +479,15 @@ def mux_derive(an, cols):
         if vec is None:
             continue
         key = generator.mux_assign_key(vec.assignments)
-        if c["user"]:
+        if c["user"] or key not in auto_keys:
+            # R2-11：`key not in auto_keys` = 屏幕上有这一列、**生成期那一档的 case 清单里没有**
+            # （在全面档编辑过、之后把全局档拧回精简，编辑列冻结在老档上）。不当 user 列补出去
+            # 的话，屏幕 25 列 / .sv 9 块，而两边都不吭声。标号沿用屏幕上那个，产物里找得到。
             uv = V.clone_vector(vec)
             uv.name = c["name"]                  # R2-03：标号以【列名】为准（自动列 name=None）
             if c["neg"]:
                 uv.is_negative = True; uv.neg_value = c["exp"]; uv.neg_mode = "value"
-            elif c["exp"] is not None:
+            elif c["exp"] is not None and not is_dft_pitch_col(an, c):
                 uv.designer_expected = c["exp"]
             user_vecs.append(uv)
         else:
@@ -522,6 +526,63 @@ def mux_resync_cols(an, old_cols, e_inputs, dropped=None):
         dropped.extend(str(c.get("name")) for c in old
                        if not c.get("user") and str(c.get("name")) not in kept)
     return cols
+
+
+def neg_only_cols(old_an, cols):
+    """这份列模型是不是「**只加过反例**、正向一格没动过」（C-154 / C5a-1）。
+
+    判据三条（缺一不可）：至少有一条反例；正向列全是自动生成的（没加过列 / 没复制过列）；
+    正向列一条手填期望都没有；而且**一条都没删过**（正向条数 == 写记录那会儿 an 给的条数）。
+    这三条一成立，这个信号的正向就还是「引擎按某一档出的那份」，换档时该跟着重算。
+
+    ⚠ iddq 漏电态自检拍**不算手填**：它那条常量期望是工具推的（与
+    `vectors.TestVector.designer_filled` 同口径）。不排除的话，凡是带 iddq 门的信号
+    都会被判成「手改过正向」，C-154 在那一半信号上等于没落地。
+    """
+    cols = list(cols or [])
+    pos = [c for c in cols if not c.get("neg")]
+    if not any(c.get("neg") for c in cols) or not pos:
+        return False
+    if any(c.get("user") for c in pos):
+        return False
+    if any(c.get("exp") is not None and not is_dft_pitch_col(old_an, c) for c in pos):
+        return False
+    want = sum(1 for v in ((old_an or {}).get("vectors") or []) if not v.is_negative)
+    return bool(want) and len(pos) == want
+
+
+def cov_resync_cols(an, e_inputs, old_an, old_cols):
+    """C-154：只加过反例的信号换覆盖度档 → **正向按新档重算、反例补回**。
+
+    返回新列集；不该重算（手改过正向 / 档其实没变）→ `None`（调用方原样用冻结那份）。
+
+    反例按【输入取值】找源列（`truth_edit.vals_key`，与 `plan_negatives` 同口径）；
+    源列在新档里没有了就退回 v1 `neg_only="first"` 的口径挂到第一条正向上 ——
+    清单上那个「反例」勾还勾着，换个档就一条反例都没有，那才是静默失效。
+    用户自定义过名字的反例保住名字（那是他的活）。
+    """
+    old_cols = list(old_cols or [])
+    if not neg_only_cols(old_an, old_cols):
+        return None
+    fresh = cols_from_vectors(an, e_inputs)
+    old_pos = [c for c in old_cols if not c.get("neg")]
+    if [c["name"] for c in fresh] == [c["name"] for c in old_pos]:
+        return None                       # 档没变 / 列集一样 → 不折腾，也不白存一次盘
+    out = list(fresh)
+    for old in [c for c in old_cols if c.get("neg")]:
+        key = TE.vals_key(old.get("vals"))
+        j = next((i for i, c in enumerate(out)
+                  if not c.get("neg") and TE.vals_key(c.get("vals")) == key), None)
+        if j is None:
+            j = next((i for i, c in enumerate(out) if not c.get("neg")), None)
+        if j is None:
+            continue                      # 新档一条正向都没有（清零过）→ 没处挂
+        made, _skipped = add_negatives(out, [j], False)
+        for c in made:
+            if not TE.is_auto_neg_name(old.get("name")):
+                c["name"] = old["name"]   # 自定义命名的反例保住名字
+        out.extend(made)
+    return out
 
 
 def is_dft_pitch_col(an, col):

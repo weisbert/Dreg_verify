@@ -351,10 +351,16 @@ class TruthPanel(QtWidgets.QWidget):
         self._conns = []
         self.state = state
         if state is not None:
+            # C5a-2：`negsChanged` 也要听 —— 清单上勾「反例」那一格之后，正看着的这个信号
+            # 的真值表当场就该多出那条 `_NEG` 列（v1 2026-06-10 修过的用户报障，v2 复发了）。
+            # **不会自激**：本槽只走 `refresh()` → `show_signal()`，而 `show_signal` 装表全程
+            # `_loading=True`，`model.load` 发出来的 `colsChanged` 被 `_persist` 的闸门挡掉，
+            # 于是不会再有 `put_edit` → `negsChanged` 这一圈。
             for sig, slot in (("currentChanged", self._on_current_changed),
                               ("coverageChanged", self._on_refresh_signal),
                               ("configChanged", self._on_refresh_signal),
                               ("scopeChanged", self._on_refresh_signal),
+                              ("negsChanged", self._on_refresh_signal),
                               ("workbookChanged", self._on_refresh_signal)):
                 s = getattr(state, sig, None)
                 if s is not None:
@@ -380,16 +386,29 @@ class TruthPanel(QtWidgets.QWidget):
         self.show_signal(name, an)
 
     def show_signal(self, name, an, cols=None):
-        """装一个信号的表（`state` 有编辑记录就用记录里的列，否则出厂默认）。"""
+        """装一个信号的表（`state` 有编辑记录就用记录里的列，否则出厂默认）。
+
+        C-154（C5a-1）：**只加过反例、正向一格没动过**的信号是个例外 —— 它的正向列还是
+        「引擎按某一档出的那份」，换了覆盖度档就该跟着重算，再把反例补回去。此前 `set_neg`
+        写下的整份 cols 被这里原样取回，于是那个信号的正向永远冻在勾反例那一刻的档位上
+        （精简 9 列 → 拧到穷举还是 9 列，导出侧同样冻着）。手填过期望 / 加过列 / 删过列的
+        信号仍然冻结不动（C-153：那是他的活，拧全局档不许冲掉）。
+        """
         self._name = str(name or "")
         self._an = an or {}
         self._e_inputs = e_inputs_from_an(self._an)
+        resynced = False
         if cols is None:
             ed = None
             if self.state is not None and hasattr(self.state, "edit_of"):
                 ed = self.state.edit_of(self._name)
-            cols = list(ed["cols"]) if ed and ed.get("cols") is not None \
-                else ED.cols_from_vectors(self._an, self._e_inputs)
+            if ed and ed.get("cols") is not None:
+                fresh = ED.cov_resync_cols(self._an, self._e_inputs,
+                                           ed.get("an"), ed["cols"])
+                cols = fresh if fresh is not None else list(ed["cols"])
+                resynced = fresh is not None
+            else:
+                cols = ED.cols_from_vectors(self._an, self._e_inputs)
         self._loading = True
         try:
             self.model.load(self._an, cols, self._e_inputs)
@@ -397,6 +416,8 @@ class TruthPanel(QtWidgets.QWidget):
             self.frozen.set_source(self.model, self._an, self._e_inputs)
         finally:
             self._loading = False
+        if resynced:
+            self._persist()          # 重算过 = 记录真的变了，state 与屏幕不许各说各话
         self._net_rows = self._build_net_rows()
         self.empty.setVisible(False)
         self.splitter.setVisible(True)

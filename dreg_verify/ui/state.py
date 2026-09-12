@@ -534,9 +534,21 @@ class WorkbenchState(QtCore.QObject):
         return self.persist_edits()
 
     def compute_edited(self, view_id=None):
-        """编辑状态 → 喂 `exports.render_sv` / 报告 的 `edited`。"""
+        """编辑状态 → 喂 `exports.render_sv` / 报告 的 `edited`。
+
+        R2-11：逐条把 `an` 换成**现在这一档**的分析结果再导。编辑记录里那份 `an` 是写记录
+        那一刻冻结的，覆盖度档换过之后它与生成期用的 case 清单就不是一回事了 ——
+        `mux_derive` 拿它算 `dropped` 就算不出该丢哪几条，屏幕 25 列 / .sv 9 块，两边都不吭声。
+        列集**不动**（C-153：手填过的信号拧全局档不许被冲掉），换的只是「拿哪一档的
+        case 清单去对账」。分析不出来（引擎瞬时异常）就退回记录里那份，不连累导出。
+        """
         vid = self._vid(view_id)
-        return ED.compute_edited(self._edits[vid], self._mux_data[vid])
+        eds = {}
+        for low, ed in self._edits[vid].items():
+            m = self.model_of(low, vid)
+            cur = self.analyze(m["name"], vid) if m is not None else None
+            eds[low] = dict(ed, an=cur) if cur is not None else ed
+        return ED.compute_edited(eds, self._mux_data[vid])
 
     def analyze(self, name, view_id=None, want_graph=False):
         """一个信号的统一分析结果 an（真值表/展开链/输入表/电路图都吃它）。找不到 → None。

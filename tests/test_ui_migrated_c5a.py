@@ -12,10 +12,11 @@
   · 夹具只用 `tests/` 下两张 mirror 镜像表（公开仓，**绝不出现真实信号名**）；
   · 有状态的动作（导入 / 恢复 / 加反例 / 改档）至少做两次，且第二次与第一次**不同**。
 
-⚠ `test_c154_neg_only_signal_follows_global_coverage` 是 `xfail(strict=True)`：
-它不是「还没写完」，是**v2 现在真的不满足 C-154**（证据见该测试的 docstring 与 C5-a 报告）。
-按主控交代：**不改 v2**，用 strict xfail 把这个缺口钉在测试里 —— 哪天 v2 补上了，
-这条会以 XPASS 失败，逼着把 xfail 摘掉。
+⚠ `test_c154_neg_only_signal_follows_global_coverage` 与
+`test_c023_c122_left_neg_column_shows_in_grid_without_reselect` 原本是 `xfail(strict=True)` ——
+它们钉的不是「还没写完」，是 C5-a 实测出来的两个 v2 缺口。Phase D 修复波 F1 把两处都补上了
+（C5a-1：`edits.cov_resync_cols`；C5a-2：面板补订 `negsChanged`），两条以 XPASS 逼停，
+装饰器已按约定摘掉，现在是普通的守门测试。
 """
 
 import io
@@ -306,9 +307,6 @@ def test_c153_edited_signal_keeps_columns_when_global_cov_changes(win, qapp):
     assert w.state.edit_of(name)["cols"][0]["exp"] == hand, "state 里那份编辑也得在"
 
 
-@pytest.mark.xfail(strict=True, reason="v2 缺陷：state.set_neg 写下的整份 cols 会被 "
-                                       "truth/panel.refresh 原样取回，切全局档时正向列不再按新档"
-                                       "重算 —— C-154 在 v2 没有落地（C5-a 报告 §5-1）")
 def test_c154_neg_only_signal_follows_global_coverage(win, qapp):
     """替下 `test_gui_default_one_survives_coverage_change` /
     `test_gui_coverage_live_update_neg_only` / `test_gui_neg_only_switch_follows_global_coverage` /
@@ -317,10 +315,12 @@ def test_c154_neg_only_signal_follows_global_coverage(win, qapp):
 
     C-154 原文：**只加过反例、没手改正向的信号，切全局档时正向按新档重算再补回反例**。
 
-    v2 现状（实证）：清单勾「反例」→ `state.set_neg` 把整份 cols 写进 `state.edits`；
-    `ui/truth/panel.py::show_signal` 只要 `state.edit_of(name)` 有记录就**原样取回**，
-    于是这个信号的正向列被冻结在勾反例那一刻的档位上。导出侧同理（`compute_edited`
-    吃的是同一份 cols）。这正是 v1 在 R25 / R27 修过的那个 bug 在 v2 的复发。
+    当初的 v2 缺陷（C5-a 报告 §5-1）：清单勾「反例」→ `state.set_neg` 把整份 cols 写进
+    `state.edits`；`ui/truth/panel.py::show_signal` 只要 `state.edit_of(name)` 有记录就
+    **原样取回**，于是这个信号的正向列被冻结在勾反例那一刻的档位上（导出侧同理）。
+    这正是 v1 在 R25 / R27 修过的那个 bug 在 v2 的复发。
+    F1 已修（C5a-1）：`edits.cov_resync_cols` 判「只加过反例」→ 正向按新档重算、
+    反例按输入取值补回；手填过期望 / 加过删过列的仍然冻结不动（C-153）。
     """
     w = win
     _load(w)
@@ -487,18 +487,17 @@ def test_c023_c122_left_neg_makes_one_neg_column_dedups_and_uncheck_removes_it(w
     assert len(w.state.edit_of(name)["cols"]) == n0
 
 
-@pytest.mark.xfail(strict=True, reason="v2 缺陷：`ui/truth/panel.py` 刻意不接 editsChanged，"
-                                       "也没人接 negsChanged —— 清单勾「反例」后，正看着的那个"
-                                       "信号的真值表不会当场多出 _NEG 列（C5-a 报告 §5-3）")
 def test_c023_c122_left_neg_column_shows_in_grid_without_reselect(win, qapp):
     """替下 `test_mux_left_neg_shows_in_editor`（老断言：
     `len(negs) == 1, "勾负向后编辑器真值表应出现 1 条负向列"`、
     `len(w._ti_mux_vecs) == n0 + 1`、`test_label(...).endswith("_NEG")`）。
 
     这正是 v1 在 2026-06-10 修过的用户报障：左表勾了反例，编辑器真值表看不到那一列，
-    用户以为没生效。v2 把它复发了 —— `state.set_neg` 只发 `negsChanged` / `editsChanged`，
-    而真值表面板订阅的是 `currentChanged / coverageChanged / configChanged / scopeChanged /
-    workbookChanged` 五条，没有一条会在这里响。**不改 v2**，用 strict xfail 钉住。
+    用户以为没生效。v2 曾把它复发了 —— `state.set_neg` 只发 `negsChanged` / `editsChanged`，
+    而真值表面板当初订阅的是 `currentChanged / coverageChanged / configChanged /
+    scopeChanged / workbookChanged` 五条，没有一条会在这里响。
+    F1 已修（C5a-2）：面板补订 `negsChanged`（装表全程 `_loading=True`，
+    `colsChanged` 被 `_persist` 的闸门挡掉，不会自激回 `put_edit`）。
     """
     w = win
     _load(w)
