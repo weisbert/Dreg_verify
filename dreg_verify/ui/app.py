@@ -97,6 +97,9 @@ SIZE_DEFAULTS = {"listW": theme.LIST_W, "sideW": theme.SIDE_W,
 #: 关窗时等后台线程在信号边界停下来的上限（ms）——QThread 还在跑就析构 = 进程级崩溃
 CLOSE_WAIT_MS = 3000
 
+#: 状态栏那一行计数的合并窗口（ms）。worker 逐信号升级时多次 `modelUpdated` 只算一次（PERF-1）。
+STATUS_COUNTS_COALESCE_MS = 100
+
 fmt_shortcut = names.fmt_shortcut          # 名字已并进 names.py；这两个别名保住既有引用
 fmt_recent_row = names.fmt_recent_row
 
@@ -179,6 +182,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker = None
         self._retired = []             # 已经作废、但线程还没停下来的旧 worker（见 _retire_worker）
         self._run_id = 0               # 分析「第几趟」：旧趟迟到的信号按它丢掉
+        # PERF-1：状态栏那一行计数（`_counts_of` 要扫全表两遍）逐信号算一次就是 O(N²)，
+        # 合并成 100 ms 一发。写过状态栏（`set_status`）就把合并中的那一发作废。
+        self._counts_timer = QtCore.QTimer(self)
+        self._counts_timer.setSingleShot(True)
+        self._counts_timer.setInterval(STATUS_COUNTS_COALESCE_MS)
+        self._counts_timer.timeout.connect(self._refresh_status_counts)
         self._analysis_vid = ""        # 这一趟 worker 在跑哪个范围（迟到的信号按它对齐）
         self._excel_path = ""
         self._load_error = ""
@@ -802,7 +811,7 @@ class MainWindow(QtWidgets.QMainWindow):
         留住之后，那次「点回来」没有了，真值表就一直停在旧档上（清单说 9 条、真值表画着 25 列）。"""
         if view_id not in ("", self._scope()):
             return
-        self._refresh_status_counts()
+        self._refresh_status_counts_soon()            # PERF-1：逐行升级时把状态栏计数合并成一次
         cur = str(getattr(self._state, "current_name", "") or "")
         if cur and (not name or str(name).lower() == cur.lower()):
             self._show_flow(cur)
@@ -1365,7 +1374,17 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def set_status(self, text):
         """C-269：逐操作反馈都走 statusLeft。"""
+        self._counts_timer.stop()        # 刚写的这一句别被合并中的那一发计数盖掉
         self.status_left.setText(terms.scrub(str(text or "")))
+
+    def _refresh_status_counts_soon(self):
+        """把连成一串的逐行升级合并成**一次**状态栏计数（PERF-1 节流）。
+
+        `_counts_of` 要把整张清单扫两遍（`_status_detail` 的悬停行再扫两遍），逐信号算一次
+        就是 O(N²) —— 合成 200 信号表上 cProfile 数出 163,400 次 `match_status`。
+        worker 收尾（`_on_worker_finished`）会同步算一次准的。"""
+        if not self._counts_timer.isActive():
+            self._counts_timer.start()
 
     def _models(self):
         try:
@@ -1390,6 +1409,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         Topout 那一行还多一截 logic+mux 的分家（它是全链范围，两页的信号混在一起）；
         换到 logic / mux / dft / iddq 时那一截没有意义（dft 页上写「logic 9」纯属看错表）。"""
+        self._counts_timer.stop()                     # 合并中的那一发作废：这一发就是现算的
         models = self._models()
         if not models:
             return

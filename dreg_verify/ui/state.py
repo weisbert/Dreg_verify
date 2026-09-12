@@ -153,6 +153,7 @@ class WorkbenchState(QtCore.QObject):
                                                 save=persist.save_settings)
                      for vid in contracts.VIEW_IDS}
         self._models = {vid: [] for vid in contracts.VIEW_IDS}
+        self._row_idx = {}              # view_id -> (行列表, 行数, {小写名: 行号})，见 _row_index
         self._fingerprint = {}          # view_id -> 上一趟跑完时的指纹（C-265）
         self._checks = {vid: None for vid in contracts.VIEW_IDS}      # None = 全勾（C-243）
         self._negs = {vid: set() for vid in contracts.VIEW_IDS}
@@ -325,9 +326,28 @@ class WorkbenchState(QtCore.QObject):
     def models(self, view_id=None):
         return self._models.get(self._vid(view_id), [])
 
+    def _row_index(self, vid):
+        """{小写信号名: 行号} —— `model_of` / `update_model` 的 O(1) 入口（PERF-1）。
+
+        这两个以前都是「按名字线性扫全表 + 逐行 `.lower()`」，而 worker 逐信号回来时**每一行**
+        都各要走一趟（清单一趟、组合根一趟）—— 200 信号上就是 O(N²)：合成表上 cProfile
+        数出 118,642 次 `str.lower`。缓存按「行列表还是不是同一个对象 + 行数变没变」判失效，
+        `set_models` 换列表、`update_model` 追加行都会让它当场重建。"""
+        rows = self._models.get(vid) or []
+        ent = self._row_idx.get(vid)
+        if ent is None or ent[0] is not rows or ent[1] != len(rows):
+            idx = {}
+            for i, m in enumerate(rows):
+                idx.setdefault(str((m or {}).get("name") or "").lower(), i)   # 同名取**第一**行
+            ent = (rows, len(rows), idx)
+            self._row_idx[vid] = ent
+        return ent[2]
+
     def model_of(self, name, view_id=None):
-        low = str(name or "").lower()
-        return next((m for m in self.models(view_id) if str(m["name"]).lower() == low), None)
+        vid = self._vid(view_id)
+        rows = self._models.get(vid) or []
+        i = self._row_index(vid).get(str(name or "").lower())
+        return rows[i] if i is not None and 0 <= i < len(rows) else None
 
     def set_models(self, view_id, models, partial=False):
         """worker 回填整张清单。
@@ -353,14 +373,12 @@ class WorkbenchState(QtCore.QObject):
         """worker 的 `signalDone`：只换一行（清单只 dataChanged 那一行，不整表重建）。"""
         vid = self._vid(view_id)
         name = str((model or {}).get("name") or "")
-        low = name.lower()
         rows = self._models.get(vid) or []
-        for i, m in enumerate(rows):
-            if str(m["name"]).lower() == low:
-                rows[i] = model
-                break
+        i = self._row_index(vid).get(name.lower())    # PERF-1：不再逐行 `.lower()` 扫全表
+        if i is not None and 0 <= i < len(rows):
+            rows[i] = model
         else:
-            rows.append(model)
+            rows.append(model)                        # 行数变了 → 下次 `_row_index` 自动重建
         self.modelUpdated.emit(vid, name)
 
     def fingerprint(self, view_id=None):

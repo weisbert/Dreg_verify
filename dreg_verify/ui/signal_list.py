@@ -66,6 +66,9 @@ _PROBLEM_TONES = T.PROBLEM_TONES
 #: 原因块正文里「点名的 Excel 行号」——引擎暂未给结构化 meta 时从 issues 文本里取（C-127 / copy_rows）
 _ROW_RE = re.compile(r"第\s*(\d+)\s*行")
 
+#: 头部计数的合并窗口（ms）。worker 逐信号升级时，多次 `modelUpdated` 只算一次计数（PERF-1）。
+COUNTS_COALESCE_MS = 100
+
 _FORMATTER = string.Formatter()
 
 
@@ -263,6 +266,32 @@ class SignalListModel(QtCore.QAbstractItemModel):
         self._expanded = -1
         self.endResetModel()
 
+    def refresh_rows(self, models):
+        """**就地**换一遍行数据（行名序列必须一致）。换成功返回 True，行集合变了返回 False。
+
+        PERF-1 次因：worker 收尾那一下 `set_models(partial=False)` 推的是同一批信号，而每一行
+        早就被 `signalDone` 逐条 `update_row` 升级过了 —— 这时整表 `load()`
+        （beginResetModel + proxy 全表重筛重排 + 视图重新布局 + 选中行按名找回）纯属白干
+        （合成 200 信号表实测 0.47 s = T2 的 18%）。这里只对**真的变了**的行发一次 dataChanged，
+        常见情形是一行都不用发。行集合真的变了（换表 / 换范围 / 换覆盖度档）→ 返回 False，
+        调用方照旧走 `reload()`。"""
+        rows = [dict(m or {}) for m in (models or [])]
+        if len(rows) != len(self._models):
+            return False
+        if [str(m.get("name", "")) for m in rows] != [str(m.get("name", "")) for m in self._models]:
+            return False
+        changed = [i for i, m in enumerate(rows) if m != self._models[i]]
+        if not changed:
+            return True
+        for i in changed:
+            self._models[i] = rows[i]
+        top, bot = min(changed), max(changed)
+        self.dataChanged.emit(self.index(top, 0), self.index(bot, self.columnCount() - 1))
+        if top <= self._expanded <= bot:
+            parent = self.index(self._expanded, 0)
+            self.dataChanged.emit(self.index(0, 0, parent), self.index(0, 0, parent))
+        return True
+
     def update_row(self, model):
         """worker.signalDone → 该行从「分析中」升级：只发 dataChanged，**不重建**（裁决⑨ / C-276）。"""
         name = str((model or {}).get("name", ""))
@@ -277,17 +306,28 @@ class SignalListModel(QtCore.QAbstractItemModel):
         return True
 
     def set_check_state(self, checked=None, negs=None):
-        """state.checksChanged / negsChanged → 刷新两个勾选列（不重建）。"""
+        """state.checksChanged / negsChanged → 刷新两个勾选列（不重建）。
+
+        ⚠ 没变就不发：整行范围的 dataChanged 会让 proxy 把全表重筛一遍、按 `LR.SORT` 重排一遍，
+        而排序键要走 `data()`（= `_row_data`，整行显示内容建一遍）—— 一次「什么都没改」的
+        `set_check_state` 就是 O(N log N) 次 `_row_data`（PERF-1）。"""
+        before = (None if self._checked is None else frozenset(self._checked), frozenset(self._negs))
         if checked is not None or self._checked is not None:
             self._checked = None if checked is None else set(checked)
         if negs is not None:
             self._negs = set(negs)
-        if self._models:
+        after = (None if self._checked is None else frozenset(self._checked), frozenset(self._negs))
+        if self._models and after != before:
             self.dataChanged.emit(self.index(0, LC.CHECK), self.index(len(self._models) - 1, LC.NEG))
 
     def set_prefix_map(self, mapping):
-        """探针前缀映射（state.probe_prefixes）—— 探针前缀列的输入侧命中要用（C-020）。"""
-        self._prefix_map = {str(k).lower(): str(v) for k, v in dict(mapping or {}).items()}
+        """探针前缀映射（state.probe_prefixes）—— 探针前缀列的输入侧命中要用（C-020）。
+
+        同 `set_check_state`：映射没变就不发全表 dataChanged（PERF-1）。"""
+        mapped = {str(k).lower(): str(v) for k, v in dict(mapping or {}).items()}
+        if mapped == self._prefix_map:
+            return
+        self._prefix_map = mapped
         if self._models:
             self.dataChanged.emit(self.index(0, LC.PREFIX), self.index(len(self._models) - 1, LC.PREFIX))
 
@@ -325,6 +365,16 @@ class SignalListModel(QtCore.QAbstractItemModel):
 
     def model_at(self, row):
         return self._models[row] if 0 <= row < len(self._models) else {}
+
+    def raw_rows(self, rows):
+        """一批源行号 → 它们的**原始**模型 dict（只读，不 copy、不走 `data()`）。
+
+        PERF-1 的口子：计数 / 可见名单只要 `name` / `status` / `status_detail` 三个字段，
+        走 `index(r, c).data(role)` 却要 `_row_data` 把整行显示内容（前缀拆分、tooltip、
+        scrub、格式化）建一遍 —— 每升级一行就对全部可见行来一次，200 信号上是 O(N²)
+        （cProfile：58,875 次 `_row_data`、1.38 s = T2 的 60%）。这里一律 O(N) 且零格式化。"""
+        n = len(self._models)
+        return [self._models[r] for r in rows if 0 <= r < n]
 
     def name_at(self, row):
         return str(self.model_at(row).get("name", ""))
@@ -451,8 +501,20 @@ class SignalListModel(QtCore.QAbstractItemModel):
         return None
 
     def _row_data(self, index, role):
+        if role == Qt.SizeHintRole:
+            # PERF-1：父行行高是个常数，别为它把整行判一遍。QTreeView 行高不统一
+            # （原因子行另有高度），所以每来一次 dataChanged 它都要把这一行**每一列**的
+            # sizeHint 重问一遍（delegate 自己问一次、`QStyledItemDelegate` 再问一次）——
+            # 逐信号升级 200 行时实测 4,140 次，每次都白算一遍 `status_key_of`。
+            return QtCore.QSize(0, TH.ROW_H)
         m = self.model_at(index.row())
         col = LC(index.column())
+        if role == LR.SORT:
+            # PERF-1：排序键是 proxy 在**每一次** dataChanged 上都要问的（逐信号升级 200 行
+            # 时是几万次），而除「状态」列外它压根用不到状态档 —— 别为一次字符串比较去算
+            # `status_key_of` + `T.STATUS[key]`。
+            return (_status_rank(m, _tone_of(m)) if col == LC.STATUS
+                    else self._sort_key(m, col, "", None))
         key = status_key_of(m)
         tone = T.STATUS[key][1]
         pending = key == "pending"
@@ -485,8 +547,6 @@ class SignalListModel(QtCore.QAbstractItemModel):
             if col in (LC.CHECK, LC.NEG, LC.STATUS):
                 return int(Qt.AlignCenter if col != LC.STATUS else (Qt.AlignLeft | Qt.AlignVCenter))
             return int(Qt.AlignLeft | Qt.AlignVCenter)
-        if role == Qt.SizeHintRole:
-            return QtCore.QSize(0, TH.ROW_H)
         if role == LR.NAME:
             return str(m.get("name", ""))
         if role == LR.STATUS_KEY:
@@ -513,9 +573,7 @@ class SignalListModel(QtCore.QAbstractItemModel):
             return _scrub(m.get("expr"))
         if role == LR.INPUT_NAMES:
             return [str(x) for x in (m.get("input_names") or [])]
-        if role == LR.SORT:
-            return self._sort_key(m, col, key, tone)
-        return None
+        return None                                  # LR.SORT 在开头就返回了（PERF-1 快路）
 
     def _display(self, m, col, key):
         if col in (LC.CHECK, LC.NEG):
@@ -652,15 +710,23 @@ class SignalListProxy(QtCore.QSortFilterProxyModel):
         ⚠ `owners` **空集合 = 不按 owner 筛**（与 `filter_bar.match_row` 同口径）：
         筛选行一个 owner 都没勾时发的就是空集合，把它当成「只要 owner 在这 0 个里面的行」，
         整张清单会一行不剩 —— C1-int 端到端第一次载 mirror 就是这个现象。"""
-        self._owners = {str(o) for o in owners} if owners else None
-        self._kind = str(kind or "")
-        self._status = str(status or "")
-        self._rx = None
+        new_owners = {str(o) for o in owners} if owners else None
+        new_kind, new_status = str(kind or ""), str(status or "")
+        new_rx = None
         if regex:
             try:
-                self._rx = re.compile(regex, re.I)
+                new_rx = re.compile(regex, re.I)
             except re.error:
-                self._rx = re.compile(re.escape(str(regex)), re.I)      # 写坏的正则按字面串搜，不报错
+                new_rx = re.compile(re.escape(str(regex)), re.I)        # 写坏的正则按字面串搜，不报错
+        # PERF-1：四项一格没变就别 `invalidate()` —— 那是整表重筛 + 重排（排序键要走 `data()`，
+        # 200 行一次几千次 `_row_data`）。而清单一变 `filter_bar.rebuild` 就会把**同一份**
+        # 筛选条件原样再发一遍（载表推骨架、worker 收尾各一次），白算两趟。
+        old_pat = None if self._rx is None else (self._rx.pattern, self._rx.flags)
+        new_pat = None if new_rx is None else (new_rx.pattern, new_rx.flags)
+        if (new_owners, new_kind, new_status, new_pat) == (self._owners, self._kind,
+                                                           self._status, old_pat):
+            return
+        self._owners, self._kind, self._status, self._rx = new_owners, new_kind, new_status, new_rx
         self._invalidate()
 
     def _invalidate(self):
@@ -707,8 +773,17 @@ class SignalListProxy(QtCore.QSortFilterProxyModel):
                 n += 1
         return n
 
+    def visible_source_rows(self):
+        """可见父行的**源**行号（按 proxy 的显示顺序）。只用 `mapToSource`，不碰 `data()`。"""
+        return [self.mapToSource(self.index(r, 0)).row() for r in range(self.rowCount())]
+
+    def visible_rows(self):
+        """可见父行的**原始**模型 dict（PERF-1：计数不再经 `_row_data`，见 `raw_rows` 的注释）。"""
+        src = self.sourceModel()
+        return src.raw_rows(self.visible_source_rows()) if src is not None else []
+
     def visible_names(self):
-        return [self.index(r, LC.NAME).data(int(LR.NAME)) or "" for r in range(self.rowCount())]
+        return [str(m.get("name", "")) for m in self.visible_rows()]
 
     # ── 内部 ──
     def _accepts(self, source_row):
@@ -1115,6 +1190,11 @@ class SignalListPanel(QtWidgets.QWidget):
         self.state = state
         self._view_id = view_id or getattr(state, "scope", CT.DEFAULT_VIEW_ID)
         self._syncing = False
+        # PERF-1 计数节流：逐行升级时只排一发，到点合并算一次（见 `_refresh_counts_soon`）
+        self._counts_timer = QtCore.QTimer(self)
+        self._counts_timer.setSingleShot(True)
+        self._counts_timer.setInterval(COUNTS_COALESCE_MS)
+        self._counts_timer.timeout.connect(self._refresh_counts)
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1321,14 +1401,15 @@ class SignalListPanel(QtWidgets.QWidget):
 
     # ── 计数（清单头部 / C-031）──
     def counts_text(self):
-        names = self.visible_names()
-        rows = {str(m.get("name", "")): m for m in self.model.rows()}
-        k = sum(1 for n in names if self.model.is_checked(n))
+        # PERF-1：直接读可见行的**原始** dict —— 以前先 `visible_names()`（每个可见行一次
+        # `index(r, NAME).data(NAME)` → `_row_data` 整行建一遍）再回头拿 models 拼一张
+        # {名字: 行} 的表，每升级一行就来一次，200 信号上是 O(N²)。
+        rows = [m for m in self.proxy.visible_rows() if m.get("name")]
+        k = sum(1 for m in rows if self.model.is_checked(m.get("name", "")))
         # P-20：「有问题」的判据只有 `terms.match_status` 一份 —— 以前这里按色档数
         # （warn/bad），筛选行按 match_status 筛，状态栏又是第三套，同屏三个数。
-        p = sum(1 for n in names
-                if T.match_status(rows.get(n) or {}, T.STATUS_FILTER_ITEMS[2]))
-        return T.LIST_COUNTS_FMT.format(n=len(names), k=k, p=p)
+        p = sum(1 for m in rows if T.match_status(m, T.STATUS_FILTER_ITEMS[2]))
+        return T.LIST_COUNTS_FMT.format(n=len(rows), k=k, p=p)
 
     def visible_counts_text(self):
         """筛选后给状态栏用的一行（C-031）：可见 N / 共 M（其中 K 个按输入信号名命中）。"""
@@ -1336,7 +1417,17 @@ class SignalListPanel(QtWidgets.QWidget):
                                            k=self.proxy.n_by_input())
 
     def _refresh_counts(self, *_):
+        self._counts_timer.stop()          # 合并中的那一发作废：这一发就是现算的
         self.counts.setText(self.counts_text())
+
+    def _refresh_counts_soon(self):
+        """把连成一串的逐行升级合并成**一次**计数（PERF-1 节流，`COUNTS_COALESCE_MS`）。
+
+        `modelUpdated` 是逐信号来的：200 信号 = 200 次全表计数，而头部那一行
+        「共 N · 勾 K · 有问题 P」本来就不需要每升级一行都跳一下。worker 收尾时
+        `modelsChanged` 会立刻再算一次准的（`reload` / `_refresh_in_place` 都调同步那个）。"""
+        if not self._counts_timer.isActive():
+            self._counts_timer.start()
 
     def visible_names(self):
         return [n for n in self.proxy.visible_names() if n]
@@ -1517,7 +1608,24 @@ class SignalListPanel(QtWidgets.QWidget):
 
     def _on_models_changed(self, view_id=None):
         if view_id in (None, "", self._view_id):
-            self.reload()
+            if not self._refresh_in_place():
+                self.reload()
+
+    def _refresh_in_place(self):
+        """行集合没变 → 就地换数据，**不整表重建**（PERF-1 次因）。换不了返回 False。
+
+        worker 收尾的 `set_models(partial=False)` 推的是同一批信号、同样的顺序，而每一行
+        早就被 `signalDone` 逐条升级过 —— `reload()` 那一趟 beginResetModel 只会把 proxy、
+        视图、选中行、展开行统统推倒重来（合成 200 信号表实测 0.47 s），换来的是一模一样的
+        一张表。换表 / 换范围 / 换覆盖度档会改行集合，那时 `refresh_rows` 返回 False，照旧重建。"""
+        models = list(self.state.models(self._view_id) or [])
+        if not self.model.refresh_rows(models):
+            return False
+        self.model.set_prefix_map(getattr(self.state, "probe_prefixes", None) or {})
+        self.model.set_analyzer(getattr(self.state, "analyze", None))     # R3-02 原因块点名
+        self.model.set_check_state(self._checked_set(), self.state.negs(self._view_id))
+        self._refresh_counts()
+        return True
 
     def _on_model_updated(self, view_id, name=None):
         """worker.signalDone → 增量升级一行（dataChanged，不重建）。"""
@@ -1528,7 +1636,7 @@ class SignalListPanel(QtWidgets.QWidget):
         m = self.state.model_of(name, self._view_id)
         if m:
             self.model.update_row(m)
-            self._refresh_counts()
+            self._refresh_counts_soon()          # PERF-1：逐行升级时把计数合并成一次
 
     def _on_checks_changed(self, view_id=None):
         if view_id in (None, "", self._view_id):
