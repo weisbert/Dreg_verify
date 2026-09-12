@@ -201,6 +201,25 @@ def test_iddq_folded_into_expansion_chain(wl_wb, wl_res):
     assert not r2.chain or "iddq" not in (r2.chain[0].get("subst") or "").lower()
 
 
+def test_c050_chain_entries_have_page_kind(wl_wb, wl_res):
+    """N9：展开链每一级都带 page/kind（来源页 + 本级类型），三种来源各一例。
+
+    只加键——老消费方（HTML 报告 cli.write_report / 旧 GUI 展开链面板）只读 out/expr/subst，
+    byte-gate 6/6 是这条『只加不改』的硬证。"""
+    topo = next(t for t in wl_wb.topout if t.name == "d_wl_rf_lo2g5g_bias_en")
+    r = T.analyze_signal(wl_wb, wl_res, topo, mode="min")
+    seen = [(c.get("page"), c.get("kind")) for c in r.chain]
+    assert ("dft", "gate") in seen        # topout._gate_chain_entry（iddq 门级，链首）
+    assert ("logic", "logic") in seen     # cone.expand（logic 页展开级）
+    assert ("mux", "mux") in seen         # mux_gen.synthesize_mux_expr（mux 页选路级）
+    for c in r.chain:                     # 每一级都有，且老三键一个不少
+        assert set(("out", "expr", "subst", "page", "kind")) <= set(c)
+        assert c["page"] in ("logic", "mux", "dft", "iddq") and c["kind"] in ("logic", "mux", "gate")
+    # 页本地 iddq 视图的门要标 page="iddq"（由 pageviews 传，C0-b 接）
+    e = T._gate_chain_entry("x", "iddq_mode", "inner", 0, page="iddq")
+    assert (e["page"], e["kind"]) == ("iddq", "gate")
+
+
 def test_view_models_carry_form_label(wb):
     """#2：视图模型带 form/form_label(展开后表达式形态 F0-F4)——信号清单『逻辑类型』列。"""
     ms = {m["name"]: m for m in T.topout_view_models(wb, mode="max")}

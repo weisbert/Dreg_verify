@@ -20,7 +20,7 @@ an 的字段（两条流水线保证同名同义）::
     expansion     mux 展开 dict（logic 为 None）
     vectors       [TestVector]     该信号的测试向量
     out_width     int              输出位宽
-    chain         [{"out","expr","subst"}]  逐层展开链
+    chain         [{"out","expr","subst","page","kind"}]  逐层展开链（page/kind：N9 加的来源页/级类型）
     name          str              信号显示名
     sig           源对象（LogicSignal / MuxGroup / None）
     groups        [输入分组 dict]  已按 for_test 行序排好（wb 传入时）

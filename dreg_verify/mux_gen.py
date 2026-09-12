@@ -538,8 +538,10 @@ def synthesize_mux_expr(wb, resolver, group, _depth=0, _stack=None, chain_out=No
         node = E.Ternary(cond, data_nodes[i], node)
 
     if chain_out is not None and all(c.get("out") != "mux%s" % group.group_no for c in chain_out):
+        # page/kind（GUI v2 N9，additive）：本级来自 mux 页、是一级选路——只加键，
+        # 老消费方（报告 HTML / 测试）只读 out/expr/subst，字节不变。
         chain_out.append({"out": "mux%s" % group.group_no, "expr": group.expr,
-                          "subst": E.to_text(node)})
+                          "subst": E.to_text(node), "page": "mux", "kind": "mux"})
     # ⭐ additive 来源标签（改动点 A，见 cone._tag_origin 的 docstring）：mux 合成子树的根挂组号 + 输出网名
     cone._tag_origin(node, net=getattr(group, "rtl_base", None) or group.out_base, kind="mux",
                      width=group.out_width, group=group.group_no)

@@ -509,13 +509,16 @@ def result_form(wb, res):
         return None
 
 
-def _gate_chain_entry(top_name, gate_base, inner_ref, transp):
+def _gate_chain_entry(top_name, gate_base, inner_ref, transp, page="dft"):
     """门控级展开链条目（#1/#4-6：把 iddq 折进 cone 展开链显示）：<top> = iddq ? 0 : <inner>
     （透传值 transp 决定常量支 0 在哪支：transp=0→iddq 选 0、功能走 inner）。纯展开链【显示】用，
-    不入 .sv 向量(byte-safe)——让跨页 cone 展开页/真表上方能看到 iddq_mode 这一级。"""
+    不入 .sv 向量(byte-safe)——让跨页 cone 展开页/真表上方能看到 iddq_mode 这一级。
+
+    page/kind（GUI v2 N9，additive）：本级是【门】，来源页按调用方给——Topout cone 的门由
+    `_gate_obs_for` 从 dft 页观测行取（page="dft"）；页本地 iddq 视图的门由 pageviews 传 "iddq"。"""
     expr = ("%s ? 0 : %s" % (gate_base, inner_ref) if int(transp) == 0
             else "%s ? %s : 0" % (gate_base, inner_ref))
-    return {"out": top_name, "expr": expr, "subst": expr}
+    return {"out": top_name, "expr": expr, "subst": expr, "page": page, "kind": "gate"}
 
 
 def _prepend_gate_chain(res, root, inner_ref):

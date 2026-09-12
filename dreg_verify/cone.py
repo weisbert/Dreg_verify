@@ -80,8 +80,10 @@ def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
               上游行展开来的叶子="上游行名.字母" 如 "pll_n1.A"），供 GUI/报告显示溯源——
               展开后表达式变量名是大写基名，没有这个就对不回 Excel 的 A/B/C 列了。
     chain_out: 传入 list 时，把『展开链』按 DFS 顺序追加进去（GUI/报告显示用）：
-              [{"out": 行基名, "expr": Excel 原式, "subst": 字母代入真实信号名的等价形式}, ...]
-              首项=本行(根)，同一上游行被多次到达只记一次。
+              [{"out": 行基名, "expr": Excel 原式, "subst": 字母代入真实信号名的等价形式,
+                "page": 来源页, "kind": 本级类型}, ...]
+              首项=本行(根)，同一上游行被多次到达只记一次。page/kind 是 GUI v2 N9 加的显示用键
+              （logic 页展开级恒 page="logic"/kind="logic"；mux 级在 mux_gen、门级在 topout）。
 
     循环引用 / 超深 / 找不到内部信号定义行 / 子表达式解析失败 → 抛 ConeError。
     """
@@ -103,8 +105,11 @@ def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
     if chain_out is not None and all(c["out"] != sig.out_base for c in chain_out):
         rename = {ltr: b.base + _slice_suffix(b)
                   for ltr, b in bindings.items() if b is not None and b.base}
+        # page/kind（GUI v2 N9，additive）：这一级来自哪一页、是什么级——展开链的页标签与图元徽标
+        # 据此显示，免视图层再按名字猜。只加键；老消费方（报告 HTML / 测试）只读 out/expr/subst。
         chain_out.append({"out": sig.out_base, "expr": str(sig.expr).strip(),
-                          "subst": E.to_text(node, rename)})
+                          "subst": E.to_text(node, rename),
+                          "page": "logic", "kind": "logic"})
 
     # 整个 cone 的根信号(stack[0] = 最外层被断言的输出)。叶子的"自引用"判定相对它：
     # 任何层级的叶子若引用根信号，都绝不能 force 根的输出网(那正是要断言的网)。
