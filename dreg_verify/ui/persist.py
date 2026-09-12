@@ -1,0 +1,273 @@
+# -*- coding: utf-8 -*-
+"""persist.py —— ui 状态层的【文件 IO 唯一入口】（架构 §2.1 / §6.2；不变量 I-01、I-05、I-08）。
+
+两个文件，两种语义（A3 §3.1 / §3.2）：
+  · `SETTINGS_PATH = ~/.dreg_verify_gui.json`  —— 界面偏好 + 诊断配置，平坦 dict、无版本号、宽容读；
+  · `EDITS_PATH    = ~/.dreg_verify_edits.json`—— 劳动成果（designer 手填期望/负向/自定义列/勾选），
+    顶层按 **Excel 全路径**分桶，一个桶里同时住着 legacy 段与 v2 段。
+
+本模块只做三件事，且都不自己实现格式：
+  ① 路径（模块级常量，**可 monkeypatch** —— `tests/ui_harness.isolate_settings` 按名字 patch 这两个，
+     与 `gui.py` 同名故同一个 helper 能同时隔离两套门面）；
+  ② 落盘策略（I-08 / C-246：路径 == 默认路径时 pytest 下一律 no-op，绝不污染用户真机的配置与编辑；
+     测试把路径 patch 到 tmp 后写入照常生效，持久化行为才测得到）；
+  ③ **桶合并写**（I-05 / C-300）——见 `write_edits_bucket` 的长注释，这是本模块存在的头号理由。
+
+格式与序列化一律走 `session` / `edits` / `exports`：多一份实现就多一处会漂的口径。
+
+依赖方向（§1.2）：只 import Qt-free 层（session / edits / exports），不 import PySide6、不 import 视图。
+"""
+
+import sys
+
+from dreg_verify import edits as ED
+from dreg_verify import exports as X
+from dreg_verify import session
+
+from . import contracts
+
+__all__ = [
+    "SETTINGS_PATH", "EDITS_PATH", "LEGACY_SEGMENTS", "V2_SEGMENTS",
+    "is_isolated", "may_read_machine_settings",
+    "load_settings", "save_settings", "patch_settings",
+    "load_edits_all", "save_edits_all", "load_edits_bucket", "write_edits_bucket",
+    "load_legacy_bucket", "legacy_bucket_counts",
+    "list_columns_get", "list_columns_set", "presets_get", "presets_set",
+    "push_recent", "recent_excels", "update_recent_count",
+    "last_export", "record_last_export",
+    "path_map_of", "save_path_map", "load_export_options", "store_export_options",
+]
+
+#: 界面偏好 / 诊断配置（可 monkeypatch；与 `gui.SETTINGS_PATH` 同名同义）
+SETTINGS_PATH = session.DEFAULT_SETTINGS_PATH
+#: 测试项编辑（可 monkeypatch；与 `gui.EDITS_PATH` 同名同义）
+EDITS_PATH = ED.DEFAULT_EDITS_PATH
+
+#: 出厂默认路径——**只用来判断「现在写的是不是用户真机那份」**（I-08），不参与读写
+_SETTINGS_DEFAULT = SETTINGS_PATH
+_EDITS_DEFAULT = EDITS_PATH
+
+#: 一个 Excel 桶里 legacy（『排查(旧)』门面）写的九段 —— v2 **不读不删**（C-235），写时逐字节保留
+LEGACY_SEGMENTS = ("edits", "neg_only", "mux_expected", "mux_neg", "mux_data",
+                   "mux_dropped", "mux_cleared", "mux_user_vecs", "signals_checked")
+#: v2 自己管的两段（C-234）
+V2_SEGMENTS = ("view_edits", "view_checks")
+
+#: settings 里 v2 新增的两个键（清单列设置 / 筛选预设），其余键名一律沿用 A3 §3.1 的旧名
+PRESETS_KEY = "presets"
+INCLUDE_RISKY_KEY = "include_risky"
+
+
+# ═════════════════════ ① settings（界面偏好 + 诊断配置）═════════════════════
+def is_isolated():
+    """路径是不是已经被指到临时目录了（`tests/ui_harness.isolate_settings` 干的）。
+
+    读设置这件事在 pytest 下本身是安全的，但**读用户真机那份**会让默认值断言随机红
+    （同事机上存着 `include_risky: false` / `maxt_topout: 512`…）。凡是「只在隔离后才该
+    生效」的恢复动作都问它一句，判据只此一处，不在各模块各写各的 `"pytest" in sys.modules`。"""
+    return SETTINGS_PATH != _SETTINGS_DEFAULT
+
+
+def may_read_machine_settings():
+    """现在从盘上恢复「界面偏好」安不安全。
+
+    只有 **pytest + 出厂默认路径** 这一种组合要躲开——那读的是用户真机的偏好
+    （同事机上可能存着 `maxt_topout: 512` / `cov_topout: 穷举`），默认值断言会随机红。
+    真机运行、或测试已经把路径 patch 到 tmp，都照常读。"""
+    return is_isolated() or "pytest" not in sys.modules
+
+
+def load_settings():
+    """读设置（I-01 / C-227：未知键原样留着、坏文件 → `{}`，**绝不收紧**）。
+
+    同事机上的旧文件里有一堆 v2 已经不认识的键（cascade_* / append_to_* / suffix_override…），
+    它们必须能原样载入、原样写回去——升级工具不该把同事的设置吃掉。"""
+    return session.load_settings(SETTINGS_PATH)
+
+
+def save_settings(d):
+    """写设置。返回是否真落了盘。
+
+    I-08 / C-246：`SETTINGS_PATH` 还是出厂默认值时，pytest 下 no-op；
+    测试把它 patch 到 tmp 之后照常写（否则持久化这件事根本测不到）。"""
+    return session.save_settings(d, SETTINGS_PATH,
+                                 skip_under_pytest=(SETTINGS_PATH == _SETTINGS_DEFAULT))
+
+
+def patch_settings(patch):
+    """读-改-写：只覆盖 patch 里的键，其余键（含不认识的旧键）原样保留。返回合并后的 dict。"""
+    st = load_settings()
+    st.update(patch or {})
+    save_settings(st)
+    return st
+
+
+def list_columns_get():
+    """清单列设置 `{列键: 可见}`（C-008 / C-046）。没存过 → 按 `contracts.LIST_DEFAULT_VISIBLE` 造。"""
+    st = load_settings().get(contracts.SETTINGS_LIST_COLUMNS)
+    if isinstance(st, dict):
+        return {str(k): bool(v) for k, v in st.items()}
+    vis = set(contracts.LIST_DEFAULT_VISIBLE)
+    return {key: (col in vis) for col, key in contracts.LIST_COL_KEYS.items()}
+
+
+def list_columns_set(mapping):
+    """写清单列设置。"""
+    return patch_settings({contracts.SETTINGS_LIST_COLUMNS:
+                           {str(k): bool(v) for k, v in (mapping or {}).items()}})
+
+
+def presets_get():
+    """筛选/勾选预设 `{名字: {"checks": [...], "filters": {...}}}`（脏数据丢掉，不抛）。"""
+    raw = load_settings().get(PRESETS_KEY)
+    out = {}
+    for name, spec in (raw if isinstance(raw, dict) else {}).items():
+        if isinstance(spec, dict):
+            out[str(name)] = {"checks": list(spec.get("checks") or []),
+                              "filters": dict(spec.get("filters") or {})}
+    return out
+
+
+def presets_set(presets):
+    """整体替换预设段。"""
+    return patch_settings({PRESETS_KEY: {str(k): v for k, v in (presets or {}).items()}})
+
+
+# ── N4 / N5 / 按路径分桶的诊断配置：薄包一层 session，统一把本模块的 load/save 注进去 ──
+def push_recent(path, n_signals=None):
+    """载表成功 → MRU 置顶（C-003 / C-228）。`last_excel` 由 session 一并照写。"""
+    return session.push_recent_excel(path, n_signals=n_signals,
+                                     load=load_settings, save=save_settings)
+
+
+def recent_excels():
+    """最近打开的表（新→旧，≤ `session.RECENT_MAX`）。"""
+    return session.recent_excels(load=load_settings)
+
+
+def update_recent_count(path, n):
+    """清单分析完 → 给 MRU 条目补上信号数。"""
+    return session.update_recent_count(path, n, load=load_settings, save=save_settings)
+
+
+def last_export(kind):
+    """该交付物上次导出到哪 → `{"path","ts"}`；没导过 → None（N5）。"""
+    return session.last_export(kind, load=load_settings)
+
+
+def record_last_export(kind, path):
+    """导出成功 → 记下这一格（N5）。"""
+    return session.record_last_export(kind, path, load=load_settings, save=save_settings)
+
+
+def path_map_of(key, excel_path):
+    """读【按 Excel 全路径分桶】的配置段（I-04 / C-233：探针前缀 / 强制 force / RTL 补充）。"""
+    return session.path_map_of(key, excel_path, load=load_settings)
+
+
+def save_path_map(key, excel_path, value):
+    """写同上；value 为空 = 清掉这张表的这一段。"""
+    return session.save_path_map(key, excel_path, value, load=load_settings, save=save_settings)
+
+
+def load_export_options():
+    """导出选项（I-03 / C-231/C-232：四个 `export_*` 键统一默认值走 `exports`，不另写一套）。"""
+    return X.load_export_options(load_settings())
+
+
+def store_export_options(opt):
+    """写回导出选项。"""
+    return patch_settings(X.store_export_options({}, opt or {}))
+
+
+# ═════════════════════ ② edits 文件（劳动成果）═════════════════════
+def load_edits_all():
+    """整份 edits 文件 `{Excel 全路径: 桶}`（坏文件 → `{}`，每次载表都跑、绝不能崩）。"""
+    return ED.load_edits_file(EDITS_PATH)
+
+
+def save_edits_all(d):
+    """整份写回。I-08 / C-246 的 no-op 规则与 settings 同（由 `edits.save_edits_file` 判）。"""
+    return ED.save_edits_file(EDITS_PATH, d, _EDITS_DEFAULT)
+
+
+def load_edits_bucket(excel_path):
+    """这张表的桶（不存在 → `{}`）。legacy 段与 v2 段都在里面，各读各的（A3 §3.2 C）。"""
+    b = load_edits_all().get(excel_path)
+    return dict(b) if isinstance(b, dict) else {}
+
+
+def write_edits_bucket(excel_path, patch):
+    """**桶合并写**（I-05 / C-300）——v2 写 edits 文件的唯一出口。返回是否真落了盘。
+
+    为什么不能整桶重建：一个桶里同时住着
+      · legacy 九段（『排查(旧)』门面的劳动成果，C-235 规定 v2 不读不删）；
+      · `view_edits` / `view_checks` 里**别的 view_id** 的子桶（同事可能只在 logic 视图里干活）。
+    v2 只认识自己那几格，整桶重建 = 把上面两类静默抹掉。手填期望没了、而且没有任何报错，
+    这类丢失要等到下次导出时才被发现——所以写入一律是「先读旧桶，再只覆盖自己那几格」。
+
+    patch 形状（两段都可选，按 **view_id 逐格**合并）：
+        {"view_edits":  {view_id: 序列化子桶（空 dict = 这个范围没有编辑）},
+         "view_checks": {view_id: [勾选名] 或 None（None = 全勾 = 默认态）}}
+    **patch 里没提到的 view_id 一格都不动**。两段都空了就把段删掉；整个桶空了就把桶删掉
+    （与 v1 `_persist_edits` 的「啥都没有 → 桶也删掉」同语义）。
+
+    ⚠ 删这一格的判据是 `None` 或**空 dict**，不是「假值」：`view_checks` 的 `[]` 是
+    「一个都没勾」——那是用户真实的选择，得照写；当成空丢掉的话下次开工具会变回全勾，
+    然后他一导出就是整表都出来了。`None` 才是「全勾 = 默认态」（C-243 不写桶）。
+    """
+    allb = load_edits_all()
+    bucket = dict(allb.get(excel_path) or {})
+    for seg in V2_SEGMENTS:
+        if seg not in (patch or {}):
+            continue                                  # 没提这一段 → 一个字节都不碰
+        cur = dict(bucket.get(seg) or {})
+        for vid, val in (patch[seg] or {}).items():
+            if val is None or (isinstance(val, dict) and not val):
+                cur.pop(str(vid), None)               # 默认态 / 没有编辑 → 不留空壳
+            else:
+                cur[str(vid)] = val
+        if cur:
+            bucket[seg] = cur
+        else:
+            bucket.pop(seg, None)
+    if bucket:
+        allb[excel_path] = bucket
+    else:
+        allb.pop(excel_path, None)
+    return save_edits_all(allb)
+
+
+def load_legacy_bucket(excel_path):
+    """这张表桶里的 legacy 九段（**只读**，给诊断抽屉的「旧版编辑迁移」用，C-302）。
+
+    C-235 的「不读不删」说的是**自动**恢复流程不碰它；显式迁移动作当然要读——
+    读完也不删（迁移失败/回退旧版本时同事的活还在）。"""
+    b = load_edits_bucket(excel_path)
+    return {k: b[k] for k in LEGACY_SEGMENTS if k in b}
+
+
+def legacy_bucket_counts(excel_path, kind_of=None):
+    """legacy 段的条数统计，给诊断抽屉的 `DiagnosticsSnapshot.legacy_counts` 用（C-302）。
+
+    → `{"edits","logic","register","mux","checks"}`。
+
+    ⚠ `kind_of` 的存在理由：legacy `edits` 段按信号名键、**段里没有 kind 字段**，
+    单看文件分不出 logic 根还是 register 根——那要 `topout.resolve_root` 查当前表才知道。
+    不给 `kind_of` 时全部记在 `logic` 格（并非「这些都是 logic」，而是「还没分类」）；
+    调用方有 wb 时传 `kind_of(name) -> "logic"/"register"/None` 就能拿到真的两格。"""
+    b = load_edits_bucket(excel_path)
+    names = list((b.get("edits") or {}).keys())
+    n_logic, n_reg = len(names), 0
+    if kind_of is not None:
+        n_logic = n_reg = 0
+        for nm in names:
+            n_reg += 1 if kind_of(nm) == "register" else 0
+            n_logic += 0 if kind_of(nm) == "register" else 1
+    mux_names = set()
+    for seg in ("mux_expected", "mux_data", "mux_dropped", "mux_user_vecs"):
+        mux_names |= set((b.get(seg) or {}).keys())
+    for seg in ("mux_neg", "mux_cleared"):
+        mux_names |= set(b.get(seg) or ())
+    return {"edits": len(names), "logic": n_logic, "register": n_reg,
+            "mux": len(mux_names), "checks": len(b.get("signals_checked") or ())}
