@@ -692,6 +692,46 @@ def test_e_addneg_avoids_designer_expected_collision(topo_win):
     assert neg["exp"] != col["auto"]                  # 也避开 auto(correct)
 
 
+def test_truth_cell_accepts_verilog_notations(topo_win):
+    """轨0-③：数值格接管 IC 工程师常写的 8 种写法(16'h3 / 'b1010 / hA / 'd9 / 0x7f)——
+    此前新门面只认 0x/'h/0b/十进制，16'h3 之类静默吞成 0（输入格）或未填（期望格）。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_dcoc_i")     # 7 bit 输入 + 7 bit 输出，有取值空间
+    v._e_regen()
+    ni = len(v.e_inputs)
+    row = next(i for i, e in enumerate(v.e_inputs) if e["width"] == 7)
+    key = v.e_inputs[row]["key"]
+    for text, want in [("16'h3", 3), ("'b1010", 10), ("hA", 10), ("'d9", 9), ("0x7f", 0x7F)]:
+        v.truth.item(row, 0).setText(text)
+        assert v.cur_cols[0]["vals"][key] == want, text
+    v.truth.item(ni + 1, 0).setText("7'h2a")          # 期望格同一套写法
+    assert v.cur_cols[0]["exp"] == 0x2A
+
+
+def test_truth_cell_bad_number_is_visible_and_restored(topo_win):
+    """轨0-③：识别不了的写法必须【看得见】——状态栏提示 + 该格还原旧值，
+    绝不静默把输入吞成 0 / 把期望吞成未填（那等于悄悄改掉验证意图）。"""
+    from dreg_verify import generator as GEN
+    w = topo_win
+    v = _sel(w, "d_logic_bt_lp_rx_dcoc_i")
+    v._e_regen()
+    ni = len(v.e_inputs)
+    row = next(i for i, e in enumerate(v.e_inputs) if e["width"] == 7)
+    key = v.e_inputs[row]["key"]
+    v.truth.item(row, 0).setText("0x2a")
+    before = v.cur_cols[0]["vals"][key]
+    assert before == 0x2A
+    v.truth.item(row, 0).setText("哈哈")               # 非法写法
+    assert v.cur_cols[0]["vals"][key] == before        # 值没被吞成 0
+    assert "解析失败" in w.status.currentMessage()      # 用户看得见
+    assert v.truth.item(row, 0).text() == GEN._fmt_cell(before, 7)   # 格里还原旧值
+    # 期望格同理：填错不清空已填的期望
+    v.truth.item(ni + 1, 0).setText("0x55")
+    exp0 = v.cur_cols[0]["exp"]
+    v.truth.item(ni + 1, 0).setText("0x")              # 只有前缀 = 打了一半
+    assert v.cur_cols[0]["exp"] == exp0
+    assert "解析失败" in w.status.currentMessage()
+
+
 # ── 点1：真值表清零/加列/删列/改预填 ──
 def test_topout_truth_add_delete_column(topo_win):
     """加列→列数+1；删列→回到原数；清零→零列（可逆：重新生成恢复）。"""

@@ -40,6 +40,7 @@ from dreg_verify import resolver as R            # noqa: E402
 from dreg_verify import expr as E                 # noqa: E402
 from dreg_verify import vectors as V              # noqa: E402
 from dreg_verify import sv_writer as W            # noqa: E402
+from dreg_verify import truth_edit as TE          # noqa: E402
 
 # 记住上次加载的 Excel，下次启动自动加载（省去重复浏览/点击）
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_gui.json")
@@ -423,26 +424,12 @@ _FORM_COV_ROWS = [
 
 
 def _parse_cell_int(text):
-    """真值表单元格输入 → int（接受 0x../'h../0b../十进制；空/非法 → None）。"""
-    t = (text or "").strip()
-    if t == "":
-        return None
-    low = t.lower()
-    if low in ("0x", "0b", "'h"):          # 只有前缀没数字 → 非法（别让 0x→16 进制兜底把 "0b" 读成 11）
-        return None
-    try:
-        if low.startswith("'h"):
-            return int(low[2:], 16)
-        if low.startswith("0x"):
-            return int(low, 16)
-        if low.startswith("0b"):
-            return int(low, 2)
-        return int(t, 10)
-    except ValueError:
-        try:
-            return int(t, 16)
-        except ValueError:
-            return None
+    """真值表单元格输入 → int（空 = 没填 → None；识别不了 → 抛 ValueError，调用方必须让用户看见）。
+
+    8 种写法(16'hA / 'hA / 0xA / hA / 'b101 / 0b101 / 'd9 / 9 / 裸 hex)由 truth_edit 统一实现，
+    新门面与『排查(旧)』同一份——此前新门面只认 4 种，16'h3 / 'b101 / hA 会被静默吞成 0/未填。
+    """
+    return TE.parse_cell(text)
 
 
 def _subst_expr(expr, name_of):
@@ -1536,9 +1523,11 @@ class SignalView(QtWidgets.QWidget):
         if r < ni:                                   # 输入值编辑：logic 输入 / mux 数据行(N8)
             e = self.e_inputs[r]
             if self.cur_an["editable"] == "logic" and e["editable"]:
-                val = _parse_cell_int(item.text())
-                if val is None:
-                    val = 0
+                try:
+                    val = TE.parse_int(item.text())          # 空 = 0（输入格没有"未填"这一档）
+                except ValueError as ex:
+                    self._parse_failed(ex)
+                    return
                 col["vals"][e["key"]] = val & E.mask(e["width"])
                 self._recompute_col(col)
                 self._commit()
@@ -1552,10 +1541,20 @@ class SignalView(QtWidgets.QWidget):
                 col["exp"] = None
                 col["neg"] = False
             else:
-                val = _parse_cell_int(txt)
-                col["exp"] = None if val is None else (val & E.mask(col["auto_w"]))
+                try:
+                    val = TE.parse_int(txt)
+                except ValueError as ex:
+                    self._parse_failed(ex)
+                    return
+                col["exp"] = val & E.mask(col["auto_w"])
             self._commit()
             self._populate_truth()
+
+    def _parse_failed(self, ex):
+        """数值写法没认出来：状态栏说清楚 + 整表重渲（这一格还原成旧值）。
+        绝不静默吞成 0/未填——那会让『输入格变 0、期望格变未填』悄悄改掉验证意图。"""
+        self.main.status.showMessage("数值解析失败: %s（已还原）" % ex)
+        self._populate_truth()
 
     def _set_mux_data(self, base_low, width, text):
         """mux 数据行手填(N8/B2)：按物理基名存进会话 _mux_data（清空=恢复自动），改后重析当前信号
@@ -1568,10 +1567,10 @@ class SignalView(QtWidgets.QWidget):
         if txt == "":
             ent["data"].pop(base_low, None)
         else:
-            val = _parse_cell_int(txt)
-            if val is None:
-                self.main.status.showMessage("mux 数据值解析失败（已忽略）")
-                self._populate_truth()
+            try:
+                val = TE.parse_int(txt)
+            except ValueError as ex:
+                self._parse_failed(ex)
                 return
             ent["data"][base_low] = val & E.mask(width)
         if not ent["data"]:
@@ -5966,31 +5965,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _parse_int(s):
-        """宽松解析用户输入的数值：16'hA / 0x.. / hA / 'b.. / 'd.. / 十进制 / 裸 hex。"""
-        import re
-        t = str(s).strip().lower().replace(" ", "")
-        if t == "":
-            return 0
-        m = re.search(r"'h([0-9a-f]+)$", t)
-        if m:
-            return int(m.group(1), 16)
-        m = re.search(r"'b([01]+)$", t)
-        if m:
-            return int(m.group(1), 2)
-        m = re.search(r"'d(\d+)$", t)
-        if m:
-            return int(m.group(1), 10)
-        if t.startswith("0b") and t[2:] and set(t[2:]) <= {"0", "1"}:
-            return int(t, 2)             # 仅当 0b 后全是 0/1 才当二进制；'0bc' 之类仍按裸 hex 解析(向后兼容)
-        if t.startswith("0x"):
-            return int(t, 16)
-        if t.startswith("h"):
-            return int(t[1:], 16)
-        if re.fullmatch(r"\d+", t):
-            return int(t, 10)
-        if re.fullmatch(r"[0-9a-f]+", t):
-            return int(t, 16)
-        raise ValueError("无法识别 %r（用 0x.. 或 16'h.. 或纯数字）" % s)
+        """宽松解析用户输入的数值：16'hA / 0x.. / hA / 'b.. / 'd.. / 十进制 / 裸 hex。
+        实现搬进 truth_edit（不依赖 Qt、可单测），与新门面共用同一份——两边写法集合不再漂移。"""
+        return TE.parse_int(s)
 
     def on_ti_item_changed(self, item):
         if self._ti_loading:
