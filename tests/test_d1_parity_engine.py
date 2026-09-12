@@ -317,3 +317,138 @@ def test_p14_regex_search_hits_the_excel_type(monkeypatch, tmp_path):
     hit2 = [m["name"] for m in models
             if FB.match_row(m, rx=FB.compile_regex("_to_mux"), raw="_to_mux")[0]]
     assert hit2 == ["d_logic_bt_lp_tsensor"], hit2
+
+
+# ═════════ P-05 / P-25：完整配置里 legacy 那几段原样透传（只读）═════════
+#: 一份 v1【排查(旧)】门面干出来的活（形状照 `edits.py` 的桶 schema）
+_V1_BUCKET = {
+    "edits": {"d_logic_bt_lp_rx_en": [{"kind": "pos", "name": "T0",
+                                       "base_values": {"a": 1}, "designer_expected": 1}]},
+    "neg_only": {"d_logic_bt_lp_reserve": True},
+    "mux_expected": {"d_bt_lp_lna_itrim": {"c:R2=1": 1}},
+    "mux_neg": ["d_bt_lp_lna_itrim"],
+    "mux_data": {"d_bt_lp_lna_itrim": {"m0.d:0": 3}},
+    "mux_dropped": {"d_bt_lp_lna_itrim": ["sig-xyz"]},
+    "mux_cleared": ["d_bt_lp_lna_itrim"],
+    "signals_checked": ["d_logic_bt_lp_rx_en", "d_bt_lp_lna_itrim"],
+}
+
+
+def _put_legacy_bucket(path, bucket):
+    allb = P.load_edits_all()
+    allb[path] = dict(bucket)
+    P.save_edits_all(allb)
+
+
+def test_p05_config_top_level_key_set_is_unchanged(tmp_path, monkeypatch):
+    """C-250 的硬底线：透传与否，完整配置的**顶层键集**一个不多一个不少。"""
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    st = ST.WorkbenchState()
+    assert st.load(H.mirror_path("btlp"))
+    assert sorted(EC.collect_config(st)) == sorted(session.collect_config("x.xlsx", {}))
+
+
+def test_p05_legacy_segments_ride_along_from_the_local_bucket(tmp_path, monkeypatch):
+    """同事「v1 导出 → v2 转一手 → v1 导回」之后，v1 那边的手填期望 / mux 六段 / 单点尾缀
+    **全清零**，而顶层键集一模一样、一句提示都没有（P-05，BLOCKER）：`collect_config` 把这几段
+    一律写成了空段。裁决：从本机 legacy 桶（C-235 只读）原样透传。"""
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    path = H.mirror_path("btlp")
+    _put_legacy_bucket(path, _V1_BUCKET)
+    P.save_path_map("suffix_override", path, {"d_en_refbuf_ls": True})
+
+    st = ST.WorkbenchState()
+    assert st.load(path)
+    payload = EC.collect_config(st)
+    for seg, want in _V1_BUCKET.items():
+        assert payload[seg] == want, seg
+    assert payload["suffix_override"] == {"d_en_refbuf_ls": True}
+    assert payload["mux_user_vecs"] == {}, "桶里没有的段不该凭空造出来"
+
+    # 第二次、且不同：桶里没有 legacy 段（这台机器从没用过旧门面）→ 那几段仍是空
+    _put_legacy_bucket(path, {})
+    P.save_path_map("suffix_override", path, {})
+    st2 = ST.WorkbenchState()
+    assert st2.load(path)
+    payload2 = EC.collect_config(st2)
+    for seg in ("edits", "neg_only", "mux_expected", "mux_data", "mux_dropped"):
+        assert payload2[seg] == {}, seg
+    assert payload2["mux_neg"] == [] and payload2["mux_cleared"] == []
+    assert payload2["suffix_override"] == {}
+
+
+def test_p05_v2_never_writes_into_the_legacy_segments(tmp_path, monkeypatch):
+    """透传是**只读**搬运：导出一份配置之后，盘上那个桶必须逐字节没动（C-235）。"""
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    path = H.mirror_path("btlp")
+    _put_legacy_bucket(path, _V1_BUCKET)
+    raw_before = open(P.EDITS_PATH, "rb").read()
+    st = ST.WorkbenchState()
+    assert st.load(path)
+    EC.collect_config(st)
+    assert open(P.EDITS_PATH, "rb").read() == raw_before
+
+
+def test_p05_v1_to_v2_to_v1_round_trip_keeps_the_legacy_work(tmp_path, monkeypatch):
+    """「v1 写的配置 → v2 导入 → v2 再导出」这一趟，legacy 那几段逐字节不丢。"""
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    path = H.mirror_path("btlp")
+    _put_legacy_bucket(path, _V1_BUCKET)
+    P.save_path_map("suffix_override", path, {"d_en_refbuf_ls": True})
+
+    # v1 导出的那份（`session.collect_config` 就是 v1 `_collect_config` 调的同一个函数）
+    v1_cfg = session.collect_config(path, {"coverage_logic": "全面", "coverage_mux": "全面",
+                                           "max_tests": 256, "include_risky": True},
+                                    signals_checked=_V1_BUCKET["signals_checked"],
+                                    suffix_override={"d_en_refbuf_ls": True}, **{
+                                        k: v for k, v in _V1_BUCKET.items()
+                                        if k != "signals_checked"})
+    cfg = str(tmp_path / "cfg_v1.json")
+    session.write_config_file(cfg, v1_cfg)
+
+    st = ST.WorkbenchState()
+    assert st.load(path)
+    assert EC.import_config(st, cfg).is_full
+    v2_cfg = EC.collect_config(st)
+
+    assert sorted(v2_cfg) == sorted(v1_cfg)                       # C-250 键集
+    for seg in list(P.LEGACY_SEGMENTS) + ["suffix_override"]:
+        assert v2_cfg[seg] == v1_cfg[seg], seg
+
+
+def test_p25_signals_checked_keeps_the_v1_meaning_when_the_bucket_has_it(tmp_path, monkeypatch):
+    """P-25 核对：`signals_checked` 在 v1 是**排查(旧)左表**的勾选（`MainWindow._collect_checked`，
+    落盘也落在 legacy 桶的同名段里），不是 Topout 清单的勾选。
+
+    v2 没有那张表，于是这个字段被改成了「当前范围的勾选」—— 同一个键两种含义，v1 导回去
+    会拿 Topout 的名字去套它那张左表（`_apply_signal_checks` 是「列出的勾上、其余清空」）。
+    裁决按 v1：桶里有这一段就照搬；桶里没有才退回 v2 自己的口径。
+    """
+    from dreg_verify.ui import export_center as EC         # noqa: PLC0415
+    from dreg_verify.ui import state as ST                 # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    path = H.mirror_path("btlp")
+    _put_legacy_bucket(path, {"signals_checked": ["d_logic_bt_lp_rx_en"]})
+    st = ST.WorkbenchState()
+    assert st.load(path)
+    st.set_models("topout", st.provider("topout").skeleton_models(), True)
+    assert len(st.checked_names()) > 1                    # Topout 那边是全勾
+    assert EC.collect_config(st)["signals_checked"] == ["d_logic_bt_lp_rx_en"]
+
+    # 第二次、且不同：桶里没这一段 → 退回 v2 的「当前范围勾选」，并跟着勾选变
+    _put_legacy_bucket(path, {})
+    st2 = ST.WorkbenchState()
+    assert st2.load(path)
+    st2.set_models("topout", st2.provider("topout").skeleton_models(), True)
+    keep = [m["name"] for m in st2.models()][:3]
+    st2.set_checked([m["name"] for m in st2.models()], False)
+    st2.set_checked(keep, True)
+    assert sorted(EC.collect_config(st2)["signals_checked"]) == sorted(keep)

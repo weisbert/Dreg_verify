@@ -475,7 +475,7 @@ def collect_config(state):
       · `cascade_* / append_to_*` 四项 v2 已无界面（随入口退役），值从 settings 按
         `session.normalize_global_settings` 的兼容口径取 —— 字段留着，老同事的文件才导得回去；
       · legacy 的 `edits / neg_only / mux_*` 段 v2 不产（那是『排查(旧)』门面的劳动成果，
-        C-235 规定不读不删），`collect_config` 照常写成空段，字段集因此不变；
+        C-235 规定不读不删），但**原样透传**本机 legacy 桶里已有的那几段（见 `_legacy_segments`）；
       · v2 的劳动成果全在 `view_edits` / `view_checks` 两段里。
 
     ⚠ 已知限制（报给 C4-int）：`global` 段只有 logic / mux 两格覆盖度档，
@@ -493,13 +493,49 @@ def collect_config(state):
             view_edits[vid] = ser
         if state.checked(vid) is not None:          # 全勾 = 默认态 = 不写（与 C-243 同口径）
             view_checks[vid] = list(state.checked_names(vid))
+    legacy = _legacy_segments(state)
     return session.collect_config(
         state.loaded_path or state.excel_path or "", g,
-        signals_checked=list(state.checked_names()),
+        signals_checked=legacy.pop("signals_checked", None) or list(state.checked_names()),
         probe_prefixes=dict(state.probe_prefixes or {}),
         force_signals=sorted(state.force_signals or ()),
         logic_overrides={k: dict(v) for k, v in (state.logic_overrides or {}).items()},
-        view_edits=view_edits or None, view_checks=view_checks or None)
+        view_edits=view_edits or None, view_checks=view_checks or None, **legacy)
+
+
+def _legacy_segments(state):
+    """本机 legacy 桶里那几段 → `session.collect_config` 的同名形参（**只读透传**，P-05）。
+
+    C-235 说的「不读不删」是**自动恢复流程**不碰它；导出一份完整配置是显式动作，而那几段是
+    同事在『排查(旧)』门面里干出来的活。以前 `collect_config` 把它们一律写成空段，于是
+    「v1 导出 → v2 转一手 → v1 导回」之后 v1 那边的手填期望 / mux 六段 / 单点尾缀**全清零**，
+    而顶层键集一模一样，静默（P-05）。这里一个字节都不改地搬过去。
+
+    `signals_checked` 也在里面（P-25）：它在 v1 是**排查(旧)左表**的勾选，不是 Topout 清单的
+    —— 桶里有就照搬，桶里没有（这台机器从没用过旧门面）才退回 v2 自己的「当前范围勾选」。
+
+    只搬 `persist.LEGACY_SEGMENTS` 圈定的那几段：v2 自己的段（`view_edits` / `view_checks`
+    以及后来加的逐信号段）不在里面，不会被当 legacy 搬。`suffix_override` 不在桶里
+    —— 它在 v1 是按 Excel 路径分桶的 settings 段，从那儿取。"""
+    path = state.loaded_path or state.excel_path or ""
+    if not path:
+        return {}
+    out = {}
+    try:
+        bucket = persist.load_legacy_bucket(path) or {}
+    except Exception:                       # noqa: BLE001  读不出来就当没有，绝不挡住导出
+        bucket = {}
+    for seg in persist.LEGACY_SEGMENTS:
+        val = bucket.get(seg)
+        if val:
+            out[seg] = val
+    try:
+        so = persist.path_map_of("suffix_override", path)
+    except Exception:                       # noqa: BLE001
+        so = None
+    if so:
+        out["suffix_override"] = dict(so)
+    return out
 
 
 def config_done_text(payload):
