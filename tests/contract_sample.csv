@@ -1,0 +1,8 @@
+id,area,capability,category,old_entry,backend_api,v2_location,test_ids,status,source,note
+C-001,信号表,信号清单按 owner 筛选,保留,MainWindow.apply_filter,excel_model.read_logic,SignalListPanel,c001,已定,推进方案 §4.1,函数名挂钩
+C-002,导出,导出 .sv 选项记忆上次选择,保留,SignalView._ask_export_options,topout.render_topout_sv,ExportDialog,c002,已定,GUI现状清单 §3,故意造一条失败的
+C-003,导出,导出时跳过项必须点名,新增,,topout.build_report,ExportResultPanel,,待写,通用功能丢失审计,还没写测试
+C-004,排查(旧),旧 logic 页独立导出入口,删除,SignalView.on_export_csv,generator.render_sv,,,已定,GUI现状清单 §5,删除类免检
+C-005,信号表,当前线网高亮总线,保留,MainWindow.on_row_focus,sigflow.build_graph,NetHighlightBus,C-005,已定,Design prompt §10,marker 挂钩
+C-006,导出,导出 nets.txt 选类别,合并,MainWindow._ask_nets_pages,resolver.nets_for_pages,ExportDialog,c006,已定,GUI现状清单 §3,同一条测试挂两个 ID
+C-007,导出,导出 nets.txt 记住上次勾选,合并,MainWindow._ask_nets_pages,resolver.nets_for_pages,ExportDialog,c007,已定,GUI现状清单 §3,同一条测试挂两个 ID
