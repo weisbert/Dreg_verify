@@ -222,6 +222,104 @@ def test_needs_prefix_drive_carries_the_warning():
     assert "需探针前缀" in rows[0]["drive"]
 
 
+@pytest.mark.contract("C-058", "C-059")
+def test_c058_c059_input_rows_flags(btlp):
+    """N10：把「需前缀」与「猜名」拆成两个布尔——Design 只有一个『猜名』标记，后端分得更细。
+
+    needs_prefix = 网在、但埋子模块，不配前缀 force 必被跳过；
+    guessed      = 名字本身是按命名约定猜的（不在寄存器表里查到），可能根本没这根网。
+    两者互斥；都为假 = 真查到的可信名。binding_meta 不变（驱动文案一字不动）。"""
+    for found_in, want in (("tmm", (False, False)), ("regmap", (False, False)),
+                           ("needs-prefix", (True, False)), ("mux-output", (True, False)),
+                           ("wire", (False, True)), ("prefixed-wire", (False, True)),
+                           ("logic", (False, True)), ("", (False, False))):
+        r = IT.input_rows(_fake_an(_FakeBinding(found_in)))[0]
+        assert (r["needs_prefix"], r["guessed"]) == want, found_in
+        assert not (r["needs_prefix"] and r["guessed"]), found_in      # 互斥
+        assert r["trusted"] == (found_in in IT.TRUSTED_FOUND_IN)       # 老字段不受影响
+    # 没有绑定的行（mux 级联控制占位行）也带这两个键，且都为假——界面不必到处 .get 兜底
+    r = IT._row(letter="A", name="x", role="控制", b=None)
+    assert r["needs_prefix"] is False and r["guessed"] is False
+    # 真表：镜像夹具的输入全在寄存器表里查到 → 两个标记都不该亮
+    rows = IT.input_rows(_an(btlp, "d_logic_bt_lp_reserve"))
+    assert not any(r["needs_prefix"] or r["guessed"] for r in rows)
+    # 键齐全（v2 输入表逐行读它们画橙字/⚠）
+    assert all({"needs_prefix", "guessed"} <= set(r) for r in rows)
+
+
+@pytest.mark.contract("C-074")
+def test_c074_vheader_display_format(btlp):
+    """真值表冻结列行标签的 Design 格式 `<真名>　(角色 · 端口)`；vheader_short 原样不动。"""
+    an = _an(btlp, "d_logic_bt_lp_reserve")
+    g = an["groups"][0]
+    assert IT.vheader_display(g) == "d_bt_lp_linelocal_mode_ctrl　(控制位 · A)"
+    assert IT.vheader_short(g) == "d_bt_lp_linelocal_mode_ctrl (控制)"      # 旧格式一字不动
+    assert "　(" in IT.vheader_display(g)                                   # 全角空格分隔
+    data_g = next(gg for gg in an["groups"] if not gg.get("is_control"))
+    assert IT.vheader_display(data_g).endswith("(数据位 · %s)" % IT.group_letters(data_g))
+
+    # mux：端口写成 mux<组号>.ctrl<i> / mux<组号>.d<i>（与 mux_gen 合成子树挂的来源标签同名）
+    man = _an(btlp, "d_bt_lp_lna_itrim")
+    no = man["sig"].group_no
+    rows = IT.input_rows(man)
+    ctrl0 = rows[0]
+    assert IT.vheader_display(ctrl0, man) == "%s　(控制位 · mux%s.ctrl0)" % (ctrl0["name"], no)
+    data0 = next(r for r in rows if r["role"].startswith("数据寄存器"))
+    assert IT.vheader_display(data0, man) == "%s　(数据位 · mux%s.d0)" % (data0["name"], no)
+    # 不给 an → 定不出端口，退回字母（case 值），但格式与角色不变
+    assert IT.vheader_display(data0).startswith("%s　(数据位 · case " % data0["name"])
+
+    # DFT 门行：角色写 DFT 门(iddq)
+    gate = IT.dft_gate_row({"label": "d_fake_gate", "binding": _FakeBinding("tmm"),
+                            "transp": 0, "width": 1, "key": "__dft_gate__"})
+    assert IT.vheader_display(gate).startswith("d_fake_gate　(DFT 门(iddq)")
+    # 空输入不炸（界面在没选中信号时也会调）
+    assert IT.vheader_display({}) == "?　(数据位)"
+
+
+@pytest.mark.contract("C-060")
+def test_c060_mux_ctrl_binding_and_missing_keys():
+    """§7-3/4 消费：mux 级联控制口有 Binding 就用它出类型/驱动；used_vars 漏掉的控制键殿后补行。
+
+    两个键都是 C0-a 在引擎侧补的 additive 键——这里用手工 an 覆盖「有」与「没有」两种，
+    合并前后行为都钉住（没有 → 走旧的占位分支，一字不变）。"""
+    class _Up(object):
+        group_no = 7
+
+    exp_bindings = {"m7.B": _FakeBinding("mux-output")}
+    drv_no_binding = {"source": "mux", "letter": "B", "base": "d_up_out",
+                      "upstream": _Up(), "recipe": {}, "keys": [], "bindings": {}}
+    old = IT.mux_ctrl_rows(drv_no_binding, {"bindings": exp_bindings})
+    assert old[0]["rw"] == "mux" and old[0]["drive"] == "经上游 mux7 输出选路"
+    assert old[0]["name"] == "d_up_out" and old[0]["needs_prefix"] is False
+
+    drv = dict(drv_no_binding, binding=_FakeBinding("mux-output"), key="m7.B")
+    new = IT.mux_ctrl_rows(drv, {"bindings": exp_bindings})
+    assert new[0]["role"] == old[0]["role"] == "控制(经上游mux7驱动)"      # 角色文案不变
+    assert new[0]["rw"] == "RO" and new[0]["drive"].startswith("force ENV_RF.")
+    assert "需探针前缀" in new[0]["drive"] and new[0]["needs_prefix"] is True
+    assert new[0]["key"] == "m7.B" and new[0]["is_control"] and new[0]["bold"]
+
+    # §7-4：an["ctrl_keys_missing"] 的键殿后补行（角色「控制(line 路径，未展开)」）
+    class _Grp(object):
+        group_no = 7
+        cases = []
+
+    base_an = {"kind": "mux", "status": "ok", "sig": _Grp(), "dft_gate": None,
+               "expansion": {"bindings": {"c:0": _FakeBinding("tmm")}, "used_vars": ["c:0"],
+                             "data_keys": [], "ctrl_drivers": []}}
+    assert IT.input_rows(base_an) == []                                  # 没这个键 → 一行都不补
+    rows = IT.input_rows(dict(base_an, ctrl_keys_missing=["c:0"]))
+    assert len(rows) == 1
+    assert rows[0]["role"] == "控制(line 路径，未展开)" and rows[0]["key"] == "c:0"
+    assert rows[0]["is_control"] and rows[0]["rw"] == "RO"
+    # 已经有行的键不重复补
+    dup_an = dict(base_an, ctrl_keys_missing=["d:0"])
+    dup_an["expansion"] = dict(base_an["expansion"], data_keys=["d:0"],
+                              bindings={"d:0": _FakeBinding("tmm")})
+    assert len(IT.input_rows(dup_an)) == 1
+
+
 def test_unresolved_binding_says_so_instead_of_faking_a_net():
     rows = IT.input_rows(_fake_an(_FakeBinding("wire", resolved=False, note="ENV_RF 探不到")))
     assert rows[0]["drive"].startswith("✗未解析")

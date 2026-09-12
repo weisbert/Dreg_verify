@@ -29,7 +29,7 @@ from . import sv_writer as W
 __all__ = [
     "INPUT_COLS", "FOUND_IN_LABEL", "FOUND_IN_TEXT", "STATUS_HELP", "AN_STATUS_TEXT",
     "TRUSTED_FOUND_IN", "CUVUNF_FIRST", "scrub_terms", "binding_meta", "group_letters",
-    "vheader_label", "vheader_short", "mux_label", "dft_gate_row", "mux_ctrl_rows",
+    "vheader_label", "vheader_short", "vheader_display", "mux_label", "dft_gate_row", "mux_ctrl_rows",
     "input_rows", "row_cells", "drive_ctx", "drive_pair", "vector_drives", "column_drives",
     "cell_drive_tip", "header_drive_tip", "gate_pin", "legacy_resolve_detail", "resolve_detail",
 ]
@@ -165,6 +165,57 @@ def vheader_short(g):
     return "%s (控制)" % label if g.get("is_control") else label
 
 
+# 真值表冻结列行标签（Design 冻结列格式 `<真名>　(角色 · 端口)`，全角空格分隔）
+VHEADER_DISPLAY_FMT = "%s　(%s)"
+ROLE_CTRL = "控制位"
+ROLE_DATA = "数据位"
+ROLE_DFT_GATE = "DFT 门(iddq)"
+
+
+def _mux_port_of(an, key):
+    """mux 输入的**端口名** `mux<组号>.ctrl<i>` / `mux<组号>.d<i>`（与 mux_gen 合成子树挂的来源标签同名）。
+
+    端口是「这根信号接在这个 mux 的哪个口上」，比字母更能对上 Excel 的 B~E / case 行；
+    定不出来（不是 mux / 没 expansion / key 不在表里）→ 空串，调用方退回字母。"""
+    exp = (an or {}).get("expansion") or {}
+    if not key or not exp:
+        return ""
+    no = getattr((an or {}).get("sig"), "group_no", None)
+    if no is None:
+        return ""
+    for i, k in enumerate(exp.get("data_keys") or []):
+        if k == key:
+            return "mux%s.d%d" % (no, i)
+    for i, drv in enumerate(exp.get("ctrl_drivers") or []):
+        if key == drv.get("key") or key in (drv.get("keys") or []):
+            return "mux%s.ctrl%d" % (no, i)
+    return ""
+
+
+def vheader_display(g, an=None):
+    """真值表**冻结列**行标签（Design 冻结列格式）：`<真名>　(角色 · 端口)`。
+
+    例：`d_bt_lp_bt_mode_sel[2:0]　(控制位 · mux3.ctrl0)` / `d_xo_freq_sel　(数据位 · A,B)`。
+    角色 = 控制位 / 数据位 / DFT 门(iddq)；端口 = mux 的 `ctrl0`/`d1` 口（带组号）或 logic 的表达式字母。
+    `vheader_short`（旧门面真值表行表头）**一字不动**——这是并列的新格式，不是替换。
+
+    `g` 吃两种行：`input_groups` 的分组 dict（logic/register 根）与 `input_rows` 的行 dict
+    （mux 根 / DFT 门行）——v2 真值表 mux 时的输入行来自后者，两边喂同一个函数免得格式漂。
+    `an` 只在 mux 时用得上（端口要查 expansion 的 ctrl_drivers/data_keys）；不给 → 退回字母。
+    """
+    g = g or {}
+    # 真名一律取【带位宽】的那个：分组 dict 是 label(缺则 base)，输入行 dict 是 name(base 已剥了位宽)
+    name = g.get("label") or g.get("name") or g.get("base") or "?"
+    if g.get("is_dft_gate"):
+        role = ROLE_DFT_GATE
+    elif g.get("is_control"):
+        role = ROLE_CTRL
+    else:
+        role = ROLE_DATA
+    port = _mux_port_of(an, g.get("key")) or group_letters(g) or str(g.get("letter") or "")
+    return VHEADER_DISPLAY_FMT % (name, "%s · %s" % (role, port) if port else role)
+
+
 def mux_label(b):
     """绑定 → 『信号(位宽)』列文本。"""
     return b.base + ("[%d:0]" % (b.width - 1) if b.width > 1 else "")
@@ -189,6 +240,14 @@ def _row(letter, name, role, b, width=None, bold=False, key=None,
         "found_in_label": FOUND_IN_LABEL.get(found_in, found_in),
         "found_in_text": FOUND_IN_TEXT.get(found_in, found_in),
         "trusted": found_in in TRUSTED_FOUND_IN,
+        # N10（C-058/C-059）：Design 只有一个「猜名」标记，后端的 found_in 分得更细——把两件
+        # **不同的事**分开标，别再让界面自己拿 trusted 一个布尔去猜：
+        #   needs_prefix = 网确实存在、但埋在子模块里，不跑 scan_rtl 配前缀 force 必 CUVUNF 被跳过；
+        #   guessed      = 名字本身就是按命名约定猜的（不在 tmm/regmap 里查到），可能根本没这根网。
+        # 两者互斥（needs-prefix/mux-output 归前者），都为假 = 真查到的可信名。
+        "needs_prefix": found_in in ("needs-prefix", "mux-output"),
+        "guessed": bool(found_in) and found_in not in TRUSTED_FOUND_IN
+                   and found_in not in ("needs-prefix", "mux-output"),
         "note": (getattr(b, "note", "") or ""),
         "resolved": bool(getattr(b, "resolved", True)) if b is not None else False,
         "base": getattr(b, "base", None),
@@ -264,10 +323,19 @@ def mux_ctrl_rows(drv, exp):
         # mux 级联控制：本控制行 + 上游配方（载体寄存器 + 上游各控制）
         upstream = drv.get("upstream")
         up_no = getattr(upstream, "group_no", "?")
-        out.append(_row(letter=drv.get("letter") or "?", name=drv.get("base") or "?",
-                        role="控制(经上游mux%s驱动)" % up_no, b=None, width=1, bold=True,
-                        is_control=True, kind="mux",
-                        drive="经上游 mux%s 输出选路" % up_no))
+        # §7-3：上游 mux 输出网的 Binding（C0-a 在 mux_gen.expand_mux_group 里补的 additive 键）——
+        # 有它才能给出这一行真正的『类型』与『驱动』（RO + force ENV_RF.<衔接网> ⚠需探针前缀），
+        # 并让 N10 的 needs_prefix 标上；没有（旧数据/未合并）→ 原样走下面那行写死的占位文案。
+        cb = drv.get("binding")
+        if cb is not None:
+            out.append(_row(letter=drv.get("letter") or "?", name=mux_label(cb),
+                            role="控制(经上游mux%s驱动)" % up_no, b=cb, bold=True,
+                            key=drv.get("key"), is_control=True))
+        else:
+            out.append(_row(letter=drv.get("letter") or "?", name=drv.get("base") or "?",
+                            role="控制(经上游mux%s驱动)" % up_no, b=None, width=1, bold=True,
+                            is_control=True, kind="mux",
+                            drive="经上游 mux%s 输出选路" % up_no))
         recipe = drv.get("recipe") or {}
         carrier_key = recipe.get("carrier_key")
         if carrier_key is not None:
@@ -344,6 +412,19 @@ def _mux_input_rows(an):
             role = "数据寄存器(被该case选中)"
         rows.append(_row(letter="case %s" % case_raw, name=mux_label(b), role=role,
                          b=b, key=key))
+    # ── §7-4：used_vars 里有、但三来源驱动器与数据口都没落到行上的控制键（C0-a 在 analysis_norm
+    #    里算好的 an["ctrl_keys_missing"]）。典型是 LPBT 形态的 line 路径键——真值表按 used_vars
+    #    出行，输入表少了它就会「真值表 6 行、输入表 5 行」对不上（C-060）。殿后补齐，不改前面行序。
+    seen_keys = {r.get("key") for r in rows if r.get("key")}
+    for key in (an.get("ctrl_keys_missing") or []):
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        b = (exp.get("bindings") or {}).get(key)
+        rows.append(_row(letter=str(key).split(":")[-1],
+                         name=(mux_label(b) if b is not None else str(key)),
+                         role="控制(line 路径，未展开)", b=b, bold=True,
+                         key=key, is_control=True))
     return rows
 
 
