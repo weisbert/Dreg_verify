@@ -793,6 +793,24 @@ def _case_label(cv, care, width):
 
 
 # ───────────────────────────── SVG 渲染 ─────────────────────────────
+# ⭐ 五色工程图配色。**与 dreg_verify/ui/theme.py 的 FLOW_* 同值**（此处是复制，不是 import：
+# sigflow 是 Qt-free 纯函数模块，CLI / HTML 报告要能在没有 ui 包的环境里跑，绝不能依赖 GUI 层）。
+# 两边不许漂：test_sigflow_c0.py::test_flow_colors_match_ui_theme 逐个常量断言相等。
+FLOW_INK = "#1f2933"          # 主线 / 主框 / 主标
+FLOW_MUTE = "#5d6773"         # 副标 / 端口标 / 图例
+FLOW_HL = "#1d4f9c"           # 当前选中线网
+FLOW_AMB = "#a8710f"          # 猜名（名字来自命名约定）
+FLOW_BAD = "#b3302a"          # 规格冲突 / 死分支
+FLOW_REG_BAR = "#93a1b0"      # 寄存器盒左侧 5px 色条（高亮时 FLOW_HL）
+FLOW_TOP_BG = "#e8f0fb"       # TOP 端子底
+FLOW_GUESS_BG = "#fffbf3"     # 猜名盒底
+FLOW_HL_BG = "#eef4fd"        # 选中盒底
+FLOW_WIRE_W = 1.2
+FLOW_BUS_W = 2.4
+FLOW_HL_W = 2.2
+FLOW_DASH_BAD = "6 3"
+FLOW_DASH_GHOST = "5 3"
+
 _FILL = {"REG": "#eef2ff", "PIN": "#f8fafc", "AND": "#dbeafe", "NAND": "#dbeafe",
          "OR": "#dcfce7", "NOR": "#dcfce7", "XOR": "#e0f2fe", "NOT": "#fee2e2",
          "MUX2": "#fef3c7", "MUXN": "#fef3c7", "GATE": "#fce7f3", "REDUCE": "#ede9fe",
@@ -1056,17 +1074,28 @@ def layout_graph(graph):
                   rank={n.id: rank[n.id] for n in nodes}, ports=ports_xy)
 
 
-def render_svg(graph, title=None, layout=None):
+def _hl_key(net):
+    """高亮比对键：网名一律小写去空白（Excel 里同一根网大小写并不统一，别让选中漏命中）。"""
+    s = str(net or "").strip().lower()
+    return s or None
+
+
+def render_svg(graph, title=None, layout=None, highlight_net=None):
     """Graph → SVG 文本（源在左、Topout 在右）。三处复用：GUI / HTML 报告内联 / ppt 转 PNG。
 
     布局全部来自 `layout_graph`（传 layout 可复用已算好的一份，GUI 的命中层就靠它对齐）。
     标注：每条线的 net 名 + [msb:lsb]（1bit 不标）；宽总线粗线；REG 盒两行；不可信 PIN 虚线 + 角标。
-    每个图元和每条线都挂 data-net（二期点选高亮同名网直接用）。
+    每个图元和每条线都挂 data-net（点选高亮同名网直接用）。
+
+    highlight_net — 当前选中的线网名（小写比对）。命中的线与盒套 `hl` 样式（HL 蓝、线加粗到
+    2.2px、盒 2px 边框 + 浅蓝底、REG 左色条转蓝），并额外挂 `data-hl="1"` 方便测试与二次加工。
+    GUI 每次选中变化就带新的 highlight_net 重渲一遍（≤60 节点 ≈ 2ms，架构 §1.3② 路线 C）。
     """
     title = title or graph.title
     if not graph.nodes:
         return _empty_svg(title)
 
+    hl_key = _hl_key(highlight_net)
     lay = layout if layout is not None else layout_graph(graph)
     pos, gapw, rank = lay.pos, lay.gapw, lay.rank
     total_w, total_h = lay.size
@@ -1083,13 +1112,16 @@ def render_svg(graph, title=None, layout=None):
     for e, pts, side in lay.edges:
         x1, y1 = pts[0]
         px, py = pts[-1]
+        ehl = hl_key is not None and _hl_key(e.net) == hl_key
         sw = 2.6 if (e.width or 1) > 1 else 1.2
         dash = ' stroke-dasharray="5,3"' if not e.trusted else ""
         color = "#b45309" if not e.trusted else _WIRE
+        if ehl:                       # hl：选中的那根网压过虚线/粗细，一眼从图里挑出来
+            color, sw = FLOW_HL, max(sw, FLOW_HL_W)
         out.append('<polyline points="%s" fill="none" stroke="%s" stroke-width="%.1f"%s '
-                   'data-net="%s"/>'
+                   'data-net="%s"%s/>'
                    % (" ".join("%.0f,%.0f" % p for p in pts), color, sw, dash,
-                      _esc(e.net or "")))
+                      _esc(e.net or ""), ' data-hl="1"' if ehl else ""))
         # 箭头（左进 = 朝右的三角；顶进 = 朝下的三角）
         if side == "top":
             out.append('<polygon points="%.0f,%.0f %.0f,%.0f %.0f,%.0f" fill="%s"/>'
@@ -1109,7 +1141,8 @@ def render_svg(graph, title=None, layout=None):
             shown = _clip9(lbl, room)
             out.append('<text x="%.0f" y="%.0f" font-size="9" fill="%s" data-net="%s">'
                        '<title>%s</title>%s</text>'
-                       % (x1 + 5, pts[0][1] - 4, "#b45309" if not e.trusted else _NETC,
+                       % (x1 + 5, pts[0][1] - 4,
+                          FLOW_HL if ehl else ("#b45309" if not e.trusted else _NETC),
                           _esc(e.net or ""), _esc(lbl), _esc(shown)))
         # 支路标签（MUXN 的 case 值等）画在目标口外侧；与框内的端口标重复时不再画一遍（去噪）
         dstn = idx.get(e.dst)
@@ -1128,10 +1161,14 @@ def render_svg(graph, title=None, layout=None):
         dash = ' stroke-dasharray="5,3"' if untrusted else ""
         stroke = "#b45309" if untrusted else _STROKE
         self_net = (n.meta.get("base") or n.meta.get("out_base") or n.label)
-        out.append('<g data-node="%s" data-kind="%s" data-net="%s">'
-                   % (n.id, n.kind, _esc(self_net)))
+        nhl = hl_key is not None and _hl_key(self_net) == hl_key
+        out.append('<g data-node="%s" data-kind="%s" data-net="%s"%s>'
+                   % (n.id, n.kind, _esc(self_net), ' data-hl="1"' if nhl else ""))
+        if nhl:                       # hl 盒：HL 2px 边框 + 浅蓝底（Design §6.1「选中高亮」）
+            fill, stroke = FLOW_HL_BG, FLOW_HL
         out.append('<rect x="%d" y="%d" width="%d" height="%d" rx="5" fill="%s" stroke="%s" '
-                   'stroke-width="1.2"%s/>' % (x0, y0, w, h, fill, stroke, dash))
+                   'stroke-width="%s"%s/>'
+                   % (x0, y0, w, h, fill, stroke, "2" if nhl else "1.2", dash))
         tc = "#ffffff" if n.kind == "TOPOUT" else "#0f172a"
         # 有 sub 或有带文字的端口 → 主标钉在框顶那条 header 带里（否则居中的主标会插在
         # 端口标签中间，两行字叠一起，m1②）；两者都没有才居中

@@ -147,3 +147,69 @@ def test_layout_graph_empty_and_reuse(btlp):
     g = T.analyze_signal(wb, res, topo, mode="min", max_tests=32, want_graph=True).graph
     lay = SF.layout_graph(g)
     assert SF.render_svg(g, layout=lay) == SF.render_svg(g, layout=lay)
+
+
+# ═══════════════ ② 第2步：C-282 highlight_net ═══════════════
+def _hl_nets(svg):
+    """SVG 里被套上 hl 的那批元素的 data-net。"""
+    return [m.group(1) for m in
+            re.finditer(r'data-net="([^"]*)"(?=[^>]*data-hl="1")', svg)]
+
+
+def test_c282_render_svg_highlight_marks_net(wl):
+    """C-282：命中 data-net == highlight_net（小写比对）的线与盒套 hl 样式。
+
+    GUI 选中一根线网后整张 SVG 重渲一遍（路线 C），所以「谁被高亮」必须完全由这个参数决定：
+    不传 = 一个 hl 都没有、字节与老版一致；传了 = 只有那根网的线和盒变蓝加粗。
+    """
+    wb, res = wl
+    topo = next(t for t in wb.topout if t.name == "d_wl_rf_tx_epa_2g_mixer_en")
+    g = T.analyze_signal(wb, res, topo, mode="min", max_tests=32, want_graph=True).graph
+
+    plain = SF.render_svg(g)
+    assert "data-hl=" not in plain                       # 默认零高亮，且与老版字节一致（①）
+    assert plain == SF.render_svg(g, highlight_net=None)
+    assert plain == SF.render_svg(g, highlight_net="")   # 空串不是一根网，别整张图乱亮
+
+    net = "d_wl_rf_tx2g_en"
+    svg = SF.render_svg(g, highlight_net=net)
+    hit = _hl_nets(svg)
+    assert hit, "高亮没命中任何元素"
+    assert set(hit) == {net}, hit                        # 只亮这一根，别误伤别的网
+    assert len(hit) == len([e for e in g.edges if e.net == net]) + \
+        len([n for n in g.nodes
+             if (n.meta.get("base") or n.meta.get("out_base") or n.label) == net])
+    assert SF.FLOW_HL in svg                             # 线/盒确实换成了 HL 蓝
+    assert 'stroke-width="2.2"' in svg or 'stroke-width="2.6"' in svg
+
+    # 大小写/前后空白不影响命中（Excel 里同一根网大小写并不统一）
+    assert _hl_nets(SF.render_svg(g, highlight_net="  D_WL_RF_TX2G_EN ")) == hit
+    # 不存在的网 → 什么都不亮，也不许抛
+    assert _hl_nets(SF.render_svg(g, highlight_net="根本没有这根网")) == []
+    # 传了 layout 结果一样（GUI 是复用同一份 layout 重渲的）
+    assert SF.render_svg(g, highlight_net=net, layout=SF.layout_graph(g)) == svg
+
+
+def test_c282_highlight_node_box(btlp):
+    """盒也要被高亮（不止线）：REG 叶子按自己的 data-net 命中，且 <g> 上挂 data-hl。"""
+    wb, res = btlp
+    topo = next(t for t in wb.topout if t.name == "clk_force_on")
+    g = T.analyze_signal(wb, res, topo, mode="min", max_tests=32, want_graph=True).graph
+    svg = SF.render_svg(g, highlight_net="clk_force_on")
+    assert '<g data-node="n1" data-kind="REG" data-net="clk_force_on" data-hl="1">' in svg
+    assert SF.FLOW_HL_BG in svg                          # 选中盒底 #eef4fd
+
+
+def test_flow_colors_match_ui_theme():
+    """sigflow 不 import ui.theme（Qt-free），但五色常量必须与 ui/theme.py 的 FLOW_* 同值。
+
+    两边各写一份是有意的：CLI / HTML 报告要能在没有 ui 包的环境里出图。代价是可能漂 —— 这条
+    断言就是那道锁，任一边改色而另一边没跟，立刻红。
+    """
+    from dreg_verify.ui import theme
+    names = [x for x in dir(theme) if x.startswith("FLOW_")]
+    assert len(names) >= 14, names
+    for nm in names:
+        assert hasattr(SF, nm), "sigflow 少了常量 %s" % nm
+        assert getattr(SF, nm) == getattr(theme, nm), \
+            "%s 漂了：sigflow=%r theme=%r" % (nm, getattr(SF, nm), getattr(theme, nm))
