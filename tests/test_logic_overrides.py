@@ -190,7 +190,7 @@ def qapp():
 
 
 def test_gui_logic_overrides_validate_config_and_opts(qapp, tmp_path_factory):
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("glo") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow()
@@ -229,7 +229,7 @@ def test_gui_logic_overrides_validate_config_and_opts(qapp, tmp_path_factory):
 
 def test_gui_supplement_syncs_truth_table_and_marks(qapp, tmp_path_factory):
     """加补充后 GUI 真值表【同步刷新】+ 左表/编辑器【明显标注】(用户报的两个问题)。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     from PySide6 import QtCore
     path = tmp_path_factory.mktemp("gsync") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))

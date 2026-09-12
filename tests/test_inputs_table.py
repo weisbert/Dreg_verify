@@ -587,7 +587,7 @@ def gui_app():
 def _isolate_gui_settings(monkeypatch, tmp_path):
     """别碰用户真实的 ~/.dreg_verify_*.json。"""
     pytest.importorskip("PySide6")
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "SETTINGS_PATH", str(tmp_path / "gui_settings.json"))
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
 
@@ -607,7 +607,7 @@ def wl_path(tmp_path_factory):
 
 
 def _open(gui_app, path):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = G.MainWindow()
     w.path_edit.setText(path)
     w.on_load()
@@ -689,7 +689,7 @@ def test_legacy_inputs_table_equals_input_rows(gui_app, request, fixture_name, l
     5 是**有意的补齐**（旧门面那一行是缺的，C-060 的 bug），所以只把这几行摘出来单比，
       其余行仍逐格严格相等；`least_filled` 保证这条差异在 WL 上真的发生过（不是空跳过）。
     """
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = _open(gui_app, request.getfixturevalue(fixture_name))
     try:
         ans = _topout_ans(w)
@@ -734,7 +734,7 @@ def test_legacy_column_tooltip_equals_drive_pair(gui_app, request, fixture_name,
     `column_drives` 比 tooltip 多给一条 iddq 门的 force——那是 extra_forces，
     产出 .sv 里真有，旧 tooltip 漏了（见 test_column_drives_includes_the_iddq_gate_force）。
     """
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = _open(gui_app, request.getfixturevalue(fixture_name))
     try:
         ans = _topout_ans(w)
@@ -764,7 +764,7 @@ def test_legacy_column_tooltip_equals_drive_pair(gui_app, request, fixture_name,
 
 def test_legacy_resolve_detail_still_renders_the_old_text(gui_app, btlp_path):
     """左下『解析明细』搬进模块后，旧门面的文案逐字不变（信号/表达式/状态/断言/提示 五段）。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = _open(gui_app, btlp_path)
     try:
         w.on_row_focus(0, G.COL_K, -1, -1)

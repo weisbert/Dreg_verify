@@ -421,7 +421,7 @@ def qapp():
 
 
 def _reserve_window(tmp_path_factory, sub):
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp(sub) / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow()
@@ -542,7 +542,7 @@ def test_gui_copy_column_carries_designer_expected(qapp, wb, tmp_path_factory):
 
 def test_gui_mux_readonly_two_rows(qapp, tmp_path_factory):
     """mux 表也拆 auto_out / 期望 两行（排版与 logic 编辑器一致；期望行可手填见后面的专项测试）。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("de_mux") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path), with_mux=True)
     w = gui.MainWindow()
@@ -556,7 +556,7 @@ def test_gui_mux_readonly_two_rows(qapp, tmp_path_factory):
 # ───────────── 持久化：序列化 / 恢复 / 导入导出 ─────────────
 def test_serialize_rows_roundtrip():
     """rowdict 序列化往返：保留输入取值与用户意图字段，丢计算字段。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     rows = [{"base_values": {"a": 1, "b": 0}, "kind": "pos", "designer_expected": 1,
              "correct": 1, "expected": 1, "_vec": object(), "is_negative": False},
             {"base_values": {"a": 0}, "kind": "neg", "wrong_value": 1, "name": "my_neg",
@@ -576,7 +576,7 @@ def test_serialize_rows_roundtrip():
 
 def test_gui_edits_persist_across_reload(qapp, tmp_path_factory, monkeypatch):
     """⭐编辑(含手填期望)持久化：关 GUI 重开（重新 on_load）后还在。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     edits_path = str(tmp_path_factory.mktemp("persist") / "edits.json")
     monkeypatch.setattr(gui, "EDITS_PATH", edits_path)
     path = tmp_path_factory.mktemp("de_p") / "synthetic_dreg.xlsx"
@@ -617,7 +617,7 @@ def test_gui_edits_persist_across_reload(qapp, tmp_path_factory, monkeypatch):
 
 def test_gui_regen_clears_persisted(qapp, tmp_path_factory, monkeypatch):
     """重新生成(丢弃自定义) → 持久化文件同步清掉，重开不会恢复回来。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     edits_path = str(tmp_path_factory.mktemp("persist2") / "edits.json")
     monkeypatch.setattr(gui, "EDITS_PATH", edits_path)
     path = tmp_path_factory.mktemp("de_p2") / "synthetic_dreg.xlsx"
@@ -635,7 +635,7 @@ def test_gui_regen_clears_persisted(qapp, tmp_path_factory, monkeypatch):
 
 def test_gui_export_import_edits_bucket(qapp, tmp_path_factory, monkeypatch):
     """导出/导入编辑：bucket 应用到新窗口后手填期望/负向都回来；找不到的信号列出名字。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH",
                         str(tmp_path_factory.mktemp("persist3") / "edits.json"))
     path = tmp_path_factory.mktemp("de_imp") / "synthetic_dreg.xlsx"
@@ -757,7 +757,7 @@ def test_mux_expected_stale_key_dropped(wb_mux):
 
 
 def _mux_window(tmp_path_factory, sub):
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp(sub) / "synthetic_mux.xlsx"
     fixtures.build_workbook(str(path), with_mux=True)
     w = gui.MainWindow()
@@ -900,7 +900,7 @@ def test_gui_mux_export_csv_includes_negative(qapp, tmp_path_factory, tmp_path, 
 
 def test_gui_mux_expected_persists(qapp, tmp_path_factory, monkeypatch):
     """mux 手填期望持久化：关 GUI 重开自动恢复 + .sv 用恢复值。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH",
                         str(tmp_path_factory.mktemp("demux_p") / "edits.json"))
     path = tmp_path_factory.mktemp("demux3") / "synthetic_mux.xlsx"

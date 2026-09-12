@@ -408,7 +408,7 @@ def test_ui_layering_whitelist_has_no_dead_entries():
 
 
 def test_ui_layering_catches_a_known_target():
-    """搜索/扫描类测试自己也要能证明它扫得到东西：`gui.py` 确实 import 着引擎模块。"""
-    gui_py = os.path.join(os.path.dirname(UI_DIR), "gui.py")
+    """搜索/扫描类测试自己也要能证明它扫得到东西：`legacy_gui.py` 确实 import 着引擎模块。"""
+    gui_py = os.path.join(os.path.dirname(UI_DIR), "legacy_gui.py")
     mods = _imported_modules(gui_py)
-    assert mods & set(ENGINE_MODULES), "扫描器没在 gui.py 里看到任何引擎模块，这条规则等于没验"
+    assert mods & set(ENGINE_MODULES), "扫描器没在 legacy_gui.py 里看到任何引擎模块，这条规则等于没验"

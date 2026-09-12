@@ -38,14 +38,14 @@ def _isolate_gui_settings(monkeypatch, tmp_path):
     级联偏好(如 R32 用户把 mux级联设成 force级联网)会被测试读到，使 test_cascade_decouple_gui
     等「默认 cone」断言、及 mux 渲染断言非确定性地失败。指到空临时文件 → 永远走默认(cone)。"""
     pytest.importorskip("PySide6")
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "SETTINGS_PATH", str(tmp_path / "gui_settings.json"))
 
 
 @pytest.fixture()
 def wl_win(gui_app, tmp_path):
     """加载 WL 表（探针前缀未配 → 状态列应为"需探针前缀"）。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "wl_gui.xlsx"
     fixtures.build_wl_workbook(str(excel))
     w = G.MainWindow()
@@ -58,7 +58,7 @@ def wl_win(gui_app, tmp_path):
 @pytest.fixture()
 def lpbt_win(gui_app, tmp_path):
     """加载 LPBT 表（含 mux）——回归：现有 GUI 行为不变。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "lpbt_gui.xlsx"
     fixtures.build_workbook(str(excel), with_mux=True)
     w = G.MainWindow()
@@ -71,7 +71,7 @@ def lpbt_win(gui_app, tmp_path):
 def test_append_to_logic_toggle_gui(gui_app, tmp_path):
     """GUI『输出加_to_logic尾缀』开关（2026-06-11 Hi1108）：默认开→pll_n1(top_out=0,被引用)探针带
     _to_logic；关→直接探基名；resolver/_opts 同步、重析无碍、可来回切。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "atl.xlsx"
     fixtures.build_workbook(str(excel), with_pll_chain=True, with_mux=True)
     w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
@@ -99,7 +99,7 @@ def test_append_to_logic_config_roundtrip(gui_app, tmp_path, monkeypatch):
     套用缺该键的全局设置→确定性复位 True（不残留本会话切换）。"""
     import json
     from PySide6 import QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "atl_cfg.xlsx"
     fixtures.build_workbook(str(excel), with_pll_chain=True, with_mux=True)
     w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
@@ -139,7 +139,7 @@ def test_export_nets_gui(gui_app, tmp_path, monkeypatch):
       ② 导出过程不污染左表尾缀状态——collect_excel_nets 会临时把 _append_to_logic 强设 True，
          导出后必须还原成当前开关（关尾缀时探基名应保持基名）。"""
     from PySide6 import QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     from scan_rtl import parse_nets_text
     excel = tmp_path / "nets_gui.xlsx"
     fixtures.build_workbook(str(excel), with_pll_chain=True, with_mux=True)
@@ -174,7 +174,7 @@ def test_level_shift_prefix_hint_gui(gui_app, tmp_path):
     用户顾虑：换张表怕『没生效又不知道』。验证：①d_en_refbuf 行该列显示 level_shift + 顶层口名
     ②没过 level_shift 的对照信号不显示该提示 ③开 GUI 没动任何开关即生效（on_load 即出）。
     """
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "ls_gui.xlsx"
     fixtures.build_levelshift_workbook(str(excel))
     w = G.MainWindow(); w.path_edit.setText(str(excel)); w.on_load()
@@ -230,7 +230,7 @@ def test_wl_gui_status_bare_probe(wl_win):
 def test_wl_gui_status_column_info_blue_not_red(wl_win):
     """状态列文本='输出裸名·已生成'、信息色蓝（区别于未解析的红、缺前缀的橙），tooltip 含 error 全文。"""
     from PySide6 import QtGui
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = wl_win
     i = _mux_idx(w, "d_wl_rf_lna_gain")
     # 找到该信号在表格里的行（排序后行号 ≠ signals 下标）
@@ -440,7 +440,7 @@ def test_lpbt_gui_header_single_ctrl(lpbt_win):
 # ───────────── ⑥ owner 留空的信号：多选菜单可筛「（无 owner）」 ─────────────
 def test_gui_filter_no_owner(wl_win):
     """Excel owner 列(P/L/AE)留空 → sig.owner=''；多选菜单出现「（无 owner） ×N」，勾选只显示这些。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = wl_win
     for s in (w.signals[0], w.signals[1]):       # 模拟两个信号 owner 列留空
         s.owner = ""
@@ -462,7 +462,7 @@ def test_gui_filter_no_owner(wl_win):
 
 def test_gui_filter_no_owner_absent_when_all_owned(wl_win):
     """所有信号都有 owner 时，菜单不出现「（无 owner）」项（不打扰）。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = wl_win
     for s in w.signals:
         if not s.owner:
@@ -497,7 +497,7 @@ def test_wl_gui_mux_negatives_persist_across_reload(gui_app, tmp_path, monkeypat
     根因：mux 负向只在勾选框、不进 _edited 存盘，_sync_neg_checks_from_edits 又整个跳过 mux。
     修复：mux 负向存进 _mux_neg 并落盘/恢复。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
     excel = tmp_path / "wl.xlsx"
     fixtures.build_wl_workbook(str(excel))
@@ -645,7 +645,7 @@ def test_logic_signal_truth_table_uses_logic_cascade_not_mux(wl_win):
 def test_b2_mux_data_cell_editable_persist_reload(gui_app, tmp_path, monkeypatch):
     """[B2] mux 数据行可双击手填(控制行只读) → 存进 _mux_data + 落盘 + 整表重渲生效；重开恢复。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
     excel = tmp_path / "wl.xlsx"
     fixtures.build_wl_workbook(str(excel))
@@ -749,7 +749,7 @@ def test_mux_regen_discards_all_customizations(lpbt_win, monkeypatch):
 def test_mux_drop_clear_persist_reopen(gui_app, tmp_path, monkeypatch):
     """删列 + 清空 跨 GUI 重开持久化（随 EDITS 桶存盘/恢复）。"""
     from PySide6 import QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
     monkeypatch.setattr(QtWidgets.QMessageBox, "question",
                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
@@ -885,7 +885,7 @@ def test_mux_add_neg_selected_dedup(lpbt_win):
 
 def test_mux_user_vec_persist_reopen(gui_app, tmp_path, monkeypatch):
     """用户手编列跨 GUI 重开持久化（随 EDITS 桶存盘/恢复，含 case_index/name）。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
     excel = tmp_path / "lpbt.xlsx"
     fixtures.build_workbook(str(excel), with_mux=True)
@@ -915,7 +915,7 @@ def test_mux_regen_drops_user_vecs(lpbt_win):
 
 def test_mux_user_vec_no_dup_on_reload(gui_app, tmp_path, monkeypatch):
     """对抗评审 C1（blocker）：换表/重载同一表时 _mux_user_vecs 必须先清空——否则恢复用 .extend 会叠加。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
     excel = tmp_path / "lpbt.xlsx"
     fixtures.build_workbook(str(excel), with_mux=True)
@@ -945,7 +945,7 @@ def test_mux_user_neg_wrong_value_forced_mismatch(lpbt_win):
 def test_mux_left_neg_indicator_reflects_user_neg(lpbt_win):
     """对抗评审 B1：左表「负向」勾选反映用户逐 case 负向(不再误示无负向)；编辑器加负向后同步勾上。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = lpbt_win
     grp = _load_buildable_mux(w)
     r = _mux_idx(w, grp.out_base)
@@ -979,7 +979,7 @@ def _dft_wb(tmp_path, fname, iddq_typ=("Y", "RO"), fortest_groups=None):
 def test_mux_dft_gate_is_input_row(gui_app, tmp_path):
     """mux：iddq 门=真值表输入区末行（每条测试取透传值 0），期望行随之下移一行仍可手填；
     『输入信号』表照旧有 DFT 门行；头部说明改为「已列为输入行」。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "dftrow_gui.xlsx"
     _dft_wb(tmp_path, "dftrow_gui.xlsx")
     w = G.MainWindow()
@@ -1017,7 +1017,7 @@ def test_mux_dft_gate_is_input_row(gui_app, tmp_path):
 def test_mux_input_rows_follow_fortest_order(gui_app, tmp_path):
     """2026-06-10 用户要求：真值表输入行次序与 designer for_test 同组行序一致——
     门排中间也照排；编辑(手填期望)在新行号下照常工作。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "ftorder_gui.xlsx"
     _dft_wb(tmp_path, "ftorder_gui.xlsx",
             fortest_groups=[("d_g[1:0]", ["d_iddq_mode", "d_sel[1:0]",
@@ -1046,7 +1046,7 @@ def test_gui_include_risky_toggle(gui_app, tmp_path, monkeypatch):
     用户要强制生成交给仿真验证）：默认 force 子模块内部网缺前缀=跳过(阻断)；勾上=照常生成
     裸名 force、左表状态改「已强制生成」、build 不再跳过。"""
     import test_mux_wl as TM
-    from dreg_verify import gui as G, generator
+    from dreg_verify import legacy_gui as G, generator
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
     excel = tmp_path / "risky_gui.xlsx"
     TM._build_mux_wb(
@@ -1089,7 +1089,7 @@ def test_gui_include_risky_toggle(gui_app, tmp_path, monkeypatch):
 def test_logic_dft_gate_is_input_row(gui_app, tmp_path):
     """logic：受 dft 页门控的输出，真值表同样多一行 DFT 门输入（R_AUTO/R_EXP 整体下移，
     期望手填/负向编辑不受影响）。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "dftrow_lg_gui.xlsx"
     _dft_wb(tmp_path, "dftrow_lg_gui.xlsx")
     w = G.MainWindow()
@@ -1127,7 +1127,7 @@ def test_mux_left_neg_shows_in_editor(lpbt_win):
     （只在生成/导出/报告时追加），用户以为没生效。修复：_load_mux_test_items 据 _mux_neg
     用 add_negatives(which=first) 追加全局负向列，列头 _NEG。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = lpbt_win
     grp = _load_buildable_mux(w)
     n0 = len(w._ti_mux_vecs)
@@ -1145,7 +1145,7 @@ def test_mux_left_neg_shows_in_editor(lpbt_win):
 def test_mux_left_neg_editor_matches_build(lpbt_win):
     """编辑器显示的负向列数 == build 真实产出的 n_negative（所见即所得）。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = lpbt_win
     grp = _load_buildable_mux(w)
     row = _mux_table_row(w, grp)
@@ -1160,7 +1160,7 @@ def test_mux_left_neg_editor_matches_build(lpbt_win):
 def test_mux_left_neg_column_readonly(lpbt_win):
     """全局负向列=只读参考列：输入格/期望格都不可编辑（要自定义错值走「加负向(选中)」）。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = lpbt_win
     grp = _load_buildable_mux(w)
     row = _mux_table_row(w, grp)
@@ -1175,7 +1175,7 @@ def test_mux_left_neg_column_readonly(lpbt_win):
 def test_mux_left_neg_uncheck_removes_column(lpbt_win):
     """取消勾选「负向」→ 正看该信号时编辑器负向列即时消失（无残留）。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = lpbt_win
     grp = _load_buildable_mux(w)
     row = _mux_table_row(w, grp)
@@ -1189,7 +1189,7 @@ def test_mux_left_neg_uncheck_removes_column(lpbt_win):
 def test_mux_left_neg_dedup_with_user_neg(lpbt_win):
     """左表「负向」(全局 which=first) 与用户逐 case 负向重叠 → 编辑器只显 1 条（与 build 去重一致）。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = lpbt_win
     grp = _load_buildable_mux(w)
     # 先对首列加一条用户负向（= 全局 which=first 会撞的那条）
@@ -1211,7 +1211,7 @@ def test_mux_left_neg_dedup_with_user_neg(lpbt_win):
 def test_mux_left_neg_user_columns_still_editable(lpbt_win):
     """加了用户正向列 + 勾全局负向：用户列仍可编辑、全局负向只读（边界 user_start/user_end 正确）。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = lpbt_win
     grp = _load_buildable_mux(w)
     w.ti_table.setCurrentCell(0, 0)

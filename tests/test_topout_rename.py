@@ -389,7 +389,7 @@ def test_renamed_signal_gui_edit_threads_to_export(renamed_path, monkeypatch):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     monkeypatch.setattr(QtWidgets.QMessageBox, "question",       # 「清零」确认框答"是"
                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))

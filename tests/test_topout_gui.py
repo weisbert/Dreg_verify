@@ -32,7 +32,7 @@ def gui_app():
 @pytest.fixture(autouse=True)
 def _isolate_gui_settings(monkeypatch, tmp_path):
     pytest.importorskip("PySide6")
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "SETTINGS_PATH", str(tmp_path / "gui_settings.json"))
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "edits.json"))
 
@@ -46,7 +46,7 @@ def mirror_path(tmp_path_factory):
 
 @pytest.fixture()
 def topo_win(gui_app, mirror_path):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = G.MainWindow()
     w.resize(1320, 840)
     w.path_edit.setText(mirror_path)
@@ -56,7 +56,7 @@ def topo_win(gui_app, mirror_path):
 
 
 def _topo_row(w, name):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     for r in range(w.topo_table.rowCount()):
         # 显示名带位宽切片(d_x[2:0])，按【基名】(剥切片)匹配，与内部 key 一致
         if w.topo_table.item(r, G.TOPO_NAME).text().split("[", 1)[0] == name:
@@ -76,7 +76,7 @@ def test_topout_is_default_main_tab(topo_win):
 
 def test_topout_lists_twelve_signals_with_classification(topo_win):
     """载 mirror → Topout 清单列 12 个要验信号 + 分类(选路/mux/直连寄存器/RO跳过)。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     assert w.topo_table.rowCount() == 12
     cell_names = [w.topo_table.item(r, G.TOPO_NAME).text() for r in range(12)]
@@ -97,7 +97,7 @@ def test_topout_lists_twelve_signals_with_classification(topo_win):
 
 def test_topout_ro_status_skip(topo_win):
     """RO 回读 → 状态列『跳过』(信息蓝)，不崩、不静默丢。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     r = _topo_row(w, "pll_lock_indicator")
     assert w.topo_table.item(r, G.TOPO_STATUS).text() == G.TOPO_STATUS_LABEL["skip"]
@@ -106,7 +106,7 @@ def test_topout_ro_status_skip(topo_win):
 # ───────────── DoD 1：选中 → 展开链 + 真值表 + 账目 ─────────────
 def test_topout_select_rx_en_truth_table_matches_golden(topo_win, mirror_path):
     """选 rx_en → 真值表(4 输入 + auto + 期望)×12 列；期望值对上 for_test 金标准引擎(非自证)。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     w.topo_cov.setCurrentText("全面")               # max 档
     r = _topo_row(w, "d_logic_bt_lp_rx_en")
@@ -128,7 +128,7 @@ def test_topout_select_rx_en_truth_table_matches_golden(topo_win, mirror_path):
 
 def test_topout_register_passthrough_shows_table_and_note(topo_win):
     """直连寄存器根 → 展开链显示 passthrough 说明 + 真值表(1 输入)。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     r = _topo_row(w, "clk_force_on")
     w.topo_table.setCurrentCell(r, G.TOPO_NAME)
@@ -139,7 +139,7 @@ def test_topout_register_passthrough_shows_table_and_note(topo_win):
 
 def test_topout_ro_select_no_truth_table(topo_win):
     """选 RO 回读 → 无真值表(空)，展开链记账原因(不崩)。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     r = _topo_row(w, "pll_lock_indicator")
     w.topo_table.setCurrentCell(r, G.TOPO_NAME)
@@ -404,7 +404,7 @@ def test_topout_export_nets_topout_only_includes_register_roots(topo_win, tmp_pa
 def test_topout_truth_table_shows_iddq_gate_row(gui_app, tmp_path):
     """⭐2026-06-25：dft 门控 logic(经 level_shift 直接命中 logic 行)的 iddq 门，GUI 真值表里要
     看得见(只读行)——门在向量 extra_forces 里、不是 cone 输入，曾在真值表缺失(与 .sv/报告不一致)。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     p = tmp_path / "gated_ls.xlsx"
     make_mirror_btlp.build_dft_gated_ls(str(p))
     w = G.MainWindow(); w.path_edit.setText(str(p)); w.on_load()
@@ -426,7 +426,7 @@ def test_topout_dft_pitch_column_not_false_red(gui_app, tmp_path):
     根因=该列输入克隆自非零功能向量, _recompute_col_an 用节点(不含 iddq 门)重算 auto 得功能值≠0,
     与 force 的常量 0 不符→假红(DIFF_BG)。用户实证 ct_band1_f_ls 第32列被标红『我也没添加反例』。
     修=_is_dft_pitch_col 识别该列→重算跳过(auto 保持0)+期望格染淡紫(DFT_BG)非红。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     p = tmp_path / "gated_ls.xlsx"
     make_mirror_btlp.build_dft_gated_ls(str(p))
     w = G.MainWindow(); w.path_edit.setText(str(p)); w.on_load()
@@ -456,7 +456,7 @@ def test_topout_dft_pitch_column_not_false_red(gui_app, tmp_path):
 def test_topout_signal_list_shows_probe_prefix_column(topo_win):
     """⭐2026-06-25：Topout 信号清单加『探针前缀』列——配了前缀的信号显示前缀、没配为空；
     改前缀后即时刷新。解决用户『配了探针但 Topout 视图看不见 prefix 情况』。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     hdr = [w.topo_table.horizontalHeaderItem(c).text() for c in range(w.topo_table.columnCount())]
     assert "探针前缀" in hdr                                  # 列存在
@@ -471,7 +471,7 @@ def test_topout_signal_list_shows_probe_prefix_column(topo_win):
 def test_topout_signal_list_shows_assert_id_column(topo_win):
     """⭐2026-06-25→#7：Topout 清单『断言号』列 = .sv assert_<R> 的 R = Topout 行序(1..N)。
     #7 起断言号【就是】清单行号(行序命名，取代旧 TOP0/Excel R/mux<N> 混排；仿真报 assert_9 即第9行)。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     hdr = [w.topo_table.horizontalHeaderItem(c).text() for c in range(w.topo_table.columnCount())]
     assert "断言号" in hdr
@@ -486,7 +486,7 @@ def test_topout_signal_list_shows_assert_id_column(topo_win):
 def test_topout_coverage_dropdown_persists(gui_app, mirror_path, monkeypatch):
     """⭐N2：本视图全局覆盖度下拉关 GUI 不复位——改『穷举』即存盘(按 view_id) → 新开窗口恢复『穷举』。
     (pytest 下 _save_settings 默认 no-op，用内存 store 验持久化语义。)"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     store = {}
     monkeypatch.setattr(G, "_save_settings", lambda d: store.update(d))
     monkeypatch.setattr(G, "_load_settings", lambda: dict(store))
@@ -519,7 +519,7 @@ def test_topout_export_aborts_on_dup_labels(topo_win, tmp_path, monkeypatch):
 def test_topout_report_only_checked_signal(topo_win, tmp_path, monkeypatch):
     """⭐N6：导出报告按勾选过滤——只勾 rx_en → provider 收到 only=[rx_en]，报告只含它。"""
     from PySide6 import QtCore, QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     w._topo_check_all(False)
     r = _topo_row(w, "d_logic_bt_lp_rx_en")
@@ -571,7 +571,7 @@ def test_topout_export_scope_pos_neg(topo_win, tmp_path, monkeypatch):
 def test_topout_export_sv_only_checked(topo_win, tmp_path, monkeypatch):
     """勾选过滤：只勾 rx_en → 导出仅含它（其余 Topout 信号块不出现）。"""
     from PySide6 import QtCore, QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     w._topo_check_all(False)
     r = _topo_row(w, "d_logic_bt_lp_rx_en")
@@ -637,7 +637,7 @@ def test_legacy_view_intact(topo_win):
 def test_topout_graceful_when_no_topout_page(gui_app, tmp_path):
     """无 Topout 页 → Topout 清单空 + 提示，不崩。"""
     import fixtures
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     xl = tmp_path / "plain.xlsx"
     fixtures.build_workbook(str(xl), with_mux=True)      # 普通夹具，无 Topout 页
     w = G.MainWindow()
@@ -678,7 +678,7 @@ def test_topout_refresh_failure_clears_stale_panels(topo_win, monkeypatch):
 
 # ═══════════════ 2026-06-24 SignalView 重构：编辑 / 筛选 / 展开链 / 覆盖度迁移 ═══════════════
 def _sel(w, name):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w.topo_table.setCurrentCell(_topo_row(w, name), G.TOPO_NAME)
     return w.topout_view
 
@@ -832,7 +832,7 @@ def test_cascade_doc_window_reads_the_real_document(topo_win):
 def test_gui_user_texts_have_no_cli_fragments(topo_win):
     """轨0-⑦：界面上不出现 CLI 命令/命令行开关——验证工程师看的是行为，不是维护者的等价命令。"""
     from PySide6 import QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     texts = []
     for wid in w.findChildren(QtWidgets.QWidget):
@@ -1118,7 +1118,7 @@ def test_topout_edit_reflected_in_exported_sv(topo_win, monkeypatch):
 
 def test_topout_negative_checkbox_adds_neg(topo_win):
     """信号清单『负向』勾选 → 该信号加一条负向；导出 .sv 含 _NEG 断言。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     from PySide6 import QtCore
     v = _sel(topo_win, "d_logic_bt_lp_rx_en")
     r = _topo_row(topo_win, "d_logic_bt_lp_rx_en")
@@ -1186,7 +1186,7 @@ def test_topout_coverage_in_toolbar(topo_win):
 # ═══════════════ 2026-06-24 对抗 review 修复回归 ═══════════════
 def test_select_error_mux_does_not_crash(topo_win, monkeypatch):
     """选中一个『展开失败的 mux』(expansion=None, status=error) → 不崩、非可编辑（BLOCKER 修复）。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     v = topo_win.topout_view
     bad = {"kind": "mux", "status": "error", "issues": ["mux 展开失败"], "note": "",
            "node": None, "bindings": None, "expansion": None, "vectors": [],
@@ -1245,7 +1245,7 @@ def test_topout_designer_expected_survives_config_export_import(topo_win, tmp_pa
 def test_topout_signal_checks_persist_on_reload(topo_win):
     """⭐N1：Topout 信号勾选(纳入导出集)关 GUI/换表不丢——取消勾选某信号 → 重载同表仍取消。"""
     from PySide6 import QtCore
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = topo_win
     r = _topo_row(w, "d_logic_bt_lp_rx_en")
     w.topo_table.item(r, G.TOPO_SEL).setCheckState(QtCore.Qt.Unchecked)

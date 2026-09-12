@@ -688,7 +688,7 @@ def test_gui_cone_signal_editor(tmp_path_factory):
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("gui_cone") / "synthetic_pll.xlsx"
     fixtures.build_workbook(str(path), with_pll_chain=True)
     w = gui.MainWindow()
@@ -780,7 +780,7 @@ def test_gui_probe_prefix_flows_to_sv(tmp_path_factory):
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("gui_pfx") / "synthetic_pll.xlsx"
     fixtures.build_workbook(str(path), with_pll_chain=True)
     w = gui.MainWindow()
@@ -806,7 +806,7 @@ def _pll_window(tmp_path_factory, sub):
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp(sub) / "synthetic_pll.xlsx"
     fixtures.build_workbook(str(path), with_pll_chain=True)
     w = gui.MainWindow()
@@ -915,7 +915,7 @@ def test_gui_prefix_mapping_covers_input_wire(tmp_path_factory):
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("gui_wire_pfx") / "synthetic_pll.xlsx"
     fixtures.build_workbook(str(path), with_pll_chain=True)
     w = gui.MainWindow()
@@ -1127,7 +1127,7 @@ def test_gui_force_signals_flows_to_resolver_and_opts(tmp_path_factory):
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("gui_force") / "synthetic_pll.xlsx"
     fixtures.build_workbook(str(path), with_pll_chain=True)
     w = gui.MainWindow()

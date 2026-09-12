@@ -163,7 +163,7 @@ def test_skipped_detail_text_moved_but_wording_kept():
     """老 gui._skipped_detail_text 搬进来：措辞不变（GUI 里仍按它给『怎么强制生成』的下一步）。"""
     t = X.skipped_detail_text([("d_x", "1", [("A", "d_leaf", "wire 兜底")])])
     assert "d_x" in t and "d_leaf" in t and "缺前缀强制生成" in t
-    from dreg_verify import gui  # noqa: F401 —— gui 侧别名仍在（老调用点不破）
+    from dreg_verify import legacy_gui as gui  # noqa: F401 —— gui 侧别名仍在（老调用点不破）
     assert gui._skipped_detail_text is X.skipped_detail_text
 
 

@@ -66,8 +66,11 @@ def app():
 
 
 def _default_window_factory():
-    """v1 的主窗口。v2 上线后用 `set_window_factory` 换成 `dreg_verify.ui.app` 的入口。"""
-    from dreg_verify import gui as G
+    """v1 的主窗口（C5-c1 起模块名是 `legacy_gui`，行为一字未改）。
+
+    **默认工厂仍是 v1**：老测试还没迁完，现在切 v2 它们会整片红。
+    切换是 C5-c2 的活——那一步把这里换成 `v2_window_factory`。"""
+    from dreg_verify import legacy_gui as G
     return G.MainWindow()
 
 
@@ -155,14 +158,14 @@ def isolate_settings(monkeypatch, tmp_path):
     不隔离的话 `_load_settings` 会读用户真实 ~/.dreg_verify_gui.json（级联偏好等），
     使默认值断言非确定性地失败。
 
-    两套门面**同名同义**的两个模块级常量一起 patch（v1 `gui` 与 v2 `ui.persist`）：
+    两套门面**同名同义**的两个模块级常量一起 patch（v1 `legacy_gui` 与 v2 `ui.persist`）：
     v2 的落盘策略是「路径还是出厂默认值时 pytest 下 no-op」，所以不 patch 也不会污染真机，
     但那样一来持久化本身就测不到了（写了等于没写）——指到 tmp 之后写入照常生效。"""
     import pytest
     pytest.importorskip("PySide6")
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     from dreg_verify.ui import persist as P
-    for mod, prefix in ((G, "gui"), (P, "ui")):
+    for mod, prefix in ((G, "legacy"), (P, "ui")):
         for attr, fname in (("SETTINGS_PATH", "settings.json"), ("EDITS_PATH", "edits.json")):
             if hasattr(mod, attr):
                 monkeypatch.setattr(mod, attr, str(tmp_path / ("%s_%s" % (prefix, fname))))
@@ -553,7 +556,7 @@ def _auto_save_path(rec, args, kwargs):
     return os.path.join(rec.save_dir, name)
 
 
-# 自建对话框入口（gui.py）：(模块, 类名, 方法名, 默认答案工厂)。
+# 自建对话框入口（legacy_gui.py）：(模块, 类名, 方法名, 默认答案工厂)。
 # 默认答案 = 「用户按了确定、用默认选项」，保证任何导出流程都能一路跑到底。
 def _def_export_options(self, *a, **k):
     return {"scope": "all", "comments": False, "sv_summary": False, "owner_in_msg": False}
@@ -620,10 +623,10 @@ def _def_dlg_export_options(_owner, *a, **k):
 
 
 CUSTOM_MODALS = [
-    ("dreg_verify.gui", "SignalView", "_ask_export_options", _def_export_options),
-    ("dreg_verify.gui", "MainWindow", "_ask_export_options", _def_export_options),
-    ("dreg_verify.gui", "MainWindow", "_ask_nets_pages", _def_nets_pages),
-    ("dreg_verify.gui", "MainWindow", "_confirm_dup_labels", _def_confirm_dup),
+    ("dreg_verify.legacy_gui", "SignalView", "_ask_export_options", _def_export_options),
+    ("dreg_verify.legacy_gui", "MainWindow", "_ask_export_options", _def_export_options),
+    ("dreg_verify.legacy_gui", "MainWindow", "_ask_nets_pages", _def_nets_pages),
+    ("dreg_verify.legacy_gui", "MainWindow", "_confirm_dup_labels", _def_confirm_dup),
     ("dreg_verify.ui.dialogs", "ConfirmDialog", "ask", _def_dlg_true),
     ("dreg_verify.ui.dialogs", "RenameColumnDialog", "ask", _def_dlg_rename),
     ("dreg_verify.ui.dialogs", "MuxDataDialog", "ask", _def_dlg_no_change_map),
@@ -729,8 +732,8 @@ def auto_dialogs(monkeypatch, answers=None, save_dir=None):
            其余默认「取消」（凭空编一个不存在的输入文件只会更难查）
       · QInputDialog.getText / getItem / getInt —— 默认「取消」
       · 实例 exec：QMessageBox.exec / QDialog.exec —— 默认 QDialog.Accepted，
-        并按 `windowTitle()` 记录（gui.py 里 6 个自建 QDialog 全落在这条上）
-      · gui.py 自建的 `_ask_export_options`(SignalView / MainWindow)、`_ask_nets_pages`、
+        并按 `windowTitle()` 记录（legacy_gui.py 里 6 个自建 QDialog 全落在这条上）
+      · legacy_gui.py 自建的 `_ask_export_options`(SignalView / MainWindow)、`_ask_nets_pages`、
         `_confirm_dup_labels` —— 直接替换成默认答案（见 CUSTOM_MODALS）
 
     answers: dict，键可以是
@@ -851,7 +854,7 @@ def auto_dialogs(monkeypatch, answers=None, save_dir=None):
         monkeypatch.setattr(cls, "exec", _mk_exec(cls_name, "exec"))
         rec.patched.append(full)
 
-    # ── 5：gui.py 自建对话框函数 ──
+    # ── 5：legacy_gui.py 自建对话框函数 ──
     for mod_name, cls_name, meth, default_fn in CUSTOM_MODALS:
         try:
             mod = __import__(mod_name, fromlist=[cls_name])
@@ -866,7 +869,7 @@ def auto_dialogs(monkeypatch, answers=None, save_dir=None):
         if answers.get(full) is REAL or answers.get(meth) is REAL:
             continue
 
-        # v2 的 `类.ask` 是 **classmethod**（`ConfirmDialog.ask(kind, …)`），gui.py 那四个是
+        # v2 的 `类.ask` 是 **classmethod**（`ConfirmDialog.ask(kind, …)`），legacy_gui.py 那四个是
         # 普通实例方法。C3-int 之前这里一律换成裸函数，于是：classmethod 丢了绑定，
         # `ConfirmDialog.ask(kind="clear")` 这种**全关键字**调用第一个形参没人接 → TypeError
         # （调用方只好为了测试改成位置传参）。现在照原样包回去：classmethod 仍是 classmethod，

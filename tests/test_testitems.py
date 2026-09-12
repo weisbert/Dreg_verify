@@ -402,7 +402,7 @@ def qapp():
 
 
 def test_gui_testitem_edit_flow(qapp, wb, tmp_path_factory):
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("g") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow()
@@ -435,7 +435,7 @@ def test_gui_testitem_edit_flow(qapp, wb, tmp_path_factory):
 
 
 def _reserve_window(tmp_path_factory, sub):
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp(sub) / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow()
@@ -601,7 +601,7 @@ def test_gui_coverage_decouple_mapping(qapp, wb, tmp_path_factory):
 def test_gui_coverage_no_restore_under_pytest(qapp, wb, tmp_path_factory, monkeypatch):
     """⭐ 审查修复(wf_b5a361e3 confirmed)：pytest 下【不】从真实 settings 恢复覆盖档——即便磁盘有
     coverage_mux / legacy coverage 也默认精简。否则用户真机持久化的档位会污染断言覆盖版面的 GUI 测试。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "_load_settings",
                         lambda: {"coverage_mux": "穷举", "coverage_logic": "全面", "coverage": "穷举"})
     _gui, w, _sig = _reserve_window(tmp_path_factory, "covnorestore")
@@ -634,7 +634,7 @@ def test_gui_coverage_keeps_customized(qapp, wb, tmp_path_factory):
 
 def test_gui_max_tests_live_update(qapp, wb, tmp_path_factory):
     """改'上限'spinbox 也即时重算当前非自定义信号(请求#1的另一半：max_tests 实时生效)。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("cap") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
@@ -671,7 +671,7 @@ def test_gui_neg_only_switch_follows_global_coverage(qapp, tmp_path_factory, mon
     """⭐用户实测bug：全选+加负向(在精简下)后，改全局覆盖度只对【当前看的】信号生效，
     切到【别的】neg_only信号还是精简。修=neg_only信号每次加载都按当前全局覆盖度重算正向+补负向。
     覆盖①会话内切换 ②退出重开 两条路径。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("negp") / "edits.json"))
     path = tmp_path_factory.mktemp("negsw") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
@@ -720,7 +720,7 @@ def test_gui_neg_only_build_follows_global_coverage(qapp, tmp_path_factory):
     R25 只修了 GUI 显示侧(_load_test_items 切到信号才 reflow)；本测试盯的是 build 侧
     (generator.report / _opts / _vector_overrides)：不点开任一信号、直接切全局覆盖度再生成，
     报告里正向数必须跟随全局。修=_vector_overrides 对 neg_only 信号调 _neg_only_rows_now 重算。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("negbuild") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path), with_pll_chain=True)   # 多输入信号 → 覆盖度差异明显
     w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
@@ -754,7 +754,7 @@ def test_gui_neg_only_build_follows_global_coverage(qapp, tmp_path_factory):
 
 def test_gui_sig_cov_per_signal(qapp, tmp_path_factory):
     """⭐ 单点覆盖度：本信号下拉只改该信号、压过全局；存进 _sig_cov；_opts/build 带出 sig_cov。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("sigcov") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
@@ -788,7 +788,7 @@ def test_gui_sig_cov_per_signal(qapp, tmp_path_factory):
 
 def test_gui_sig_cov_isolated_to_signal(qapp, tmp_path_factory):
     """⭐ 用户报的 bug：切到别的信号，单点档不应跨信号串——A 设穷举，B 仍跟随全局精简。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("sigcoviso") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
@@ -824,7 +824,7 @@ def test_gui_sig_cov_global_clears_displayed_override(qapp, tmp_path_factory):
     """⭐用户报的bug + 拍板修法(Option A)：单点档会暗中盖过全局下拉(还从磁盘恢复)→全局看着'失效'。
     修=改【与当前信号同类】的全局下拉时,清掉【当前正在看】那个信号的单点档,让全局立刻生效；
     其它没在看的信号保留各自单点档；max_tests / 另一类下拉 不清档。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("sigcovglobal") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
@@ -856,7 +856,7 @@ def test_gui_sig_cov_global_clears_displayed_override(qapp, tmp_path_factory):
 def test_gui_sig_cov_session_only_not_persisted(qapp, tmp_path_factory, monkeypatch):
     """⭐用户报的真bug根因+修法：单点档是【会话内临时档】，不存盘、不恢复。
     否则上次留的单点档(如设成精简)会被静默恢复、暗中盖过全局下拉→'刚开GUI改全局对某些信号无效'。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("sigcovp") / "edits.json"))
     path = tmp_path_factory.mktemp("sigcovs") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
@@ -889,7 +889,7 @@ def test_gui_sig_cov_session_only_not_persisted(qapp, tmp_path_factory, monkeypa
 
 def test_gui_sig_cov_bucket_sig_cov_ignored(qapp, tmp_path_factory):
     """旧桶里残留的 sig_cov 段一律忽略（会话内临时档不恢复）。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp("sigcovr") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
     w = gui.MainWindow(); w.path_edit.setText(str(path)); w.on_load()
@@ -1084,7 +1084,7 @@ def test_gui_panes_are_resizable(qapp, wb, tmp_path_factory):
 # ───────────── Batch A/B/C：安全 / 清晰 / 效率 回归 ─────────────
 def test_gui_cell_text_binary_roundtrip(qapp):
     """B3：小字段显二进制(0bXXXX)，且能被 _parse_int 原样读回(round-trip)。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     M = gui.MainWindow
     assert M._cell_text(5, 3) == "0b101"
     assert M._cell_text(1, 1) == "1"
@@ -1100,7 +1100,7 @@ def test_gui_cell_text_binary_roundtrip(qapp):
 
 def test_gui_header_tooltips_present(qapp, wb, tmp_path_factory):
     """B2：'负向'/'状态'表头与状态单元格带说明 tooltip。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     _g, w, _sig = _reserve_window(tmp_path_factory, "g_tips")
     assert "负向" in w.table.horizontalHeaderItem(gui.COL_NEG).toolTip()
     assert w.table.horizontalHeaderItem(gui.COL_STATUS).toolTip()
@@ -1156,7 +1156,7 @@ def test_gui_del_neg_confirms_named(qapp, wb, tmp_path_factory, monkeypatch):
 
 def test_gui_confirm_dup_labels_no_dups_is_silent(qapp):
     """A1：无重复标号时 _confirm_dup_labels 直接放行(不弹框)。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     w = gui.MainWindow()
     assert w._confirm_dup_labels({"dup_labels": []}) is True
     assert w._confirm_dup_labels({}) is True
@@ -1164,7 +1164,7 @@ def test_gui_confirm_dup_labels_no_dups_is_silent(qapp):
 
 def test_skipped_detail_text_lists_names_and_reasons():
     """生成完成弹窗：跳过的信号在『显示详情』里逐个列出名字 + 不可驱动原因。"""
-    from dreg_verify.gui import _skipped_detail_text
+    from dreg_verify.legacy_gui import _skipped_detail_text
     skipped = [
         ("d_logic_pll_gear_shift_mux_sel", "130",
          [("A", "close_ready_flag", "表中查无字段，按 wire 处理(force 信号名)")]),
@@ -1264,7 +1264,7 @@ def test_gui_clear_logic_zero_tests(qapp, wb, tmp_path_factory, monkeypatch):
 def test_gui_signal_selection_persisted(qapp, tmp_path_factory, monkeypatch):
     """信号勾选(COL_SEL)跨 GUI 重开自动恢复（第二十六轮：进 EDITS 桶）。"""
     from PySide6 import QtCore
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("selp") / "edits.json"))
     path = tmp_path_factory.mktemp("selw") / "synthetic_dreg.xlsx"
     fixtures.build_workbook(str(path))
@@ -1283,7 +1283,7 @@ def test_gui_signal_selection_persisted(qapp, tmp_path_factory, monkeypatch):
 def test_gui_max_tests_persisted(qapp, tmp_path_factory, monkeypatch):
     """用例上限 max_tests 改动 → 写进 settings（第二十六轮；__init__ 恢复走与 coverage 同款
     pytest 守卫，恢复路径由 coverage 那套已验证的 settings 机制保证）。"""
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     store = {}
     monkeypatch.setattr(gui, "_load_settings", lambda: dict(store))
     monkeypatch.setattr(gui, "_save_settings", lambda d: store.update(d))
@@ -1299,7 +1299,7 @@ def test_full_config_export_import_roundtrip(qapp, tmp_path_factory, monkeypatch
     """完整配置导出→导入：信号勾选/全局档/上限/探针前缀/强制force 全部还原（第二十六轮）。"""
     import json
     from PySide6 import QtCore
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("cfgp") / "edits.json"))
     monkeypatch.setattr(gui.QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
     path = tmp_path_factory.mktemp("cfgw") / "synthetic_dreg.xlsx"
@@ -1344,7 +1344,7 @@ def test_config_excel_mismatch_warns_but_imports(qapp, tmp_path_factory, monkeyp
     """配置记的源表文件名与当前加载的不一致 → 导入完成弹窗带 ⚠ 提示，但仍照常导入。
     缺前缀强制生成『缺键时保持当前』——旧配置不该翻动本机选择。"""
     import json
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("mmp") / "edits.json"))
     captured = {}
     monkeypatch.setattr(gui.QtWidgets.QMessageBox, "information",
@@ -1372,7 +1372,7 @@ def test_config_excel_mismatch_warns_but_imports(qapp, tmp_path_factory, monkeyp
 def test_legacy_edits_import_still_merges(qapp, tmp_path_factory, monkeypatch):
     """向后兼容：旧版 v1『测试项编辑』文件仍能导入(合并语义)，不碰勾选/全局。"""
     import json
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("legp") / "edits.json"))
     monkeypatch.setattr(gui.QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
     path = tmp_path_factory.mktemp("legw") / "synthetic_dreg.xlsx"
@@ -1392,7 +1392,7 @@ def test_legacy_edits_import_still_merges(qapp, tmp_path_factory, monkeypatch):
 def test_full_config_import_clears_stale_negatives(qapp, tmp_path_factory, monkeypatch):
     """导入完整配置 = 加载该状态：上一会话残留的负向勾选被清掉(权威同步，第二十六轮自审修)。"""
     from PySide6 import QtCore
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     monkeypatch.setattr(gui, "EDITS_PATH", str(tmp_path_factory.mktemp("stp") / "edits.json"))
     monkeypatch.setattr(gui.QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
     path = tmp_path_factory.mktemp("stw") / "synthetic_dreg.xlsx"

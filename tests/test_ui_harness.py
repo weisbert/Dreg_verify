@@ -102,7 +102,7 @@ def test_find_all_by_class(win):
 
 # ───────────── 表格取值 ─────────────
 def test_table_texts_and_header_and_checked(win):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     t = H.find(win, "topo_table")
     rows = H.table_texts(t)
     assert len(rows) == t.rowCount() and len(rows[0]) == t.columnCount()
@@ -278,7 +278,7 @@ def test_auto_dialogs_answers_by_name_and_title(monkeypatch, gui_app):
 
 
 def test_auto_dialogs_intercepts_custom_qdialog_exec(monkeypatch, gui_app):
-    """gui.py 的 6 个自建 QDialog 走 `dlg.exec()` —— 按 windowTitle 记录，默认 Accepted。"""
+    """legacy_gui.py 的 6 个自建 QDialog 走 `dlg.exec()` —— 按 windowTitle 记录，默认 Accepted。"""
     from PySide6 import QtWidgets
     rec = H.auto_dialogs(monkeypatch)
     d = QtWidgets.QDialog()

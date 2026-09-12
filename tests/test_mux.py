@@ -603,7 +603,7 @@ def gui_app():
 
 @pytest.fixture()
 def gui_win(gui_app, tmp_path):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     excel = tmp_path / "gui_mux.xlsx"
     fixtures.build_workbook(str(excel), with_mux=True)
     w = G.MainWindow()

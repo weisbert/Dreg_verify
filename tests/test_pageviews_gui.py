@@ -26,7 +26,7 @@ def gui_app():
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch, tmp_path):
     pytest.importorskip("PySide6")
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(G, "SETTINGS_PATH", str(tmp_path / "s.json"))
     monkeypatch.setattr(G, "EDITS_PATH", str(tmp_path / "e.json"))
 
@@ -40,7 +40,7 @@ def mirror_path(tmp_path_factory):
 
 @pytest.fixture()
 def win(gui_app, mirror_path):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     w = G.MainWindow(); w.resize(1320, 840)
     w.path_edit.setText(mirror_path)
     w.on_load()
@@ -49,7 +49,7 @@ def win(gui_app, mirror_path):
 
 
 def _row(v, name):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     for r in range(v.sig_table.rowCount()):
         if v.sig_table.item(r, G.TOPO_NAME).text() == name:
             return r
@@ -65,7 +65,7 @@ def test_six_main_tabs(win):
 
 # ───────────── logic 子视图：列出本页行 + 真值表（不 cone） ─────────────
 def test_logic_subview_lists_rows_and_truth(win):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     v = win.page_views["logic"]
     assert v.sig_table.rowCount() == len(win.wb.logic) > 0
     r = _row(v, "d_logic_bt_lp_rx_en")
@@ -77,7 +77,7 @@ def test_logic_subview_lists_rows_and_truth(win):
 
 
 def test_logic_subview_chain_substitution(win):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     v = win.page_views["logic"]
     v.sig_table.setCurrentCell(_row(v, "d_logic_bt_lp_rx_en"), G.TOPO_NAME)
     txt = v.chain.toPlainText()
@@ -86,7 +86,7 @@ def test_logic_subview_chain_substitution(win):
 
 def test_logic_subview_edit_and_export(win, monkeypatch):
     from PySide6 import QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     monkeypatch.setattr(QtWidgets.QMessageBox, "question",       # 「清零」确认框答"是"
                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
     v = win.page_views["logic"]
@@ -104,7 +104,7 @@ def test_logic_subview_edit_and_export(win, monkeypatch):
 
 # ───────────── mux 子视图 ─────────────
 def test_mux_subview(win):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     v = win.page_views["mux"]
     assert v.sig_table.rowCount() == len(win.wb.mux) >= 1
     v.sig_table.setCurrentCell(0, G.TOPO_NAME)
@@ -116,7 +116,7 @@ def test_mux_subview(win):
 
 # ───────────── dft 子视图：passthrough ─────────────
 def test_dft_subview_passthrough(win):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     v = win.page_views["dft"]
     assert v.sig_table.rowCount() == len(win.wb.dft_rows) > 0
     v.sig_table.setCurrentCell(_row(v, "clk_force_on"), G.TOPO_NAME)
@@ -137,7 +137,7 @@ def test_iddq_subview_empty_graceful(win, monkeypatch):
 
 # ───────────── 子视图截图过目 ─────────────
 def test_subview_screenshots(win, gui_app):
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     out_dir = os.environ.get("TOPO_SHOT_DIR") or os.path.dirname(os.path.abspath(__file__))
     for idx, pg in ((1, "logic"), (2, "mux"), (3, "dft")):
         win.main_tabs.setCurrentIndex(idx)

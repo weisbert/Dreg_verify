@@ -363,7 +363,7 @@ def test_coverage_state_matches_signal_view(tmp_path_factory):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])   # noqa: F841
     d = tmp_path_factory.mktemp("sess_gui")
     checked = 0

@@ -234,7 +234,7 @@ def _assert_new_keys_equal(a_new, a_old, who):
 
 def _both(wb, main, page=None, **cfgkw):
     """(新 provider, 旧 gui provider) —— 两边读同一份配置。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     from dreg_verify import providers as PV
     cfg = _Cfg(wb, **cfgkw)
     if page is None:
@@ -248,7 +248,7 @@ def gui_windows(tmp_path_factory):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])   # noqa: F841
     d = tmp_path_factory.mktemp("prov_gui")
     out, wins = [], []
@@ -358,7 +358,7 @@ def test_providers_equivalent_to_gui_providers(gui_windows):
 def test_providers_equivalent_with_logic_overrides(gui_windows):
     """RTL 补充逻辑（_supplemented 那段 swap-and-restore）也要等价——它是最容易搬漏的一处：
     漏了就静默显示补充【前】的真值表（= 假绿），而 .sv 照样跑得过。"""
-    from dreg_verify import gui as G
+    from dreg_verify import legacy_gui as G
     from dreg_verify import providers as PV
     tag, wb, w = gui_windows[0]
     target = "d_logic_bt_lp_lna_agc"

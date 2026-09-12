@@ -167,11 +167,11 @@ def test_c076_row_order_matches_for_test(btlp, wl):
 def test_c084_display_format_roundtrips_parse_int(btlp):
     """C-084：1 位→0/1；2–4 位→0bXXXX 零填充；更宽→0xNN，**且能被 parse_int 原样读回**。
 
-    并与 v1 `gui.MainWindow._cell_text` 逐值对照（这个格式是 v1 已经在用的那一份；
+    并与 v1 `legacy_gui.MainWindow._cell_text` 逐值对照（这个格式是 v1 已经在用的那一份；
     `generator._fmt_cell` 是**报告**的格式：多位一律 0xN，不能被当成同一件事，故不许 import）。
     """
     from dreg_verify import generator as G
-    from dreg_verify import gui as GUI
+    from dreg_verify import legacy_gui as GUI
     assert TM.fmt_cell(1, 1) == "1" and TM.fmt_cell(0, 1) == "0"
     assert TM.fmt_cell(0xA, 4) == "0b1010"           # 2–4 位零填充
     assert TM.fmt_cell(1, 2) == "0b01"
@@ -718,10 +718,10 @@ def test_i15_no_clear_no_reset_outside_load(btlp):
             hits += _clear_calls(os.path.join(src_dir, fn), fn)
     assert not hits, "ui/truth 里出现了不该有的 clear()：\n%s" % "\n".join(hits)
     # 这条扫描自己也要能命中已知靶子：v1 的 _populate_truth 里确实有 tbl.clear()
-    gui_py = os.path.join(os.path.dirname(os.path.dirname(src_dir)), "gui.py")
-    known = _clear_calls(gui_py, "gui.py")
+    gui_py = os.path.join(os.path.dirname(os.path.dirname(src_dir)), "legacy_gui.py")
+    known = _clear_calls(gui_py, "legacy_gui.py")
     assert any("tbl.clear" in x for x in known), \
-        "扫描器对着 gui.py 都扫不出 tbl.clear()，这条规则等于没验"
+        "扫描器对着 legacy_gui.py 都扫不出 tbl.clear()，这条规则等于没验"
 
 
 def _clear_calls(path, tag):

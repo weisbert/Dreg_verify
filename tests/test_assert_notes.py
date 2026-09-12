@@ -382,7 +382,7 @@ def _make_gui(tmp_path_factory, name, pll=False):
     pytest.importorskip("PySide6")
     from PySide6 import QtWidgets
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from dreg_verify import gui
+    from dreg_verify import legacy_gui as gui
     path = tmp_path_factory.mktemp(name) / "synthetic.xlsx"
     fixtures.build_workbook(str(path), with_pll_chain=pll)
     w = gui.MainWindow()

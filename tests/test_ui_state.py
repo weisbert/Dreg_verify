@@ -40,7 +40,7 @@ def qapp():
 @pytest.fixture
 def iso(monkeypatch, tmp_path):
     """两份持久化文件指到临时目录 —— 与 `ui_harness.isolate_settings` 对 gui 做的同一件事
-    （属性名 `SETTINGS_PATH` / `EDITS_PATH` 与 gui.py 同名，C1-int 那边一个 helper 能管两套）。"""
+    （属性名 `SETTINGS_PATH` / `EDITS_PATH` 与 legacy_gui.py 同名，C1-int 那边一个 helper 能管两套）。"""
     monkeypatch.setattr(P, "SETTINGS_PATH", str(tmp_path / "gui_settings.json"))
     monkeypatch.setattr(P, "EDITS_PATH", str(tmp_path / "edits.json"))
     return tmp_path
