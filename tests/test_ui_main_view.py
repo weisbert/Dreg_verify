@@ -196,10 +196,13 @@ def test_mainview_injects_real_widgets(qapp):
 
 
 def test_mainview_placeholder_names_match_app(mv):
-    """占位名与 `ui/app.py` 的 `PLACEHOLDER_AREAS` 一字不差（C2-int 才换得动）。"""
+    """不注入真件时的占位名仍然只从 `names.py` 取。
+
+    C2-int 已把电路图 / .sv 预览接进组合根，`app.PLACEHOLDER_AREAS` 里只剩真值表（C3）；
+    本模块的占位块是「单独起 MainView 不注入任何东西」时的兑底，三个名字照旧。"""
     view, host = mv
+    assert set(APP.PLACEHOLDER_AREAS) == {names.TRUTH_PANEL}, APP.PLACEHOLDER_AREAS
     for nm in (names.TRUTH_PANEL, names.FLOW_PANEL, names.SV_PANEL):
-        assert nm in APP.PLACEHOLDER_AREAS
         w = H.find(view, nm)
         assert w.property("placeholder") is True
     # MAIN_VIEW 仍是那个堆叠（test_ui_app 按 `.currentIndex()` 认页，换真件不能换类型）

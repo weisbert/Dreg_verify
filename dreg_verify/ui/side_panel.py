@@ -231,6 +231,23 @@ class ChainView(QtWidgets.QTextBrowser):
     def highlight(self):
         return self._highlight
 
+    def set_show_source(self, on):
+        """C-065 / C-064：「解析明细」开着的时候，把每根输入的**来源**直接摆到驱动串后面。
+
+        不开的时候来源只在 tooltip 里（右栏本来就窄）；一旦工程师点开了标题栏的
+        「解析明细」，他要查的正是「这根名字到底从哪查到的」—— 此时两边说法要对得上。"""
+        on = bool(on)
+        if on == self._show_source:
+            return
+        self._show_source = on
+        if self._rows:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(self.rowCount() - 1, self.COLS - 1),
+                                  [Qt.DisplayRole])
+
+    def show_source(self):
+        return self._show_source
+
     def _render(self):
         bar = self.verticalScrollBar()
         keep = bar.value()
@@ -425,6 +442,7 @@ class InputsModel(QtCore.QAbstractTableModel):
         QtCore.QAbstractTableModel.__init__(self, parent)
         self._rows = []
         self._highlight = ""
+        self._show_source = False
 
     # ── 数据进出 ──
     def set_rows(self, rows):
@@ -457,6 +475,23 @@ class InputsModel(QtCore.QAbstractTableModel):
 
     def highlight(self):
         return self._highlight
+
+    def set_show_source(self, on):
+        """C-065 / C-064：「解析明细」开着的时候，把每根输入的**来源**直接摆到驱动串后面。
+
+        不开的时候来源只在 tooltip 里（右栏本来就窄）；一旦工程师点开了标题栏的
+        「解析明细」，他要查的正是「这根名字到底从哪查到的」—— 此时两边说法要对得上。"""
+        on = bool(on)
+        if on == self._show_source:
+            return
+        self._show_source = on
+        if self._rows:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(self.rowCount() - 1, self.COLS - 1),
+                                  [Qt.DisplayRole])
+
+    def show_source(self):
+        return self._show_source
 
     def highlighted_rows(self):
         """当前高亮的显示行号（两行一组都算）——测试用。"""
@@ -507,7 +542,11 @@ class InputsModel(QtCore.QAbstractTableModel):
 
         if role == Qt.DisplayRole:
             if is_drive:
-                return drive_text(row) if col == 0 else ""
+                if col != 0:
+                    return ""
+                txt = drive_text(row)
+                src = T.scrub(row.get("found_in_text") or "") if self._show_source else ""
+                return ("%s · %s" % (txt, src)) if (txt and src) else (txt or src)
             # 名字 / 字母 / RO·RW 是标识符，一个字符都不许动；角色是后端写的说明文字 → 过 scrub（I-12）
             return (str(row.get("letter") or ""), str(row.get("name") or ""),
                     T.scrub(row.get("role") or ""), str(row.get("rw") or ""))[col]
@@ -606,6 +645,10 @@ class InputsView(QtWidgets.QTableView):
 
     def set_highlight(self, net):
         self.model().set_highlight(net)
+
+    def set_show_source(self, on):
+        """C-064/C-065：标题栏的「解析明细」开合 → 驱动行是否带上来源。"""
+        self.model().set_show_source(on)
         rows = self.model().highlighted_rows()
         if rows:                              # 亮了却在可视区外 = 等于没亮
             self.scrollTo(self.model().index(rows[0], 0),
@@ -739,6 +782,13 @@ class SidePanel(QtWidgets.QWidget):
         h = max(TH.CLAMP_CHAIN[0], min(TH.CLAMP_CHAIN[1], int(px)))
         self.splitter.setSizes([h, max(total - h, 1)])
 
+    def set_show_source(self, on):
+        """C-064/C-065：标题栏的「解析明细」开着时，输入表的驱动行后面带上这根网的来源。
+
+        组合根把 `DetailHeader.resolveDetailToggled` 接到这里 —— 同一个问题（这根名字哪来的）
+        在标题栏的明细面板和右栏的输入表上说的是同一件事，不该只有一处看得见。"""
+        self.inputs_view.set_show_source(on)
+
     # ── 接线 ──
     def set_bus(self, bus):
         """挂上高亮总线（I-18：当前线网只经它；收到广播只改底色，绝不回写选择）。"""
@@ -782,7 +832,7 @@ class SidePanel(QtWidgets.QWidget):
         """把一个分析结果画出来（链 + 输入表）。`an` 为空 → 空态。"""
         self._an = an
         if not an:
-            self.show_message("")
+            self.show_message(T.SIDE_EMPTY_NO_SIGNAL)
             return
         rows = IT.input_rows(an)
         self.chain_view.set_content(chain_blocks(an), status=chain_status(an))
@@ -806,11 +856,11 @@ class SidePanel(QtWidgets.QWidget):
         """按 state 的当前信号重取 an 并重画（分析失败只落成一行文案，绝不抛到 app）。"""
         state = self.state
         if state is None:
-            self.show_message("")
+            self.show_message(T.SIDE_EMPTY_NO_SIGNAL)
             return
         name = getattr(state, "current_name", "") or ""
         if not name:
-            self.show_message("")
+            self.show_message(T.SIDE_EMPTY_NO_SIGNAL)    # 空白一块等于让人猜是不是坏了
             return
         model = None
         try:

@@ -11,8 +11,12 @@
       │    ├ ⑭ 空态 EMPTY_PANEL（620px 居中；xlsx 虚线框 / 标题 / 说明 / 两个按钮 / 最近打开）
       │    └ 工作台 WIN_WORKBENCH
       │         └ WIN_SPLIT_MAIN（③ 清单 LIST_PANEL = `signal_list.SignalListPanel` | 详情列）
-      │              └ 详情列 = ⑮ 载入态 LOADING_PANEL + ④ 标题栏 HDR_BAR（暂只挂 `coverage.CoverageControl`）
-      │                          + WIN_SPLIT_SIDE（⑤⑥⑦⑧ MAIN_VIEW | ⑨ SIDE_PANEL）
+      │              └ 详情列 = ⑮ 载入态 LOADING_PANEL + ④ 标题栏 `detail_header.DetailHeader`
+      │                          （⑯ `coverage.CoverageControl` 内嵌其中）
+      │                          + WIN_SPLIT_SIDE（⑤ `main_view.MainView` | ⑨ `side_panel.SidePanel`）
+      │                            MainView = 标签条 + MAIN_VIEW 堆叠：
+      │                              页 0 = ⑥ TRUTH_PANEL（仍占位，C3）/ ⑦ `sigflow_view.SigflowView`
+      │                              页 1 = ⑧ `sv_preview.SvPreview`
       └ ⑩ 状态栏 STATUS_BAR（STATUS_LEFT / STATUS_RIGHT / STATUS_AUTOSAVE）
 
 ⚠ 载入态**不是** WIN_STACK 的独立一页：C-276 / 场景⑧ 要求「清单立刻可点」，
@@ -31,8 +35,14 @@
     MainWindow(state=None, worker_factory=None, providers_factory=None)
 真实 `ui.state.WorkbenchState` / `ui.worker.AnalysisWorker` **只在默认工厂里惰性 import**。
 
-占位区（C2 / C3 换成真件，见 `PLACEHOLDER_AREAS`）：
-    HDR_BAR · MAIN_VIEW（含 TRUTH_PANEL / FLOW_PANEL / SV_PANEL）· SIDE_PANEL
+占位区（见 `PLACEHOLDER_AREAS`）：C2-int 之后**只剩 TRUTH_PANEL**（C3 接手）。
+
+「当前信号」这一下的分工（C2-int 定版）：
+    ④ 标题栏 / ⑧ .sv 预览 / ⑨ 右栏 自己订阅 `state.currentChanged`（各自 `set_state` 干的）；
+    ⑦ 电路图**不认 state**（它只吃 an），由组合根 `_on_current_changed` / `_on_model_updated` 喂。
+    组合根的 `currentChanged` 槽**先**连上（见 `__init__` 的顺序注释），它那次
+    `analyze(name, want_graph=True)` 先进缓存，后面三件的 `analyze(name)` 直接复用 —— 一次点选
+    只跑一遍引擎。
 """
 
 import os
@@ -42,19 +52,18 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import contracts, dialogs, names, persist, terms, theme
 from .bus import HighlightBus
-from .coverage import CoverageControl
+from .detail_header import DetailHeader
 from .filter_bar import FilterBar
+from .main_view import MainView
+from .side_panel import SidePanel
+from .sigflow_view import SigflowView
 from .signal_list import SignalListPanel, build_reason_block
+from .sv_preview import SvPreview
 from .widgets import ErrorBar, ProgressBadge, mono_font, ui_font
 
 #: 还没换成真件的区（objectName → 哪个波接手）。测试断言它们都带 property("placeholder")。
 PLACEHOLDER_AREAS = {
-    names.HDR_BAR: "C2-c ui/detail_header.py（覆盖度按钮已挂进来）",
-    names.MAIN_VIEW: "C2-c ui/main_view.py",
     names.TRUTH_PANEL: "C3-c ui/truth/panel.py",
-    names.FLOW_PANEL: "C2-b ui/sigflow_view.py",
-    names.SV_PANEL: "C2-c ui/sv_preview.py",
-    names.SIDE_PANEL: "C2-a ui/side_panel.py",
 }
 
 #: 组合根在窗口级绑的快捷键（copy_col / undo / redo / paste 是真值表的 WidgetShortcut，C3 绑）
@@ -73,19 +82,16 @@ fmt_recent_row = names.fmt_recent_row
 
 
 # ═════════════════════════ 默认工厂（惰性 import，测试可整体替换）═════════════
-def default_state_factory(providers_factory=None):
+def default_state_factory():
     """真实会话状态。**函数内 import**：测试传 state=FakeState() 时一行 state.py 都不用加载。
 
     `WorkbenchState` 自己就是 `providers.ConfigSourceProto`（wb / 三套诊断配置 /
-    include_risky / engine_lock），载表时按范围建 `TopoutProvider` + 四个 `PageProvider`，
-    所以正常路径下没有 `providers_factory` 什么事；它留给「想换数据源」的测试，
-    真 state 不认这个参数就照常裸建（I-21 的锁仍在 state 手上）。"""
+    include_risky / engine_lock），载表时按范围建 `TopoutProvider` + 四个 `PageProvider`。
+
+    ⚠ C1-d 这里曾经收一个 `providers_factory` 并在 `TypeError` 时回落裸建 —— 主控裁决删掉：
+    `WorkbenchState` 根本不收这个参数，那个 try/except 永远走回落分支，等于一段看着在生效、
+    实际从没生效过的代码（「想换数据源」的测试改从 `MainWindow(providers_factory=…)` 走）。"""
     from .state import WorkbenchState
-    if providers_factory is not None:
-        try:
-            return WorkbenchState(providers_factory=providers_factory)
-        except TypeError:
-            pass
     return WorkbenchState()
 
 
@@ -172,7 +178,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__(parent)
         self.setObjectName(names.WIN_MAIN)
         self._providers_factory = providers_factory
-        self._state = state if state is not None else default_state_factory(providers_factory)
+        self._state = state if state is not None else default_state_factory()
         # I-18 / C-282：「当前线网」总线全窗口**一个**，由组合根持有。
         # C1 还没有订阅方（电路图⑦ / 展开链⑨ / 输入表⑨ / 真值表⑥ 分别是 C2-b / C2-a / C3），
         # 但它是组合根的物件——现在就建好，C2 起各视图只管 `window.bus.netSelected.connect(...)`。
@@ -186,6 +192,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_error = ""
         self._narrow = None
         self._side_visible = True
+        self._flow_full = False            # ⑦ 电路图全屏（C-280）
+        self._truth_max = False            # ⑥ 真值表放大（C-297）
         self._sizes = self._read_sizes()
 
         self.setFont(ui_font(theme.FS_UI))
@@ -193,6 +201,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_shortcuts()
         self._connect_state()
         self._connect_views()
+        # ⚠ 详情区四件是**建完窗、接完 state 之后**才挂 state 的（都支持 `set_state`）。
+        #   顺序是有意义的：Qt 的 `currentChanged` 按连接先后派发，组合根先连上，
+        #   它那一次 `analyze(name, want_graph=True)` 就先跑、先进缓存；随后右栏/标题栏
+        #   自己那次 `analyze(name)` 直接命中（`state.analyze` 会复用带图的那份，见其注释）。
+        #   反过来（视图先连）就是一次点选跑两遍引擎 —— 211 行的真表上按一下卡两次。
+        self._attach_detail_state()
         self._refresh_title()
         self._refresh_recent()
         self._show_empty()
@@ -467,67 +481,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_sizes()
         return wb
 
-    # ④ 详情标题栏（C2-c 的 detail_header 换掉整块；本波先把覆盖度按钮挂在右上角）
+    # ④ 详情标题栏（C2-c 的真件；⑯ 覆盖度控件内嵌在它里面）
     def _build_hdr_bar(self, parent):
-        bar = _placeholder(names.HDR_BAR, parent, min_h=2 * theme.ROW_H)
-        bar.setMaximumHeight(2 * theme.ROW_H)
-        lay = bar.layout()
-        lay.setContentsMargins(12, 4, 12, 4)
-        row = QtWidgets.QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addStretch(1)
-        self.coverage = CoverageControl(self._state, bar)    # ⑯ C1-c 的真件
-        row.addWidget(self.coverage, 0, QtCore.Qt.AlignTop)
-        lay.addLayout(row)
-        lay.addStretch(1)
-        return bar
+        """`DetailHeader` 自带覆盖度按钮（`hdr_cov_btn`）。
+
+        `window.coverage` 仍然指向**同一个** `CoverageControl` —— 它从占位块右上角搬进了
+        标题栏，但 app 里 `self.coverage.set_current/refresh` 那几处调用一个字都不用改
+        （弹层本来就锚在自己按钮上、自动 reparent 到窗口，搬家不动它的逻辑）。"""
+        self.detail_header = DetailHeader(None, parent)   # state 稍后挂（见 _attach_detail_state）
+        self.coverage = self.detail_header.cov
+        return self.detail_header
 
     def _build_main_view(self, parent):
-        """⑤⑥⑦⑧ 主视图：QStackedWidget（真值表+电路图 页 / .sv 预览 页）。C2-c 换真件。"""
-        mv = QtWidgets.QStackedWidget(parent)
-        mv.setObjectName(names.MAIN_VIEW)
-        mv.setProperty("placeholder", True)
-        page = QtWidgets.QWidget(mv)
-        pl = QtWidgets.QVBoxLayout(page)
-        pl.setContentsMargins(0, 0, 0, 0)
-        self.split_truth_flow = QtWidgets.QSplitter(QtCore.Qt.Vertical, page)
-        self.split_truth_flow.setObjectName(names.WIN_SPLIT_TRUTH_FLOW)
-        self.split_truth_flow.setChildrenCollapsible(False)
-        self.split_truth_flow.setHandleWidth(theme.HANDLE_W)
-        self.truth_panel = _placeholder(names.TRUTH_PANEL, self.split_truth_flow, min_h=theme.CLAMP_TRUTH[0])
-        self.truth_panel.setMaximumHeight(theme.CLAMP_TRUTH[1])
-        self.split_truth_flow.addWidget(self.truth_panel)
-        self.flow_panel = _placeholder(names.FLOW_PANEL, self.split_truth_flow, min_h=1)
-        self.split_truth_flow.addWidget(self.flow_panel)
-        pl.addWidget(self.split_truth_flow)
-        mv.addWidget(page)                                   # index 0：真值表 + 电路图
-        self.sv_panel = _placeholder(names.SV_PANEL, mv, min_h=1)
-        mv.addWidget(self.sv_panel)                          # index 1：.sv 预览（Ctrl+P）
+        """⑤⑥⑦⑧ 主视图：标签条 + 堆叠（真值表+电路图 页 / .sv 预览 页）。
+
+        真值表仍是占位（C3 接手），电路图与 .sv 预览换成真件。`MainView` 是架构 §1.2 里
+        唯一允许组合别的视图的容器，三块一律**注入**进去。"""
+        self.truth_panel = _placeholder(names.TRUTH_PANEL, None, min_h=theme.CLAMP_TRUTH[0])
+        self.flow_view = SigflowView(bus=self.bus)                     # ⑦ C2-b 的真件
+        self.sv_preview = SvPreview(None)                              # ⑧ C2-c 的真件（state 稍后挂）
+        mv = MainView(truth_widget=self.truth_panel, flow_widget=self.flow_view,
+                      sv_widget=self.sv_preview, parent=parent)
         self.main_view = mv
-        self.split_truth_flow.splitterMoved.connect(lambda *_: self._save_sizes())
+        self.split_truth_flow = mv.splitter
+        #: 旧属性名（C1 骨架期的占位块）继续指向真件，免得调用方/测试到处改
+        self.flow_panel = self.flow_view
+        self.sv_panel = self.sv_preview
+        mv.splitter.splitterMoved.connect(lambda *_: self._save_sizes())
         return mv
 
     def _build_side_panel(self, parent):
-        """⑨ 右侧常驻栏：逐层展开 / 输入信号 两段。C2-a 换真件。"""
-        sp = QtWidgets.QWidget(parent)
-        sp.setObjectName(names.SIDE_PANEL)
-        sp.setProperty("placeholder", True)
-        sp.setMinimumWidth(theme.CLAMP_SIDE[0])
-        sp.setMaximumWidth(theme.CLAMP_SIDE[1])
-        lay = QtWidgets.QVBoxLayout(sp)
-        lay.setContentsMargins(0, 0, 0, 0)
-        self.split_chain_inputs = QtWidgets.QSplitter(QtCore.Qt.Vertical, sp)
-        self.split_chain_inputs.setObjectName(names.WIN_SPLIT_CHAIN_INPUTS)
-        self.split_chain_inputs.setChildrenCollapsible(False)
-        self.split_chain_inputs.setHandleWidth(theme.HANDLE_W)
-        chain = _placeholder(names.SIDE_CHAIN_VIEW, self.split_chain_inputs)
-        chain.setMinimumHeight(theme.CLAMP_CHAIN[0])
-        chain.setMaximumHeight(theme.CLAMP_CHAIN[1])
-        self.split_chain_inputs.addWidget(chain)
-        self.split_chain_inputs.addWidget(_placeholder(names.SIDE_INPUTS_VIEW, self.split_chain_inputs))
-        lay.addWidget(self.split_chain_inputs)
+        """⑨ 右侧常驻栏：逐层展开 / 输入信号 两段（C2-a 的真件）。"""
+        self.side_panel = SidePanel(None, self.bus, parent)   # state 稍后挂
+        self.split_chain_inputs = self.side_panel.splitter
         self.split_chain_inputs.splitterMoved.connect(lambda *_: self._save_sizes())
-        return sp
+        return self.side_panel
 
     # ⑩ 状态栏
     def _build_status_bar(self):
@@ -567,6 +555,12 @@ class MainWindow(QtWidgets.QMainWindow):
             sc.setContext(QtCore.Qt.WindowShortcut)
             sc.activated.connect(slots[key])
             self.shortcuts[key] = sc
+        # Esc 退出「主视图独占中央区」（电路图全屏 C-280 / 真值表放大 C-297）。
+        # 不进 `contracts.SHORTCUTS`：那张表是「顶栏按钮上要印出来的快捷键」，Esc 不印在任何按钮上。
+        self.esc_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
+        self.esc_shortcut.setObjectName(fmt_shortcut("exit_fullscreen"))
+        self.esc_shortcut.setContext(QtCore.Qt.WindowShortcut)
+        self.esc_shortcut.activated.connect(self.exit_fullscreen)
 
     # ───────────────────────── state 接线 ─────────────────────────
     def _connect_state(self):
@@ -598,6 +592,30 @@ class MainWindow(QtWidgets.QMainWindow):
         lp.diagRequested.connect(self.on_reason_action)          # ③ 行内原因块按钮 → 场景路由
         lp.statusMessage.connect(self.set_status)                # C-269
         self.coverage.coverageChanged.connect(lambda *_: self.coverage.refresh())
+
+        dh = self.detail_header                                  # ④ C2-c 的真件
+        dh.diagRequested.connect(self.openDiagnostics)           # C-066 解析明细末尾的直链
+        dh.sideToggled.connect(self.on_side_toggled)             # 右栏开合（记 settings 的 sideW）
+        dh.resolveDetailToggled.connect(self.on_resolve_detail_toggled)   # C-064/C-065
+
+        mv = self.main_view                                      # ⑤ C2-c 的真件
+        mv.tabChanged.connect(self.on_tab_changed)               # C-255
+        mv.flowFullscreenChanged.connect(self.on_flow_fullscreen)        # C-280
+        mv.truthMaximizedChanged.connect(self.on_truth_maximized)        # C-297
+
+        self.flow_view.fullscreenToggled.connect(mv.set_flow_fullscreen)  # ⑦ 按钮 → 容器
+        self.flow_view.exported.connect(self._on_flow_exported)           # C-284
+        self.sv_preview.statusMessage.connect(self.set_status)            # ⑧ C-172
+
+    def _attach_detail_state(self):
+        """把会话状态挂给详情区四件（构造时都传的 `None`，见 `__init__` 里的顺序注释）。"""
+        self.detail_header.set_state(self._state)     # 内含覆盖度控件的 set_state
+        self.sv_preview.set_state(self._state)
+        self.side_panel.set_state(self._state)
+        # 电路图**不认 state**（HOST_REQUIREMENTS）：图从 `state.analyze(..., want_graph=True)`
+        # 来，由组合根的 `_on_current_changed` 喂给它。
+        self.flow_view.set_bus(self.bus)
+        self.side_panel.set_bus(self.bus)
 
     @property
     def state(self):
@@ -696,6 +714,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._retire_worker()                     # 上一趟跑的是别的范围，先收掉
         self.filter_bar.set_scope(vid)
         self.coverage.refresh()
+        self._show_flow(getattr(self._state, "current_name", ""))
         self.start_analysis()
 
     def _on_models_changed(self, view_id=""):
@@ -704,13 +723,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self.filter_bar.rebuild(self._models())       # owner / 分类下拉只列本表真有的（C-027/C-028）
         self._refresh_status_counts()                 # 顺序：先重建（它会发筛选计数）再写载表小结
 
-    def _on_model_updated(self, view_id="", _name=""):
-        if view_id in ("", self._scope()):
-            self._refresh_status_counts()
+    def _on_model_updated(self, view_id="", name=""):
+        """某一行升级了（worker 逐信号回来）。**当前这一行**升级时电路图要跟着从骨架变真图。
+
+        C-276 的语义在这一句上：清单先出 N 行「分析中」，用户当场点了其中一行 → 电路图
+        `set_pending()`；等 worker 把这一条算完，`modelUpdated` 到，这里再喂真图。
+        不跟这一步的话，得等整表跑完（或用户再点一次）图才出来 —— 看着就是「点了没反应」。"""
+        if view_id not in ("", self._scope()):
+            return
+        self._refresh_status_counts()
+        cur = str(getattr(self._state, "current_name", "") or "")
+        if cur and (not name or str(name).lower() == cur.lower()):
+            self._show_flow(cur)
 
     def _on_current_changed(self, name=""):
+        """C-149 / C-280：切信号 → 覆盖度回显 + 电路图换图。
+
+        ④ 标题栏 / ⑧ .sv 预览 / ⑨ 右栏三件自己订阅了 `currentChanged`（各自的 `set_state` 干的），
+        这里只管**不认 state 的那一件**（⑦ 电路图）与组合根自己的活。"""
         self.coverage.set_current(name)               # C-149：只回显本信号的生效档，不重算
         self._relayout_loading(bool(name))
+        self._show_flow(name)
+
+    def _show_flow(self, name):
+        """⑦ 电路图的唯一喂食口：没选信号 → `clear()`；还在分析 → `set_pending()`；否则喂真 an。"""
+        nm = str(name or "")
+        if not nm:
+            self.flow_view.clear()
+            return
+        model = {}
+        try:
+            model = dict(self._state.model_of(nm, self._scope()) or {})
+        except Exception:                             # noqa: BLE001
+            model = {}
+        if str(model.get("status") or "") == "pending":
+            self.flow_view.set_pending()
+            return
+        try:
+            an = self._state.analyze(nm, self._scope(), True)
+        except Exception:                             # noqa: BLE001  C-043：图画不出来不连累别人
+            an = None
+        self.flow_view.set_signal(an, nm)
 
     def _on_export_recorded(self, _kind=""):
         self._refresh_last_export()
@@ -990,11 +1043,106 @@ class MainWindow(QtWidgets.QMainWindow):
         return pre
 
     def on_sv_preview(self):
-        """Ctrl+P（C-255 / 裁决①）：主视图切到 .sv 预览标签。"""
-        self.main_view.setCurrentIndex(1)
-        self.svPreviewRequested.emit()
+        """Ctrl+P（C-255 / 裁决①）：主视图切到 .sv 预览标签。
+
+        `svPreviewRequested` 只由 `on_tab_changed` 发（标签真的换过去了才算），
+        否则按一次 Ctrl+P 会发两遍（这里一遍、tabChanged 一遍）。已经在这一页时就地补发一次
+        —— 观察点不该因为「已经在了」而消失。"""
+        if self.main_view.tab() == "sv":
+            self.svPreviewRequested.emit()
+            self.sv_preview.refresh()
+        else:
+            self.main_view.set_tab("sv")
         self.set_status(terms.SV_TITLE_SIGNAL)
         return True
+
+    # ───────────────────────── ④⑤⑥⑦⑧⑨ 详情区联动 ─────────────────────────
+    @QtCore.Slot(bool)
+    def on_side_toggled(self, visible):
+        """④「隐藏右栏 ▶」/「◀ 展开链 · 输入信号」：收起前把当前宽度记进 settings 的 `sideW`。
+
+        不先记就没得恢复：收起之后分割器的右段是 0，再展开只能退回出厂 470，
+        用户拖过的宽度白拖了。"""
+        on = bool(visible)
+        if not on:
+            self._save_sizes()
+        self._side_visible = on
+        self._sync_side_visible()
+        if on:
+            self._apply_side_width()
+        return on
+
+    @QtCore.Slot(bool)
+    def on_resolve_detail_toggled(self, open_):
+        """④「解析明细」开合 → ⑨ 输入表的驱动行同步带上/去掉来源（C-064 / C-065）。"""
+        self.side_panel.set_show_source(bool(open_))
+        self.set_status(terms.HDR_RESOLVE if open_ else "")
+        return bool(open_)
+
+    @QtCore.Slot(str)
+    def on_tab_changed(self, key):
+        """⑤ 标签换了：切到 .sv 预览时让它把脏内容重算一遍（C-072 / C-132）。"""
+        k = str(key or "")
+        if k == "sv":
+            self.svPreviewRequested.emit()
+            self.sv_preview.refresh()
+        return k
+
+    @QtCore.Slot(bool)
+    def on_flow_fullscreen(self, on):
+        """C-280 电路图全屏：主视图接管窗口中央区（清单 / 标题栏 / 右栏都让开），Esc 退出。"""
+        on = bool(on)
+        self._flow_full = on
+        if on:
+            self._truth_max = False
+        self.flow_view.set_fullscreen(on)             # 同步按钮文案（值没变不重复 emit）
+        self._sync_fullscreen()
+        return on
+
+    @QtCore.Slot(bool)
+    def on_truth_maximized(self, on):
+        """C-297 真值表放大：电路图由 `MainView` 收起，右栏由组合根收起。Esc 退出。"""
+        on = bool(on)
+        self._truth_max = on
+        if on:
+            self._flow_full = False
+            self.flow_view.set_fullscreen(False)
+        self._sync_fullscreen()
+        return on
+
+    def is_fullscreen(self):
+        """主视图是不是正独占中央区（电路图全屏 或 真值表放大）。"""
+        return bool(self._flow_full or self._truth_max)
+
+    def exit_fullscreen(self):
+        """Esc：从两种「独占」态里退出来（都没开就什么都不做，别吞掉 Esc）。"""
+        if not self.is_fullscreen():
+            return False
+        if self._flow_full:
+            self.main_view.set_flow_fullscreen(False)
+        if self._truth_max:
+            self.main_view.set_truth_maximized(False)
+        return True
+
+    def _sync_fullscreen(self):
+        """独占态下让清单 / 标题栏让开；退出时按之前的可见性还原。"""
+        full = self.is_fullscreen()
+        self.list_panel.setVisible(not full)
+        self.detail_header.setVisible(not self._flow_full)     # 真值表放大时标题栏还要看进度
+        self._sync_side_visible()
+
+    def _sync_side_visible(self):
+        """⑨ 右栏的可见性只此一处算：用户开关 × 窄屏折叠（C-260）× 独占态。"""
+        self.side_panel.setVisible(
+            self._side_visible and not self.is_narrow() and not self.is_fullscreen())
+
+    def _on_flow_exported(self, path):
+        """⑦ 导出 SVG / PNG 落盘成功（C-284）：状态栏报一句，并记进「上次导出」。"""
+        p = str(path or "")
+        if not p:
+            return ""
+        self.set_status(p)
+        return p
 
     def route_reason_action(self, target, payload=None):
         """行内原因块 / 解析明细的跳转路由（terms.REASON_TARGETS 的键）。"""
@@ -1174,22 +1322,28 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_sizes(self):
         s = self._sizes
         self.split_main.setSizes([s["listW"], max(1, theme.WIN_W - s["listW"])])
-        self.split_side.setSizes([max(1, theme.WIN_W - s["listW"] - s["sideW"]), s["sideW"]])
-        self.split_truth_flow.setSizes([s["truthH"], max(1, theme.WIN_H - s["truthH"])])
-        self.split_chain_inputs.setSizes([s["chainH"], max(1, theme.WIN_H - s["chainH"])])
+        self._apply_side_width()
+        self.main_view.set_truth_height(s["truthH"])      # ⑥ 真件自己夹 CLAMP_TRUTH
+        self.side_panel.set_chain_height(s["chainH"])     # ⑨ 真件自己夹 CLAMP_CHAIN
+
+    def _apply_side_width(self):
+        total = sum(self.split_side.sizes()) or theme.WIN_W - self._sizes["listW"]
+        side = self._sizes["sideW"]
+        self.split_side.setSizes([max(1, total - side), side])
 
     def _save_sizes(self):
         m, sd = self.split_main.sizes(), self.split_side.sizes()
-        tf, ci = self.split_truth_flow.sizes(), self.split_chain_inputs.sizes()
         patch = {}
         if m and m[0] > 0:
             patch["listW"] = int(m[0])
         if len(sd) > 1 and sd[1] > 0:
             patch["sideW"] = int(sd[1])
-        if tf and tf[0] > 0:
-            patch["truthH"] = int(tf[0])
-        if ci and ci[0] > 0:
-            patch["chainH"] = int(ci[0])
+        th = self.main_view.truth_height()
+        if th > 0:
+            patch["truthH"] = int(th)
+        ch = self.side_panel.chain_height()
+        if ch > 0:
+            patch["chainH"] = int(ch)
         if not patch:
             return
         self._sizes.update(patch)
@@ -1207,18 +1361,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if narrow:
             w = theme.LIST_W_NARROW
             self.split_main.setSizes([w, max(1, self.width() - w)])
-            self.side_panel.setVisible(False)
         else:
             self.split_main.setSizes([self._sizes["listW"], max(1, self.width() - self._sizes["listW"])])
-            self.side_panel.setVisible(self._side_visible)
+        self._sync_side_visible()
 
     def is_narrow(self):
         return bool(self._narrow)
 
     def set_side_visible(self, on):
-        """④ HDR_SIDE_TOGGLE 的落点（C2-c 接线）。"""
+        """④ HDR_SIDE_TOGGLE 的落点。标题栏按钮的文案也跟着切（两边说的是同一件事）。"""
         self._side_visible = bool(on)
-        self.side_panel.setVisible(self._side_visible and not self.is_narrow())
+        self.detail_header.set_side_visible(self._side_visible)   # notify=False：不回弹信号
+        self._sync_side_visible()
 
     def closeEvent(self, ev):
         """关窗前把后台线程收干净：QThread 还在跑就被析构 = 进程级崩溃（不是报错，是直接没）。"""

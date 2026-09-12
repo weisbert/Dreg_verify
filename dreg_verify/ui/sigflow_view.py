@@ -39,7 +39,7 @@ from . import names as N
 from . import terms as T
 from . import theme as TH
 from .bus import net_key
-from .widgets import ui_font
+from .widgets import FlowLayout, ui_font
 
 Qt = QtCore.Qt
 
@@ -533,9 +533,11 @@ class FlowLegend(QtWidgets.QWidget):
     def __init__(self, parent=None):
         QtWidgets.QWidget.__init__(self, parent)
         self.setObjectName(N.FLOW_LEGEND)
-        lay = QtWidgets.QHBoxLayout(self)
+        # 四条并排 ≈ 700px。用 `FlowLayout`（清单底部工具条同一个）让它在窄窗口上**折行**，
+        # 而不是把电路图区的最小宽度顶到 700 —— 那样 1366×768 上清单收不到 Design 要的 420
+        # （C-260）。宽窗口下仍是一行，看不出区别。
+        lay = FlowLayout(self, hspacing=16, vspacing=2)
         lay.setContentsMargins(10, 2, 10, 2)
-        lay.setSpacing(16)
         self.items = []
         for i, text in enumerate(T.FLOW_LEGEND):
             lb = QtWidgets.QLabel(text, self)
@@ -544,7 +546,6 @@ class FlowLegend(QtWidgets.QWidget):
             lb.setStyleSheet("color:%s;" % _LEGEND_COLORS[i % len(_LEGEND_COLORS)])
             lay.addWidget(lb)
             self.items.append(lb)
-        lay.addStretch(1)
 
 
 # ═════════════════════════════ 面板 ═════════════════════════════
@@ -622,6 +623,10 @@ class SigflowView(QtWidgets.QWidget):
         self.subtitle.setObjectName(N.FLOW_SUBTITLE)
         self.subtitle.setFont(ui_font(TH.FS_UI_SMALL))
         self.subtitle.setStyleSheet("color:%s;" % TH.MUTE)
+        # C-260：副标是一句提示，不该参与「这块区最少要多宽」的计算。
+        # 不这么写，工具条 5 个按钮 + 这一句会把电路图区的最小宽度顶到 ~700px，
+        # 1366×768 上清单就收不到 Design 要的 420 了（正常宽度下显示不受影响）。
+        self.subtitle.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         lay.addWidget(self.subtitle)
         lay.addStretch(1)
 

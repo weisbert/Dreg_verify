@@ -472,7 +472,12 @@ class WorkbenchState(QtCore.QObject):
         · 覆盖度按**本信号**的生效档（单点 > 逻辑类型 > 全局，`CoverageState.mode_for`）；
         · 缓存键含指纹与该信号的 mux 数据手填，配置一变自然失效；
         · **不再套一层 `engine_lock`**：provider 每次引擎调用内部已经持锁（providers.py 的
-          `_engine()`），这里再包一层只是白拿一次可重入锁，反而让「谁持有锁」难读。"""
+          `_engine()`），这里再包一层只是白拿一次可重入锁，反而让「谁持有锁」难读。
+
+        ⚠ `want_graph=False` 的请求会**复用已经算过的带图那一份**（C2-int）：带图的 an 是不带图
+        那份的超集（多一个 `graph` 键，别的逐字段相同），而点一个信号时电路图要图、右栏和标题栏
+        不要图 —— 不复用就是同一个信号、同一份指纹，引擎连着跑两遍。所以 `want_graph=False`
+        只保证「不会为此**多算**一次图」，**不保证** `an["graph"] is None`。"""
         vid = self._vid(view_id)
         prov = self.provider(vid)
         if prov is None or self.wb is None or not name:
@@ -485,9 +490,14 @@ class WorkbenchState(QtCore.QObject):
         cov = self._cov[vid]
         mode, exh = cov.mode_for(name, self.models(vid))
         data = self._mux_data_for(name, vid)
-        key = (vid, str(name).lower(), fp, bool(want_graph), repr(sorted((data or {}).items())))
+        data_key = repr(sorted((data or {}).items()))
+        key = (vid, str(name).lower(), fp, bool(want_graph), data_key)
         if key in self._an_cache:
             return self._an_cache[key]
+        if not want_graph:
+            rich = self._an_cache.get((vid, str(name).lower(), fp, True, data_key))
+            if rich is not None:
+                return rich
         try:
             an = prov.analyze(name, mode, int(cov.max_tests), exh,
                               mux_data=data, want_graph=want_graph)

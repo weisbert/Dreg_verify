@@ -147,6 +147,10 @@ class DetailHeader(QtWidgets.QWidget):
         self.name_label.setFont(mono_font(theme.FS_MONO_NAME_BIG, bold=True))
         self.name_label.setStyleSheet("color:%s;" % theme.INK)
         self.name_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        # C-260：**最小**宽度不跟着信号名长短走。QLabel 默认拿「整行文字画得下」当最小宽度，
+        # 于是一个长信号名就能把整条标题栏、进而把整个详情列的最小宽度顶到近千像素——
+        # 1366×768 上清单再也收不到 420（Design 明写的窄屏版面）。正常宽度下显示不受影响。
+        self.name_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         row.addWidget(self.name_label)
 
         self.status_badge = QtWidgets.QLabel(self)
@@ -158,6 +162,7 @@ class DetailHeader(QtWidgets.QWidget):
         self.meta_label.setObjectName(names.HDR_META)
         self.meta_label.setFont(ui_font())
         self.meta_label.setStyleSheet("color:%s;" % theme.MUTE)
+        self.meta_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         row.addWidget(self.meta_label)
 
         self.cov = CoverageControl(None, self)

@@ -256,7 +256,7 @@ def test_c054_empty_pending_and_failed_states_use_terms_copy(qapp):
 
     st = F.FakeState()
     w = panel(state=st)
-    assert chain_text(w).strip() == ""                       # 未选信号
+    assert chain_text(w).strip() == T.SIDE_EMPTY_NO_SIGNAL   # 未选信号（空白一块等于让人猜）
     assert w.inputs_title.text() == T.SIDE_INPUTS_TITLE_FMT.format(n=0)
 
     st.set_models(st.scope, st.provider().skeleton_models(), partial=True)

@@ -611,7 +611,10 @@ def test_c253_c254_c255_c256_c257_shortcuts_bound(qapp):
     w = make_win(qapp)
     got = {sc.key().toString() for sc in w.findChildren(QtGui.QShortcut)}
     want = {contracts.SHORTCUTS[k] for k in A.APP_SHORTCUTS}
-    assert got == want == {"Ctrl+O", "Ctrl+L", "Ctrl+P", "Ctrl+R", "Ctrl+G", "Ctrl+Shift+D"}
+    # Esc 不在 `contracts.SHORTCUTS` 里：那张表是「要印在顶栏按钮上的快捷键」，
+    # Esc 谁也不印，它只管从「主视图独占中央区」退出来（C-280 / C-297）。
+    assert got - {"Esc"} == want == {"Ctrl+O", "Ctrl+L", "Ctrl+P", "Ctrl+R", "Ctrl+G", "Ctrl+Shift+D"}
+    assert "Esc" in got
     assert "Ctrl+D" not in got                      # 裁决①：Ctrl+D 留给真值表「复制列」
     for k in A.APP_SHORTCUTS:
         assert w.shortcuts[k].objectName() == A.fmt_shortcut(k)
