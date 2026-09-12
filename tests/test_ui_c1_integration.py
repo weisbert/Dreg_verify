@@ -254,6 +254,15 @@ QTFREE_ALLOWED = {
         "edits": "反例列的保护性判定（哪些是自定义命名 / 手调过错值的）",
         "truth_edit": "check_col_name / parse_int —— 重命名列与 mux 数据值的三道校验",
     },
+    "export_center.py": {
+        "exports": "六种产物的唯一写法（render_sv / export_sv(_split) / export_report / "
+                   "export_fortest / export_nets_by_purpose / export_claims / write_json）+ "
+                   "跳过原因标签 SKIP_STATUS_LABEL + 报告筛选器 —— §2.6 的表就是这张 import",
+        "session": "collect_config / read_config_file / apply_config / normalize_global_settings / "
+                   "default_config_filename —— 配置 .json 的字段集与版本判据只有那一份（I-09 / C-247）",
+        "edits": "serialize_view_edits / restore_view_edits —— 配置里 view_edits 段的序列化口径"
+                 "（导出写它、导入按它还原并重算 auto，C-238）",
+    },
     # ── ui/truth/ 子包（C3；键带子目录）──
     "truth/model.py": {
         "edits": "列 schema 与全部列操作的 Qt-free 实现（cols_from_vectors / add_col / expected_cell_state …），model 只包撤销",
