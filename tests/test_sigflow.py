@@ -422,6 +422,86 @@ def test_reduce_cmp_bus_elements():
     assert g.has_kind("OP")
 
 
+# ═════════════════ ④ HTML 报告内联（开关默认开；.sv 一个字节都不能动） ═════════════════
+def _sv_digests(wb, max_tests=256):
+    """与 tools/byte_gate.py 同口径的 3 档 .sv 摘要（那里用 max_tests=100000 跑权威 6 值，
+    这里为测试速度用默认档——要证的是『建图有没有副作用』，不是重跑基线）。"""
+    import hashlib
+    out = {}
+    for tag, kw in (("min", {"mode": "min"}), ("max", {"mode": "max"}),
+                    ("exh", {"mode": "min", "exhaustive": True})):
+        text, _build = T.render_topout_sv(wb, max_tests=max_tests, **kw)
+        out[tag] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return out
+
+
+def test_report_svg_never_touches_sv(btlp, wl):
+    """建图/内联 SVG 之后再渲 .sv，3 档摘要必须与建图之前完全一致——图纯属显示，
+    绝不能对 .sv 产生任何副作用（权威 6 值由 tools/byte_gate.py 守）。"""
+    for wb, _res in (btlp, wl):
+        before = _sv_digests(wb)
+        rep = T.topout_report(wb, mode="min", max_tests=32)
+        assert SF.attach_report_svgs(wb, rep, mode="min", max_tests=32) > 0
+        assert _sv_digests(wb) == before
+
+
+def test_report_html_inlines_sigflow(wl, tmp_path):
+    """HTML 报告 ② 真值表每块内联一张 <svg>，且 JSON 数据块仍能被 JSON.parse
+    （SVG 里的 </svg> 必须被 js_blob 转义成 <\\/svg>，否则会提前闭掉外层 <script>）。"""
+    import json
+    import re
+
+    from dreg_verify import cli
+    wb, _res = wl
+    rep = T.topout_report(wb, mode="min", max_tests=32)
+    n = SF.attach_report_svgs(wb, rep, mode="min", max_tests=32)
+    assert n == len(rep["tables"]) == 9
+
+    p = tmp_path / "rep.html"
+    cli.write_report(str(p), rep, "mirror_wl_dreg.xlsx")
+    s = p.read_text(encoding="utf-8")
+    assert "</svg>" not in s and s.count(r"<\/svg>") == 9      # 全部转义过，script 不会被闭掉
+    assert "details.sigflow" in s                              # CSS 进来了
+    m = re.search(r'<script type="application/json" id="tt-data">(.*?)</script>', s, re.S)
+    assert m
+    data = json.loads(m.group(1).replace(r"<\/", "</"))
+    assert len(data) == 9 and all("<svg" in d["h"] for d in data)
+    assert all('class="sigflowbox"' in d["h"] for d in data)
+
+
+def test_report_html_without_sigflow(wl, tmp_path):
+    """不调 attach_report_svgs（= --no-sigflow-svg）时报告里一张图都没有，其余内容照旧。"""
+    from dreg_verify import cli
+    wb, _res = wl
+    rep = T.topout_report(wb, mode="min", max_tests=32)
+    p = tmp_path / "rep.html"
+    cli.write_report(str(p), rep, "mirror_wl_dreg.xlsx")
+    s = p.read_text(encoding="utf-8")
+    assert "sigflowbox\"><svg" not in s and r"<\/svg>" not in s
+    assert '<table class="tt">' in s or "ttblock" in s          # 真值表本体还在
+
+
+def test_cli_flag_exists():
+    """--no-sigflow-svg 关掉内联；默认（不传）= 开。"""
+    from dreg_verify import cli
+    p = cli.build_argparser()
+    assert p.parse_args(["--excel", "x.xlsx"]).no_sigflow_svg is False
+    assert p.parse_args(["--excel", "x.xlsx", "--no-sigflow-svg"]).no_sigflow_svg is True
+
+
+def test_attach_report_svgs_is_crash_proof(wl, monkeypatch):
+    """单张图渲染炸掉只是那一张没有，报告数据结构不受影响（绝不让报告整份出不来）。"""
+    wb, _res = wl
+    rep = T.topout_report(wb, mode="min", max_tests=32)
+
+    def boom(*a, **kw):
+        raise RuntimeError("刻意炸")
+    monkeypatch.setattr(SF, "render_svg", boom)
+    assert SF.attach_report_svgs(wb, rep, mode="min", max_tests=32) == 0
+    assert len(rep["tables"]) == 9
+    assert not any("sigflow_svg" in t for t in rep["tables"])
+
+
 def test_empty_graph_renders():
     """没有可画结构时也要给出一张能解析的空图（不能吐半截 SVG 让 GUI 崩）。"""
     svg = SF.render_svg(SF.Graph("空信号"))

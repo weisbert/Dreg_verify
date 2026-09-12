@@ -927,7 +927,11 @@ def render_svg(graph, title=None):
             out.append('<text x="%.0f" y="%.0f" font-size="9" fill="%s" data-net="%s">%s</text>'
                        % (x1 + 5, pts[0][1] - 4, "#b45309" if not e.trusted else _NETC,
                           _esc(e.net or ""), _esc(lbl)))
-        if e.label:
+        # 支路标签（MUXN 的 case 值等）画在目标口外侧；与框内的端口标重复时不再画一遍（去噪）
+        dstn = idx.get(e.dst)
+        dup = dstn is not None and any(p["name"] == e.dst_port and p["label"] == e.label
+                                       for p in dstn.ports)
+        if e.label and not dup:
             out.append('<text x="%.0f" y="%.0f" font-size="8.5" fill="#b91c1c" '
                        'text-anchor="end">%s</text>' % (px - 9, py + 3, _esc(e.label)))
     out.append("</g><g id=\"cells\">")
@@ -992,6 +996,47 @@ def _empty_svg(title):
             '<text x="16" y="26" font-size="13" fill="#0f172a">%s</text>'
             '<text x="16" y="46" font-size="11" fill="#64748b">该信号没有可画的结构'
             '（未解析 / RO 回读）</text></svg>' % (_FONT, _esc(title or "")))
+
+
+def attach_report_svgs(wb, rep, probe_prefixes=None, resolver=None,
+                       mode="min", max_tests=256, exhaustive=False, only=None):
+    """给 topout_report 的 rep['tables'] 逐表挂一张内联 SVG（键 `sigflow_svg`）。返回挂上的张数。
+
+    HTML 报告的 ② 真值表 tab 每个信号一块，图就贴在展开链下面、真值表上面——「这张表在验的到底
+    是个什么电路」当场看得见。**只影响报告 HTML，不碰 .sv/向量/账目**（.sv 的 6 个 sha 有专门测试守着）。
+
+    永不抛：任何一个信号建图/渲染失败都只是那一张图没有，报告照出。
+    """
+    from . import resolver as R          # 惰性 import：避免与 topout 的相互 import 打架
+    from . import topout as T
+
+    tabs = (rep or {}).get("tables") or []
+    if not tabs:
+        return 0
+    res = resolver if resolver is not None else R.Resolver(wb, wire_prefixes=probe_prefixes)
+    by_name = {str(t.name).lower(): t for t in (getattr(wb, "topout", None) or [])}
+    only_low = {str(n).lower() for n in only} if only is not None else None
+    cache, n = {}, 0
+    for tb in tabs:
+        nm = str(tb.get("topout_name") or tb.get("signal") or "").lower()
+        if not nm or (only_low is not None and nm not in only_low):
+            continue
+        topo = by_name.get(nm)
+        if topo is None:
+            continue
+        if nm not in cache:
+            cache[nm] = ""
+            try:
+                r = T.analyze_signal(wb, res, topo, mode=mode, max_tests=max_tests,
+                                     exhaustive=exhaustive, want_graph=True)
+                if r.graph is not None:
+                    cache[nm] = render_svg(r.graph)
+            except Exception:      # noqa: BLE001 —— 一张图失败不连累整份报告
+                cache[nm] = ""
+        if cache[nm]:
+            tb["sigflow_svg"] = cache[nm]
+            n += 1
+    return n
 
 
 def render_png(svg_text, path, scale=1.0):

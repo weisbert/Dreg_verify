@@ -51,6 +51,9 @@ def build_argparser():
     p.add_argument("--report", default=None,
                    help="导出'给人看'的测试用例表格(按扩展名: .csv 用 Excel 打开 / .html 网页)。"
                         "可与 --out 同时用(同时出 .sv 和报告)；只传 --report 则只出报告")
+    p.add_argument("--no-sigflow-svg", action="store_true",
+                   help="HTML 报告里不内联『信号流门级图』(默认内联：每个信号的真值表上方贴一张源→"
+                        "Topout 的门级电路图，配各线 net 名)。只影响报告，与 .sv 产物无关")
     p.add_argument("--export-claims", default=None, metavar="claims.json",
                    help="导出探针/force 网名声明清单(JSON)——红区 scan_rtl 校验器的输入契约：带进红区"
                         "校验'探针是真·RTL 输出网、force 网真实存在'。可与 --out 同时用")
@@ -292,6 +295,12 @@ def cmd_topout(args, wb, opts):
                               neg_all=opts.neg_all, neg_signals=opts.neg_signals,
                               neg_which=opts.neg_which, neg_mode=opts.neg_mode,
                               neg_value=opts.neg_value)
+        if not args.no_sigflow_svg:
+            # 信号流门级图内联进 HTML 报告（默认开，--no-sigflow-svg 关）。只往 rep['tables'] 里
+            # 加一个 sigflow_svg 键，.sv 产物一个字节都不碰。
+            from . import sigflow as SF
+            SF.attach_report_svgs(wb, rep, probe_prefixes=pp, mode=mode, max_tests=mt,
+                                  exhaustive=exh)
         written = write_report(args.report, rep, args.excel)
         print("Topout 报告已写出: %s" % "  ".join(written))
         print("  Topout 信号 %d 个（真值表 %d 个）" % (len(rep["summary"]), len(rep["tables"])))
@@ -608,6 +617,12 @@ tr.vrow.warn{background:#fff8ec} tr.vrow.bad{background:#ffecec}
 .ttfclr:hover{background:#eef2f8}
 .suppbar{margin:4px 0 8px;padding:5px 10px;border:1px solid #e6a23c;border-left:4px solid #e6a23c;
  border-radius:4px;background:#fdf6ec;color:#a05a00;font-size:12px;line-height:1.5}
+/* 信号流门级图：默认折叠(不撑高页面)；展开后图自己横向滚动，绝不把整页撑宽 */
+details.sigflow{margin:6px 0 4px;border:1px solid #d4e0f5;border-radius:4px;background:#fbfdff}
+details.sigflow>summary{cursor:pointer;padding:5px 10px;font-size:12px;color:#234;user-select:none}
+details.sigflow>summary:hover{background:#eef4ff}
+.sigflowbox{padding:4px 10px 10px;overflow-x:auto;max-width:100%}
+.sigflowbox svg{display:block}
 """
 
 _REPORT_JS = """
@@ -1150,11 +1165,20 @@ def _write_report_html(path, rep, excel):
             # RTL 补充逻辑(Excel 真表缺、手工补)：块内显眼红条 banner，提示本张真值表非纯 Excel 推导
             supp = t.get("supplement") or ""
             supp_html = ('<div class="suppbar">⚠ %s</div>' % esc(supp)) if supp else ""
+            # 信号流门级图：源→Topout 的实际电路（NAND/OR/MUX…）+ 每条线的 net 名。默认折叠，
+            # 展开就在真值表正上方——「这张表在验的到底是个什么电路」当场看得见。
+            # SVG 原文直接内联(不 esc)：它本来就是 XML 元素；js_blob 会把 "</" 转义成 "<\/"，
+            # 不会意外闭掉外层 <script>。
+            svg = t.get("sigflow_svg") or ""
+            svg_html = ('<details class="sigflow"><summary>🔌 信号流门级图'
+                        '<span class="ex">（源 → Topout 的实际电路，各线标 net 名；虚线橙框='
+                        '名字来自命名约定、表里未查到）</span></summary>'
+                        '<div class="sigflowbox">%s</div></details>' % svg) if svg else ""
             h = ('<div class="ttblock">'
-                 '<h3>%s　<code>%s</code>　<span class="ex">%s</span>%s</h3>%s%s'
+                 '<h3>%s　<code>%s</code>　<span class="ex">%s</span>%s</h3>%s%s%s'
                  '<table class="tt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>'
                  % (esc(rlabel), esc(t["signal"]), esc(t["expr"]), ttfbar, supp_html, chain_html,
-                    "".join(hdr), "".join(body)))
+                    svg_html, "".join(hdr), "".join(body)))
             items.append({"h": h, "t": text.lower(), "o": t.get("owner", "") or "",
                           "n": 1 if neg_block else 0,
                           "s": t["signal"], "ty": t.get("type", "") or "", "tp": _top_of(t["signal"])})
