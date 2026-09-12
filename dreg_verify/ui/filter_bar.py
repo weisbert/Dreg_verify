@@ -13,16 +13,17 @@ Design 对照：docs/GUI_v2_Design对齐_20260912.md §1.2 ②
     · 任一筛选项变化 → `filterChanged(dict)`，dict 可直接 `proxy.set_filters(**d)`（§2.3 签名）；
     · 预设存/取 → `presetSaveRequested()` / `presetLoadRequested(name)`（对话框在 C2-d 的 dialogs.py）。
 
-临时自建控件（C1-int 集成时替换）：
-    · `_Segmented` → `ui/widgets.py` 的 `SegmentedControl`（C1-d 交付）；
-    · `_CheckableMenu` → `ui/widgets.py` 的 `CheckableMenu`（语义抄自 gui.py L275–283）。
+C1-int 已把两个临时自建控件换成 `ui/widgets.py` 的共享件：
+    `_Segmented` → `SegmentedControl`（`currentChanged` / `set_item_enabled`），
+    `_CheckableMenu` → `CheckableMenu`。
 """
 
 import re
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from dreg_verify.ui import contracts, names, terms, theme
+from dreg_verify.ui.widgets import CheckableMenu, SegmentedControl, ui_font as _ui_font
 
 #: 搜索框去抖（ms）——键入不逐字符重筛（C-030）。
 SEARCH_DEBOUNCE_MS = 150
@@ -30,10 +31,9 @@ SEARCH_DEBOUNCE_MS = 150
 #: 状态下拉三项 → 过滤键（terms.STATUS_FILTER_ITEMS 的同序值）。
 STATUS_VALUES = ("", "ok", "issues")
 
-#: ⚠ names.py 里还没有「筛选行的粘贴名单勾选入口」这个名字（`LIST_BTN_PASTE_NAMES` 属清单区，
-#: 同一个 objectName 不得跨模块复用）。已回报主控补 `FILTER_PASTE_NAMES_BTN`；补进去之后
-#: 删掉本常量、改从 names 取。
-PASTE_NAMES_OBJECT_NAME = "filter_paste_names_btn"
+#: 预设菜单里「粘贴名单勾选…」那条 QAction 的 objectName（C1-int 已补进 names.py；
+#: 这里留一个别名，免得动到已有测试对本模块的引用）。
+PASTE_NAMES_OBJECT_NAME = names.FILTER_PASTE_NAMES_BTN
 
 
 # ═════════════════════ 纯函数：筛选判定（proxy 与状态栏同一口径）═════════════════════
@@ -115,104 +115,6 @@ def visible_status_text(visible, total, by_input):
     return terms.STATUS_VISIBLE_FMT.format(v=visible, m=total, k=by_input)
 
 
-def _ui_font(size=theme.FS_UI, bold=False):
-    f = QtGui.QFont(theme.FONT_UI)
-    f.setPixelSize(int(round(size)))
-    f.setBold(bool(bold))
-    return f
-
-
-# ═════════════════════ 临时控件（C1-int 换 widgets.py 版本）═════════════════════
-
-class _CheckableMenu(QtWidgets.QMenu):
-    """可勾选下拉菜单：点 checkable 项只切勾选、菜单不关（owner 多选，C-024）。
-
-    ⚠ 临时件：C1-int 换成 `ui/widgets.py` 的 `CheckableMenu`（语义与 gui.py `_CheckableMenu` 相同）。
-    """
-
-    def mouseReleaseEvent(self, e):
-        act = self.activeAction()
-        if act is not None and act.isEnabled() and act.isCheckable():
-            act.trigger()
-            return
-        super(_CheckableMenu, self).mouseReleaseEvent(e)
-
-
-class _Segmented(QtWidgets.QWidget):
-    """5 段联排（范围切换）：首段选中蓝底、其余白底、段间竖分隔（Design ②）。
-
-    ⚠ 临时件：C1-int 换成 `ui/widgets.py` 的 `SegmentedControl`（C1-d 交付），
-    换的时候只需保证 `changed(str)` / `set_current` / `current` / `set_available` 四个口不变。
-    """
-
-    changed = QtCore.Signal(str)
-
-    def __init__(self, items, parent=None):
-        super(_Segmented, self).__init__(parent)
-        self._btns = {}
-        self._keys = [k for k, _ in items]
-        lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        self._group = QtWidgets.QButtonGroup(self)
-        self._group.setExclusive(True)
-        for i, (key, label) in enumerate(items):
-            b = QtWidgets.QToolButton(self)
-            b.setObjectName(names.fmt_scope_btn(key))
-            b.setText(label)
-            b.setCheckable(True)
-            b.setFont(_ui_font())
-            b.setFixedHeight(theme.BTN_H)
-            b.setCursor(QtCore.Qt.PointingHandCursor)
-            b.setStyleSheet(self._btn_qss(first=(i == 0), last=(i == len(items) - 1)))
-            b.clicked.connect(lambda _c=False, k=key: self._on_click(k))
-            self._group.addButton(b)
-            lay.addWidget(b)
-            self._btns[key] = b
-        if self._keys:
-            self._btns[self._keys[0]].setChecked(True)
-
-    @staticmethod
-    def _btn_qss(first, last):
-        radius = "border-top-left-radius:3px;border-bottom-left-radius:3px;" if first else ""
-        radius += "border-top-right-radius:3px;border-bottom-right-radius:3px;" if last else ""
-        return ("QToolButton{background:%s;color:%s;border:1px solid %s;%s"
-                "border-left-width:%dpx;padding:2px 10px;}"
-                "QToolButton:checked{background:%s;color:%s;border-color:%s;}"
-                "QToolButton:disabled{background:%s;color:%s;}"
-                % (theme.WHITE, theme.TEXT, theme.BORDER_SEG, radius, 1 if first else 0,
-                   theme.BLUE, theme.WHITE, theme.BLUE, theme.DISABLED_BG, theme.DISABLED_TEXT))
-
-    def _on_click(self, key):
-        b = self._btns.get(key)
-        if b is None or not b.isEnabled():
-            return
-        b.setChecked(True)
-        self.changed.emit(key)
-
-    def button(self, key):
-        return self._btns.get(key)
-
-    def current(self):
-        for k, b in self._btns.items():
-            if b.isChecked():
-                return k
-        return self._keys[0] if self._keys else ""
-
-    def set_current(self, key):
-        b = self._btns.get(key)
-        if b is not None and b.isEnabled():
-            b.setChecked(True)
-
-    def set_available(self, key, on, tip=""):
-        """C-042：本表没这一页 → 置灰 + tooltip 标「本表无 dft 页」。"""
-        b = self._btns.get(key)
-        if b is None:
-            return
-        b.setEnabled(bool(on))
-        b.setToolTip("" if on else tip)
-
-
 # ═════════════════════ 筛选行 ═════════════════════
 
 class FilterBar(QtWidgets.QWidget):
@@ -254,9 +156,10 @@ class FilterBar(QtWidgets.QWidget):
         self.setStyleSheet("QWidget#%s{background:%s;border-bottom:1px solid %s;}"
                            % (names.FILTER_BAR, theme.WHITE, theme.BORDER_LIGHT))
 
-        self.scope_seg = _Segmented([(v, terms.SCOPE_LABELS[v]) for v in contracts.VIEW_IDS], self)
+        self.scope_seg = SegmentedControl(
+            [(v, terms.SCOPE_LABELS[v], names.fmt_scope_btn(v)) for v in contracts.VIEW_IDS], self)
         self.scope_seg.setObjectName(names.FILTER_SCOPE_SEG)
-        self.scope_seg.changed.connect(self._on_scope)
+        self.scope_seg.currentChanged.connect(self._on_scope)
         lay.addWidget(self.scope_seg)
 
         # scopeHint：Design 的模板没渲染它（只在脚本里），这里按同样口径 —— 全文进范围段的 tooltip，
@@ -278,7 +181,7 @@ class FilterBar(QtWidgets.QWidget):
         self.owner_btn.setFixedHeight(theme.BTN_H)
         self.owner_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.owner_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
-        self.owner_menu = _CheckableMenu(self.owner_btn)
+        self.owner_menu = CheckableMenu(self.owner_btn)
         self.owner_menu.setObjectName(names.FILTER_OWNER_MENU)
         self.owner_btn.setMenu(self.owner_menu)
         lay.addWidget(self.owner_btn)
@@ -344,7 +247,11 @@ class FilterBar(QtWidgets.QWidget):
         return self.scope_seg.current()
 
     def set_scope(self, view_id):
-        self.scope_seg.set_current(view_id)
+        """程序回填当前范围（组合根按 `state.scopeChanged` 同步）。
+
+        `block=True`：这是「跟着 state 走」，不是用户点的段——再发一次 `scopeChanged`
+        会绕回 `state.set_scope`，白跑一圈还可能把别处正在做的切换顶掉。"""
+        self.scope_seg.set_current(view_id, block=True)
 
     def missing_pages(self):
         """本表没有的页（C-042）；组合根拿去写状态栏。"""
@@ -365,7 +272,8 @@ class FilterBar(QtWidgets.QWidget):
                     ok = bool(st.page_available(vid))
                 except Exception:                                  # noqa: BLE001
                     ok = True
-            self.scope_seg.set_available(vid, ok, terms.SCOPE_MISSING_FMT.format(page=vid))
+            self.scope_seg.set_item_enabled(vid, ok, "" if ok else
+                                            terms.SCOPE_MISSING_FMT.format(page=vid))
             if not ok:
                 self._missing.append(vid)
         self.scope_hint.setText(self.missing_pages_text())

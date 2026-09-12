@@ -16,36 +16,23 @@ Design 对照：docs/GUI_v2_Design对齐_20260912.md §1.2 ⑯（covPopStyle wid
 界面上的逻辑类型名一律取 `terms.FORM_LABELS`，
 生效来源串由本模块按 `terms.COV_CHAIN_FMT` 自己拼，不直接显示后端给的 level 串。
 
-临时自建控件（C1-int 集成时替换）：`_Pop` → `ui/widgets.py` 的 `Popover`（C1-d 交付）。
+C1-int 已把临时自建的 `_Pop` 换成 `ui/widgets.py` 的 `Popover`（点外部关闭 / 主体布局 / 样式
+全归共享件），本模块只留「贴着按钮弹」这一条覆盖度专属的定位逻辑（`_AnchoredPopover`）。
 """
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from dreg_verify import session
 from dreg_verify.ui import names, terms, theme
+from dreg_verify.ui.widgets import Popover, mono_font as _mono_font, ui_font as _ui_font
 
 #: 逻辑类型四行的键（= session.FORM_COV_ROWS 的第一列，顺序即 Design covRows 2–5 行）
 FORM_KEYS = tuple(k for k, _n, _e, _t in session.FORM_COV_ROWS)
 #: 形态键 → 例子表达式（C-146，后端文本已 scrub）
 FORM_EXAMPLES = {k: terms.scrub(e) for k, _n, e, _t in session.FORM_COV_ROWS}
 
-#: ⚠ names.py 里还没有「弹层内联帮助正文」的名字。已回报主控补 `COV_HELP_TEXT`（或 `COV_HELP_PANEL`）；
-#: 补进去之后删掉本常量、改从 names 取。
-HELP_TEXT_OBJECT_NAME = "cov_help_text"
-
-
-def _ui_font(size=theme.FS_UI, bold=False):
-    f = QtGui.QFont(theme.FONT_UI)
-    f.setPixelSize(int(round(size)))
-    f.setBold(bool(bold))
-    return f
-
-
-def _mono_font(size=theme.FS_MONO, bold=False):
-    f = QtGui.QFont(theme.FONT_MONO)
-    f.setPixelSize(int(round(size)))
-    f.setBold(bool(bold))
-    return f
+#: 弹层内联帮助正文的 objectName（C1-int 已补进 names.py；别名留着，已有测试照引用）
+HELP_TEXT_OBJECT_NAME = names.COV_HELP_TEXT
 
 
 def form_display(form_key):
@@ -74,57 +61,30 @@ def chain_text(cov, name, models=None, form_key=None):
                                       global_label=chain[2]["label"])
 
 
-# ═════════════════════ 临时控件（C1-int 换 widgets.Popover）═════════════════════
+# ═════════════════════ 弹层：共享 Popover + 覆盖度专属的「贴着按钮弹」═════════════════════
 
-class _Pop(QtWidgets.QFrame):
-    """无边框弹层：挂在窗口上盖住标题栏，点外部关闭。
+class _AnchoredPopover(Popover):
+    """`widgets.Popover` + 一条覆盖度专属的定位：挂到窗口上、贴在按钮正下方（Design ⑯）。
 
-    ⚠ 临时件：C1-int 换成 `ui/widgets.py` 的 `Popover`（C1-d 交付），
-    换的时候保证 `popup(anchor)` / `close_pop()` / `closed` 三个口不变。"""
-
-    closed = QtCore.Signal()
-
-    def __init__(self, parent=None):
-        super(_Pop, self).__init__(parent)
-        self.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.setAutoFillBackground(True)
-        self.setStyleSheet("QFrame#%s{background:%s;border:1px solid %s;border-radius:4px;}"
-                           % (names.COV_POPOVER, theme.WHITE, theme.BORDER))
-        self.hide()
+    为什么要改挂到 `anchor.window()`：弹层比标题栏高得多，留在标题栏里会被父控件裁掉，
+    而标题栏那一格只有两行高。挂到窗口上它才能盖在下面的主视图上。"""
 
     def popup(self, anchor):
-        """在 anchor 下方弹出（Design：covPop 挂在详情标题栏上，left 420 / top 40）。"""
         win = anchor.window() if anchor is not None else self.parentWidget()
         if win is not None and self.parentWidget() is not win:
             self.setParent(win)
-        # 子控件弹层不受父布局管理 —— 自己按内容定高，否则内部控件会被压成 0 高
-        self.adjustSize()
-        self.resize(self.width(), max(self.height(), self.sizeHint().height()))
+        self.fit_to_content()
+        pos = QtCore.QPoint(8, 8)
         if anchor is not None and win is not None:
             pt = anchor.mapTo(win, QtCore.QPoint(0, anchor.height() + 2))
-            x = max(8, min(pt.x(), max(8, win.width() - self.width() - 8)))
-            y = max(0, min(pt.y(), max(0, win.height() - self.height())))
-            self.move(x, y)
-        self.show()
-        self.raise_()
-        app = QtWidgets.QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
+            pos = QtCore.QPoint(max(8, min(pt.x(), max(8, win.width() - self.width() - 8))),
+                                max(0, min(pt.y(), max(0, win.height() - self.height()))))
+        self.open_at(pos)
 
-    def close_pop(self):
-        app = QtWidgets.QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
-        if self.isVisible():
-            self.hide()
-            self.closed.emit()
-
-    def eventFilter(self, obj, ev):
-        if self.isVisible() and ev.type() == QtCore.QEvent.MouseButtonPress:
-            w = obj if isinstance(obj, QtWidgets.QWidget) else None
-            if w is None or not (w is self or self.isAncestorOf(w)):
-                self.close_pop()
-        return False
+    def fit_to_content(self):
+        """按内容定高——弹层不受父布局管理，不自己定高的话内部控件会被压成 0 高。"""
+        self.adjustSize()
+        self.resize(self.width(), max(self.height(), self.sizeHint().height()))
 
 
 # ═════════════════════ 覆盖度控件 ═════════════════════
@@ -145,7 +105,7 @@ class CoverageControl(QtWidgets.QWidget):
 
     def __init__(self, state=None, parent=None):
         super(CoverageControl, self).__init__(parent)
-        self.setObjectName("cov_control")
+        self.setObjectName(names.COV_CONTROL)
         self._state = state
         self._name = ""
         self._mute = 0
@@ -173,16 +133,12 @@ class CoverageControl(QtWidgets.QWidget):
         self.button.clicked.connect(self._on_button)
         lay.addWidget(self.button)
 
-        self.pop = _Pop(self)
-        self.pop.setObjectName(names.COV_POPOVER)
-        self.pop.setFixedWidth(theme.COV_POP_W)
+        self.pop = _AnchoredPopover(self, width=theme.COV_POP_W, object_name=names.COV_POPOVER)
         self.pop.closed.connect(self._on_pop_closed)
         self._build_pop()
 
     def _build_pop(self):
-        v = QtWidgets.QVBoxLayout(self.pop)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(8)
+        v = self.pop.content_layout()          # Popover 自带主体布局（14/12 边距）
 
         head = QtWidgets.QHBoxLayout()
         self.title = QtWidgets.QLabel(self.pop)
@@ -339,10 +295,12 @@ class CoverageControl(QtWidgets.QWidget):
         return session.form_key_of(self._models(), self._name) if self._name else None
 
     def _touch(self):
-        """改档后让 state 发 coverageChanged（C-152/C-153/C-154 的重算规则在 state 里判）。"""
-        fn = getattr(self._state, "coverage_touched", None)
-        if callable(fn):
-            fn(self._view_id())
+        """改档后让 state 发 coverageChanged（C-152/C-153/C-154 的重算规则在 state 里判）。
+
+        `coverage_touched` 是 `WorkbenchStateProto` 的一员（C1-int 补进契约），直接调；
+        只有「压根没接 state」这一种情况要躲开。"""
+        if self._state is not None:
+            self._state.coverage_touched(self._view_id())
 
     # ───────── 当前信号（C-149：只回显，不重算）─────────
     def set_current(self, name):
@@ -366,7 +324,7 @@ class CoverageControl(QtWidgets.QWidget):
         self.popoverToggled.emit(True)
 
     def close_popover(self):
-        self.pop.close_pop()
+        self.pop.close_popover()
         self.button.setChecked(False)
 
     def _on_pop_closed(self):
@@ -430,8 +388,7 @@ class CoverageControl(QtWidgets.QWidget):
     def _on_help(self, on):
         self.help_text.setVisible(bool(on))
         if self.pop.isVisible():                               # 展开说明后弹层要长高
-            self.pop.adjustSize()
-            self.pop.resize(self.pop.width(), self.pop.sizeHint().height())
+            self.pop.fit_to_content()
 
     # ───────── 回显 ─────────
     def refresh(self):

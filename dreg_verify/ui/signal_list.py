@@ -31,6 +31,7 @@ from . import contracts as CT
 from . import names as N
 from . import terms as T
 from . import theme as TH
+from .widgets import FlowLayout, mono_font as _mono_font, ui_font as _ui_font
 
 Qt = QtCore.Qt
 LC = CT.ListCol
@@ -53,32 +54,6 @@ _FORMATTER = string.Formatter()
 
 
 # ═════════════════════════════ 小工具 ═════════════════════════════
-def _px(size):
-    return int(round(float(size)))
-
-
-def _ui_font(size=TH.FS_UI, bold=False):
-    f = QtGui.QFont(TH.FONT_UI)
-    try:
-        f.setFamilies(list(TH.FONT_UI_FALLBACKS))
-    except AttributeError:                       # pragma: no cover - Qt5 回退
-        pass
-    f.setPixelSize(_px(size))
-    f.setBold(bool(bold))
-    return f
-
-
-def _mono_font(size=TH.FS_MONO, bold=False):
-    f = QtGui.QFont(TH.FONT_MONO)
-    try:
-        f.setFamilies(list(TH.FONT_MONO_FALLBACKS))
-    except AttributeError:                       # pragma: no cover - Qt5 回退
-        pass
-    f.setPixelSize(_px(size))
-    f.setBold(bool(bold))
-    return f
-
-
 def _checked(value):
     """Qt.CheckState（枚举 / int / None）→ bool。"""
     if value is None:
@@ -191,70 +166,6 @@ def build_reason_block(model):
               else _strip_placeholders(action_tpl))
     return CT.ReasonBlock(title=title, body=body, action_label=action, action_target=target,
                           rows=rows, payload={"name": (model or {}).get("name", ""), "status": key})
-
-
-# ═════════════════════════════ 自动换行工具条布局 ═════════════════════════════
-class _FlowLayout(QtWidgets.QLayout):
-    """按可用宽度换行的布局（Qt 官方 FlowLayout 同款）。
-
-    底部工具条 6 个按钮用普通 QHBoxLayout 会把「按钮宽度之和」变成清单面板的最小宽度，
-    splitter 就拖不到 `theme.CLAMP_LIST` 的 320 —— C1-d 的 `widgets.FlowLayout` 落地后可换掉。"""
-
-    def __init__(self, parent=None, margin=0, hspacing=6, vspacing=4):
-        super().__init__(parent)
-        self._items = []
-        self._hspace = hspacing
-        self._vspace = vspacing
-        self.setContentsMargins(margin, margin, margin, margin)
-
-    def addItem(self, item):
-        self._items.append(item)
-
-    def count(self):
-        return len(self._items)
-
-    def itemAt(self, index):
-        return self._items[index] if 0 <= index < len(self._items) else None
-
-    def takeAt(self, index):
-        return self._items.pop(index) if 0 <= index < len(self._items) else None
-
-    def expandingDirections(self):
-        return Qt.Orientations()
-
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, width):
-        return self._do(QtCore.QRect(0, 0, width, 0), True)
-
-    def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self._do(rect, False)
-
-    def sizeHint(self):
-        return self.minimumSize()
-
-    def minimumSize(self):
-        size = QtCore.QSize()
-        for it in self._items:
-            size = size.expandedTo(it.minimumSize())
-        m = self.contentsMargins()
-        return size + QtCore.QSize(m.left() + m.right(), m.top() + m.bottom())
-
-    def _do(self, rect, test_only):
-        m = self.contentsMargins()
-        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
-        x, y, line_h = eff.x(), eff.y(), 0
-        for it in self._items:
-            w, h = it.sizeHint().width(), it.sizeHint().height()
-            if x + w > eff.right() + 1 and line_h > 0:
-                x, y, line_h = eff.x(), y + line_h + self._vspace, 0
-            if not test_only:
-                it.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), QtCore.QSize(w, h)))
-            x += w + self._hspace
-            line_h = max(line_h, h)
-        return y + line_h - rect.y() + m.bottom()
 
 
 # ═════════════════════════════ model ═════════════════════════════
@@ -1109,7 +1020,8 @@ class SignalListView(QtWidgets.QTreeView):
 class ColumnsDialog(QtWidgets.QDialog):
     """「列设置…」（C-008 / C-046）。勾选列常驻第一列、不进本对话框（用户标注截图 c22c965c）。
 
-    C2-d 的 `ui/dialogs.py` 落地后本类整体搬过去（objectName / 文案已按 names / terms 对齐）。"""
+    ⏳ 暂住在这里：C2-d 正在写 `ui/dialogs.py`，C2-int 把本类与 `PasteNamesDialog` 一起搬过去
+    （objectName / 文案已按 names / terms 对齐，搬家时不用改调用方）。"""
 
     def __init__(self, visible, parent=None):
         super().__init__(parent)
@@ -1234,6 +1146,7 @@ class SignalListPanel(QtWidgets.QWidget):
 
         # ── 排序菜单（C-037 的第二个入口）──
         self.sort_menu = QtWidgets.QMenu(self)
+        self.sort_menu.setObjectName(N.LIST_SORT_MENU)
         for col in (LC.STATUS, LC.NTEST, LC.OWNER, LC.NAME):
             act = self.sort_menu.addAction(T.LIST_HEADERS[CT.LIST_COL_KEYS[col]])
             act.setData(int(col))
@@ -1245,7 +1158,7 @@ class SignalListPanel(QtWidgets.QWidget):
         bar.setObjectName(N.LIST_BOTTOM_BAR)
         bar.setStyleSheet("#%s{background:%s;border-top:1px solid %s;}" % (N.LIST_BOTTOM_BAR,
                                                                           TH.PANEL_BG, TH.BORDER))
-        fl = _FlowLayout(bar, margin=8, hspacing=6, vspacing=4)
+        fl = FlowLayout(bar, margin=8, hspacing=6, vspacing=4)
         self.btn_check_all = self._bar_button(T.LIST_BTN_CHECK_ALL, N.LIST_BTN_CHECK_ALL, bar, fl)
         self.btn_uncheck_all = self._bar_button(T.LIST_BTN_UNCHECK_ALL, N.LIST_BTN_UNCHECK_ALL, bar, fl)
         self.btn_check_selected = self._bar_button(T.LIST_BTN_CHECK_SELECTED, N.LIST_BTN_CHECK_SELECTED, bar, fl)
@@ -1613,9 +1526,10 @@ STATE_REQUIREMENTS = (
     ("suspend_persist()", "with 上下文：批量操作挂起逐格存盘（C-244）"),
     ("settings() / save_settings(patch)", "列设置持久化，键 = contracts.SETTINGS_LIST_COLUMNS"),
     ("probe_prefixes", "属性 {网名: 前缀}：探针前缀列的输入侧命中（C-020）"),
-    ("★ protected_negatives(names, view_id)", "→ list[str]：哪些信号的反例是自定义命名 / 手填过错值的"
-                                              "（C-036 二次确认；口径 = edits.protected_negatives，"
-                                              "视图不 import edits）。state 没有 = 不拦用户直接删"),
+    ("protected_negatives(names, view_id)", "→ list[str]：哪些信号的反例是自定义命名 / 手填过错值的"
+                                            "（C-036 二次确认；口径 = edits.protected_negatives，"
+                                            "视图不 import edits）。C1-int 已补进 state 与契约；"
+                                            "state 没有（更早的假件）= 不拦用户直接删"),
     ("信号 modelsChanged / modelUpdated / checksChanged / negsChanged / currentChanged / "
      "scopeChanged / configChanged", "有哪条接哪条，缺的静默跳过"),
 )
