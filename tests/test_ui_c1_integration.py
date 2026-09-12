@@ -144,21 +144,20 @@ def test_c244_bulk_check_single_write(win, monkeypatch):
 
 
 # ═══════════════ I-14：objectName 全覆盖 ═══════════════
-#: C3 / C4 才落地的区（本波 find 不到很正常）——每条注明谁交付。
-#: ⚠ C2-int 把详情区四件接进组合根后，HDR_* / TABS_* / MAIN_* / SV_* / SIDE_* / FLOW_*
-#:   整片从这张白名单里**删掉**了：它们现在起窗就该找得到（白名单只减不增）。
+#: 只在**特定状态**下才存在的名字（起窗 + 载表 + 把各区都打开一遍之后仍然找不到）——每条写明理由。
+#: ⚠ 白名单只减不增：C2-int 删掉了 HDR_/TABS_/MAIN_/SV_/SIDE_/FLOW_ 整片，C3-int 删掉 TRUTH_
+#:   整片，C4-int 删掉 EXPORT_/DONE_ 整片与 DIAG_ 前缀 —— 它们现在都由本用例真造出来再找。
 LATER_WAVE_NAMES = {
-    "EXPORT_DIALOG", "EXPORT_TABLE", "EXPORT_SUMMARY", "EXPORT_SUMMARY_SKIPPED",
-    "EXPORT_BTN_CANCEL", "EXPORT_BTN_RUN", "EXPORT_BTN_IMPORT_CONFIG",
-    "EXPORT_OPTIONS_POPOVER",                                     # C4-a export_center
-    "DONE_DIALOG", "DONE_SKIPPED_BLOCK", "DONE_WRITTEN_BLOCK", "DONE_BTN_OPEN_DIR",
-    "DONE_BTN_GO_FIX", "DONE_BTN_OK",                             # C4-a 导出完成
-    "LIST_REASON_RISKY_BTN",      # 只在 needs-prefix 且主按钮不是 diag_risky 的行上出现
-    "HARNESS_EXCEL_PATH_EDIT",    # v1 的名字，harness 的退回路径用
+    # 只在「缺前缀·跳过」且主按钮的 target 不是 diag_risky 的那种行上才多出一个按钮；
+    # mirror wl 里这一档的行主按钮就是 diag_risky，所以起不出来（signal_list 自己的测试守它）
+    "LIST_REASON_RISKY_BTN",
+    # v1 的名字：`ui_harness._set_excel_path` 找不到 `path_edit` 属性时的退回路径用，v2 窗口上没有
+    "HARNESS_EXCEL_PATH_EDIT",
 }
-#: 诊断抽屉整片（C4-b）+ 对话框整片（`ui/dialogs.py`，弹出时才存在）。
-#: ⚠ C3-int 把 `TRUTH_` 整片从这里**删掉**了：真值表面板已经接进组合根，起窗就该找得到。
-LATER_WAVE_PREFIXES = ("DIAG_", "DLG_")
+#: `ui/dialogs.py` 的十个对话框：它们由具体动作弹出（改名 / 清零 / 粘贴名单 …），
+#: 各自的契约测试在 `tests/test_ui_dialogs.py` 里逐个起框验名字（`test_dlg_all_object_names_registered`），
+#: 这里不重复造一遍十个框。
+LATER_WAVE_PREFIXES = ("DLG_",)
 
 
 def _in_scope(key, value):
@@ -178,8 +177,36 @@ def _find_any(root, value):
     return any(a.objectName() == value for a in root.findChildren(QtGui.QAction))
 
 
+def _open_c4_surfaces(w, qapp):
+    """把 ⑪ 导出中心 / ⑫ 完成弹层 / ⑬ 诊断抽屉与它的四个编辑器**真造出来**（父都是窗口）。
+
+    这几块不是「起窗就在」的东西：⑪⑫ 是现起现关的模态框，四个编辑器要点开才有。
+    I-14 要的是「注册表里每个名字都真挂在某个控件上」——所以这里把它们造出来再 find，
+    而不是往白名单里塞一堆「本波找不到很正常」（那等于这几十个名字谁都没验过）。
+
+    返回活着的对话框列表：Qt 父子链之外 Python 侧也得留一份引用，否则当场被 GC。"""
+    from dreg_verify.ui import diagnostics as DG
+    from dreg_verify.ui import export_center as EC
+    alive = []
+    ec = EC.ExportCenterDialog(w.state, w)
+    ec.open_options("nets")                      # EXPORT_NETS_MORE_BTN 在 nets 的选项弹层里
+    alive.append(ec)
+    # 完成弹层的四块（跳过 / 已写出 / 只记录不产断言 / 写失败）一律**构造即存在**（空时只是隐藏），
+    # 给一份四样齐全的结果，顺带让版面也是真的那一副
+    res = contracts.ExportRunResult(
+        skipped=[("d_fake_skipped", "输入缺层级前缀")], accounted=["d_fake_ro"],
+        errors=[("sv", "写不出去（文件被占用？）")], out_dir="")
+    alive.append(EC.ExportDoneDialog(res, w))
+    w.diag_drawer.open_for("")                   # ⑬ 抽屉本体（DIAG_* 的大半）
+    for cls in (DG.PrefixEditorDialog, DG.ForceEditorDialog,
+                DG.SupplementEditorDialog, DG.LegacyImportDialog):
+        alive.append(cls(w.state, w))            # 四个编辑器（DIAG_PREFIX_* / _FORCE_* / _SUPP_* / _LEGACY_*）
+    qapp.processEvents()
+    return alive
+
+
 def test_ui_names_all_present(win, qapp):
-    """I-14：起窗 + 载表 + 展开一个原因块之后，C1 范围内的每个名字都能按 objectName 找到。"""
+    """I-14：起窗 + 载表 + 把每个区都打开一遍之后，`names.py` 里的每个名字都能按 objectName 找到。"""
     w = win
     _ended, models = _load_and_wait(w)
     panel = w.list_panel
@@ -199,14 +226,20 @@ def test_ui_names_all_present(win, qapp):
     tp.build_context_menu(0, 0)                     # TRUTH_CONTEXT_MENU + truth_menu_*
     tp.grid.edit(tp.model.index(tp.model.rowCount() - 1, 0))   # TRUTH_CELL_EDITOR
     qapp.processEvents()
+    alive = _open_c4_surfaces(w, qapp)               # ⑪⑫⑬ + 四个编辑器（C4-int）
 
     want = {k: v for k, v in names.all_names().items() if _in_scope(k, v)}
-    # C2-int 把详情区四件、C3-int 把真值表接进来之后这个数只增不减（C1-int 收尾时是 95）
-    assert len(want) >= 170, "本波该覆盖的名字只剩 %d 个了，白名单是不是放太宽" % len(want)
-    assert {"TRUTH_GRID_VIEW", "TRUTH_CELL_EDITOR", "TRUTH_CONTEXT_MENU"} <= set(want)
+    # C2-int 详情区四件、C3-int 真值表、C4-int 导出中心 + 诊断抽屉进来之后只增不减
+    # （C1-int 收尾时是 95）
+    assert len(want) >= 230, "本波该覆盖的名字只剩 %d 个了，白名单是不是放太宽" % len(want)
+    assert {"TRUTH_GRID_VIEW", "TRUTH_CELL_EDITOR", "TRUTH_CONTEXT_MENU",
+            "EXPORT_TABLE", "EXPORT_NETS_MORE_BTN", "DONE_ACCOUNTED", "DONE_ERRORS",
+            "DIAG_DRAWER", "DIAG_PREFIX_TEXT", "DIAG_LEGACY_RUN_BTN"} <= set(want)
     assert not _find_any(w, "no_such_object_name_xyz")     # 先证明这条查找能判「没有」
     missing = [("%s=%s" % (k, v)) for k, v in want.items() if not _find_any(w, v)]
     assert not missing, "这些 objectName 在起窗后找不到：%s" % missing
+    for dlg in alive:
+        dlg.close() if hasattr(dlg, "close") else None
 
 
 # ═══════════════ I-19：分层 ═══════════════

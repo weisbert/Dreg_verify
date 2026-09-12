@@ -11,6 +11,7 @@ C1-int 起，①②⑧ 都走**真工厂**：`ui.app.MainWindow()` 默认造真 
 （→ 真 `providers.TopoutProvider` / `PageProvider`）与真 `AnalysisWorker`（真 QThread）。
 ① 另留一版 FakeState 的（`..._with_fake_state`）—— 那条验的是「app 不认得 state 是真是假」。
 """
+import os
 import re
 
 import pytest
@@ -24,7 +25,7 @@ from PySide6 import QtCore, QtWidgets                            # noqa: E402
 import ui_fakes as F                                            # noqa: E402
 from dreg_verify import inputs_table as IT                      # noqa: E402
 from dreg_verify.ui import bus as BUS                           # noqa: E402
-from dreg_verify.ui import contracts, names, terms              # noqa: E402
+from dreg_verify.ui import contracts, names, terms, theme        # noqa: E402
 from dreg_verify.ui.app import MainWindow, build_window         # noqa: E402
 from dreg_verify.ui.signal_list import status_key_of            # noqa: E402
 from test_ui_app import FakeState, FakeWorker, make_models      # noqa: E402
@@ -478,19 +479,169 @@ def test_scene_04_coverage_popover(qapp, isolated, monkeypatch):
     w.close()
 
 
-# ═════════════════════ 其余 3 个场景（各波接手，别删这些桩）═════════════════════
+# ═════════════════════ ⑤ 导出中心 ═════════════════════
+#: ⑤⑥ 用 btlp 镜像：它有一个 RO 回读根（`pll_lock_indicator`）**按设计**不产断言，
+#: 于是摘要与完成弹层都真的有「会被跳过」那一块可验；wl 镜像一条都不跳，验不到裁决⑯。
+_SKIP_KIND = "btlp"
 
 
-@pytest.mark.skip(reason="C4-int：ui/export_center.py 接上后补")
-def test_scene_05_export_center():
-    """⑤ 导出中心（Ctrl+G）：6 行齐；EXPORT_SUMMARY 含「会被跳过」时列出名字。"""
+def test_scene_05_export_center(qapp, isolated, monkeypatch):
+    """⑤ 导出中心（Ctrl+G）：六行齐、默认勾 .sv / 报告 / claims；
+    摘要说「N 个信号会被跳过」时能就地展开**名字 + 原因**（裁决⑯ / I-20）。
+
+    全真：真 state（→ 真 provider / 真引擎）+ 真导出中心。模态 `exec` 由 harness 拦下
+    （offscreen 下不拦就是整条用例挂住，不是红）。"""
+    w = _loaded_window(qapp, monkeypatch, kind=_SKIP_KIND)
+
+    w.shortcuts["export_center"].activated.emit()          # Ctrl+G（C-257）
+    qapp.processEvents()
+    d = w.export_center
+    assert d is not None and d.objectName() == names.EXPORT_DIALOG
+    d.resize(1080, 520)
+    d.show()
+    qapp.processEvents()
+
+    # —— 六行：次序 = contracts.EXPORT_KINDS，每行都有勾选框与「上次导出到哪」——
+    table = H.find(d, names.EXPORT_TABLE)
+    assert table.rowCount() == len(contracts.EXPORT_KINDS) == 6
+    assert list(H.header_texts(table)) == list(terms.EXPORT_HEADERS)
+    for kind in contracts.EXPORT_KINDS:
+        assert H.find(d, names.fmt_export_check(kind)) is not None
+        assert H.find(d, names.fmt_export_last(kind)).text() == terms.EXPORT_LAST_NEVER
+    # 默认勾选 = Design ER 数组 [0,1,4]
+    on = [k for k in contracts.EXPORT_KINDS if d.checks[k].isChecked()]
+    assert on == ["sv", "report", "claims"]
+
+    # —— 摘要：跳过项先点名、计数在后 ——
+    plan = d.plan()
+    assert plan.will_skip, "%s 镜像这次一条都没跳过，裁决⑯ 就验不到了" % _SKIP_KIND
+    summary = H.find(d, names.EXPORT_SUMMARY).text()
+    assert summary == terms.EXPORT_SUMMARY_FMT.format(
+        k=len(on), n=plan.n_signals, s=len(plan.will_skip))
+    btn = H.find(d, names.EXPORT_SUMMARY_SKIPPED)
+    assert btn.isVisibleTo(d) and btn.text().startswith(terms.EXPORT_SUMMARY_SKIPPED_HEAD)
+    lst = H.find(d, names.EXPORT_SUMMARY_SKIPPED_LIST)
+    assert not lst.isVisibleTo(d), "名字那块默认是收起的（裁决⑯：可展开，不是一上来铺满）"
+    H.click(btn)                                            # 真点击「展开名字和原因」
+    qapp.processEvents()
+    assert lst.isVisibleTo(d)
+    lines = [ln for ln in lst.toPlainText().splitlines() if ln.strip()]
+    assert len(lines) == len(plan.will_skip)
+    for (nm, _why), line in zip(plan.will_skip, lines):
+        assert line.startswith(nm), "跳过行没有把名字放在最前面（I-20）：%r" % line
+        assert line.strip() != nm, "只有名字没有原因：%r" % line
+
+    shot = H.shot(d, "scene_05")
+    assert shot.endswith("scene_05.png")
+    d.close()
+    w.close()
 
 
-@pytest.mark.skip(reason="C4-int：导出完成弹层接上后补")
-def test_scene_06_export_done_names_skipped():
-    """⑥ 导出完成 · 跳过点名：DONE_SKIPPED_BLOCK 在 DONE_WRITTEN_BLOCK 之上；文件真存在。"""
+# ═════════════════════ ⑥ 导出完成 · 跳过点名 ═════════════════════
+def test_scene_06_export_done_names_skipped(qapp, isolated, monkeypatch, tmp_path):
+    """⑥ 真跑一次导出：完成弹层**琥珀跳过块在上、已写出块在下**，名字在计数之前（I-20 / C-199）；
+    「去处理这 N 个信号」→ ⑬ 抽屉停在「找不到网」那一条（C-167）；
+    关掉弹层后主视图切到 .sv 预览（C-168）。"""
+    w = _loaded_window(qapp, monkeypatch, kind=_SKIP_KIND)
+    out = tmp_path / "out"
+    out.mkdir()
+    # 「另存为」一律落到 out/（harness 按对话框给的默认文件名取名）
+    H.auto_dialogs(monkeypatch, save_dir=str(out))
+
+    w.shortcuts["export_center"].activated.emit()
+    qapp.processEvents()
+    d = w.export_center
+    for k, cb in d.checks.items():
+        cb.setChecked(k == "sv")                            # 只导 .sv（C-168 要的就是这一种）
+    res = d.run()
+    qapp.processEvents()
+    assert res is not None and [o.kind for o in res.outcomes] == ["sv"]
+    assert os.path.isfile(res.outcomes[0].path), "产物没真落盘"
+    assert res.skipped, "这一趟一条都没跳过，⑥ 的琥珀块就验不到了"
+
+    done = d.done_dialog
+    assert done is not None
+    done.resize(820, 460)
+    done.show()
+    qapp.processEvents()
+
+    # —— 版式即规范：跳过块在**上**、已写出块在下 ——
+    skipped_block = H.find(done, names.DONE_SKIPPED_BLOCK)
+    written_block = H.find(done, names.DONE_WRITTEN_BLOCK)
+    assert skipped_block.isVisibleTo(done) and written_block.isVisibleTo(done)
+    assert skipped_block.y() < written_block.y(), "「已写出」跑到了跳过点名的前面（C-199 / I-20）"
+    # 名字在计数之前：整段文本里第一个信号名的位置早于「已写出」
+    text = done.text()
+    first_name = res.skipped[0][0]
+    assert first_name in text and text.index(first_name) < text.index(terms.DONE_WRITTEN)
+    assert terms.DONE_SKIPPED_HEAD_FMT.format(n=len(res.skipped)) in text
+    # 已写出那一行 = 路径 + 该交付物的报数口径
+    assert any(res.outcomes[0].path in ln for ln in done.written_lines())
+
+    shot = H.shot(done, "scene_06")
+    assert shot.endswith("scene_06.png")
+
+    # —— C-168：完成弹层关掉之后，主视图停在 .sv 预览标签 ——
+    #    （`run()` 里的次序就是这样：`done.exec()` 返回之后才发 `svPreviewRequested`）
+    assert w.main_view.tab() == "sv"
+
+    # —— C-167：「去处理这 N 个信号」→ ⑬ 抽屉打开并停在「找不到网」那一条 ——
+    assert done.go_fix_btn.isVisibleTo(done)
+    assert done.go_fix_btn.text() == terms.DONE_BTN_GO_FIX_FMT.format(n=len(res.skipped))
+    assert not w.diag_drawer.isVisible()
+    H.click(done.go_fix_btn)
+    qapp.processEvents()
+    assert w.diag_drawer.isVisible(), "「去处理」没把诊断抽屉打开"
+    assert H.find(w.diag_drawer, names.DIAG_CUVUNF_BOX).isVisibleTo(w.diag_drawer)
+    assert H.find(w, names.STATUS_LEFT).text() == terms.REASON_TARGETS["diag_cuvunf"]
+    w.close()
 
 
-@pytest.mark.skip(reason="C4-int：ui/diagnostics.py 接上后补")
-def test_scene_07_diagnostics_drawer():
-    """⑦ 诊断 · 找不到网（Ctrl+Shift+D）：三步标题齐；DIAG_STEP2_BOX = python3 scan_rtl.py。"""
+# ═════════════════════ ⑦ 诊断抽屉 · 找不到网 ═════════════════════
+def test_scene_07_diagnostics_drawer(qapp, isolated, monkeypatch):
+    """⑦ 诊断（Ctrl+Shift+D）：主症状蓝框 + 三步齐；第 2 步把那行命令复制到剪贴板（C-221）；
+    折叠项 ④「缺前缀是否强制生成」默认**是**（I-11 / C-217），关掉要先确认。"""
+    w = _loaded_window(qapp, monkeypatch)
+    assert not w.diag_drawer.isVisible()
+
+    w.shortcuts["diagnostics"].activated.emit()              # Ctrl+Shift+D
+    qapp.processEvents()
+    dr = w.diag_drawer
+    assert dr.isVisible() and dr.width() == theme.DIAG_W == 620
+    assert H.find(dr, names.DIAG_INTRO).text() == terms.DIAG_INTRO
+    assert H.find(dr, names.DIAG_CUVUNF_TITLE).text() == terms.DIAG_CUVUNF_TITLE
+
+    # —— 三步：编号 + 标题 + 结果框 + 主按钮 ——
+    for i, oname in enumerate((names.DIAG_STEP1_TITLE, names.DIAG_STEP2_TITLE,
+                               names.DIAG_STEP3_TITLE)):
+        no, title = terms.DIAG_STEPS[i][0], terms.DIAG_STEPS[i][1]
+        assert H.find(dr, oname).text() == "%s　%s" % (no, title)
+    assert H.find(dr, names.DIAG_STEP1_BOX).text() == terms.DIAG_STEP1_NEVER   # 还没导出过
+    assert H.find(dr, names.DIAG_STEP2_BOX).text() == terms.DIAG_STEPS[1][3] == "python3 scan_rtl.py"
+    assert H.find(dr, names.DIAG_STEP3_BOX).text() == terms.DIAG_STEPS[2][3].format(
+        n_map=len(w.state.probe_prefixes), n_missing=dr.snapshot.n_prefix_missing)
+
+    # —— 第 2 步：复制这行命令（C-221）——
+    qapp.clipboard().setText("")
+    H.click(H.find(dr, names.DIAG_STEP2_BTN))
+    qapp.processEvents()
+    assert qapp.clipboard().text() == "python3 scan_rtl.py"
+    assert H.find(w, names.STATUS_LEFT).text() == terms.STATUS_COPIED
+
+    # —— 折叠项 ④：默认「是」，关掉先确认；答「否」= 一个字节都不动（C-217 / I-11）——
+    dr.items[names.DIAG_SYM_RISKY].expand()
+    chk = H.find(dr, names.DIAG_RISKY_TOGGLE, QtWidgets.QCheckBox)
+    assert chk.isChecked() is True and w.state.include_risky is True
+    rec = H.auto_dialogs(monkeypatch, answers={"ConfirmDialog.ask": False})
+    H.click(chk, (8, chk.height() // 2))                     # QCheckBox 点指示器
+    qapp.processEvents()
+    assert rec.count("ConfirmDialog.ask") == 1, "关掉前没弹确认"
+    assert chk.isChecked() is True and w.state.include_risky is True
+
+    shot = H.shot(w, "scene_07")
+    assert shot.endswith("scene_07.png")
+
+    # Esc：先收抽屉（没开全屏时不吞别人的 Esc —— 见 test_ui_c4_integration）
+    assert w.on_escape() is True
+    assert not dr.isVisible()
+    w.close()
