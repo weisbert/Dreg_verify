@@ -761,10 +761,15 @@ def test_model_module_imports_only_allowed_layers():
     src_dir = os.path.dirname(TM.__file__)
     allowed = {"edits", "truth_edit", "inputs_table", "analysis_norm",
                "contracts", "names", "terms", "commands", "rows", "model", "io"}
+    #: 视图层（C3-b）另外准 import `theme` / `widgets` —— 架构 §6.13：底色字色**只**在
+    #: delegate/表头里按 role 查 theme 的表。model 那半边照旧不许（它只给 CELL_STATE 键名）。
+    view_extra = {"theme", "widgets", "delegate", "view", "panel"}
+    view_files = {"view.py", "delegate.py", "panel.py"}
     bad = []
     for fn in sorted(os.listdir(src_dir)):
         if not fn.endswith(".py"):
             continue
+        ok = allowed | (view_extra if fn in view_files else set())
         tree = ast.parse(io.open(os.path.join(src_dir, fn), encoding="utf-8").read())
         for node in ast.walk(tree):
             if not (isinstance(node, ast.ImportFrom) and node.level):
@@ -773,7 +778,7 @@ def test_model_module_imports_only_allowed_layers():
             # （module 为空的相对 import）→ 名字本身就是模块
             mods = ([node.module.split(".")[-1]] if node.module
                     else [a.name for a in node.names])
-            bad += ["%s: %s" % (fn, mm) for mm in mods if mm not in allowed]
+            bad += ["%s: %s" % (fn, mm) for mm in mods if mm not in ok]
     assert not bad, "ui/truth 里 import 了不该 import 的：%s" % bad
     # 先证明这条扫描判得出「不允许」：把 theme 塞进来会被抓（model 只给 CELL_STATE 键名）
     assert "theme" not in allowed
