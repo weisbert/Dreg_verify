@@ -173,6 +173,73 @@ def test_export_sv_writes_file_and_outcome(mirror_wb, tmp_path):
     assert out.counts["n_vectors"] > 0
 
 
+class _FakePageProvider:
+    """页本地 provider 的最小替身——它的 render_sv **认得** block_suffix（走 pageviews）。"""
+
+    def __init__(self, wb, page="logic"):
+        self.wb = wb
+        self.page = page
+        self.view_id = page
+
+    def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=False,
+                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None, form_cov=None,
+                  block_suffix=""):
+        from dreg_verify import pageviews as P
+        return P.build_page_sv(self.wb, self.page, mode=mode, max_tests=max_tests,
+                               exhaustive=exhaustive, comments=comments, sv_summary=sv_summary,
+                               owner_in_msg=owner_in_msg, only=only, scope=scope,
+                               block_suffix=block_suffix)
+
+
+@pytest.mark.contract("C-169", "C-170")
+def test_c169_c170_export_sv_split_two_files(mirror_wb, tmp_path):
+    """N2（冲突④）：.sv『正向 + 反例分文件』= 两次独立 render，两个 outcome。
+
+    C-169 路径 `<stem>_pos.sv` / `<stem>_neg.sv`；C-170 汇总命名块各带 `_pos`/`_neg` 后缀
+    （两份贴进同一个 testcase 时同名 begin/end 块是非法 SV）。"""
+    from dreg_verify import sv_writer as W
+
+    opts = {"comments": False, "sv_summary": True, "owner_in_msg": False, "scope": "垃圾"}
+    base = tmp_path / "mirror.sv"
+    assert X.split_sv_paths(str(base)) == (str(tmp_path / "mirror_pos.sv"),
+                                           str(tmp_path / "mirror_neg.sv"))
+    assert X.split_sv_paths(str(tmp_path / "无扩展名")) == \
+        (str(tmp_path / "无扩展名_pos.sv"), str(tmp_path / "无扩展名_neg.sv"))
+
+    prov = _FakeTopoutProvider(mirror_wb)
+    pos, neg = X.export_sv_split(prov, str(base), mode="min", max_tests=64, options=opts)
+    assert [o.path for o in (pos, neg)] == list(X.split_sv_paths(str(base)))
+    assert all(os.path.exists(o.path) for o in (pos, neg))
+    assert pos.kind == neg.kind == "sv"
+    # 两次独立 render：各自的统计只说自己那份文件的事（scope 由分文件定死，options 里的被忽略）
+    assert any("仅正向" in w for w in pos.warnings)
+    assert any("仅负向" in w for w in neg.warnings)
+    assert "n_fallback" in pos.counts and "n_fallback" not in neg.counts
+    pos_text = open(pos.path, encoding="utf-8").read()
+    neg_text = open(neg.path, encoding="utf-8").read()
+    assert pos_text != neg_text
+
+    # C-170 汇总块后缀：provider（→引擎）接得住 block_suffix 时必须真的加上。
+    # 旧门面的 provider 没这个形参（C5 随 legacy 退役）——那种情况下只断言「没炸、没乱加」。
+    if X._accepts_kw(prov.render_sv, "block_suffix"):
+        assert (W.SUMMARY_BLOCK + "_pos") in pos_text
+        assert (W.SUMMARY_BLOCK + "_neg") in neg_text
+    else:
+        assert (W.SUMMARY_BLOCK + "_pos") not in pos_text          # 接不住就别偷偷改名
+        assert W.SUMMARY_BLOCK in pos_text
+
+    # 认得 block_suffix 的 provider（页本地）：两份产物的命名块必须不同名
+    # （⚠ 页本地『仅负向』产物的**内容**另有一处既有缺陷，见 pageviews.build_page_sv 的 scope 分支——
+    #   已回报主控，不在本次 additive 范围内；这里只断言命名块，不给那个行为背书。）
+    page_base = tmp_path / "page.sv"
+    ppos, pneg = X.export_sv_split(_FakePageProvider(mirror_wb), str(page_base),
+                                   mode="max", exhaustive=True, options=opts)
+    ptext = open(ppos.path, encoding="utf-8").read()
+    ntext = open(pneg.path, encoding="utf-8").read()
+    assert (W.SUMMARY_BLOCK + "_pos") in ptext and (W.SUMMARY_BLOCK + "_neg") not in ptext
+    assert (W.SUMMARY_BLOCK + "_neg") in ntext and (W.SUMMARY_BLOCK + "_pos") not in ntext
+
+
 def test_render_sv_without_options_keeps_provider_defaults(mirror_wb):
     """预览路径 options=None → 不覆盖 provider 默认（逐字节与旧预览一致）。"""
     seen = {}

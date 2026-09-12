@@ -19,6 +19,7 @@ GUI 的「导出中心」骨架（GUI v2 执行计划 Phase A4d / Design prompt 
 
 import contextlib
 import csv
+import inspect
 import io
 import json
 import os
@@ -328,6 +329,27 @@ def read_json(path):
 
 
 # ═════════════════════════ 五、.sv ═════════════════════════
+def _accepts_kw(fn, name):
+    """fn 收不收得住这个关键字参数（收 **kwargs 也算）。拿不到签名一律当「收不住」。
+
+    用途只有一个：新形参在引擎侧分批落地期间，编排层对**两种版本的 provider/引擎**都要能跑
+    （给了它不认识的参数 = TypeError 炸在导出中途，那是最难查的一类失败）。"""
+    if fn is None:
+        return False
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):      # noqa: BLE001  C 实现/内建取不到签名
+        return False
+    for p in sig.parameters.values():
+        if p.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if p.name == name and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                         inspect.Parameter.KEYWORD_ONLY):
+            return True
+    return False
+
+
+
 def render_sv(provider, only=None, mode="min", max_tests=256, exhaustive=False, edited=None,
               options=None, sig_cov=None, form_cov=None):
     """渲染 .sv（不落盘）——预览与导出走同一条路径（所见即所得）。返回 (text, build)。
@@ -340,6 +362,12 @@ def render_sv(provider, only=None, mode="min", max_tests=256, exhaustive=False, 
         o.update(options or {})
         kw = {"comments": o["comments"], "sv_summary": o["sv_summary"],
               "owner_in_msg": o["owner_in_msg"], "scope": o["scope"]}
+        # block_suffix（C-170）只有 export_sv_split 会传，且不进 EXPORT_OPTION_DEFAULTS/KEYS
+        # ——它是「这一次导出」的事，不是要记盘的界面偏好。provider 认不认得由它自己说了算
+        # （旧门面的两个 provider 没这个形参；C5 随 legacy 退役），故非空且接得住才传。
+        bs = str(o.get("block_suffix") or "")
+        if bs and _accepts_kw(getattr(provider, "render_sv", None), "block_suffix"):
+            kw["block_suffix"] = bs
     return provider.render_sv(only, mode, max_tests, exhaustive, edited,
                               sig_cov=sig_cov, form_cov=form_cov, **kw)
 
@@ -393,6 +421,40 @@ def export_sv(provider, path, only=None, mode="min", max_tests=256, exhaustive=F
     write_text(path, text)
     scope = (options or {}).get("scope", "all")
     return text, sv_outcome(path, build, scope=scope)
+
+
+# N2（冲突④）：导出选项「正向 + 反例分文件」——export_sv 一次只出一份，这里编排出两份。
+SPLIT_SUFFIX = {"pos": "_pos", "neg": "_neg"}
+
+
+def split_sv_paths(base_path):
+    """分文件导出的两个落盘路径：`<stem>_pos.sv` / `<stem>_neg.sv`（C-169）。
+    导出前摘要要先把路径显给用户看（别等写完了才知道写去了哪），故单独开口。"""
+    stem, ext = os.path.splitext(base_path or "")
+    ext = ext or ".sv"
+    return stem + SPLIT_SUFFIX["pos"] + ext, stem + SPLIT_SUFFIX["neg"] + ext
+
+
+def export_sv_split(provider, base_path, only=None, mode="min", max_tests=256, exhaustive=False,
+                    edited=None, options=None, sig_cov=None, form_cov=None):
+    """.sv **正向 / 反例分两个文件**（C-169/C-170）。返回 (pos_outcome, neg_outcome)。
+
+    两次独立的 render（scope="pos" / "neg"，各自 build），不是把一份切两半——
+    负向用例的来源、跳过原因、重复标号都要各算各的，否则两份产物的统计对不上自己那份文件。
+    汇总命名块各带 `_pos`/`_neg` 后缀（C-170）：两份贴进同一个 testcase 时同名命名块是非法 SV。
+    调用方给的 options 里的 scope 会被忽略（分文件本身就定死了范围）。
+    """
+    pos_path, neg_path = split_sv_paths(base_path)
+    outs = []
+    for scope, path in (("pos", pos_path), ("neg", neg_path)):
+        o = dict(options or {})
+        o["scope"] = scope
+        o["block_suffix"] = SPLIT_SUFFIX[scope]
+        _text, out = export_sv(provider, path, only=only, mode=mode, max_tests=max_tests,
+                               exhaustive=exhaustive, edited=edited, options=o,
+                               sig_cov=sig_cov, form_cov=form_cov)
+        outs.append(out)
+    return outs[0], outs[1]
 
 
 # ═════════════════════════ 六、报告（HTML / CSV / Excel 一个函数按扩展名分派） ═════════════════════════
