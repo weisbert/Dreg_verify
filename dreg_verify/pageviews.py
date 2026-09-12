@@ -270,29 +270,51 @@ def _prefix_for(probe_prefixes, name):
 
 
 def page_view_models(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                    force_overrides=None):
+                    force_overrides=None, include_risky=True, progress=None, should_cancel=None):
     """某一页的【视图模型清单】（GUI 子视图 / 无头测试消费），按页行序。
-    每个模型带 probe_net(assert LHS=输出 rtl_base) + prefix(配的探针层级前缀)，供『探针前缀』列显示。"""
+    每个模型带 probe_net(assert LHS=输出 rtl_base) + prefix(配的探针层级前缀)，供『探针前缀』列显示。
+
+    progress/should_cancel（N8，与 topout_view_models 同签名）：v2 把分析放后台、可随时停止、
+    清单逐信号增量填充。
+      · progress(done, total, name, model)  每分析完一个信号调一次（model = 该行的视图模型）
+      · should_cancel() -> True             在**下一个信号之前**生效，已分析完的照常返回（部分列表）
+      两个都不传 = 旧行为（一趟跑完整表），逐字节不变。
+    include_risky：接口一致性形参（provider 对每个引擎调用传同一个开关）。页视图只做分析、不 build，
+      风险输入放不放行是 build 层的事（见 _page_gen_opts），故此处只接受不使用——签名统一，
+      免得 provider 对五个入口写五种调用法。
+    """
+    resolver = _page_resolver(wb, probe_prefixes, force_overrides)
+    sigs = page_signals(wb, page)
+    total = len(sigs)
     models = []
-    for r in analyze_all(wb, page, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                         probe_prefixes=probe_prefixes, force_overrides=force_overrides):
+    for i, s in enumerate(sigs):
+        if should_cancel is not None and should_cancel():
+            break
+        r = analyze_page_signal(wb, resolver, s, page, mode=mode, max_tests=max_tests,
+                                exhaustive=exhaustive)
         m = result_to_model(r)
         pnet = getattr(r.sig, "rtl_base", None) or r.name
         m["probe_net"] = pnet
         m["prefix"] = _prefix_for(probe_prefixes, pnet)
         m["assert_id"] = str(getattr(r.sig, "assert_id", "") or "")   # .sv assert_<R> 的 <R>
         models.append(m)
+        if progress is not None:
+            progress(i + 1, total, m["name"], m)
     return models
 
 
 # ═══════════════ 页本地 .sv / 报告 / for_test 产出（复用 generator.build/report，force 级联=不跨页 cone）═══
 def _page_gen_opts(page, mode, max_tests, exhaustive, edit_overrides=None,
                    signals=None, comments=False, probe_prefixes=None,
-                   sv_summary=False, owner_in_msg=False, force_overrides=None):
-    """构造页本地 GenOptions：force 级联(不跨页 cone) + include_risky + 编辑回流。"""
+                   sv_summary=False, owner_in_msg=False, force_overrides=None,
+                   include_risky=True):
+    """构造页本地 GenOptions：force 级联(不跨页 cone) + include_risky + 编辑回流。
+
+    include_risky（C-217）：默认 True = 这里原先写死的值，逐字节不变。传 False 时「输入还没配
+    探针前缀」的信号不放行（= 诊断抽屉里那个全局开关关掉时的行为），由 provider 从会话配置透传下来。"""
     eo = edit_overrides or {}
     return G.GenOptions(
-        mode=mode, max_tests=max_tests, exhaustive=exhaustive, include_risky=True,
+        mode=mode, max_tests=max_tests, exhaustive=exhaustive, include_risky=include_risky,
         comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
         gen_mux=(page == "mux"), signals=signals,
         logic_cascade="force", mux_cascade="force", probe_prefixes=probe_prefixes,
@@ -323,8 +345,13 @@ def _page_signals_filter(wb, page, only):
 
 def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
                   edit_overrides=None, only=None, comments=False, probe_prefixes=None,
-                  sv_summary=False, owner_in_msg=False, scope="all", force_overrides=None):
-    """页本地 .sv：复用 generator.build（force 级联=不跨页 cone）。返回 (text, summary)。"""
+                  sv_summary=False, owner_in_msg=False, scope="all", force_overrides=None,
+                  include_risky=True, block_suffix=""):
+    """页本地 .sv：复用 generator.build（force 级联=不跨页 cone）。返回 (text, summary)。
+
+    include_risky（C-217）：默认 True = 原先写死的值。
+    block_suffix（C-170，N2 用）：末尾汇总命名块的后缀 "_pos"/"_neg"——『正向 + 反例分两个文件』
+    时两份产物若被贴进同一个 testcase，命名块重名是非法 SV。默认 "" = 不加，字节不变。"""
     saved = _with_page_logic(wb, page)
     try:
         # 导出范围 scope(all/pos/neg)：页本地负向同样全来自编辑(eo)、自动向量恒正向 → 过滤 eo；
@@ -338,12 +365,14 @@ def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
         opts = _page_gen_opts(page, mode, max_tests, exhaustive, eo,
                               signals=sigs, comments=comments,
                               probe_prefixes=probe_prefixes, sv_summary=sv_summary,
-                              owner_in_msg=owner_in_msg, force_overrides=force_overrides)
+                              owner_in_msg=owner_in_msg, force_overrides=force_overrides,
+                              include_risky=include_risky)
         built = G.build(wb, opts)
     finally:
         if saved is not None:
             wb.logic = saved
-    text = W.render_file(built["blocks"], comments=comments, summary=sv_summary)
+    text = W.render_file(built["blocks"], comments=comments, summary=sv_summary,
+                         block_suffix=block_suffix)
     n_emit = sum(1 for _l, s in built["blocks"] if s.get("n_vectors", 0) > 0)
     summary = {"n_total": len(built["blocks"]), "n_emitted": n_emit,
                "n_vectors": sum(s.get("n_vectors", 0) for _l, s in built["blocks"]),
@@ -366,15 +395,17 @@ def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
 
 
 def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_prefixes=None,
-                only=None, force_overrides=None):
+                only=None, force_overrides=None, include_risky=True):
     """页本地报告（write_report 兼容：summary/detail/tables/verifiability）。
-    only：限定只报这些信号（GUI 勾选项过滤；None=全部，N6）。"""
+    only：限定只报这些信号（GUI 勾选项过滤；None=全部，N6）。
+    include_risky（C-217）：默认 True = 原先写死的值。"""
     saved = _with_page_logic(wb, page)
     try:
         opts = _page_gen_opts(page, mode, max_tests, exhaustive,
                               signals=_page_signals_filter(wb, page, only),
                               probe_prefixes=probe_prefixes,
-                              force_overrides=force_overrides)
+                              force_overrides=force_overrides,
+                              include_risky=include_risky)
         return G.report(wb, opts)
     finally:
         if saved is not None:
@@ -382,10 +413,10 @@ def page_report(wb, page, mode="min", max_tests=256, exhaustive=False, probe_pre
 
 
 def page_fortest(wb, page, src_path, out_path, mode="min", max_tests=256, exhaustive=False,
-                 probe_prefixes=None, only=None, force_overrides=None):
-    """页本地 for_test 回填（含 mux 表）。"""
+                 probe_prefixes=None, only=None, force_overrides=None, include_risky=True):
+    """页本地 for_test 回填（含 mux 表）。include_risky（C-217）：默认 True = 原先写死的值。"""
     from . import fortest_writer
     rep = page_report(wb, page, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                       probe_prefixes=probe_prefixes, only=only,
-                      force_overrides=force_overrides)
+                      force_overrides=force_overrides, include_risky=include_risky)
     fortest_writer.write_fortest(src_path, out_path, rep, include_mux=True)
