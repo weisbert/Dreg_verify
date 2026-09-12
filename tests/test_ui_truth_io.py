@@ -185,7 +185,8 @@ def test_c294_paste_plan_overflow_rules(btlp, wl):
     p = IO.paste_plan(m, "1\n1", auto_r, 0)
     assert len(p.skipped) == 1 and p.skipped[0][0] == auto_r
     assert len(p.cells) == 1 and p.cells[0][0] == auto_r + 1
-    assert "跳过 1 格" in p.report_text
+    # R3-08：跳过的格子**先点名（行×列）再报数**，「共 N 格」在后
+    assert "共 1 格" in p.report_text and "×" in p.report_text
 
     # ⑦ 写法认不出来的那一格跳过，整次粘贴照常落别的格（C-083 同一条原则）
     p = IO.paste_plan(m, "1\t零", r_in, 0)

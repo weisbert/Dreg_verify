@@ -1475,7 +1475,8 @@ def test_c294_paste_says_why_it_could_not_add_columns(btlp):
     assert ok is True and m.columnCount() == 0
     assert terms.TRUTH_PASTE_NO_NEW_COL_MUX in msg, \
         "没说清「mux 清零后没 case 可克隆」，只说了「只读」：%s" % msg
-    assert terms.TRUTH_PASTE_SKIPPED_FMT.split("{")[0] not in msg
+    # R3-08 之后这句以 `{cells}` 开头，不能再按前缀判 —— 认「只读格」那半句
+    assert "是只读格" not in msg and terms.TRUTH_PASTE_SKIPPED_PLAIN_FMT.format(n=3) not in msg
     assert m.undo_stack().index() == n_undo, "一格都没落，不该占一步撤销"
     # logic 信号清零后是加得出列的（对照：证明上面那句 mux 的原因不是随口一说）
     lm, lan, lei = _fresh(btlp, LOGIC_SIG)

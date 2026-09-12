@@ -114,6 +114,12 @@ class PasteTally:
     no_col: int = 0
     mux_whole: int = 0
     bad: list = field(default_factory=list)
+    #: R3-08：前三桶的**格名**（`行标签×列名`，与 `bad` 同一种写法）。
+    #: 以前它们只有计数 —— 屏幕上写着「跳过 2 格（只读行/列）」，是哪两格没人说得出来。
+    #: 计数仍由 `.n` 按四个数算（格名拿不到时照样报得出数，见 `paste_report_text`）。
+    ro_cells: list = field(default_factory=list)
+    no_col_cells: list = field(default_factory=list)
+    mux_cells: list = field(default_factory=list)
 
     @property
     def n(self):
@@ -250,22 +256,42 @@ def paste_report_text(n_cells, added_names, skipped=0, kind=""):
     tally = skipped if isinstance(skipped, PasteTally) else PasteTally(ro=int(skipped or 0))
     tail = ""
     if tally.ro:
-        tail += terms.TRUTH_PASTE_SKIPPED_FMT.format(n=int(tally.ro))
+        tail += _named(terms.TRUTH_PASTE_SKIPPED_FMT, terms.TRUTH_PASTE_SKIPPED_PLAIN_FMT,
+                       tally.ro_cells, tally.ro)
     if tally.no_col:
         why = (terms.TRUTH_PASTE_NO_NEW_COL_MUX if kind == "mux"
                else terms.TRUTH_PASTE_NO_NEW_COL)
-        tail += terms.TRUTH_PASTE_NO_COL_FMT.format(n=int(tally.no_col), why=why)
+        tail += _named(terms.TRUTH_PASTE_NO_COL_FMT, terms.TRUTH_PASTE_NO_COL_PLAIN_FMT,
+                       tally.no_col_cells, tally.no_col, why=why)
     if tally.mux_whole:
-        tail += terms.TRUTH_PASTE_MUX_WHOLE_FMT.format(n=int(tally.mux_whole))
+        tail += _named(terms.TRUTH_PASTE_MUX_WHOLE_FMT, terms.TRUTH_PASTE_MUX_WHOLE_PLAIN_FMT,
+                       tally.mux_cells, tally.mux_whole)
     if tally.bad:
-        shown = list(tally.bad)[:BAD_NAMES_MAX]
-        tail += terms.TRUTH_PASTE_BAD_FMT.format(
-            n=len(tally.bad),
-            names="、".join(shown) + ("…" if len(tally.bad) > BAD_NAMES_MAX else ""))
+        tail += terms.TRUTH_PASTE_BAD_FMT.format(n=len(tally.bad), names=_cells(tally.bad))
     return terms.TRUTH_PASTE_REPORT_FMT.format(
         n=int(n_cells),
         added=(terms.TRUTH_PASTE_ADDED_FMT.format(names=", ".join(added)) if added else ""),
         skipped=tail)
+
+
+def _cell_name(model, names_after, r, c):
+    """格名：`行标签×列名`（`terms.TRUTH_PASTE_BAD_CELL_FMT`）—— 四桶共用一种写法（R3-08）。"""
+    return terms.TRUTH_PASTE_BAD_CELL_FMT.format(
+        row=model.row_label(r), col=(names_after[c] if 0 <= c < len(names_after) else "?"))
+
+
+def _cells(names):
+    """格名列成一串（超出 `BAD_NAMES_MAX` 就省略号，别把整张表抄进一行）。"""
+    shown = [str(x) for x in list(names)[:BAD_NAMES_MAX] if str(x).strip()]
+    return "、".join(shown) + ("…" if len(list(names)) > BAD_NAMES_MAX else "")
+
+
+def _named(fmt, plain_fmt, names, n, **kw):
+    """点名版 / 不点名版 二选一（R3-08：点名在前、计数在后；拿不到格名时照实只报数）。"""
+    text = _cells(names)
+    if text:
+        return fmt.format(cells=text, n=int(n), **kw)
+    return plain_fmt.format(n=int(n), **kw)
 
 
 def paste_plan(model, text, r0, c0):
@@ -316,26 +342,27 @@ def paste_plan(model, text, r0, c0):
             r, c = r0 + dr, c0 + dc
             if not (0 <= c < n_have):
                 tally.no_col += 1
+                tally.no_col_cells.append(_cell_name(model, names_after, r, c))
                 skipped.append((r, c, terms.TRUTH_PASTE_SKIP_NO_COL))
                 continue
             # 新追加的那几列是**手编列**（`edits.copy_cols` 置 user=True），
             # 按定义不会是「自动生成列的 mux 数据值」，所以只问表上已有的列。
             if c < n_old and model.is_mux_auto_data_cell(r, c):
                 tally.mux_whole += 1
+                tally.mux_cells.append(_cell_name(model, names_after, r, c))
                 skipped.append((r, c, terms.TRUTH_PASTE_SKIP_MUX_WHOLE))
                 continue
             can = (_cell_editable(model, r, c) if c < n_old
                    else _new_col_editable(model, r, ref_col, new_is_dft))
             if not can:
                 tally.ro += 1
+                tally.ro_cells.append(_cell_name(model, names_after, r, c))
                 skipped.append((r, c, terms.TRUTH_PASTE_SKIP_READONLY))
                 continue
             try:
                 TE.parse_int(txt)                  # 空串 = 0 / 期望格的「清空」，都不算失败
             except ValueError:
-                tally.bad.append(terms.TRUTH_PASTE_BAD_CELL_FMT.format(
-                    row=model.row_label(r),
-                    col=(names_after[c] if c < len(names_after) else "")))
+                tally.bad.append(_cell_name(model, names_after, r, c))
                 skipped.append((r, c, terms.TRUTH_PASTE_SKIP_PARSE_FMT.format(text=txt)))
                 continue
             cells.append((r, c, txt))

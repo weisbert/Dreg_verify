@@ -855,9 +855,11 @@ class LegacyImportDialog(QtWidgets.QDialog):
 
     def refresh(self):
         mux_names = [n for n, why in self.plan.skipped if why == _t("DIAG_LEGACY_SKIP_MUX")]
-        head = _t("DIAG_LEGACY_PREVIEW_FMT", n_ok=self.plan.n_rows, n_mux=len(mux_names),
-                  mux_names=("、".join(mux_names) if mux_names else "—"))
-        body = [head, ""]
+        body = [_t("DIAG_LEGACY_PREVIEW_FMT", n_ok=self.plan.n_rows)]
+        if mux_names:                      # R3-09：一个 mux 都不跳过时，这两截整句不出
+            body.append(_t("DIAG_LEGACY_PREVIEW_MUX_FMT", n_mux=len(mux_names),
+                           mux_names="、".join(mux_names)))
+        body.append("")
         if self.plan.rows:
             for name, n, note in self.plan.rows:
                 body.append(_t("DIAG_LEGACY_ROW_FMT", name=name, n=n))

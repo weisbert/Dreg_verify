@@ -1367,7 +1367,7 @@ class SignalListPanel(QtWidgets.QWidget):
         """C-032 全选（作用于当前可见行）。"""
         names = self.visible_names()
         self._set_checked(names, True)
-        self.statusMessage.emit(T.LIST_BTN_CHECK_ALL + " %d" % len(names))
+        self.statusMessage.emit(T.STATUS_CHECK_ALL_FMT.format(n=len(names)))     # R3-10
         return names
 
     def uncheck_all(self):
@@ -1379,14 +1379,14 @@ class SignalListPanel(QtWidgets.QWidget):
         更是没人想得到。要清整张：先把筛选清空再点。"""
         names = self.visible_names()
         self._set_checked(names, False)
-        self.statusMessage.emit(T.LIST_BTN_UNCHECK_ALL + " %d" % len(names))
+        self.statusMessage.emit(T.STATUS_UNCHECK_ALL_FMT.format(n=len(names)))   # R3-10
         return names
 
     def check_selected_rows(self):
         """C-034 把框选 / Ctrl 多选的行一次勾上。"""
         names = self.selected_names()
         self._set_checked(names, True)
-        self.statusMessage.emit(T.LIST_BTN_CHECK_SELECTED + " %d" % len(names))
+        self.statusMessage.emit(T.STATUS_CHECK_SELECTED_FMT.format(n=len(names)))  # R3-10
         return names
 
     def neg_targets(self):
@@ -1404,7 +1404,7 @@ class SignalListPanel(QtWidgets.QWidget):
         """C-035 一键给一批信号各加 1 条反例。"""
         names = self.neg_targets()
         self._set_negs(names, True)
-        self.statusMessage.emit(T.LIST_BTN_NEG_ALL + " %d" % len(names))
+        self.statusMessage.emit(T.STATUS_NEG_ALL_FMT.format(n=len(names)))       # R3-10
         return names
 
     def neg_clear(self):
@@ -1422,7 +1422,7 @@ class SignalListPanel(QtWidgets.QWidget):
             if ans != QtWidgets.QMessageBox.Yes:
                 return []
         self._set_negs(names, False)
-        self.statusMessage.emit(T.LIST_BTN_NEG_CLEAR + " %d" % len(names))
+        self.statusMessage.emit(T.STATUS_NEG_CLEAR_FMT.format(n=len(names)))     # R3-10
         return names
 
     def open_paste_names_dialog(self):

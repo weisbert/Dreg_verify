@@ -890,8 +890,11 @@ class WorkbenchState(QtCore.QObject):
     def _report_restore(self, n, missing, bad):
         """恢复结果落状态栏：先点名、再计数（C-270 / I-20）。"""
         if missing:
+            # R3-08 / C-239：名字在前、计数在后，**并且给原因** —— 只说「找不到」的话，
+            # 用户第一反应是「我手填的活丢了」（其实盘上那份原样留着）。
             self.status(terms.STATUS_RESTORE_MISSING_FMT.format(
-                n=len(missing), names="、".join(str(m) for m in missing)))
+                names="、".join(str(m) for m in missing), n=len(missing),
+                reason=terms.STATUS_RESTORE_MISSING_REASON))
         if bad:
             self.status(STATUS_RESTORE_BAD_FMT.format(n=bad))
         if n:

@@ -699,6 +699,7 @@ class MainWindow(QtWidgets.QMainWindow):
         此刻还在跑的旧 worker 每回调一次就往新表的清单里塞一行上一张表的信号。"""
         self._retire_worker()
         path = str(path or "")
+        was = str(getattr(self._state, "loaded_path", "") or "")   # R3-12：失败要回滚到它
         self._set_path_text(path)
         self.error_bar.dismiss()
         self._load_error = ""
@@ -713,7 +714,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if not ok and not self._load_error:
             self._on_load_failed(terms.STATUS_LOAD_FAILED_FMT.format(
                 reason=terms.exc_text("OSError", path)))
+        if not ok:
+            self._rollback_path(was)
         return ok
+
+    def _rollback_path(self, was):
+        """R3-12：载表失败 → 路径框回到**真正载着的那张表**，错误条补一句「当前仍是《…》」。
+
+        路径框在 `state.load` 之前就被改成新路径了（要让用户看见工具正在载哪一张）。
+        失败后不回滚的话，顶栏写着 A 表、清单 / 真值表 / .sv 预览却还是 B 表 ——
+        用户会照着 A 的规格去核对 B 的用例，而屏幕上没有任何一处提示这件事。"""
+        self._set_path_text(was)
+        if not was:
+            return
+        cur = os.path.basename(was) or was
+        self._load_error = terms.STATUS_LOAD_FAILED_KEPT_FMT.format(
+            reason=self._load_error.rstrip("。"), cur=cur)
+        self.error_bar.show_error(self._load_error)
+        self.set_status(self.error_bar.text())
 
     def apply_startup(self, argv=()):
         """C-004：命令行带一个 .xlsx → 跳过空态直接载；否则 C-003：按 last_excel 自动载入。"""
@@ -1212,7 +1230,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_resolve_detail_toggled(self, open_):
         """④「解析明细」开合 → ⑨ 输入表的驱动行同步带上/去掉来源（C-064 / C-065）。"""
         self.side_panel.set_show_source(bool(open_))
-        self.set_status(terms.HDR_RESOLVE if open_ else "")
+        # R3-11：不写面板名（「解析明细」三个字对着一块刚展开的面板 = 把控件名念了一遍）
+        name = str(getattr(self._state, "current_name", "") or "")
+        self.set_status(terms.STATUS_RESOLVE_OPENED_FMT.format(name=name)
+                        if (open_ and name) else "")
         return bool(open_)
 
     @QtCore.Slot(str)
@@ -1335,7 +1356,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_status(terms.STATUS_COPIED)
             return t
         if t == "resolve_detail":
-            self.set_status(terms.HDR_RESOLVE)
+            nm = str(getattr(self._state, "current_name", "") or "")
+            self.set_status(terms.STATUS_RESOLVE_OPENED_FMT.format(name=nm) if nm else "")
             return t
         return ""
 

@@ -379,6 +379,111 @@ def test_r3_07_resolve_detail_status_line_matches_the_badge(win):
     assert IT.AN_STATUS_TEXT["ok"] not in text
 
 
+# ═══════ R3-08 / R3-09 / R3-10 / R3-11 / R3-12：名字在前、零跳过不出、状态栏说人话 ═══════
+def test_r3_08_five_sentences_put_names_before_counts():
+    """五句「计数在前」翻正（C-239 / C-290 / C-294 三桶 / C-302）。"""
+    for fmt, first, later in (
+            (T.STATUS_RESTORE_MISSING_FMT, "{names}", "{n}"),
+            (T.DLG_PASTE_NAMES_RESULT_FMT, "{names}", "{m}"),
+            (T.TRUTH_PASTE_SKIPPED_FMT, "{cells}", "{n}"),
+            (T.TRUTH_PASTE_NO_COL_FMT, "{cells}", "{n}"),
+            (T.TRUTH_PASTE_MUX_WHOLE_FMT, "{cells}", "{n}"),
+            (T.TRUTH_PASTE_BAD_FMT, "{names}", "{n}"),
+            (T.DIAG_LEGACY_PREVIEW_MUX_FMT, "{mux_names}", "{n_mux}")):
+        assert fmt.index(first) < fmt.index(later), fmt
+    # 汇总那一句也是先说跳过（点名）再说落了几格
+    assert T.TRUTH_PASTE_REPORT_FMT.index("{skipped}") < T.TRUTH_PASTE_REPORT_FMT.index("{n}")
+    # C-239 带原因（以前只有名字，用户以为手填的活丢了）
+    assert "{reason}" in T.STATUS_RESTORE_MISSING_FMT and T.STATUS_RESTORE_MISSING_REASON
+
+
+def test_r3_08_paste_skipped_cells_are_named(win):
+    """只读格 / mux 整表格 / 写法没认出来的格子，报告里都给坐标（`行标签×列名`）。"""
+    from dreg_verify.ui.truth import io as TIO
+    _load(win, "btlp")
+    name = next(m["name"] for m in win.state.models()
+                if (win.state.analyze(m["name"]) or {}).get("editable"))
+    win.state.set_current(name)
+    H.app().processEvents()
+    model = win.truth_panel.model
+    assert model.rowCount() >= 2 and model.columnCount() >= 1
+    r_auto = next(r for r in range(model.rowCount())
+                  if model.row_kind(r) == contracts.TruthRowKind.AUTO)
+    plan = TIO.paste_plan(model, "7", r_auto, 0)                 # 往 auto_out 行粘 = 只读格
+    assert plan.tally.ro == 1 and plan.tally.ro_cells, "只读格没留下坐标"
+    assert "×" in plan.report_text and "共 1 格" in plan.report_text
+    assert plan.report_text.index(plan.tally.ro_cells[0]) < plan.report_text.index("粘贴落了")
+
+
+def test_r3_08_paste_names_dialog_says_nothing_when_nothing_missing(qapp):
+    """一个都没落空时不端出「找不到 0 个：—」（零跳过不该出现在屏幕上）。"""
+    from dreg_verify.ui import dialogs as D
+    d = D.PasteNamesDialog()
+    assert d.set_result(3, []) == T.DLG_PASTE_NAMES_RESULT_ALL_FMT.format(n=3)
+    msg = d.set_result(3, ["d_gone_a", "d_gone_b"])
+    assert msg.index("d_gone_a") < msg.index("2"), msg
+    d.close()
+
+
+def test_r3_09_legacy_preview_hides_the_mux_line_when_there_is_none(win):
+    """R3-09：旧版迁移预览无条件端出「不迁 0 个 mux 信号：—」+ 三行 mux 解释。"""
+    _load(win, "btlp")
+    d = DG.LegacyImportDialog(win.state, win)
+    text = H.find(d, names.DIAG_LEGACY_PREVIEW).text()
+    mux_skips = [n for n, why in d.plan.skipped if why == T.DIAG_LEGACY_SKIP_MUX]
+    if not mux_skips:
+        assert "mux" not in text, "一个 mux 都不跳过，却还在讲 mux 为什么不迁：%r" % text
+        assert "—" not in text
+    assert T.DIAG_LEGACY_PREVIEW_FMT.split("{")[0] in text
+    d.close()
+
+
+def test_r3_10_list_bulk_actions_say_what_changed(win):
+    """R3-10：五个批量动作的状态栏以前是「全选 12」—— 按钮名 + 一个数字。"""
+    _load(win, "btlp")
+    said = []
+    win.list_panel.statusMessage.connect(said.append)
+    n = len(win.list_panel.visible_names())
+    for call, fmt in ((win.list_panel.check_all_visible, T.STATUS_CHECK_ALL_FMT),
+                      (win.list_panel.uncheck_all, T.STATUS_UNCHECK_ALL_FMT),
+                      (win.list_panel.neg_all, T.STATUS_NEG_ALL_FMT),
+                      (win.list_panel.neg_clear, T.STATUS_NEG_CLEAR_FMT)):
+        del said[:]
+        got = call()
+        assert said and said[-1] == fmt.format(n=len(got)), said[-1:]
+        assert said[-1] != "%s %d" % (T.LIST_BTN_CHECK_ALL, n)
+    assert n
+
+
+def test_r3_11_resolve_detail_status_does_not_write_the_panel_name(win):
+    """R3-11：点「解析明细」时状态栏写的是面板名（把控件名念了一遍）。"""
+    _load(win, "btlp")
+    assert win.list_panel.select_first_visible()
+    H.app().processEvents()
+    nm = win.state.current_name
+    win.on_resolve_detail_toggled(True)
+    txt = H.find(win, names.STATUS_LEFT).text()
+    assert txt != T.HDR_RESOLVE and nm in txt
+    win.on_resolve_detail_toggled(False)
+    assert H.find(win, names.STATUS_LEFT).text() == ""
+
+
+def test_r3_12_failed_load_rolls_the_path_box_back(win, tmp_path):
+    """R3-12：载表失败后路径框换成了**没载进来**的那张，工作台却还是上一张。"""
+    _load(win, "btlp")
+    good = win.state.loaded_path
+    assert good
+    bad = str(tmp_path / "根本没有这张.xlsx")
+    assert not win.load_path(bad)
+    # ① 路径框回滚到真正载着的那张
+    assert win.path_edit.text() == good, "路径框停在没载进来的那张上"
+    # ② 错误条补一句「当前仍是《…》」
+    err = H.find(win, names.ERROR_TEXT).text()
+    assert os.path.basename(good) in err and "当前仍是" in err
+    # ③ 工作台没被清空（清单还是上一张表的）
+    assert win.state.models(), "上一张表的清单被失败的那次载入清掉了"
+
+
 def test_f1_two_new_strings_reviewed():
     """F1 留给 F2 过目的两条：名字在前、不写本机全路径。"""
     # `{names}（共 {n} 列）…` —— 名字在前、计数在后（I-20）

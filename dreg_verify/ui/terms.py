@@ -328,6 +328,9 @@ HDR_COV_FMT = "覆盖度 {label} （来自：{source}） ▾"
 HDR_PROGRESS_FMT = "手填期望 {n}/{m}"
 HDR_PROGRESS_DIFF_FMT = "其中 {k} 条与程序算的不一致"
 HDR_RESOLVE = "解析明细"
+#: R3-11：点「解析明细」时状态栏别只写面板名（「解析明细」三个字对着一块刚展开的面板，
+#: 等于把控件名念了一遍）。要么说清展开的是谁的，要么什么都不写（收起时就什么都不写）。
+STATUS_RESOLVE_OPENED_FMT = "已展开 {name} 的解析明细（逐输入怎么驱动、名字是查到的还是猜的）"
 HDR_SIDE_HIDE = "隐藏右栏 ▶"
 HDR_SIDE_SHOW = "◀ 展开链 · 输入信号"
 HDR_ANALYSIS_FAILED = "分析失败（其余信号不受影响）"                          # C-043 / R3-14
@@ -383,7 +386,7 @@ TRUTH_LEGEND = (("match", "手填 · 与 auto 一致"), ("diff", "手填 · 与 
                 ("neg", "反例（故意填错）"), ("dft", "iddq=1 漏电态自检拍"))
 TRUTH_PARSE_FAILED_FMT = "数值写法没认出来：{text}（已还原）。认的写法：16'h3 / 'b101 / 'd9 / hA / 0x3 / 0b101 / 9 / A"
 TRUTH_PASTE_OVERFLOW_ROWS_FMT = "粘贴的行数（{rows}）超过真值表行数（{max}），已拒绝：真值表的行是输入信号，不能凭空加"
-TRUTH_PASTE_REPORT_FMT = "粘贴落了 {n} 格{added}{skipped}"
+TRUTH_PASTE_REPORT_FMT = "{skipped}粘贴落了 {n} 格{added}"
 TRUTH_CONTEXT_MENU = {"insert": "插入列", "delete": "删除列", "copy": "复制列", "set_neg": "设为反例",
                       "mux_data_col": "设置本列 mux 数据值…", "rename": "重命名列…"}
 TRUTH_MUX_HEADER_FMT = "{case_desc} · 生效档 {cov}：{how} · 手填 {n}/{m}"    # C-124
@@ -431,12 +434,16 @@ TRUTH_BATCH_FILL_NOTHING = "没有可填的期望格（选中的列都是只读�
 TRUTH_BATCH_FILL_REPORT_FMT = "批量填了 {n} 列的期望"
 # ── C-294 粘贴结果说明的各截尾巴（`TRUTH_PASTE_REPORT_FMT` 的 {added} / {skipped}）──
 TRUTH_PASTE_ADDED_FMT = "，新增列 {names}"
-TRUTH_PASTE_SKIPPED_FMT = "，跳过 {n} 格（只读行/列）"
-TRUTH_PASTE_NO_COL_FMT = "，{n} 格右边没有测试列了（{why}）"
+TRUTH_PASTE_SKIPPED_FMT = "{cells} 是只读格（auto_out 行 / 只读输入行 / 自检拍列），跳过；共 {n} 格。"
+TRUTH_PASTE_SKIPPED_PLAIN_FMT = "跳过 {n} 格（只读行/列）。"          # 拿不到格名时的退路
+TRUTH_PASTE_NO_COL_FMT = "{cells} 右边没有测试列了（{why}），跳过；共 {n} 格。"
+TRUTH_PASTE_NO_COL_PLAIN_FMT = "{n} 格右边没有测试列了（{why}）。"
 TRUTH_PASTE_NO_NEW_COL_MUX = "mux 信号清零后没有 case 可克隆，加不出新列——先「重新生成」"
 TRUTH_PASTE_NO_NEW_COL = "这个信号加不出新列"
-TRUTH_PASTE_MUX_WHOLE_FMT = "，{n} 格是自动生成列的 mux 数据值（要整表一起改：工具条的「设置 mux 数据值」）"
-TRUTH_PASTE_BAD_FMT = "，{n} 格没认出写法：{names}"                            # C-083 的粘贴面：逐格点名
+TRUTH_PASTE_MUX_WHOLE_FMT = ("{cells} 是自动生成列的 mux 数据值，要整表一起改"
+                             "（工具条的「设置 mux 数据值」）；共 {n} 格。")
+TRUTH_PASTE_MUX_WHOLE_PLAIN_FMT = "{n} 格是自动生成列的 mux 数据值（要整表一起改：工具条的「设置 mux 数据值」）。"
+TRUTH_PASTE_BAD_FMT = "{names} 没认出写法，跳过；共 {n} 格。"                   # C-083 的粘贴面：逐格点名
 TRUTH_PASTE_BAD_CELL_FMT = "{row}×{col}"
 #: 跳过某一格的原因（给用户逐格看的，不进汇总那句；四桶各一条，跳过必有原因）
 TRUTH_PASTE_SKIP_READONLY = "只读格（auto_out 行 / 只读输入行 / 自检拍列）"
@@ -537,17 +544,30 @@ STATUS_MISSING_PAGES_FMT = "本表无 {pages} 页，门控层跳过"            
 STATUS_LAST_EXPORT_FMT = "上次导出 {kind}：{when} → {path}"
 STATUS_AUTOSAVE_FMT = "编辑自动存盘 · 上次 {when}"
 STATUS_RESTORED_FMT = "恢复了 {n} 个信号的手填编辑"                               # C-241
-STATUS_RESTORE_MISSING_FMT = "有 {n} 个信号的编辑在当前表找不到：{names}"           # C-239
+STATUS_RESTORE_MISSING_FMT = "{names}（共 {n} 个）的手填编辑在当前表里对不上信号：{reason}"   # C-239 / R3-08
+#: 为什么对不上 —— 以前这句只有名字没有原因，用户看到「找不到」第一反应是「我的活丢了」。
+STATUS_RESTORE_MISSING_REASON = "改名？删行？还是这一页不在当前范围里？盘上那份原样留着，没删"
 STATUS_SUPPLEMENT_FMT = "RTL 补充逻辑生效：{names}"                              # C-215
 STATUS_COPIED = "已复制到剪贴板"
 STATUS_NEG_ADDED_FMT = "已加 {n} 条反例，跳过 {skipped} 条（同输入取值已有反例）"    # C-097
 STATUS_NEG_NONE = "选中的用例都已有反例，未重复添加"
 STATUS_MUX_FLIPPED_FMT = "反例错值撞上正确值，已自动翻一位：{name}"                  # C-105
 STATUS_LOAD_FAILED_FMT = "表读不进来：{reason}"                                  # C-005
+#: R3-12：载不进来时补一句「工作台上仍然是哪一张」。路径框已经先被改成新路径了，
+#: 失败后不回滚的话，屏幕上写着 A 表、清单和真值表却还是 B 表 —— 用户照着 A 去核对。
+STATUS_LOAD_FAILED_KEPT_FMT = "{reason}。当前仍是《{cur}》"
 #: R3-13 / C5b-1：整表展开这一趟炸了（worker.failed）。以前错误条上整条就是引擎异常的
 #: message（真表上是一串英文），而详情区那行「分析失败」压根没人去点亮（C-043 是空的）。
 STATUS_ANALYZE_FAILED_FMT = "整表展开中断了：{reason}。已展开完的信号还在，重新载入可再跑"
 STATUS_NO_ROWS_SELECTED = "先在清单里选中若干行（鼠标框选 / Ctrl·Shift 点），再点「勾选选中行」"
+#: R3-10：清单底部五个批量动作的反馈。以前视图里写的是 `T.LIST_BTN_XXX + " %d"`，
+#: 状态栏上就是「全选 12」「清空勾选 12」—— 一个按钮名加一个数字，既没说作用在谁身上
+#: （可见行？整张清单？勾着的？三个按钮三种作用域），也没说这一下改变了什么。
+STATUS_CHECK_ALL_FMT = "已勾选可见的 {n} 个信号（导出范围跟着变）"
+STATUS_UNCHECK_ALL_FMT = "已取消勾选可见的 {n} 个信号（被筛掉看不见的那些不动）"
+STATUS_CHECK_SELECTED_FMT = "已勾选选中的 {n} 个信号（导出范围跟着变）"
+STATUS_NEG_ALL_FMT = "已给 {n} 个信号各加一条反例（自检 checker 抓不抓得到）"
+STATUS_NEG_CLEAR_FMT = "已清除 {n} 个信号的反例（正向用例都留着）"
 
 # ⑭ 空态 / ⑮ 载入态
 EMPTY_TITLE = "先载入 Dreg 核心 Excel"
@@ -862,9 +882,13 @@ DIAG_SUPP_TMPL_BAD_JSON = "当前内容不是合法 JSON，合并不进去；请
 DIAG_SUPP_DONE_FMT = "RTL 补充逻辑已更新（共 {n} 条，{n_on} 条启用）"
 DIAG_SUPP_CLEARED = "RTL 补充逻辑已清空"
 DIAG_LEGACY_TITLE = "从旧版真值表编辑迁进来"
-DIAG_LEGACY_PREVIEW_FMT = ("可迁移 {n_ok} 个信号（logic / 直连寄存器根）；不迁 {n_mux} 个 mux 信号：{mux_names}\n"
-                           "原因：mux 用的是 case / 数据列坐标（c:A / d:0），与旧版按物理基名存的取值对不上。\n"
+#: R3-09：「不迁 N 个 mux 信号」那两截**只有真有 mux 要跳过时才出**。以前是无条件拼的，
+#: 于是一张没有 mux 编辑的表上也端出「不迁 0 个 mux 信号：—」+ 三行 mux 解释 ——
+#: 零跳过的东西不该出现在屏幕上（用户会去找那个「—」是什么）。
+DIAG_LEGACY_PREVIEW_FMT = ("可迁移 {n_ok} 个信号（logic / 直连寄存器根）。\n"
                            "迁入后用例数以旧版编辑为准（如 4 → 原自动 12），旧数据只读不删。")
+DIAG_LEGACY_PREVIEW_MUX_FMT = ("{mux_names}（共 {n_mux} 个 mux 信号）不迁：mux 用的是 case / "
+                               "数据列坐标（c:A / d:0），与旧版按物理基名存的取值对不上。")
 DIAG_LEGACY_NONE = "这张表没有旧版真值表编辑"
 DIAG_LEGACY_RUN = "开始迁移"
 #: C-302 迁移计划书：**不迁的名字 + 原因在前**（C-270 的形状），能迁的清单与计数在后
@@ -1028,7 +1052,8 @@ DLG_COLUMNS_HINT = "勾选列常驻第一列，不在这里关。"
 # ⑤ 粘贴名单
 DLG_PASTE_NAMES_TITLE = "粘贴名单勾选"
 DLG_PASTE_NAMES_HINT = "每行一个信号名（可带位宽切片，大小写无关）。"
-DLG_PASTE_NAMES_RESULT_FMT = "勾上 {n} 个；找不到 {m} 个：{names}"
+DLG_PASTE_NAMES_RESULT_FMT = "{names}（共 {m} 个）在当前清单里找不到；其余 {n} 个已勾上"   # R3-08
+DLG_PASTE_NAMES_RESULT_ALL_FMT = "已勾上 {n} 个信号"
 DLG_PASTE_NAMES_EMPTY = "一个名字都没填。"
 # ⑥ 预设
 DLG_PRESETS_TITLE = "预设"

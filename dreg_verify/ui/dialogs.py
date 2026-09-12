@@ -672,10 +672,18 @@ class PasteNamesDialog(_BaseDialog):
         return out
 
     def set_result(self, n_checked, missing=()):
-        """把「勾上几个 / 找不到哪些」回填进结果行（C-290 / C-270：点名在前）。"""
+        """把「勾上几个 / 找不到哪些」回填进结果行（C-290 / C-270：点名在前）。
+
+        R3-08：一个都没落空时**不端出「找不到 0 个：—」** —— 零跳过的那半句不该出现
+        （没跳过的东西不用报，报了反而让人去找那个「—」是什么）。"""
         missing = [str(x) for x in (missing or ())]
+        if not missing:
+            msg = T.DLG_PASTE_NAMES_RESULT_ALL_FMT.format(n=int(n_checked))
+            self.result_label.setText(msg)
+            self._detail_text = msg
+            return msg
         msg = T.DLG_PASTE_NAMES_RESULT_FMT.format(n=int(n_checked), m=len(missing),
-                                                  names="、".join(missing) or "—")
+                                                  names="、".join(missing))
         self.result_label.setText(msg)
         self._detail_text = msg
         return msg
