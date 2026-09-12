@@ -84,8 +84,11 @@ def test_logic_subview_chain_substitution(win):
     assert "(A?C:B)" in txt and "d_bt_lp_linelocal_mode_ctrl" in txt
 
 
-def test_logic_subview_edit_and_export(win):
+def test_logic_subview_edit_and_export(win, monkeypatch):
+    from PySide6 import QtWidgets
     from dreg_verify import gui as G
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",       # 「清零」确认框答"是"
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
     v = win.page_views["logic"]
     v.sig_table.setCurrentCell(_row(v, "d_logic_bt_lp_rx_en"), G.TOPO_NAME)
     base, _ = v.provider.render_sv(None, "max", 64, False, {})

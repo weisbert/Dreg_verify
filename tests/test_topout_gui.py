@@ -659,6 +659,13 @@ def _sel(w, name):
     return w.topout_view
 
 
+def _auto_yes(monkeypatch):
+    """确认框一律答"是"（清零/删负向/auto→期望 有确认框；确认框本身另有专门测试）。"""
+    from PySide6 import QtWidgets
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+
+
 def test_form_cov_applies_to_truth_table_too(topo_win):
     """#3 修：逻辑类型覆盖度对【右侧真值表】也生效(此前 _mode_for 只认单点 sig_cov、不认 form_cov →
     左侧清单按 form_cov 算、右侧真值表按全局算 → 用例数对不上，用户实证清单 5/真值表 32)。
@@ -788,6 +795,78 @@ def test_e_addneg_names_survive_export(topo_win):
     assert len(names) == len(set(names)) and all(names)
 
 
+def _ask_spy(monkeypatch, answer):
+    """拦下确认框，记下标题+正文，返回预设答案。"""
+    from PySide6 import QtWidgets
+    seen = []
+
+    def _q(_parent, title, text, *a, **k):
+        seen.append((title, text))
+        return answer
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", staticmethod(_q))
+    return seen
+
+
+def test_clear_asks_before_zeroing_the_signal(topo_win, monkeypatch):
+    """轨0-④：「清零」= 该信号零用例（.sv 不产断言），不可手滑——先确认；点否什么都不动。"""
+    from PySide6 import QtWidgets
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    n0 = len(v.cur_cols)
+    seen = _ask_spy(monkeypatch, QtWidgets.QMessageBox.No)
+    v._e_clear()
+    assert len(v.cur_cols) == n0 and seen                # 点否 → 一列没少
+    assert "零用例" in seen[0][1] and "重新生成" in seen[0][1]
+    seen2 = _ask_spy(monkeypatch, QtWidgets.QMessageBox.Yes)
+    v._e_clear()
+    assert v.cur_cols == [] and seen2                    # 点是 → 清零
+
+
+def test_fill_expected_warns_about_losing_independent_check(topo_win, monkeypatch):
+    """轨0-④：「auto→期望」等于采信程序算出的值，确认框必须把这句话说清楚（沿用 legacy 文案）。"""
+    from PySide6 import QtWidgets
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    v._e_regen()
+    seen = _ask_spy(monkeypatch, QtWidgets.QMessageBox.No)
+    v._e_fill()
+    assert seen and "独立核对" in seen[0][1]
+    assert all(c["exp"] is None for c in v.cur_cols if not c["neg"])   # 点否 → 没填
+    _ask_spy(monkeypatch, QtWidgets.QMessageBox.Yes)
+    v._e_fill()
+    assert all(c["exp"] == c["auto"] for c in v.cur_cols if not c["neg"])
+    v._e_fill()                                          # 都填过了 → 不再弹框，只提示
+    assert "没有可填" in topo_win.status.currentMessage()
+
+
+def test_delneg_asks_only_when_negatives_are_worth_protecting(topo_win, monkeypatch):
+    """轨0-④：删负向——纯自动造的负向直接删；含自定义命名/手填错值的先确认（对齐 legacy）。"""
+    from PySide6 import QtWidgets
+    from dreg_verify import expr as E
+    v = _sel(topo_win, "d_logic_bt_lp_lna_agc")          # 3 bit，有手填错值的空间
+    v._e_regen()
+    v.truth.setCurrentCell(0, 0)
+    v._e_addneg()
+    seen = _ask_spy(monkeypatch, QtWidgets.QMessageBox.No)
+    v._e_delneg()
+    assert not seen and not any(c["neg"] for c in v.cur_cols)   # 自动负向：不问，直接删
+    # 手填错值的负向 → 要问；点否则保留
+    v.truth.setCurrentCell(0, 0)
+    v._e_addneg()
+    neg = next(c for c in v.cur_cols if c["neg"])
+    neg["exp"] = (neg["auto"] + 3) & E.mask(neg["auto_w"])
+    seen = _ask_spy(monkeypatch, QtWidgets.QMessageBox.No)
+    v._e_delneg()
+    assert seen and any(c["neg"] for c in v.cur_cols)
+    # 自定义命名的负向 → 同样要问
+    neg["exp"] = None
+    neg["name"] = "MY_CASE_NEG"
+    seen = _ask_spy(monkeypatch, QtWidgets.QMessageBox.No)
+    v._e_delneg()
+    assert seen and any(c["neg"] for c in v.cur_cols)
+    seen = _ask_spy(monkeypatch, QtWidgets.QMessageBox.Yes)
+    v._e_delneg()
+    assert not any(c["neg"] for c in v.cur_cols)
+
+
 def test_truth_cell_accepts_verilog_notations(topo_win):
     """轨0-③：数值格接管 IC 工程师常写的 8 种写法(16'h3 / 'b1010 / hA / 'd9 / 0x7f)——
     此前新门面只认 0x/'h/0b/十进制，16'h3 之类静默吞成 0（输入格）或未填（期望格）。"""
@@ -829,8 +908,9 @@ def test_truth_cell_bad_number_is_visible_and_restored(topo_win):
 
 
 # ── 点1：真值表清零/加列/删列/改预填 ──
-def test_topout_truth_add_delete_column(topo_win):
-    """加列→列数+1；删列→回到原数；清零→零列（可逆：重新生成恢复）。"""
+def test_topout_truth_add_delete_column(topo_win, monkeypatch):
+    """加列→列数+1；删列→回到原数；清零(确认后)→零列（可逆：重新生成恢复）。"""
+    _auto_yes(monkeypatch)
     v = _sel(topo_win, "d_logic_bt_lp_rx_en")
     n0 = len(v.cur_cols)
     v._e_add()
@@ -862,8 +942,9 @@ def test_topout_truth_edit_expected_and_input_recompute(topo_win):
     assert ed["d_logic_bt_lp_rx_en"]["vectors"][0].designer_expected == 1
 
 
-def test_topout_edit_reflected_in_exported_sv(topo_win):
+def test_topout_edit_reflected_in_exported_sv(topo_win, monkeypatch):
     """清零某 Topout 信号→导出 .sv 不再含它的断言，但记账『用户已清空』(不静默丢)。"""
+    _auto_yes(monkeypatch)
     v = _sel(topo_win, "d_logic_bt_lp_rx_en")
     base, _ = v.provider.render_sv(None, "max", v._maxt(), False, {})
     assert "`ENV_RF.d_logic_bt_lp_rx_en==" in base

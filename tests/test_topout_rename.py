@@ -383,7 +383,7 @@ def test_dft_fanout_post_gate_consumer_is_gated(fanout_path):
     assert _iddq_evidence(res) == (True, True, 1)
 
 
-def test_renamed_signal_gui_edit_threads_to_export(renamed_path):
+def test_renamed_signal_gui_edit_threads_to_export(renamed_path, monkeypatch):
     """GUI 编辑改名信号 → 走 reg 路按顶层名键回流（否则编辑落源名键被改名路忽略=静默不生效）。"""
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -391,6 +391,8 @@ def test_renamed_signal_gui_edit_threads_to_export(renamed_path):
     from PySide6 import QtWidgets
     from dreg_verify import gui as G
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",       # 「清零」确认框答"是"
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
     w = G.MainWindow(); w.path_edit.setText(renamed_path); w.on_load()
     try:
         v = w.topout_view

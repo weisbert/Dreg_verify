@@ -1746,8 +1746,20 @@ class SignalView(QtWidgets.QWidget):
         self.cur_cols = [c for i, c in enumerate(self.cur_cols) if i not in sel]
         self._commit(); self._populate_truth()
 
+    def _confirm(self, title, text):
+        """不可逆/影响验证意义的操作，先问一声（默认按钮 = 否，防手滑回车）。"""
+        return QtWidgets.QMessageBox.question(
+            self, title, text,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
+
     def _e_clear(self):
         if self.cur_an is None or not self.cur_an["editable"]:
+            return
+        if self.cur_cols and not self._confirm(
+                "确认清空",
+                "清空 %s 的所有测试列 = 该信号零用例（生成 .sv 时本信号不产出任何断言）。\n"
+                "可点「重新生成」按当前覆盖度恢复默认。确定？" % self.cur_an["name"]):
             return
         self.cur_cols = []
         self._commit(); self._populate_truth()
@@ -1755,10 +1767,21 @@ class SignalView(QtWidgets.QWidget):
     def _e_fill(self):
         if self.cur_an is None or not self.cur_cols:
             return
-        for c in self.cur_cols:
-            if not c["neg"] and c["exp"] is None:
-                c["exp"] = c["auto"]
+        targets = [c for c in self.cur_cols if not c["neg"] and c["exp"] is None]
+        if not targets:
+            self.main.status.showMessage("没有可填的列：期望都已手填(或全是负向列)")
+            return
+        if not self._confirm(
+                "auto_out → 期望",
+                "把 auto_out(程序计算值) 填进 %d 列未填的「期望」？\n\n"
+                "⚠ 注意：这等于直接采信程序算出的值——失去了 designer 独立核对的意义。\n"
+                "更稳妥的做法是自己算一遍再填(或用 HTML 报告的『真值表检查』页自测)。\n"
+                "确认无误时再用这个快捷方式。" % len(targets)):
+            return
+        for c in targets:
+            c["exp"] = c["auto"]
         self._commit(); self._populate_truth()
+        self.main.status.showMessage("已把 auto_out 填入 %d 列「期望」(已手填的未动)" % len(targets))
 
     def _e_addneg(self, *_):
         self._add_negatives(False)
@@ -1799,11 +1822,37 @@ class SignalView(QtWidgets.QWidget):
             msg += "；%d 条用例已有负向，已跳过" % skipped
         self.main.status.showMessage(msg)
 
+    def _protected_negatives(self):
+        """"值得保护"的负向列 = 自定义命名 或 手填过错值（误删就是丢用户的活）。
+        自动造的负向叫 T<n>_NEG / U<n>_NEG、错值 = make_negative 的防撞取反值。"""
+        out = []
+        for c in (self.cur_cols or []):
+            if not c.get("neg"):
+                continue
+            named = not TE.is_auto_neg_name(c.get("name"))
+            _tmpv = V.TestVector(0, {}, c["auto"], c["auto_w"])
+            hand = (c.get("exp") is not None
+                    and c["exp"] != V.make_negative(_tmpv, mode="invert").neg_value)
+            if named or hand:
+                out.append(c)
+        return out
+
     def _e_delneg(self):
         if self.cur_an is None or not self.cur_cols:
             return
+        negs = [c for c in self.cur_cols if c["neg"]]
+        if not negs:
+            self.main.status.showMessage("本信号没有负向列可删")
+            return
+        prot = self._protected_negatives()
+        if prot and not self._confirm(
+                "确认删除负向",
+                "%s 有 %d 条自定义命名/手填错值的负向，删除会丢失（正向列保留）。确定？"
+                % (self.cur_an["name"], len(prot))):
+            return
         self.cur_cols = [c for c in self.cur_cols if not c["neg"]]
         self._commit(); self._populate_truth()
+        self.main.status.showMessage("已删除 %d 条负向列（正向保留）" % len(negs))
 
     def _e_rename(self):
         sel = self._sel_cols()

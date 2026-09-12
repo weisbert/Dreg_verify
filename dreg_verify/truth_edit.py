@@ -12,8 +12,8 @@
 import re
 
 __all__ = ["parse_int", "parse_cell", "uniq_col_name", "sanitize_name",
-           "is_reserved_test_name", "final_col_name", "check_col_name",
-           "vals_key", "plan_negatives"]
+           "is_reserved_test_name", "is_auto_neg_name", "final_col_name",
+           "check_col_name", "vals_key", "plan_negatives"]
 
 
 # ───────────────────────── ① 数值写法 ─────────────────────────
@@ -72,6 +72,7 @@ def parse_cell(s):
 
 # ───────────────────────── ② 列名 ─────────────────────────
 _RE_AUTO_NAME = re.compile(r"(?i)^t\d+(_neg)?$")
+_RE_AUTO_NEG = re.compile(r"(?i)^[tu]\d+_neg$")
 
 
 def uniq_col_name(existing, prefix="U", suffix="", start=0):
@@ -97,6 +98,12 @@ def sanitize_name(s):
 def is_reserved_test_name(nm):
     """T<编号> / T<编号>_NEG 是自动测试的保留命名——手填会在列位移后撞名，禁止。"""
     return bool(_RE_AUTO_NAME.match(str(nm or "")))
+
+
+def is_auto_neg_name(nm):
+    """是不是【工具自动造】的负向列名（T<n>_NEG / U<n>_NEG）。
+    反之 = 用户自己改过名 → 属"值得保护"的负向，删之前要先问一声。"""
+    return bool(_RE_AUTO_NEG.match(str(nm or "")))
 
 
 def final_col_name(nm, negative=False):
