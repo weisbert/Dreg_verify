@@ -325,6 +325,60 @@ def test_r2_12_newer_config_version_says_one_line(win, tmp_path):
     assert T.EXPORT_IMPORT_NEWER_VERSION not in EC.import_config(win.state, str(p2)).text()
 
 
+# ═══════════════ R3-06：术语替换表本身的三处病 ═══════════════
+def test_r3_06_scrub_is_idempotent_and_keeps_real_page_names():
+    """同一段文本会被 scrub 两遍（`resolve_detail` 内部一次、`scrub_detail` 整段再一次）。
+
+    以前第二遍会把第一遍的产物再换一次：
+      ·「寄存器定义表（Excel 的 tmm 页）」→「寄存器定义表（Excel 的 寄存器定义表 页）」；
+      ·「按 wire 兜底 force 裸名 X」→「按 按命名约定当线网处理 force 裸名 X」。
+    """
+    samples = [
+        "regmap 页缺 addr 列",
+        "RO 回读(regmap)——模拟/FSM 状态、非寄存器组合函数，无 cone，跳过+记账",
+        "输入 A 表里查无字段，按 wire 兜底 force 裸名 x——该网在 RTL 顶层多半不存在",
+        IT.FOUND_IN_TEXT["tmm"], IT.FOUND_IN_TEXT["regmap"], IT.FOUND_IN_TEXT["wire"],
+        "导出 claims 给红区", "必 CUVUNF", "tmm 里没有这个字段",
+    ]
+    for raw in samples:
+        once = IT.scrub_terms(raw)
+        assert IT.scrub_terms(once) == once, "scrub 两遍结果不一样：%r → %r" % (raw, once)
+    # ① 已是人话的来源串原样不动
+    for v in IT.FOUND_IN_TEXT.values():
+        assert IT.scrub_terms(v) == v, v
+    # ② 「按 … force」不再多出一个「处理」
+    got = IT.scrub_terms("按 wire 兜底 force 裸名 x")
+    assert "处理 force" not in got and "按命名约定当线网 force" in got
+    # ③ 页名位置保留真页名 + 中文说法（就地解释）
+    assert IT.scrub_terms("regmap 页缺 addr 列").startswith(IT.PAGE_NAME_TEXT["regmap"])
+    assert IT.scrub_terms("tmm 页") == IT.PAGE_NAME_TEXT["tmm"]
+    # ④ claims 只有一种译法（与术语表 T 数组同一句）
+    assert IT.CLAIMS_TEXT in IT.scrub_terms("导出 claims 给红区")
+    assert IT.CLAIMS_TEXT == dict((b, s) for b, s, _f in T.TERMS)["claims"]
+    # ⑤ 记账 / 账目 与术语表同一句
+    assert "只记录" in IT.scrub_terms("跳过+记账") and "不产生断言" in IT.scrub_terms("记账")
+
+
+# ═══════════════ R3-07：解析明细「状态」行与清单徽标同一档 ═══════════════
+def test_r3_07_resolve_detail_status_line_matches_the_badge(win):
+    """以前解析明细走引擎的**四档** status，徽标走**八档** —— 同一块屏幕上
+    「状态 可建」对着「⚠ 输入缺前缀·跳过」，用户只能自己猜哪个算数。"""
+    _load(win, "wl", risky=False)
+    m = _first_with(win, "needs-prefix")
+    assert m, "关了强制生成却没有 needs-prefix 档，样本选错了"
+    win.state.set_current(m["name"])
+    H.app().processEvents()
+    hdr = win.detail_header
+    hdr.resolve_btn.setChecked(True)
+    H.app().processEvents()
+    text = hdr.resolve_text()
+    badge = T.STATUS[T.status_key_of(m)][0]
+    assert badge in text, "解析明细的状态行与徽标对不上：%r" % text.splitlines()[:4]
+    assert H.find(win, names.HDR_STATUS_BADGE).text() == badge
+    # 四档那句（「可建 —— 输入都落到了具体的网…」）不再出现在这一行上
+    assert IT.AN_STATUS_TEXT["ok"] not in text
+
+
 def test_f1_two_new_strings_reviewed():
     """F1 留给 F2 过目的两条：名字在前、不写本机全路径。"""
     # `{names}（共 {n} 列）…` —— 名字在前、计数在后（I-20）

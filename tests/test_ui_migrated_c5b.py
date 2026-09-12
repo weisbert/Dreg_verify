@@ -21,6 +21,7 @@ import ui_harness as H                                    # noqa: E402
 pytest.importorskip("PySide6")
 
 from dreg_verify import exports as X                      # noqa: E402
+from dreg_verify import inputs_table as IT                # noqa: E402
 from dreg_verify import rtl_scan                          # noqa: E402
 from dreg_verify import session as SS                     # noqa: E402
 from dreg_verify.ui import app as A                       # noqa: E402
@@ -639,4 +640,5 @@ def test_c043_whole_table_analysis_failure_shows_a_human_message(win, qapp, monk
         reason=terms.scrub("regmap 页缺 addr 列"))
     assert H.find(w, names.ERROR_TEXT).text() == want
     assert H.find(w, names.STATUS_LEFT).text() == want
-    assert "regmap" not in want, "术语没过 scrub"
+    # R3-06 ③：页名位置保留真页名，但括号外是中文说法（就地解释，不是裸用）
+    assert IT.PAGE_NAME_TEXT["regmap"] in want, "术语没过 scrub"

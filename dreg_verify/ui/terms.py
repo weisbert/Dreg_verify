@@ -121,6 +121,21 @@ def status_key_of(model):
     return st if st in STATUS else "error"
 
 
+#: 解析明细「状态」那一行的写法（R3-07）：标签 + 悬停解释，与清单徽标同一档。
+STATUS_DETAIL_LINE_FMT = "{label} —— {help}"
+
+
+def status_detail_text(model):
+    """模型行 / an → 解析明细「状态」那一行。**与清单徽标同一档**（八档，`status_key_of`）。
+
+    以前解析明细走的是 `inputs_table.AN_STATUS_TEXT`（引擎的**四档** status），于是同一块
+    屏幕上出现「解析明细：状态 可建」对着「徽标：⚠ 输入缺前缀·跳过」—— 两个数、两句话，
+    用户只能自己猜哪个算数（R3-07）。"""
+    key = status_key_of(model)
+    label, _tone, help_text = STATUS[key]
+    return STATUS_DETAIL_LINE_FMT.format(label=label, help=help_text)
+
+
 def tone_of(model):
     """模型行 → 色档 `ok` / `warn` / `bad` / `note`（= `STATUS[status_key_of(m)][1]`）。"""
     return STATUS[status_key_of(model)][1]

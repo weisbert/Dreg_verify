@@ -196,10 +196,16 @@ def test_c065_resolve_detail_has_no_raw_terms(real):
     hdr.show_signal(_ready_model(st, LOGIC_SIG))
     H.click(H.find(hdr, names.HDR_RESOLVE_BTN))
     text = hdr.resolve_text()
-    # CUVUNF 只允许出现在「首次出现的完整说法」里（术语表第 10 行钦定的展开式）
+    # CUVUNF 只允许出现在「首次出现的完整说法」里（术语表第 10 行钦定的展开式）；
+    # R3-06 ③：`tmm` / `regmap` 在**页名位置**保留真页名，但**括号外就是中文说法**
+    # （`FOUND_IN_TEXT` / `PAGE_NAME_TEXT` 两处都是就地解释过的）——摘掉它们再扫。
     stripped = text.replace(terms.CUVUNF_FIRST, "")
+    for ok in list(IT.FOUND_IN_TEXT.values()) + list(IT.PAGE_NAME_TEXT.values()):
+        stripped = stripped.replace(ok, "")
     for word in terms.FORBIDDEN:
         assert word not in stripped, "解析明细裸出现术语：%s" % word
+    # 反过来：来源串确实还在（放行不能变成「顺手把解释也删了」）
+    assert "查到了这个字段" in text or "按命名约定" in text
 
 
 # ═════════════════════════ C-106 手填期望进度 ═════════════════════════
@@ -270,7 +276,8 @@ def test_c043_worker_failure_can_be_pushed_in(fake):
     assert not H.find(hdr, names.HDR_ERROR_LABEL, QtWidgets.QLabel).isVisible()
     hdr.set_error("%s\n读 regmap 页时炸了" % terms.HDR_ANALYSIS_FAILED)
     err = H.find(hdr, names.HDR_ERROR_LABEL, QtWidgets.QLabel)
-    assert err.isVisible() and "regmap" not in err.text()          # scrub 过
+    # scrub 过：R3-06 ③ 之后，页名位置保留真页名但括号外给中文说法（就地解释，不是裸用）
+    assert err.isVisible() and IT.PAGE_NAME_TEXT["regmap"] in err.text()
     hdr.set_error("")
     assert not err.isVisible()
 

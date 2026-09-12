@@ -32,7 +32,7 @@ __all__ = [
     "vheader_label", "vheader_short", "vheader_display", "mux_label", "dft_gate_row", "mux_ctrl_rows",
     "input_rows", "row_cells", "drive_ctx", "drive_pair", "vector_drives", "column_drives",
     "cell_drive_tip", "header_drive_tip", "gate_pin", "legacy_resolve_detail", "resolve_detail",
-    "needs_prefix_rows", "shaky_rows",
+    "needs_prefix_rows", "shaky_rows", "CLAIMS_TEXT", "PAGE_NAME_TEXT",
 ]
 
 # 「输入信号」表(真值表上方)：把字母→信号/角色/驱动 集中成一张可读的小表
@@ -95,32 +95,80 @@ AN_STATUS_TEXT = {
 # CUVUNF 首次出现的展开说法（Design prompt §8.6：不许裸用错误码）
 CUVUNF_FIRST = "仿真器找不到这根网（elaboration 阶段报错，错误码 CUVUNF）"
 
+# 探针清单的定版说法（术语表 T 数组那一行；界面上到处都是这一个写法，不另起一套）
+CLAIMS_TEXT = "探针清单（claims.json）"
+
+#: `tmm` / `regmap` 出现在**页名位置**（「tmm 页」「regmap 页」）时的写法（R3-06 ③）。
+#: 它们是用户在 Excel 标签上真看得见的页名 —— 直接换掉就成了「寄存器定义表 页缺 addr 列」，
+#: 换回原页名又是裸用术语。所以两样都给：中文说法 + 括号里的真页名（= 就地解释）。
+PAGE_NAME_TEXT = {"tmm": "寄存器定义表（tmm 页）", "regmap": "寄存器地址映射表（regmap 页）"}
+
+#: **已经是人话**的定版串：过 scrub 时先摘成哨兵、替换完再放回去（R3-06 ①）。
+#: 这些串本身就含「tmm 页」「claims.json」「错误码 CUVUNF」这类词 —— 它们是**说明**，
+#: 不是待替换的术语。同一段文本会被 scrub 两次（`resolve_detail` 内部一次、
+#: `detail_header.scrub_detail` 整段再一次），没有保护第二次就会把说明本身也换掉。
+#: 按长度降序摘，长串先走（短串是长串的一部分时不会先把长串切碎）。
+_PROTECTED = tuple(sorted(
+    set(FOUND_IN_TEXT.values()) | set(PAGE_NAME_TEXT.values()) | {CUVUNF_FIRST, CLAIMS_TEXT},
+    key=len, reverse=True))
+_SENTINEL_FMT = "\x00t%d\x00"
+#: 定版串 → 它的哨兵。**规则的替换文本也用哨兵**：替换是顺序执行的，
+#: 「regmap 页 → 寄存器地址映射表（regmap 页）」插进去之后，下一条规则
+#: 「regmap → 寄存器地址映射表」会再吃掉括号里那个真页名（→「（寄存器地址映射表 页）」）。
+_SENT = {s: _SENTINEL_FMT % i for i, s in enumerate(_PROTECTED)}
+
 # 术语替换表（Design prompt §8.6）：后端给的 note / issues 里还留着一堆内部说法
 # （『无 cone，跳过+记账』这种），照搬到界面上就是术语裸露。往界面送之前过一遍这张表。
 # ASCII 词用词边界匹配，免得把信号名里的同名片段也改了（d_tmm_xxx 不能动）。
+#
+# R3-06 三处修正：
+#   ① 规则**带前后文**。以前 `wire 兜底 → 按命名约定当线网处理` 是裸替换，引擎那句
+#      「按 wire 兜底 force 裸名 X」于是变成「按 按命名约定当线网处理 force 裸名 X」
+#      （多一个「按」、多一个「处理」）。现在「按…force」「按…处理」各有各的规则。
+#   ② `claims` 的译法与术语表 T 数组统一成 `CLAIMS_TEXT`（以前这里写「认领清单」、
+#      术语表写「探针清单（claims.json）」，同一个东西两个名字）。
+#   ③ `tmm` / `regmap` 出现在**页名位置**（「tmm 页」「Excel 的 regmap 页」）时换成
+#      `PAGE_NAME_TEXT`：中文说法 + 括号里的**真页名**。直接换掉页名会变成
+#      「寄存器定义表 页缺 addr 列」（对不上用户在 Excel 标签上看到的东西），
+#      原样留着又是裸用术语 —— 两样都给，就是「就地解释」。
 _TERM_RULES = [
-    (re.compile(r"跳过\s*\+\s*记账"), "跳过并记在清单里"),
+    (re.compile(r"跳过\s*\+\s*记账"), "跳过，只记录不产生断言"),
     (re.compile(r"无\s*cone(?![A-Za-z0-9_])", re.I), "没有可展开的上游"),
     (re.compile(r"(?<![A-Za-z0-9_])cone\s*展开", re.I), "从输出往回展开到源寄存器"),
     (re.compile(r"(?<![A-Za-z0-9_])cone(?![A-Za-z0-9_])", re.I), "从输出往回展到源寄存器"),
-    (re.compile(r"记账"), "记在清单里"),
+    (re.compile(r"记账"), "只记录、不产生断言"),
+    (re.compile(r"账目"), "只记录不产生断言的那份清单"),
     (re.compile(r"(?<![A-Za-z0-9_])prefixed-wire(?![A-Za-z0-9_])", re.I), "带层级前缀的线网"),
+    (re.compile(r"按\s*wire\s*兜底\s*(?=force|驱动)"), "按命名约定当线网 "),
+    (re.compile(r"按\s*wire\s*兜底\s*处理"), "按命名约定当线网处理"),
     (re.compile(r"wire\s*兜底"), "按命名约定当线网处理"),
+    (re.compile(r"(?<![A-Za-z0-9_])regmap\s*页", re.I), _SENT[PAGE_NAME_TEXT["regmap"]]),
+    (re.compile(r"(?<![A-Za-z0-9_])tmm\s*页", re.I), _SENT[PAGE_NAME_TEXT["tmm"]]),
     (re.compile(r"(?<![A-Za-z0-9_])regmap(?![A-Za-z0-9_])", re.I), "寄存器地址映射表"),
     (re.compile(r"(?<![A-Za-z0-9_])tmm(?![A-Za-z0-9_])", re.I), "寄存器定义表"),
-    (re.compile(r"(?<![A-Za-z0-9_])claims(?![A-Za-z0-9_])", re.I), "认领清单"),
+    (re.compile(r"(?<![A-Za-z0-9_])claims(?![A-Za-z0-9_.])", re.I), _SENT[CLAIMS_TEXT]),
     (re.compile(r"必\s*CUVUNF"), "必然找不到这根网"),
     (re.compile(r"(?<![A-Za-z0-9_])CUVUNF(?![A-Za-z0-9_])"), "找不到这根网"),
 ]
 
-
 def scrub_terms(text):
     """把后端文本（an 的 note / issues、解析器留的说明）里的内部术语换成工程师说法。
 
-    只动这几个 §8.6 点名的词，其余原样——信号名、地址、位段都不能碰。"""
+    只动这几个 §8.6 点名的词，其余原样——信号名、地址、位段都不能碰。
+    已是人话的定版串（`_PROTECTED`）先摘成哨兵，**不会被二次替换**；
+    规则自己插进去的定版串也是哨兵，收尾时一起还原。"""
     out = text or ""
+    if not out:
+        return out
+    for s in _PROTECTED:                      # 长串先摘（短串是长串一部分时不会把长串切碎）
+        if s in out:
+            out = out.replace(s, _SENT[s])
     for rx, rep in _TERM_RULES:
         out = rx.sub(rep, out)
+    for s in _PROTECTED:                      # 摘出去的 + 规则新插进来的，一起放回
+        sent = _SENT[s]
+        if sent in out:
+            out = out.replace(sent, s)
     return out
 
 
@@ -655,12 +703,17 @@ def legacy_resolve_detail(sig, a, status_label=None):
     return "\n".join(lines)
 
 
-def resolve_detail(an):
+def resolve_detail(an, status_text=None):
     """**解析明细**：一整块给 IC 工程师看的文本（信号 / 逻辑式 / 状态 / 断言探针 /
     逐输入解析 / 找不到网时的排查步骤）。an 为空 → 空串。
 
     术语按 Design prompt §8.6：CUVUNF 首次出现展开成「仿真器找不到这根网」，
     不出现 cone / 记账 / prefixed-wire 这类裸词。
+
+    `status_text`：「状态」那一行写什么。不给就退到 `AN_STATUS_TEXT` 的**四档**
+    （`an["status"]`）—— 而清单徽标是**八档**（`terms.status_key_of`），同一块屏幕上于是
+    出现「解析明细：状态 可建」对着「徽标：⚠ 输入缺前缀·跳过」（R3-07）。v2 的调用方
+    （`ui/detail_header`）一律把八档那一句传进来；四档只留给旧门面与单测兜底。
     """
     if not an:
         return ""
@@ -675,7 +728,7 @@ def resolve_detail(an):
     if expr:
         lines.append("逻辑式   %s = %s" % (getattr(sig, "out_base", None) or "out", expr))
     st = an.get("status") or ""
-    lines.append("状态     %s" % AN_STATUS_TEXT.get(st, st))
+    lines.append("状态     %s" % (status_text or AN_STATUS_TEXT.get(st, st)))
     probe = _probe_net(an)
     if probe:
         lines.append("断言探针 %s   ← 仿真里比对的就是这根网" % probe)

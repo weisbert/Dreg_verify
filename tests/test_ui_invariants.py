@@ -104,6 +104,7 @@ from PySide6 import QtCore, QtGui, QtWidgets                    # noqa: E402
 
 from dreg_verify import edits as ED                             # noqa: E402
 from dreg_verify import exports as X                            # noqa: E402
+from dreg_verify import inputs_table as IT                      # noqa: E402
 from dreg_verify import session                                 # noqa: E402
 from dreg_verify.ui import app as A                             # noqa: E402
 from dreg_verify.ui import contracts, names, terms              # noqa: E402
@@ -408,12 +409,17 @@ _REDLINE_1 = (
     (re.compile(r"发给维护者|发给开发|提交到仓库|请把下面"), "「请把下面发给维护者」"),
 )
 
-#: 屏幕上**允许**出现禁用词的三处（与 `test_ui_terms_scan._FORBIDDEN_OK` 同一份登记，
-#: 来源一律取 `terms` 的常量 —— 文案改了这里跟着走，不会变成一份过期的副本）
+#: 屏幕上**允许**出现禁用词的几处（与 `test_ui_terms_scan._FORBIDDEN_OK` 同一份登记，
+#: 来源一律取 `terms` / `inputs_table` 的常量 —— 文案改了这里跟着走，不会变成一份过期的副本）。
+#: 值是「就地解释过的那几句」；一条文本里含禁用词但不含其中任何一句 = 裸用。
+#: R3-06 ③ 之后多两类：`tmm` / `regmap` 出现在**页名位置**时保留真页名 + 括号里的中文说法
+#: （`inputs_table.PAGE_NAME_TEXT`），以及来源串本身（`FOUND_IN_TEXT`，已是人话、scrub 不动它）。
 _FORBIDDEN_OK = {
-    "CUVUNF": terms.DIAG_CUVUNF_TITLE,
-    "claims": terms.EXPORT_ROWS["claims"][0],
-    "regmap": terms.EMPTY_DESC,
+    "CUVUNF": (terms.DIAG_CUVUNF_TITLE, terms.CUVUNF_FIRST),
+    "claims": (terms.EXPORT_ROWS["claims"][0], IT.CLAIMS_TEXT),
+    "regmap": (terms.EMPTY_DESC, IT.PAGE_NAME_TEXT["regmap"], IT.FOUND_IN_TEXT["regmap"]),
+    "tmm": (IT.PAGE_NAME_TEXT["tmm"], IT.FOUND_IN_TEXT["tmm"]),
+    "假绿": (terms.DLG_MUX_DATA_HINT, terms.TRUTH_MUX_COLLISION, terms.STATUS["false-green"][2]),
 }
 
 
@@ -588,9 +594,9 @@ def test_i12_c273_no_raw_terms_on_screen_full_window(scan_win, qapp):
         for word in terms.FORBIDDEN:
             if word not in text:
                 continue
-            src_text = _FORBIDDEN_OK.get(word)
-            if src_text is not None and src_text in text:
-                continue                                 # 就地解释过的三处，逐条放行
+            oks = _FORBIDDEN_OK.get(word) or ()
+            if any(ok and ok in text for ok in oks):
+                continue                                 # 就地解释过的那几处，逐条放行
             bad.append("%s[%s] 裸用 %r：%r" % (owner or "?", src, word, text[:110]))
     assert not bad, ("这些面上裸露了内部术语（要么换说法、要么经 terms.scrub）：\n%s"
                      % "\n".join(sorted(set(bad))))

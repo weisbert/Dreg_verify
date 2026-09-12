@@ -924,7 +924,8 @@ def test_i12_backend_text_is_scrubbed_everywhere():
     blob = all_visible_text(panel)
     for word in ("记账", "CUVUNF", "prefixed-wire", "regmap", "wire 兜底"):
         assert word not in blob, "界面上裸露了内部术语 %r" % word
-    assert "找不到这根网" in blob and "记在清单里" in blob
+    # R3-06：`记账` 统一译成「只记录、不产生断言」（与术语表 T 数组同一个说法）
+    assert "找不到这根网" in blob and "不产生断言" in blob
 
 
 def test_reason_block_never_shows_unfilled_placeholder():

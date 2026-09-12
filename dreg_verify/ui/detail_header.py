@@ -414,7 +414,9 @@ class DetailHeader(QtWidgets.QWidget):
         an = self._an
         if an is None and self._name:
             an = self._an = self._analyze(self._name)
-        text = scrub_detail(IT.resolve_detail(an)) if an else ""
+        # R3-07：「状态」那一行走八档（与清单徽标同一档），不用引擎的四档 status
+        st_text = terms.status_detail_text(self._model or an or {}) if an else ""
+        text = scrub_detail(IT.resolve_detail(an, status_text=st_text)) if an else ""
         if not text:
             text = failure_text(self._model, an) if self._name else ""
         self.resolve_panel.setPlainText(text)

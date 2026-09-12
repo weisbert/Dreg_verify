@@ -518,7 +518,8 @@ def test_scrub_terms_rewrites_backend_jargon():
     got = IT.scrub_terms(src)
     for bad in ("regmap", "cone", "记账"):
         assert bad not in got
-    assert "寄存器地址映射表" in got and "记在清单里" in got
+    # R3-06：`记账` 的译法与术语表 T 数组统一成「只记录、不产生断言」
+    assert "寄存器地址映射表" in got and "只记录" in got and "不产生断言" in got
     assert IT.scrub_terms("") == "" and IT.scrub_terms(None) == ""
 
 

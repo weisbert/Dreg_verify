@@ -229,14 +229,21 @@ def test_c028_c029_kind_status_filters(bar):
 # ───────────────────────── C-030 / C-031 / C-047 搜索 ─────────────────────────
 
 def test_c030_c031_regex_search_reports_visible_and_by_input(bar):
+    """C5b-2：这条以前 4 跑 1 红 —— `H.type_text` 是**真键盘事件**，offscreen 下逐字派发，
+    机器一忙就超过 150ms 的去抖窗口，于是「敲字当下不重筛」那一句偶尔已经重筛过了。
+
+    改法：验「不重筛」时把去抖拉到足够长（计时器打桩，不靠机器跑得快）；
+    验「计时器真的会自己到点」时改用 `H.wait_for` 等条件，不用固定 qWait 赌时长。"""
     search = H.find(bar, names.FILTER_SEARCH)
     assert search.placeholderText() == terms.SEARCH_PLACEHOLDER
     msgs = _catch(bar.statusMessage)
     got = _catch(bar.filterChanged)
 
-    # 去抖 150ms：敲字当下不重筛
+    # 去抖：敲字当下不重筛（把窗口拉到 10s，排除「打字比去抖还慢」这个时序变量）
+    bar._debounce.setInterval(10000)
     H.type_text(search, "alpha|beta")
-    assert got == []
+    assert got == [], "去抖窗口内不该重筛"
+    bar._debounce.setInterval(FB.SEARCH_DEBOUNCE_MS)
     bar.flush_search()
     assert got[-1]["regex"] == "alpha|beta"
     assert msgs[-1] == terms.STATUS_VISIBLE_FMT.format(v=2, m=5, k=0)
@@ -253,15 +260,13 @@ def test_c030_c031_regex_search_reports_visible_and_by_input(bar):
         assert msgs[-1] == terms.STATUS_VISIBLE_FMT.format(v=exp_v, m=5, k=exp_k)
     assert "按输入信号名命中" in msgs[-1]
 
-    # 去抖计时器真的会自己到点（不靠 flush）
+    # 去抖计时器真的会自己到点（不靠 flush）——等条件，不赌固定时长
     search.setText("")
     bar.flush_search()
     n0 = len(got)
     H.type_text(search, "sig_")
-    QtCore.QCoreApplication.processEvents()
-    from PySide6.QtTest import QTest
-    QTest.qWait(FB.SEARCH_DEBOUNCE_MS + 120)
-    assert len(got) > n0 and got[-1]["regex"] == "sig_"
+    assert H.wait_for(lambda: len(got) > n0), "去抖计时器没有自己到点"
+    assert got[-1]["regex"] == "sig_"
 
 
 def test_c047_type_suffix_search(bar):
