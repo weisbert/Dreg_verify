@@ -423,15 +423,6 @@ _FORM_COV_ROWS = [
 ]
 
 
-def _parse_cell_int(text):
-    """真值表单元格输入 → int（空 = 没填 → None；识别不了 → 抛 ValueError，调用方必须让用户看见）。
-
-    8 种写法(16'hA / 'hA / 0xA / hA / 'b101 / 0b101 / 'd9 / 9 / 裸 hex)由 truth_edit 统一实现，
-    新门面与『排查(旧)』同一份——此前新门面只认 4 种，16'h3 / 'b101 / hA 会被静默吞成 0/未填。
-    """
-    return TE.parse_cell(text)
-
-
 def _subst_expr(expr, name_of):
     """把单字母变量(A-J)替换成真实信号名，给展开链『字母代入』一行用（cone 多级链由分析结果直接给）。"""
     return _SV_VAR_RE.sub(lambda m: name_of.get(m.group(1), m.group(1)), expr or "")
