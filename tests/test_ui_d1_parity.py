@@ -41,20 +41,20 @@ def _v2_window(path):
     return w
 
 
-def _v1_sv(view):
+def _v1_sv(view, only=None):
     """v1 Topout 视图当前编辑状态渲染出的 .sv 全文（= 它 `on_export_sv` 写盘的那份）。"""
     mode, exh = view._mode()
-    text, _ = X.render_sv(view.provider, only=None, mode=mode, max_tests=view._maxt(),
+    text, _ = X.render_sv(view.provider, only=only, mode=mode, max_tests=view._maxt(),
                           exhaustive=exh, edited=view._compute_edited(),
                           sig_cov=view._sig_cov, form_cov=view._form_cov)
     return text
 
 
-def _v2_sv(w, vid="topout"):
+def _v2_sv(w, vid="topout", only=None):
     """v2 同一份 .sv（同一个 `exports.render_sv`，参数从 state 取）。"""
     cov = w.state.coverage(vid)
     mode, exh = cov.mode()
-    text, _ = X.render_sv(w.state.provider(vid), only=None, mode=mode,
+    text, _ = X.render_sv(w.state.provider(vid), only=only, mode=mode,
                           max_tests=int(cov.max_tests), exhaustive=exh,
                           edited=w.state.compute_edited(vid),
                           sig_cov=dict(cov.sig_cov) or None, form_cov=dict(cov.form_cov) or None)
@@ -133,3 +133,128 @@ def test_p02_truth_toolbar_negatives_keep_their_own_numbering(monkeypatch, tmp_p
     made, _skipped = ED.add_negatives(cols, [0, 1], False)
     assert [c["name"] for c in made] == ["U0_NEG", "U1_NEG"]
     assert ST.NEG_COL_NAME == "T0_NEG"
+
+
+# ═════════════ P-07：「清空勾选」只清可见（v1 口径）═════════════
+def test_p07_uncheck_all_only_clears_the_visible_rows(monkeypatch, tmp_path):
+    """C-033。工程师的用法是「筛出这一批 → 清掉这一批 → 换个筛选再挑」。v1
+    `SignalView._check_all(False)` 跳过 `isRowHidden` 的行，v2 清的是整张清单 ——
+    筛选之外那些他刚挑好的被静默抹掉，清单上看不见、状态栏也只报一个数（P-07）。
+
+    序列两边一字不差：载表（默认全勾）→ 搜 `d_logic` → 清空勾选 → 清掉搜索 →
+    按「勾选的」渲 .sv → 逐字节比。
+    """
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.auto_dialogs(monkeypatch)
+    path = H.mirror_path("btlp")
+
+    w1, v1 = _v1_window(path)
+    try:
+        n_all = len(v1._checked_names())
+        v1.search.setText("d_logic")
+        v1._apply_filter()
+        n_vis1 = sum(1 for r in range(v1.sig_table.rowCount())
+                     if not v1.sig_table.isRowHidden(r))
+        v1._check_all(False)                     # 「清空勾选」
+        v1.search.setText("")
+        v1._apply_filter()
+        left1 = sorted(v1._checked_names())
+        sv1 = _v1_sv(v1, only=v1._checked_names())
+        # 第二次、且不同：换个筛选再「全选(可见)」——两边的「全选」本来就只作用可见
+        v1.search.setText("en_")
+        v1._apply_filter()
+        v1._check_all(True)
+        v1.search.setText("")
+        v1._apply_filter()
+        left1b = sorted(v1._checked_names())
+    finally:
+        w1.close()
+    H.app().processEvents()
+
+    w2 = _v2_window(path)
+    try:
+        lp = w2.list_panel
+        assert len(w2.state.checked_names("topout")) == n_all
+        lp.set_filters(regex="d_logic")
+        H.app().processEvents()
+        assert lp.proxy.n_visible() == n_vis1
+        lp.uncheck_all()
+        lp.set_filters()
+        H.app().processEvents()
+        left2 = sorted(w2.state.checked_names("topout"))
+        sv2 = _v2_sv(w2, only=w2.state.checked_names("topout"))
+        lp.set_filters(regex="en_")
+        H.app().processEvents()
+        lp.check_all_visible()
+        lp.set_filters()
+        H.app().processEvents()
+        left2b = sorted(w2.state.checked_names("topout"))
+    finally:
+        w2.close()
+
+    assert 0 < n_vis1 < n_all, "筛选得真的筛掉点东西，否则这条测试验不到作用域"
+    assert 0 < len(left1) < n_all, "v1 清空勾选后既有留下的也有清掉的"
+    assert left2 == left1
+    assert left2b == left1b and len(left1b) > len(left1)
+    assert sv2 == sv1, ".sv 与 v1 不再逐字节相同（v1 %d / v2 %d 字符）" % (len(sv1), len(sv2))
+
+
+# ═════════════ P-08：「全部加反例」作用于所有勾着的（v1 口径）═════════════
+def test_p08_neg_all_covers_every_checked_signal_even_the_hidden_ones(monkeypatch, tmp_path):
+    """C-035。勾选是「我要验这一批」的声明，与「这会儿筛选让我看见哪几行」是两件事。
+    v1 `_bulk_neg` 取的是 `_checked_names()`（整张清单里勾着的），v2 取的是「可见 ∩ 勾着」
+    —— 先勾 20 个、筛到 3 个、点「全部加反例」，另外 17 个静默没加上，导出时才发现（P-08）。
+
+    序列两边一字不差：载表（默认全勾）→ 搜 `d_logic` → 全部加反例 → 清掉搜索 → 比 .sv。
+    """
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.auto_dialogs(monkeypatch)
+    path = H.mirror_path("btlp")
+
+    w1, v1 = _v1_window(path)
+    try:
+        v1.search.setText("d_logic")
+        v1._apply_filter()
+        n_vis = sum(1 for r in range(v1.sig_table.rowCount())
+                    if not v1.sig_table.isRowHidden(r))
+        v1._bulk_neg(True)
+        v1.search.setText("")
+        v1._apply_filter()
+        neg1 = sorted(_neg_names(v1.edits))
+        sv1 = _v1_sv(v1)
+        # 第二次、且不同：再筛一个更小的集合「清除反例」——同一条作用域规矩反着走一遍
+        v1.search.setText("en_dig")
+        v1._apply_filter()
+        v1._bulk_neg(False)
+        v1.search.setText("")
+        v1._apply_filter()
+        neg1b = sorted(_neg_names(v1.edits))
+    finally:
+        w1.close()
+    H.app().processEvents()
+
+    w2 = _v2_window(path)
+    try:
+        lp = w2.list_panel
+        lp.set_filters(regex="d_logic")
+        H.app().processEvents()
+        assert lp.proxy.n_visible() == n_vis
+        lp.neg_all()
+        lp.set_filters()
+        H.app().processEvents()
+        neg2 = sorted(_neg_names(w2.state.edits("topout")))
+        sv2 = _v2_sv(w2)
+        lp.set_filters(regex="en_dig")
+        H.app().processEvents()
+        lp.neg_clear()
+        lp.set_filters()
+        H.app().processEvents()
+        neg2b = sorted(_neg_names(w2.state.edits("topout")))
+    finally:
+        w2.close()
+
+    assert len(neg1) > n_vis, "v1 应当连被筛掉的勾选信号一起加上，否则这条测试验不到作用域"
+    assert neg2 == neg1
+    # 「清除反例」走同一个 `neg_targets`：信号全都还勾着 → 一次清光（v1 也是），两边同样空
+    assert neg2b == neg1b == []
+    assert sv2 == sv1, ".sv 与 v1 不再逐字节相同（v1 %d / v2 %d 字符）" % (len(sv1), len(sv2))

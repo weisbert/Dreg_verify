@@ -387,18 +387,20 @@ def test_c151_global_change_clears_only_the_current_signal_override(win, qapp):
     assert cov.sig_cov_of(a) == "exhaustive", "改用例上限不该清单点档"
 
 
-# ══════════════════ ③ C-035：勾了但被筛掉的行不进批量作用域 ══════════════════
+# ══════════════════ ③ C-035：批量反例的作用域 = 所有勾着的（含被筛掉的）══════════════════
 
-def test_c035_bulk_neg_scope_excludes_checked_but_hidden_rows(win, qapp):
-    """替下 `test_gui_bulk_scope_excludes_hidden_checked`
-    （老断言：`r0 in w._scope_rows()` → 隐藏后 `r0 not in w._checked_rows()` /
-    `not in w._scope_rows()`）。
+def test_c035_bulk_neg_scope_keeps_checked_but_hidden_rows(win, qapp):
+    """替下 `test_gui_bulk_scope_excludes_hidden_checked`。
 
-    v2 的 `signal_list.neg_targets()` 写的是 `checked or names`，其中 `names` 已经是
-    **可见**那批；但 v2 侧两条现有测试（`test_c032_check_all_only_touches_visible_rows` /
-    `test_c035_neg_all_falls_back_to_visible_when_nothing_checked`）验的都是「没勾选」那条路。
-    「勾了、然后被筛掉」这条路没人守 —— 写成 `state.checked() or names` 一样绿，
-    而那会让批量反例改到用户**看不见**的信号。
+    ⚠ **C5-a 当初对错了 v1 的门面**（D1 对抗 review P-08 更正）：v1 有两套批量作用域，
+    老断言引的 `MainWindow._scope_rows()` 是**排查(旧)** 那张表（可见 ∩ 勾着），而 v2 清单
+    这一件的前身是 `SignalView`，它的 `_bulk_neg` 取的是 `self._checked_names()` ——
+    **整张清单里勾着的，不管这会儿看不看得见**。C-035 的契约原文也是「有勾选只作用勾选，
+    否则作用于全部可见」，没有「可见 ∩ 勾选」这一说。
+
+    为什么按 SignalView 那套：勾选是「我要验这一批」的声明，筛选是「这会儿我在看哪几行」。
+    先勾好 20 个、再筛到 3 个、点「全部加反例」，只有那 3 个加上了、另外 17 个静默没有 ——
+    到导出时才发现反例少了 17 条（P-08 实证：同一串动作 v1/v2 的 .sv 差 8 个信号的反例块）。
     """
     w = win
     _load(w)
@@ -416,7 +418,7 @@ def test_c035_bulk_neg_scope_excludes_checked_but_hidden_rows(win, qapp):
     assert w.state.is_checked(target)
     assert lp.neg_targets() == [target], "有勾选时作用域该只剩勾选那批：%s" % lp.neg_targets()
 
-    # ② 用真搜索框把它筛掉（第二次动作，与①不同）—— 它必须同时退出「可见」与「作用域」
+    # ② 用真搜索框把它筛掉（第二次动作，与①不同）—— 它退出「可见」，但**不**退出作用域
     keep = None
     for cand in all_names[1:]:
         lp.set_filters(regex=re.escape(cand))
@@ -427,14 +429,23 @@ def test_c035_bulk_neg_scope_excludes_checked_but_hidden_rows(win, qapp):
             break
     assert keep, "mirror 上找不到一个能把 %s 筛掉的搜索词" % target
     vis = lp.visible_names()
-    assert w.state.is_checked(target), "筛选不该动勾选本身"
-    assert target not in lp.neg_targets(), "勾了但被筛掉的行仍在批量作用域里"
-    assert set(lp.neg_targets()) == set(vis), "作用域没退回到可见那批"
+    assert target not in vis and w.state.is_checked(target), "筛选不该动勾选本身"
+    assert lp.neg_targets() == [target], "勾了、被筛掉，作用域里就该还是它（v1 SignalView 口径）"
 
     made = lp.neg_all()
     H.app().processEvents()
-    assert set(made) == set(vis)
-    assert not w.state.has_negatives(target), "看不见的信号被批量加上了反例"
+    assert made == [target]
+    assert w.state.has_negatives(target), "勾着的信号被筛掉就加不上反例了"
+    assert not any(w.state.has_negatives(n) for n in vis), "没勾的可见行不该被捎带上"
+
+    # ③ 一个都没勾时才退回「全部可见」（C-035 的后半句，与①②都不同）
+    lp.set_filters()                                                  # 先让它回到可见，才点得到
+    H.app().processEvents()
+    H.click_cell(lp.view, _row_of(w, target), int(LC.CHECK))          # 取消勾选
+    lp.set_filters(regex=re.escape(keep))
+    H.app().processEvents()
+    assert not w.state.is_checked(target)
+    assert set(lp.neg_targets()) == set(lp.visible_names()) == {keep}
 
 
 # ══════════════════ ④ C-023 / C-122：清单勾反例 → 编辑器真的多一列 ══════════════════

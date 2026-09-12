@@ -1262,8 +1262,13 @@ class SignalListPanel(QtWidgets.QWidget):
         return names
 
     def uncheck_all(self):
-        """C-033 清空全部勾选（整张清单，不只可见行）。"""
-        names = [str(m.get("name", "")) for m in self.model.rows()]
+        """C-033 清空勾选 —— **只作用于当前可见行**（v1 `SignalView._check_all(False)` 同口径）。
+
+        以前这里清整张清单。工程师的用法是「筛出这一批 → 清掉这一批 → 换个筛选再挑」，
+        清整张等于把筛选之外那些他刚挑好的也一并抹掉，而清单上看不见、状态栏也只报一个数
+        （P-07）。「全选」本来就只作用可见（C-032），两个按钮挨着放却一个可见一个全表，
+        更是没人想得到。要清整张：先把筛选清空再点。"""
+        names = self.visible_names()
         self._set_checked(names, False)
         self.statusMessage.emit(T.LIST_BTN_UNCHECK_ALL + " %d" % len(names))
         return names
@@ -1276,10 +1281,15 @@ class SignalListPanel(QtWidgets.QWidget):
         return names
 
     def neg_targets(self):
-        """C-035 的作用域：有勾选只作用勾选，否则作用于全部可见。"""
-        names = self.visible_names()
-        checked = [n for n in names if self.model.is_checked(n)]
-        return checked or names
+        """C-035 / C-036 的作用域：有勾选 → **所有勾着的**（v1 `_bulk_neg` 口径，含被筛掉
+        看不见的）；一个都没勾 → 全部可见行。
+
+        以前取的是「可见 ∩ 勾着」。勾选是「我要验这一批」的声明，与「这会儿筛选让我看见
+        哪几行」是两件事：先勾好 20 个、再筛到 3 个、点「全部加反例」，只有那 3 个加上了，
+        另外 17 个静默没有 —— 导出时才发现反例少了 17 条（P-08）。"""
+        names = [str(m.get("name", "")) for m in self.model.rows()]
+        checked = [n for n in names if n and self.model.is_checked(n)]
+        return checked or self.visible_names()
 
     def neg_all(self):
         """C-035 一键给一批信号各加 1 条反例。"""
