@@ -28,6 +28,18 @@ DEFAULT_NAMES = ("d_fake_lna_itrim", "d_fake_rx_en", "d_fake_pll_lock", "d_fake_
 _KIND_LABEL = {"logic": "选路/logic", "mux": "mux", "register": "直连寄存器"}
 
 
+def _fake_graph(name):
+    """假 provider 的图：**真** `sigflow.Graph`，一个只有根节点的最小图。
+
+    不能给个占位对象——组合根拿到 `an["graph"]` 就直接交给电路图视图画（`layout_graph`
+    上来就读 `.nodes`）。给真类型、空内容，视图走的是和真表一样的那条路。
+    """
+    from dreg_verify import sigflow as _SF
+    g = _SF.Graph(title=str(name or ""))
+    g.add_node("out", str(name or ""))
+    return g
+
+
 def lite_model(name, i=0, **over):
     """一行 lite 视图模型（键集 = `contracts.LITE_MODEL_KEYS`，一个不多一个不少）。"""
     m = {"name": name, "disp": name, "owner": "fake_owner", "width": 1,
@@ -90,13 +102,17 @@ class FakeProvider(object):
 
     def analyze(self, name, mode="max", max_tests=256, exhaustive=False, mux_data=None,
                 want_graph=False):
+        # ⚠ `graph` 以前给的是 `object()` 占位：组合根会把它直接喂给 `sigflow_view`，
+        #   `sigflow.layout_graph` 上来就读 `graph.nodes` → AttributeError。这个异常发生在
+        #   Qt 槽里，PySide6 只往 stderr 打一行，测试照样绿 —— C3-int 给全部 `test_ui_*`
+        #   装上 `sys.excepthook` 闸门之后当场露头（见 `tests/conftest.py`）。
         self.calls.append(("analyze", name, mode, bool(want_graph)))
         if name not in self.names:
             return None
         return {"name": name, "src_out_name": name, "kind": "logic", "editable": "",
                 "renamed": False, "groups": [], "vectors": [], "out_width": 1,
                 "note": "", "issues": [], "status": "ok", "status_detail": "clean",
-                "out_net": name, "graph": None if not want_graph else object()}
+                "out_net": name, "graph": _fake_graph(name) if want_graph else None}
 
     def render_sv(self, only=None, mode="max", max_tests=256, exhaustive=False, edited=None,
                   comments=True, sv_summary=False, owner_in_msg=False, scope="all",

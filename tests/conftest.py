@@ -13,10 +13,32 @@ import os
 import re
 import sys
 
+import pytest
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 仓库根
 for _p in (_ROOT, os.path.join(_ROOT, "redzone_tools")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+
+@pytest.fixture(autouse=True)
+def _no_swallowed_slot_errors(request, monkeypatch):
+    """I-14 之外的一道通用闸门：**Qt 槽里抛的异常一律判红**（C3-int 从真值表面板提上来）。
+
+    PySide6 的槽是 C++ 侧调回来的，Python 异常传不回去 —— 它只走 `sys.excepthook` 打一行
+    traceback。测试里点了按钮、动作其实没做成，而断言的那几样恰好没变，就是一条**绿**测试。
+    装上这道闸门之后，那种用例当场红。
+
+    只对 `test_ui_*.py` 生效（引擎测试不起 Qt，装了也白装）。要在某条用例里故意让槽抛异常，
+    自己在用例内把 `sys.excepthook` 换回去。
+    """
+    if not os.path.basename(str(request.node.fspath)).startswith("test_ui_"):
+        yield
+        return
+    import ui_harness as H                     # noqa: PLC0415  只有 UI 用例才需要
+    boom = H.slot_error_gate(monkeypatch)
+    yield
+    assert not boom, "槽里抛了异常（Qt 只打了 stderr，动作其实没做成）：%s" % "；".join(boom)
 
 
 _CONTRACT_ID = re.compile(r"[Cc][-_ ]?(\d{3,})")

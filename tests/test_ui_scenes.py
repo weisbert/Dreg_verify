@@ -19,9 +19,10 @@ import ui_harness as H
 
 pytest.importorskip("PySide6")
 
-from PySide6 import QtWidgets                                   # noqa: E402
+from PySide6 import QtCore, QtWidgets                            # noqa: E402
 
 import ui_fakes as F                                            # noqa: E402
+from dreg_verify import inputs_table as IT                      # noqa: E402
 from dreg_verify.ui import bus as BUS                           # noqa: E402
 from dreg_verify.ui import contracts, names, terms              # noqa: E402
 from dreg_verify.ui.app import MainWindow, build_window         # noqa: E402
@@ -149,13 +150,34 @@ def _slow_state(n=8, delay=0.05):
     return st
 
 
+def _ok_prefix(rows):
+    """(已展开完的行数 k, k 之后那些行的状态集合)。
+
+    worker 按顺序逐条升级，所以清单的状态一定是「前面一段已完成 + 后面一段分析中」。
+    进度条上读到的 `done` 只是 k 的**下限**：读完之后只要再转一次事件循环
+    （`H.shot` / `select_first_visible` 都会转），队列里排着的 progress 就又落进来几条。
+    以前这条用例按「恰好等于 done」断言，全量跑（负载重、信号积压成批到达）约一半概率红、
+    单跑绿 —— 根子就在这儿。现在口径是「k ≥ done 且结构仍是前缀式」。
+    """
+    sts = [r["status"] for r in rows]
+    k = 0
+    while k < len(sts) and sts[k] != "pending":
+        k += 1
+    return k, set(sts[k:])
+
+
 def test_scene_08_loading_in_progress(qapp, isolated):
     """worker 正在逐信号展开：进度标题「正在展开 Topout 信号 k / N」、清单已可点、可随时停止。
 
     真 `AnalysisWorker`（真 QThread）+ 真 `WorkbenchState`；进度靠队列信号回主线程，
-    所以等待一律走 `H.wait_for`，不写死毫秒。"""
+    所以等待一律走 `H.wait_for`，不写死毫秒。
+
+    ⚠ 每条信号 0.3 s（不是 0.05）：8 条 = 2.4 s，而这条用例在 done≥2 时就按停止。
+    0.05 s 时全量跑一趟的调度抖动就够 worker 把 8 条全跑完 —— 那时 `2 <= done < n`、
+    `w.worker.is_running()`、`ended == [(vid, False)]` 会一起红，而单跑必绿。
+    """
     n = 8
-    st = _slow_state(n=n, delay=0.05)
+    st = _slow_state(n=n, delay=0.3)
     w = MainWindow(state=st)             # ← 默认 worker 工厂 = 真 AnalysisWorker
     w.resize(1600, 900)
     w.show()
@@ -172,7 +194,10 @@ def test_scene_08_loading_in_progress(qapp, isolated):
     assert w.worker.is_running()
     lp = H.find(w, names.LOADING_PANEL)
     assert lp.isVisibleTo(w)
-    assert H.find(w, names.LOADING_TITLE).text() == terms.LOADING_TITLE_FMT.format(done=done, total=n)
+    # 标题与进度条是同一个槽里一起写的：现读现比，不拿上面那个可能已经过期的 done
+    d_now, t_now = bar.value()
+    assert H.find(w, names.LOADING_TITLE).text() == \
+        terms.LOADING_TITLE_FMT.format(done=d_now, total=t_now)
     assert H.find(w, names.LOADING_CURRENT).text().startswith("当前：d_fake_sig_")
     assert H.find(w, names.LOADING_HINT).text() == terms.LOADING_HINT
     assert H.find(w, names.LOADING_BTN_STOP).text() == terms.LOADING_BTN_STOP
@@ -181,8 +206,14 @@ def test_scene_08_loading_in_progress(qapp, isolated):
     assert not w.is_empty_state() and H.find(w, names.LIST_PANEL).isVisibleTo(w)
     rows = st.models()
     assert len(rows) == n
-    assert [r["status"] for r in rows[:done]] == ["ok"] * done
-    assert {r["status"] for r in rows[done:]} == {"pending"}
+    k, rest = _ok_prefix(rows)
+    # 进度条可能比清单**快恰好一行**：worker 对同一条信号先发 `progress`
+    # （刷进度条）再发 `signalDone`（升级清单那一行），主线程恰好在两者之间
+    # 转一圈时就差一行。差更多 = 真丢了一行，该红。
+    assert done - 1 <= k <= done,         "进度条 %d / 清单已完成 %d：%s" % (done, k, [r["status"] for r in rows])
+    assert k >= 1
+    assert {r["status"] for r in rows[:k]} == {"ok"}
+    assert rest == {"pending"}, "剩下的行不是「分析中」：%s" % rest
     assert terms.STATUS["pending"][0] == "分析中"
     assert w.list_panel.proxy.rowCount() == n        # 分析中的行照样在清单里、照样能点
     assert w.list_panel.select_first_visible()
@@ -199,12 +230,14 @@ def test_scene_08_loading_in_progress(qapp, isolated):
     assert not w.worker.is_running()
     assert not lp.isVisibleTo(w)
     rows = st.models()
-    kept = sum(1 for r in rows if r["status"] != "pending")
-    assert kept >= done                               # 已展开完的一行都不许退回 pending
-    assert [r["status"] for r in rows[:kept]] == ["ok"] * kept
-    assert {r["status"] for r in rows[kept:]} == {"pending"}
+    kept, rest = _ok_prefix(rows)
+    assert kept >= k                                  # 已展开完的一行都不许退回 pending
+    assert kept < n, "worker 没被停下来（8 条全跑完了），这条用例就验不到「停止」了"
+    assert {r["status"] for r in rows[:kept]} == {"ok"}
+    assert rest == {"pending"}
     assert H.find(w, names.STATUS_LEFT).text() == terms.LOADING_STOPPED_FMT.format(done=kept, total=n)
     w.close()
+
 
 
 def test_scene_08_finished_run_clears_loading(qapp, isolated):
@@ -317,25 +350,27 @@ def _loaded_window(qapp, monkeypatch, kind="wl"):
     return w
 
 
-def test_scene_03_detail_header_side_and_flow(qapp, isolated, monkeypatch):
-    """③ 详情：选中一个信号后**标题栏 + 右栏 + 电路图**都有内容，点右栏一个网名电路图对应块高亮。
+def test_scene_03_detail_truth_and_flow(qapp, isolated, monkeypatch):
+    """③ 详情：选中一个信号后**标题栏 + 真值表 + 右栏 + 电路图**都有内容，
+    点右栏一个网名电路图对应块高亮。
 
-    ⚠ 真值表仍是占位（C3-c 接手），所以这条不断言真值表 —— 场景③ 的「冻结列首行 = 真名」
-    那半条留给 C3-int 补（当时把本条改名成 `..._truth_and_flow` 即可）。
+    C3-int 把真值表那半条补齐（以前叫 `..._detail_header_side_and_flow`，真值表还是占位）：
+    有行有列、冻结列首行 = 该信号**第一根输入的真名**、点一格之后那一列是当前列。
 
-    全真：真 state（→ 真 provider / 真引擎）、真 worker、真清单 / 标题栏 / 右栏 / 电路图。
+    全真：真 state（→ 真 provider / 真引擎）、真 worker、真清单 / 标题栏 / 真值表 / 右栏 / 电路图。
     夹具只用 `tests/` 里的 mirror 镜像表（公开仓，绝不出现真实信号名）。"""
     w = _loaded_window(qapp, monkeypatch)
     panel = w.list_panel
 
-    # 挑一个真画得出图的信号（只读回读 / 未解析的没有图，验不到东西）
+    # 挑一个**既画得出图、又编辑得了真值表**的信号（只读回读 / 未解析的两样都验不到）
     name = ""
     for m in w.state.models():
         an = w.state.analyze(m["name"], want_graph=True)
-        if an and an.get("graph") is not None and an["graph"].edges:
+        if (an and an.get("editable") and an.get("graph") is not None
+                and an["graph"].edges):
             name = m["name"]
             break
-    assert name, "mirror 里没有画得出图的信号：%s" % [m["name"] for m in w.state.models()]
+    assert name, "mirror 里没有「有图 + 可编辑」的信号：%s" % [m["name"] for m in w.state.models()]
 
     H.click_cell(panel.view, _row_of(panel, name), int(LC.NAME))       # 真点击，不直接调槽
     qapp.processEvents()
@@ -347,6 +382,27 @@ def test_scene_03_detail_header_side_and_flow(qapp, isolated, monkeypatch):
         w.state.model_of(name))][0]
     assert terms.OWNER_NONE in H.find(w, names.HDR_META).text() or \
         (w.state.model_of(name).get("owner") or "") in H.find(w, names.HDR_META).text()
+
+    # ⑥ 真值表：有行有列 · 冻结列首行 = 第一根输入的真名 · 点一格之后那一列是当前列
+    tp = w.truth_panel
+    tm = tp.model
+    assert tm.rowCount() > 2 and tm.columnCount() > 0,         "真值表没行没列（%d x %d）" % (tm.rowCount(), tm.columnCount())
+    assert H.find(w, names.TRUTH_GRID_VIEW).model() is tm
+    an = w.state.analyze(name)
+    by_key = {}
+    for r in IT.input_rows(an):
+        by_key.setdefault(r.get("key"), r)
+    real = str((by_key.get(tp._e_inputs[0].get("key")) or {}).get("name") or "")
+    assert real, "第一根输入在 inputs_table 里查不到真名"
+    fm = H.find(w, names.TRUTH_NAMES_VIEW).model()
+    assert fm.rowCount() == tm.rowCount(), "冻结列与网格行数不一致（C-295）"
+    assert str(fm.data(fm.index(0, 0), QtCore.Qt.DisplayRole) or "").startswith(real),         "冻结列首行不是第一根输入的真名：%r" % fm.data(fm.index(0, 0), QtCore.Qt.DisplayRole)
+    cur = min(1, tm.columnCount() - 1)
+    H.click_cell(tp.grid, 0, cur)
+    qapp.processEvents()
+    hot = [j for j in range(tm.columnCount())
+           if tm.headerData(j, QtCore.Qt.Horizontal, int(contracts.TruthRole.IS_CURRENT_COL))]
+    assert hot == [cur], "当前列高亮落在 %s（点的是第 %d 列）" % (hot, cur)
 
     # ⑨ 右栏：逐层展开非空 + 输入信号表有行
     assert H.find(w, names.SIDE_PANEL).isVisibleTo(w)

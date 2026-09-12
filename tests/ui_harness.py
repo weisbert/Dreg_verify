@@ -27,6 +27,7 @@ v2 上线后只需改一处：`set_window_factory(...)` 换成 `dreg_verify.ui.a
         H.shot(w, "topout_default")
 """
 
+import inspect
 import os
 import re
 import sys
@@ -401,6 +402,28 @@ def wait_for(pred, timeout_ms=10000, interval_s=0.002):
     return bool(pred())
 
 
+def slot_error_gate(monkeypatch):
+    """接管 `sys.excepthook` 收集「Qt 槽里抛出来的异常」，返回那张清单（list）。
+
+    Qt 的槽是从 C++ 侧调回来的：Python 里抛的异常传不回去，PySide6 只把它交给
+    `sys.excepthook` 打一行 traceback 就继续跑。于是「按钮点了、什么也没发生」会变成
+    一条**绿**测试 —— 点击发出去了、断言的那几样又恰好没变，测试看不出任何异常。
+
+    `tests/conftest.py` 的 autouse fixture 对所有 `test_ui_*.py` 装这道闸门
+    （C3-int 从 `test_ui_truth_panel.py` 提上来的；那边原本只守真值表面板一个模块）。
+    调用方拿到清单，在用例结束时 `assert not boom`。
+    """
+    boom = []
+    real = sys.excepthook
+
+    def _hook(etype, value, tb):
+        boom.append("%s: %s" % (etype.__name__, value))
+        real(etype, value, tb)
+
+    monkeypatch.setattr(sys, "excepthook", _hook)
+    return boom
+
+
 # ─────────────────────────── ⑥ 模态对话框自动拦截 ───────────────────────────
 
 class REAL(object):
@@ -555,9 +578,13 @@ def _def_dlg_true(self, *a, **k):
     return True
 
 
-def _def_dlg_rename(self, *a, **k):
-    """重命名列：确定但没改名 → 原样返回当前列名（`ask(current, …)`，self = current）。"""
-    return str(self or "")
+def _def_dlg_rename(_owner, *a, **k):
+    """重命名列：确定但没改名 → 原样返回**当前列名**（`ask(current, …)`）。
+
+    ⚠ C3-int 起第一个形参是 `cls`（stub 按 classmethod 包回去了），领域值要从
+    `a[0]` / `k["current"]` 取 —— 以前靠「stub 丢了绑定、self 恰好接到 current」拿值，
+    那是个巧合，全关键字调用时就没了。"""
+    return str(k.get("current", a[0] if a else "") or "")
 
 
 def _def_dlg_no_change_map(self, *a, **k):
@@ -585,9 +612,11 @@ def _def_dlg_batch_fill(self, *a, **k):
     return {"mode": "const", "value": None, "scope": "selected"}
 
 
-def _def_dlg_export_options(self, *a, **k):
-    """.sv 导出选项：原样返回调用方传进来的默认选项（`ask(defaults, …)`，self = defaults）。"""
-    return dict(self or {})
+def _def_dlg_export_options(_owner, *a, **k):
+    """.sv 导出选项：原样返回调用方传进来的**默认选项**（`ask(defaults, …)`）。
+
+    同 `_def_dlg_rename`：领域值从 `a[0]` / `k["defaults"]` 取，不靠 self 的巧合。"""
+    return dict(k.get("defaults", a[0] if a else None) or {})
 
 
 CUSTOM_MODALS = [
@@ -815,16 +844,29 @@ def auto_dialogs(monkeypatch, answers=None, save_dir=None):
         if answers.get(full) is REAL or answers.get(meth) is REAL:
             continue
 
-        def _mk_custom(full=full, meth=meth, default_fn=default_fn):
-            def _patched(self, *args, **kwargs):
+        # v2 的 `类.ask` 是 **classmethod**（`ConfirmDialog.ask(kind, …)`），gui.py 那四个是
+        # 普通实例方法。C3-int 之前这里一律换成裸函数，于是：classmethod 丢了绑定，
+        # `ConfirmDialog.ask(kind="clear")` 这种**全关键字**调用第一个形参没人接 → TypeError
+        # （调用方只好为了测试改成位置传参）。现在照原样包回去：classmethod 仍是 classmethod，
+        # `_patched` 收 `(*args, **kwargs)`，第一个位置参数才是 self/cls。
+        raw = inspect.getattr_static(cls, meth, None)
+        is_cm, is_sm = isinstance(raw, classmethod), isinstance(raw, staticmethod)
+        bound = not is_sm                      # classmethod 与实例方法都会多收一个 self/cls
+
+        def _mk_custom(full=full, meth=meth, default_fn=default_fn, bound=bound):
+            def _patched(*args, **kwargs):
+                owner = args[0] if (bound and args) else None
+                rest = args[1:] if (bound and args) else args
                 call = rec._add(full, title=CUSTOM_TITLES.get(full, ""),
-                                args=(self,) + args, kwargs=kwargs)
-                res = _lookup((full, meth, call.title), call, args, kwargs,
-                              lambda c, a, k: default_fn(self, *a, **k))
+                                args=args, kwargs=kwargs)
+                res = _lookup((full, meth, call.title), call, rest, kwargs,
+                              lambda c, a, k: default_fn(owner, *a, **k))
                 call.result = res
                 return res
             return _patched
-        monkeypatch.setattr(cls, meth, _mk_custom())
+        stub = _mk_custom()
+        monkeypatch.setattr(cls, meth, classmethod(stub) if is_cm
+                            else (staticmethod(stub) if is_sm else stub))
         rec.patched.append(full)
 
     return rec

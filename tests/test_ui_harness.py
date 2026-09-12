@@ -215,6 +215,27 @@ def test_auto_dialogs_patches_v2_dialog_ask_entrypoints(monkeypatch, gui_app):
     assert rec3.saw(D.TITLES["presets_save"])
 
 
+def test_auto_dialogs_ask_stub_takes_all_keyword_calls(monkeypatch, gui_app):
+    """C3-int：`类.ask` 的 stub 收**全关键字**调用也不炸（以前 self/cls 没人接 → TypeError）。
+
+    `ui/dialogs.py` 的 `ask*` 都是 `@classmethod`。stub 以前一律换成裸函数，绑定就没了，
+    `ConfirmDialog.ask(kind=...)` 这种写法第一个形参没人接 —— 调用方只好为了测试改成位置传参
+    （C3-c 的 `_do_batch_fill` 就这么绕过的）。现在 stub 照原样包成 classmethod。
+    """
+    from dreg_verify.ui import dialogs as D
+    rec = H.auto_dialogs(monkeypatch)
+    assert D.ConfirmDialog.ask(kind=D.CONFIRM_CLEAR, n=0, names=(), parent=None) is True
+    assert D.RenameColumnDialog.ask(current="U0", others=["T1"], parent=None) == "U0"
+    assert D.BatchFillDialog.ask(n_selected=2, n_total=5, parent=None) == {
+        "mode": "const", "value": None, "scope": "selected"}
+    assert D.ExportOptionsDialog.ask(defaults={"comments": True}) == {"comments": True}
+    assert D.ColumnsDialog.ask(visible=(), parent=None) == {}
+    assert rec.count("ConfirmDialog.ask") == 1
+    # 位置传参与关键字传参给出同一个答案
+    assert D.RenameColumnDialog.ask("U9") == "U9"
+    assert D.ExportOptionsDialog.ask({"comments": False}) == {"comments": False}
+
+
 def test_auto_dialogs_defaults_are_affirmative(monkeypatch, gui_app):
     """默认答案按实际给的按钮挑「肯定」：Yes|No → Yes（固定 Ok 会把导出静默取消掉）。"""
     from PySide6 import QtWidgets

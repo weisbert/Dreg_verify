@@ -69,22 +69,8 @@ def iso(monkeypatch, tmp_path):
     H.isolate_settings(monkeypatch, tmp_path)
 
 
-@pytest.fixture(autouse=True)
-def no_swallowed_slot_errors(monkeypatch):
-    """槽里抛的异常 Qt 只往 stderr 打一条就算了事 —— 那会让「按钮点了什么也没发生」变成一条**绿**测试。
-
-    这里接管 `sys.excepthook`（PySide6 的槽异常走它）：本条用例里只要炸过一次就判红。
-    """
-    boom = []
-    real = sys.excepthook
-
-    def _hook(etype, value, tb):
-        boom.append("%s: %s" % (etype.__name__, value))
-        real(etype, value, tb)
-
-    monkeypatch.setattr(sys, "excepthook", _hook)
-    yield
-    assert not boom, "槽里抛了异常（Qt 只打了 stderr，动作其实没做成）：%s" % "；".join(boom)
+# ⚠ C3-int：「槽里抛异常就判红」的 autouse fixture 已提到 `tests/conftest.py`（对所有 `test_ui_*.py` 生效），
+# 实现在 `ui_harness.slot_error_gate`。本文件不再自带一份。
 
 
 @pytest.fixture(autouse=True)

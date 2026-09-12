@@ -803,9 +803,8 @@ class TruthPanel(QtWidgets.QWidget):
     # ── C-298 批量填 ──
     def _do_batch_fill(self):
         cs_sel = self.selected_columns(fallback_current=False)
-        # 位置传参（不是风格问题）：`ui_harness.auto_dialogs` 把 `类.ask` 换成普通函数，
-        # 全用关键字调的话第一个形参 `self` 没人接，测试里会 TypeError 而不是走到对话框。
-        spec = DLG.BatchFillDialog.ask(len(cs_sel), self.model.columnCount(), self)
+        spec = DLG.BatchFillDialog.ask(n_selected=len(cs_sel),
+                                       n_total=self.model.columnCount(), parent=self)
         if not spec:
             return
         cs = cs_sel if spec.get("scope") == "selected" else list(range(self.model.columnCount()))
