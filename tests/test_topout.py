@@ -220,6 +220,29 @@ def test_c050_chain_entries_have_page_kind(wl_wb, wl_res):
     assert (e["page"], e["kind"]) == ("iddq", "gate")
 
 
+def test_c060_mux_ctrl_has_binding(wl_wb, wl_res):
+    """§7-3：mux 级联控制口（source=="mux"）补 binding = 上游 mux 输出衔接网的绑定。
+
+    此前这一行在输入信号表里只能写 b=None（『类型』『驱动』两列空白）。只加键，
+    used_vars / keys / bindings / 向量一律不动 → byte-gate 6/6。"""
+    from dreg_verify import mux_gen
+    seen = 0
+    for g in wl_wb.mux:
+        exp = mux_gen.expand_mux_group(wl_wb, wl_res, g)
+        for d in exp["ctrl_drivers"]:
+            if d["source"] != "mux":
+                continue
+            b = d.get("binding")
+            assert b is not None, "mux%s 的级联控制口缺 binding" % g.group_no
+            # 上游输出衔接网：RO（force 优先级高于 assign）+ resolver 的 mux-output 分支
+            assert b.kind == "RO"
+            assert b.found_in in ("mux-output", "prefixed-wire")
+            # 衔接网名来自上游 mux 输出（下游控制若是切片，wire_lhs 带切片）
+            assert d["upstream"].out_base.lower() in b.wire_lhs.lower()
+            seen += 1
+    assert seen >= 4, "WL 镜像应有多组 mux 级联控制口"
+
+
 def test_view_models_carry_form_label(wb):
     """#2：视图模型带 form/form_label(展开后表达式形态 F0-F4)——信号清单『逻辑类型』列。"""
     ms = {m["name"]: m for m in T.topout_view_models(wb, mode="max")}

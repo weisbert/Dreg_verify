@@ -268,7 +268,7 @@ def _resolve_ctrl_driver(wb, resolver, ctrl, idx, key_prefix, _stack, _depth, is
        'keys': [赋值键], 'bindings': {键: InputBinding},
        # source='logic'（LPBT 形态）: 'ctrl_sig','ctrl_node','line','local'
        # source='reg'/'mux-force':    'key','binding'
-       # source='mux'（级联展开）:     'upstream','recipe'}
+       # source='mux'（级联展开）:     'upstream','recipe','binding'(上游输出衔接网，§7-3 显示用)}
     """
     low = ctrl.base.lower()
     driver = {"source": "unknown", "idx": idx, "base": ctrl.base,
@@ -358,6 +358,13 @@ def _resolve_ctrl_driver(wb, resolver, ctrl, idx, key_prefix, _stack, _depth, is
         # cone 展开上游模式（默认）：反解上游 mux → 上游控制驱动 + 载体数据寄存器写目标值
         driver["source"] = "mux"
         driver["upstream"] = upstream
+        # ⭐ binding（GUI v2 §7-3，additive）：上游 mux 输出【衔接网】的绑定。就是上面第 (b) 步
+        # 已经解出来的 b —— 控制列原文写的正是那根网，resolver 的 mux-output 分支已给出
+        # kind="RO" / found_in="mux-output"（配了探针前缀则是 prefixed-wire），与同一函数里
+        # cascade_mode=="force" 分支存的 driver["binding"] 是同一个对象，两条路口径不分岔。
+        # 用途纯显示：输入信号表这一行此前只能写 b=None（类型/驱动两列空白，用户看不出这根
+        # 级联控制口到底是什么网）。不改 used_vars / keys / bindings / 向量 → .sv 逐字节不变。
+        driver["binding"] = b
         # ⭐ 下游控制是上游输出的【切片】(如 temp_code_to_mux[3:1], slice_lsb=1)时，case 选值 N 落在
         # 上游输出的 [msb:lsb] 位段——必须把它左移 slice_lsb 写进载体（否则上游输出=N、被切片成 N>>1，
         # 选错 case；mux56→mux157 实证）。slice_lsb=0（全宽控制）时为 no-op，不影响既有级联测试。
