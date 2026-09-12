@@ -590,7 +590,8 @@ def test_c006_status_left_counts(qapp, tmp_path):
     # 5 条：logic 3 + mux 2；前 3 条 clean（可建），后 2 条 unresolved（有问题）
     assert txt == terms.STATUS_LOADED_FMT.format(n=5, nl=3, nm=2, nt=3, np=2)
     assert "非 clean" not in txt                    # 明细只进 tooltip，不占状态栏
-    assert H.find(w, names.STATUS_LEFT).toolTip().startswith("非 clean 2")
+    # P-20：悬停口径与状态栏那一行同一份判据（`terms.match_status`），不再是「非 clean」
+    assert H.find(w, names.STATUS_LEFT).toolTip().startswith("有问题 2 个")
     w.close()
 
 

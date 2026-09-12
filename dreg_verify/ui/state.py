@@ -48,6 +48,15 @@ STATUS_RESTORE_BAD_FMT = terms.STATUS_RESTORE_BAD_FMT
 #: 清单勾「反例」造出来的那条反例列的标号（C-023）——与 v1 `legacy_gui.py:1634` 一字不差（P-02）
 NEG_COL_NAME = "T0_NEG"
 
+#: 一份**完整配置**的 `global` 段真能写进来的那两个范围（= v1「排查(旧)」工具条那三个控件
+#: `coverage_logic` / `coverage_mux` / `max_tests`，P-10 / P-12 实证）。
+#: `reset_config_state` 的「先清空」只作用在这两侧 —— Topout / dft / iddq 各有自己的
+#: `cov_<vid>`，配置里带不走，清了就是把本机的档位白抹掉。
+#: ⚠ 与 `export_center.GLOBAL_COV_VIEWS` 是同一件事的两半（那边负责套用、这边负责清空）；
+#:   `tests/test_ui_d1_terms.py::test_reset_config_state_only_clears_logic_and_mux_coverage`
+#:   钉着两边相等，改一边另一边当场红。这里不 import export_center（视图层，I-19 分层）。
+_CFG_COV_VIEWS = ("logic", "mux")
+
 #: legacy 覆盖度键（C-230）：只在缺 `cov_<view_id>` 时读一次作迁移，**永不回写**
 _LEGACY_COV_KEYS = {"logic": "coverage_logic", "mux": "coverage_mux"}
 _LEGACY_COV_FALLBACK = "coverage"
@@ -704,8 +713,15 @@ class WorkbenchState(QtCore.QObject):
                 cov = self._cov[vid]
                 cov.sig_cov.clear()
                 cov.set_form_cov({})
-                cov.persist_global_label(session.DEFAULT_COV_LABEL)
-                cov.persist_max_tests(session.DEFAULT_MAX_TESTS)
+                # ⚠ **覆盖度的全局档 / 用例上限只清 logic 与 mux 两个范围**（主控裁决，与 v1 一致）。
+                #   一份完整配置的 `global` 段能写进来的只有那两侧（`export_center.GLOBAL_COV_KEYS`
+                #   / `GLOBAL_COV_VIEWS`，P-10/P-12 实证：v1 的 coverage_logic / coverage_mux /
+                #   max_tests 就是排查(旧)工具条那三个控件）。Topout / dft / iddq 各有自己的
+                #   `cov_<vid>`，配置里根本带不走它们 —— 这里把它们也清成出厂档，等于「导入
+                #   同事的配置」顺手把本机这三个范围的档位抹了，而配置文件里压根没有那几个值。
+                if vid in _CFG_COV_VIEWS:
+                    cov.persist_global_label(session.DEFAULT_COV_LABEL)
+                    cov.persist_max_tests(session.DEFAULT_MAX_TESTS)
                 self.coverage_touched(vid)
         self.set_probe_prefixes({})
         self.set_force_signals(set())

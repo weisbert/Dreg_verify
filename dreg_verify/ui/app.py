@@ -1373,17 +1373,35 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:                             # noqa: BLE001
             return []
 
+    @staticmethod
+    def _counts_of(models):
+        """(要验几个, 有问题几个) —— **判据只有 `terms.match_status` 一份**（P-20）。
+
+        以前这里按色档数（ok / warn·bad），而悬停那一行按「非 clean」数，筛选行又是第三套：
+        同一块屏幕上「有问题 0」对着悬停「非 clean 2」对着筛选「仅有问题」筛出 0 条。
+        `match_status` 里 note 色档按 v1 的四档分家（skip 算有问题、bare-probe 算可建）。"""
+        ok_key = terms.STATUS_FILTER_ITEMS[1]
+        bad_key = terms.STATUS_FILTER_ITEMS[2]
+        return (sum(1 for m in models if terms.match_status(m, ok_key)),
+                sum(1 for m in models if terms.match_status(m, bad_key)))
+
     def _refresh_status_counts(self):
-        """C-006：载完在状态栏报信号总数 / logic+mux / 要验几个 / 有问题几个。"""
+        """C-006 / P-15：载完在状态栏报信号总数 / 要验几个 / 有问题几个 —— **按当前范围说话**。
+
+        Topout 那一行还多一截 logic+mux 的分家（它是全链范围，两页的信号混在一起）；
+        换到 logic / mux / dft / iddq 时那一截没有意义（dft 页上写「logic 9」纯属看错表）。"""
         models = self._models()
         if not models:
             return
         n = len(models)
-        nm = sum(1 for m in models if (m.get("kind") or "") == "mux")
-        tones = [_tone_of(m) for m in models]
-        txt = terms.STATUS_LOADED_FMT.format(n=n, nl=n - nm, nm=nm,
-                                             nt=sum(1 for t in tones if t == "ok"),
-                                             np=sum(1 for t in tones if t in ("warn", "bad")))
+        nt, np_ = self._counts_of(models)
+        vid = self._scope()
+        if vid == contracts.DEFAULT_VIEW_ID:
+            nm = sum(1 for m in models if (m.get("kind") or "") == "mux")
+            txt = terms.STATUS_LOADED_FMT.format(n=n, nl=n - nm, nm=nm, nt=nt, np=np_)
+        else:
+            txt = terms.STATUS_LOADED_SCOPE_FMT.format(
+                page=terms.SCOPE_PAGE_NAMES.get(vid, vid), n=n, nt=nt, np=np_)
         self.status_left.setText(txt)
         self.status_left.setToolTip(self._status_detail(models))
 
@@ -1399,7 +1417,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ntmm = v
             else:
                 nreg = v
-        nbad = sum(1 for m in models if _tone_of(m) != "ok")
+        _nt, nbad = self._counts_of(models)          # P-20：与上面那一行同一份判据
         return terms.STATUS_LOADED_DETAIL_FMT.format(nbad=nbad, ntmm=ntmm, nreg=nreg)
 
     def _refresh_last_export(self):

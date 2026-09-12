@@ -538,7 +538,16 @@ SIDE_UNRESOLVED_MARK = "✗未解析"
 
 # ⑩ 状态栏
 STATUS_LOADED_FMT = "已载入 {n} 个信号（logic {nl} + mux {nm}）· Topout 要验 {nt} 个 · 有问题 {np} 个"
-STATUS_LOADED_DETAIL_FMT = "非 clean {nbad} · 寄存器定义表字段 {ntmm} · 寄存器地址映射表字段 {nreg}"   # C-006
+#: P-15：切到别的范围后这一行还写着「Topout 要验 N 个」，dft 页写成「logic 9」——
+#: 那两个数说的是**当前范围**的清单，标题却是另一个范围的名字。非 Topout 范围换这一句。
+STATUS_LOADED_SCOPE_FMT = "{page}：{n} 个信号 · 要验 {nt} 个 · 有问题 {np} 个"
+#: 范围 → 状态栏里怎么称呼它（`SCOPE_LABELS` 是筛选行按钮上的说法，「只看 logic」放进
+#: 「{page}：9 个信号」里读不通）
+SCOPE_PAGE_NAMES = {"topout": "Topout", "logic": "logic 页", "mux": "mux 页",
+                    "dft": "dft 页", "iddq": "iddq 页"}
+#: C-006 的悬停口径必须与上面那一行**同一份判据**（P-20）：这里以前写「非 clean N」
+#: （= 色档不是 ok），上面写「有问题 N」（= warn/bad）—— 同一块屏幕两个数。
+STATUS_LOADED_DETAIL_FMT = "有问题 {nbad} 个 · 寄存器定义表字段 {ntmm} · 寄存器地址映射表字段 {nreg}"   # C-006
 STATUS_VISIBLE_FMT = "可见 {v} / 共 {m}（其中 {k} 个按输入信号名命中）"            # C-031
 STATUS_MISSING_PAGES_FMT = "本表无 {pages} 页，门控层跳过"                        # C-042
 STATUS_LAST_EXPORT_FMT = "上次导出 {kind}：{when} → {path}"

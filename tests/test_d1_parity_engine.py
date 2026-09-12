@@ -215,9 +215,11 @@ def test_p10_global_block_round_trips_without_drifting(tmp_path, monkeypatch):
     assert EC.import_config(st, cfg).is_full
     two = EC.collect_config(st)["global"]
     assert two == one, "同一份配置导进来再导出去，global 段就变了"
-    # Topout 的上限不在 `global` 段里（P-11 已登记 backlog）：导入时它走 C-192 的「先清空」
-    # 回出厂 256，而**不是**被配置里那个 777 顶掉 —— 后者才是 P-10 那 26003 字节的来处
-    assert int(st.coverage("topout").max_tests) == session.DEFAULT_MAX_TESTS
+    # Topout 的上限不在 `global` 段里（P-11 已登记 backlog）。F2 收窄 `reset_config_state`
+    # 之后（主控裁决，与 v1 一致）：它**原样留着**，既不被配置里那个 777 顶掉
+    # （后者才是 P-10 那 26003 字节的来处），也不被「先清空」抹成出厂 256 ——
+    # 配置文件里压根没有 Topout 这一档，清了就是把本机设的档位白抹掉。
+    assert int(st.coverage("topout").max_tests) == 12
 
 
 # ═════════════════════ P-13：状态筛的 note 档归属按 v1 ═════════════════════

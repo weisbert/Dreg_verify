@@ -484,6 +484,69 @@ def test_r3_12_failed_load_rolls_the_path_box_back(win, tmp_path):
     assert win.state.models(), "上一张表的清单被失败的那次载入清掉了"
 
 
+# ═══════════════ P-15 / P-20：状态栏按当前范围说话、口径只有一份 ═══════════════
+def test_p15_status_bar_follows_the_scope(win):
+    """P-15：切到 dft / logic 页后状态栏还写着「Topout 要验 N 个」，dft 页写成「logic 9」。"""
+    _load(win, "btlp")
+    txt = H.find(win, names.STATUS_LEFT).text()
+    assert txt.startswith(T.STATUS_LOADED_FMT.split("{")[0]) and "Topout" in txt
+    for vid in ("logic", "mux"):
+        if not win.state.page_available(vid):
+            continue
+        win.state.set_scope(vid)
+        H.app().processEvents()
+        win.start_analysis(force=True)
+        assert H.wait_for(lambda: bool(win.state.models(vid)))
+        win._refresh_status_counts()
+        got = H.find(win, names.STATUS_LEFT).text()
+        assert got.startswith(T.SCOPE_PAGE_NAMES[vid]), got
+        assert "Topout" not in got, "换到 %s 页了还写着 Topout：%r" % (vid, got)
+
+
+def test_p20_problem_count_uses_one_judge(win):
+    """P-20：状态栏「有问题 N」、它的悬停、清单头部、筛选行 —— 四处同一个数。"""
+    _load(win, "btlp")
+    models = win.state.models()
+    want = sum(1 for m in models if T.match_status(m, T.STATUS_FILTER_ITEMS[2]))
+    ok = sum(1 for m in models if T.match_status(m, T.STATUS_FILTER_ITEMS[1]))
+    left = H.find(win, names.STATUS_LEFT)
+    assert left.text().endswith("有问题 %d 个" % want), left.text()
+    assert "要验 %d 个" % ok in left.text()
+    assert left.toolTip().startswith("有问题 %d 个" % want), left.toolTip()
+    assert T.LIST_COUNTS_FMT.format(n=len(win.list_panel.visible_names()),
+                                    k=len([n for n in win.list_panel.visible_names()
+                                           if win.list_panel.model.is_checked(n)]),
+                                    p=want) == win.list_panel.counts_text()
+    # skip 档（只读回读根）算「有问题」、bare-probe 算「可建」—— v1 的四档归属（P-13）
+    assert "skip" in T.NOTE_AS_PROBLEM_KEYS and "bare-probe" in T.NOTE_AS_OK_KEYS
+
+
+# ═══════════════ reset_config_state 的作用范围（主控裁决）═══════════════
+def test_reset_config_state_only_clears_logic_and_mux_coverage(win):
+    """一份完整配置的 `global` 段只写得进 logic / mux 两侧（P-10 / P-12 实证）。
+
+    以前「先清空」把五个范围的全局档与用例上限一起抹成出厂值 —— 导入同事的配置顺手
+    把本机 Topout / dft / iddq 的档位清了，而那几个值配置文件里压根没有。"""
+    from dreg_verify import session as S
+    from dreg_verify.ui import export_center as EC
+    from dreg_verify.ui import state as ST
+    _load(win, "btlp")
+    st = win.state
+    for vid in contracts.VIEW_IDS:
+        st.coverage(vid).persist_global_label("精简")
+        st.coverage(vid).persist_max_tests(12)
+    assert st.reset_config_state() is True
+    for vid in contracts.VIEW_IDS:
+        cov = st.coverage(vid)
+        if vid in ("logic", "mux"):
+            assert (cov.global_label, int(cov.max_tests)) == \
+                (S.DEFAULT_COV_LABEL, S.DEFAULT_MAX_TESTS), vid
+        else:
+            assert (cov.global_label, int(cov.max_tests)) == ("精简", 12), vid
+    # 「清空」与「套用」必须是同一批范围，否则导一次配置这几个数就自己漂
+    assert tuple(ST._CFG_COV_VIEWS) == tuple(EC.GLOBAL_COV_VIEWS)
+
+
 def test_f1_two_new_strings_reviewed():
     """F1 留给 F2 过目的两条：名字在前、不写本机全路径。"""
     # `{names}（共 {n} 列）…` —— 名字在前、计数在后（I-20）

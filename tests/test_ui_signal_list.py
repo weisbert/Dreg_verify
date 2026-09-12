@@ -861,9 +861,10 @@ def test_counts_text_and_visible_counts_text():
     """头部「要验信号 N · 已勾选 K · 有问题 P」与筛选后给状态栏的一行。"""
     panel, st = make_panel()
     n = len(panel.visible_names())
-    p = sum(1 for x in st.models() if SL.status_key_of(x) in
-            ("needs-prefix", "risky-generated", "wire-fallback", "false-green",
-             "spec-collision", "parse-err", "unresolved", "error"))
+    # P-20：「有问题」的判据只有 `terms.match_status` 一份（清单头部 / 筛选行 / 状态栏共用）。
+    # 以前这里按色档算，`skip`（只读回读根，v1 四档里 status="skip"）不算 —— 而筛选行
+    # 「仅有问题」筛得出它，同一块屏幕上两个数。
+    p = sum(1 for x in st.models() if T.match_status(x, T.STATUS_FILTER_ITEMS[2]))
     assert H.find(panel, N.LIST_HEADER_COUNTS).text() == T.LIST_COUNTS_FMT.format(n=n, k=n, p=p)
     said = []
     panel.statusMessage.connect(said.append)

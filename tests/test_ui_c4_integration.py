@@ -364,8 +364,15 @@ def test_c4_reset_config_state_clears_all_three_and_risky_true(qapp, monkeypatch
     assert st.probe_prefixes == {} and st.force_signals == set() and st.logic_overrides == {}
     assert st.include_risky is True                          # I-11 出厂默认
     cov = st.coverage("topout")
-    assert cov.global_label == S.DEFAULT_COV_LABEL and cov.max_tests == S.DEFAULT_MAX_TESTS
+    # F2 收窄（主控裁决，与 v1 一致）：**全局档 / 用例上限只清 logic 与 mux 两个范围**——
+    # 一份完整配置的 `global` 段能写进来的就只有那两侧（P-10 / P-12 实证）；Topout / dft /
+    # iddq 的档配置里带不走，清了等于「导入同事的配置」顺手把本机这三档抹了。
+    # 逐信号档 / 逻辑类型档仍然五个范围都清（它们在 `view_edits` 那条路上）。
+    assert cov.global_label == "精简" and cov.max_tests == S.DEFAULT_MAX_TESTS
     assert cov.form_cov == {} and cov.sig_cov == {}
+    for vid in ("logic", "mux"):
+        c = st.coverage(vid)
+        assert c.global_label == S.DEFAULT_COV_LABEL and c.max_tests == S.DEFAULT_MAX_TESTS
     assert st.checked("topout") is None, "勾选该回到「全勾 = 默认态」"
     assert st.edits("topout") == {} and st.mux_data("topout") == {}
     # 四个 set_* 各发一次 configChanged（清单据此翻指纹重跑）

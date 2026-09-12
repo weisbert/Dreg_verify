@@ -1321,7 +1321,10 @@ class SignalListPanel(QtWidgets.QWidget):
         names = self.visible_names()
         rows = {str(m.get("name", "")): m for m in self.model.rows()}
         k = sum(1 for n in names if self.model.is_checked(n))
-        p = sum(1 for n in names if _tone_of(rows.get(n) or {}) in _PROBLEM_TONES)
+        # P-20：「有问题」的判据只有 `terms.match_status` 一份 —— 以前这里按色档数
+        # （warn/bad），筛选行按 match_status 筛，状态栏又是第三套，同屏三个数。
+        p = sum(1 for n in names
+                if T.match_status(rows.get(n) or {}, T.STATUS_FILTER_ITEMS[2]))
         return T.LIST_COUNTS_FMT.format(n=len(names), k=k, p=p)
 
     def visible_counts_text(self):
