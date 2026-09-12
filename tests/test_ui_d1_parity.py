@@ -11,6 +11,8 @@
 夹具一律用 mirror 生成脚本（公开仓，**无真实信号名**）。
 """
 
+import os
+
 import pytest
 
 import ui_harness as H                                    # noqa: E402
@@ -334,3 +336,133 @@ def test_p27_form_column_labels_match_v1(monkeypatch, tmp_path):
     assert labels2 == labels1
     assert not any("F0" in s or "F1" in s or "F2" in s or "F3" in s or "F4" in s
                    for s in labels2.values()), "逻辑类型列不得出现 F 编号"
+
+
+# ═════════════ P-04：导入「旧版测试项编辑文件」走 C-302 那条迁移路 ═════════════
+#: 文件里掺进去的两个**当前表没有**的名字（C-194：跳过必须点名）
+_GHOST_LOGIC = "d_ghost_signal_gone"
+_GHOST_MUX = "d_ghost_mux_gone"
+
+
+def _make_legacy_file(w1, out_path):
+    """用 v1【排查(旧)】门面真造一份旧格式【测试项编辑】文件（只有九段、没有版本号键）。"""
+    import json                                            # noqa: PLC0415
+    from dreg_verify import legacy_gui as G                 # noqa: PLC0415
+    picked = []
+    for sig in w1.signals:
+        if not str(getattr(sig, "out_name", "")).startswith("d_logic") or len(picked) >= 2:
+            continue
+        w1._load_test_items(sig)
+        H.app().processEvents()
+        w1.ti_table.item(w1.R_EXP, 0).setText(str(1 - (w1._ti_rows[0]["correct"] & 1)))
+        H.app().processEvents()
+        picked.append(sig.out_name)
+    assert len(picked) == 2, "镜像表里应当至少有两个 logic 信号可手填"
+    w1._persist_edits()
+    H.app().processEvents()
+    bucket = G._load_edits_file().get(w1._loaded_excel_path) or {}
+    payload = {"dreg_verify_edits": 1, "excel": os.path.basename(w1._loaded_excel_path)}
+    for k in ("edits", "neg_only", "mux_expected", "mux_neg", "mux_data",
+              "mux_dropped", "mux_cleared", "mux_user_vecs"):
+        if k in bucket:
+            payload[k] = bucket[k]
+    payload["edits"][_GHOST_LOGIC] = [{"base_values": {}, "kind": "pos"}]
+    payload["mux_expected"] = dict(payload.get("mux_expected") or {})
+    payload["mux_expected"][_GHOST_MUX] = {"c:A=1": 1}
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+    return picked
+
+
+def test_p04_legacy_edits_file_import_restores_the_same_signals_as_v1(monkeypatch, tmp_path):
+    """旧版【测试项编辑】文件（只有 edits / neg_only / mux_* 九段、没有 `dreg_verify_config`）
+    在 v2 **完全空转**：v1 恢复 2 个信号并点名跳过 2 个，v2 报「恢复了 0 个信号」（P-04，BLOCKER）
+    —— 那一支只调了 `_apply_view_edits`，而它只读 `view_edits` / `view_checks` 两段。
+
+    裁决：走 C-302 那条迁移路（`diagnostics.plan/apply_legacy_import`，桶换成**文件内容**），
+    点名迁了谁、跳过谁 + 原因，用的是既有文案。
+    """
+    from dreg_verify import edits as ED                     # noqa: PLC0415
+    from dreg_verify.ui import export_center as EC          # noqa: PLC0415
+    from dreg_verify.ui import terms as T                   # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.auto_dialogs(monkeypatch)
+    path = H.mirror_path("btlp")
+    legacy = str(tmp_path / "old_edits.json")
+
+    w1, _v = _v1_window(path)
+    try:
+        picked = _make_legacy_file(w1, legacy)
+    finally:
+        w1.close()
+    H.app().processEvents()
+
+    # v1 参照：真走 on_import_edits（弹框已被 auto_dialogs 接管）
+    H.auto_dialogs(monkeypatch, answers={"getOpenFileName": lambda c, *a, **k: (legacy, "")})
+    w1b, _v = _v1_window(path)
+    try:
+        w1b.on_import_edits()
+        H.app().processEvents()
+        v1_restored = {k.lower() for k in w1b._edited}
+    finally:
+        w1b.close()
+    H.app().processEvents()
+
+    w2 = _v2_window(path)
+    try:
+        rep = EC.import_config(w2.state, legacy)
+        H.app().processEvents()
+        v2_restored = set(ED.serialize_view_edits(w2.state.edits("topout")))
+        text = rep.text()
+        missing = dict(rep.missing)
+    finally:
+        w2.close()
+
+    assert rep.ok and rep.is_legacy and not rep.is_full
+    assert {p.lower() for p in picked} <= v1_restored, "v1 参照本身就没恢复出来，夹具有问题"
+    assert v2_restored == v1_restored
+    assert rep.n_restored == len(v1_restored) == 2
+    # C-194 / I-20：跳过的先点名 + 原因（用的是 C-302 那几句既有文案）
+    assert missing.get(_GHOST_LOGIC) == T.DIAG_LEGACY_SKIP_UNKNOWN
+    assert missing.get(_GHOST_MUX) == T.DIAG_LEGACY_SKIP_MUX
+    for nm in picked:                                      # 迁了谁也点名
+        assert nm in text
+    assert text.index(_GHOST_LOGIC) < text.index(
+        T.EXPORT_IMPORT_DONE_FMT.format(kind=T.EXPORT_IMPORT_KIND_LEGACY, n=2))
+
+
+def test_p04_a_full_config_does_not_go_down_the_legacy_migration_path(monkeypatch, tmp_path):
+    """第二次、且不同：**完整配置**里也带着那九段（C-250 的字段集，P-05 起还会原样透传），
+    但它归 `view_edits` 那条路管 —— 别把同一份劳动成果再顺着 C-302 迁一遍。"""
+    from dreg_verify import session as S                    # noqa: PLC0415
+    from dreg_verify.ui import export_center as EC          # noqa: PLC0415
+    H.isolate_settings(monkeypatch, tmp_path)
+    H.auto_dialogs(monkeypatch)
+    path = H.mirror_path("btlp")
+    legacy = str(tmp_path / "old_edits.json")
+
+    w1, _v = _v1_window(path)
+    try:
+        _make_legacy_file(w1, legacy)
+    finally:
+        w1.close()
+    H.app().processEvents()
+
+    import json                                            # noqa: PLC0415
+    with open(legacy, encoding="utf-8") as f:
+        old = json.load(f)
+    full = str(tmp_path / "cfg.json")
+    S.write_config_file(full, S.collect_config(
+        path, {}, edits=old.get("edits"), mux_expected=old.get("mux_expected")))
+
+    w2 = _v2_window(path)
+    try:
+        rep = EC.import_config(w2.state, full)
+        H.app().processEvents()
+        restored = set(w2.state.edits("topout"))
+    finally:
+        w2.close()
+
+    assert rep.ok and rep.is_full
+    assert rep.n_restored == 0 and not restored, "完整配置的 legacy 段不该被 C-302 再迁一遍"
+    assert not rep.missing

@@ -656,12 +656,37 @@ def _apply_view_edits(state, payload):
 _MISSING_REASON = "当前表里没有这个信号，跳过它的手填编辑"
 
 
+def _apply_legacy_file(state, payload):
+    """旧版【测试项编辑】文件 → 走 **C-302 那条迁移路**。→ `(迁了几个, [(名字, 迁了几列)], 跳过的)`。
+
+    以前这一支只调 `_apply_view_edits`，而它只读 `view_edits` / `view_checks` 两段 —— 旧版文件
+    压根没有这两段，于是 v2 完全空转（v1 能恢复 2 个信号并点名跳过 2 个，v2 报「恢复了 0 个」，
+    P-04，BLOCKER）。旧版那九段的键空间与 v2 列模型对不上，硬塞是不行的；`diagnostics` 里
+    早就有一条把它们迁成 v2 列模型的正路（C-302，logic / 直连寄存器根迁、mux 根点名不迁），
+    只是它读的是**本机 edits.json 的桶**。这里把同一条路的桶换成**文件内容**，一份实现两个入口。
+
+    只取 `persist.LEGACY_SEGMENTS` 圈的那几段：文件里若还带着 v2 自己的段（同事导的是完整
+    配置、却被当旧版文件读），那几段归 `_apply_view_edits` 管，别在这里重复搬一遍。"""
+    from dreg_verify.ui import diagnostics as DG          # noqa: PLC0415  只有这一支要用
+    bucket = {k: payload[k] for k in persist.LEGACY_SEGMENTS if k in (payload or {})}
+    plan = DG.plan_legacy_import(state, bucket=bucket)
+    before = set(state.edits())
+    n_sig, _n_col = DG.apply_legacy_import(state, plan, bucket=bucket)
+    done = set(state.edits()) - before
+    migrated = [(nm, n) for nm, n, _note in plan.rows if str(nm).lower() in done]
+    skipped = list(plan.skipped)
+    skipped += [(nm, _MISSING_REASON) for nm, _n, _note in plan.rows
+                if str(nm).lower() not in done]
+    return n_sig, migrated, skipped
+
+
 def import_config(state, path):
     """导入配置（C-192…C-195 / C-247）。→ `ImportReport`。
 
     · `is_full` → 先 `reset_config_state` 再照单恢复：global（只认三样）→ 三套诊断配置 →
       `view_edits` + `view_checks`；
-    · `is_legacy`（旧版【测试项编辑】文件）→ **只并入**编辑，别的一律不动；
+    · `is_legacy`（旧版【测试项编辑】文件）→ **只并入**编辑，别的一律不动；旧版那九段走
+      `_apply_legacy_file`（= C-302 的同一条迁移路，P-04），点名迁了谁、跳过谁 + 原因；
     · 都不是 → 明说缺哪个段（C-195），不静默失败。
     """
     rep = ImportReport()
@@ -691,6 +716,11 @@ def import_config(state, path):
         if plan["logic_overrides"] is not None:
             state.set_logic_overrides(plan["logic_overrides"])
     rep.n_restored, rep.missing = _apply_view_edits(state, payload)
+    if rep.is_legacy and not rep.is_full:                  # C-302 的同一条迁移路（P-04）
+        n_sig, migrated, skipped = _apply_legacy_file(state, payload)
+        rep.n_restored += n_sig
+        rep.missing += skipped
+        rep.counts += [terms.DIAG_LEGACY_ROW_FMT.format(name=nm, n=n) for nm, n in migrated]
     kind = terms.EXPORT_IMPORT_KIND_FULL if rep.is_full else terms.EXPORT_IMPORT_KIND_LEGACY
     rep.counts.append(terms.EXPORT_IMPORT_DONE_FMT.format(kind=kind, n=rep.n_restored))
     if rep.is_full:
