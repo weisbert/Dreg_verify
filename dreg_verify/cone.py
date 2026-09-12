@@ -187,8 +187,22 @@ def _tag_origin(node, net, kind, width, row=None, group=None):
     byte-safe：全仓对 AST 无 deepcopy/pickle，下游（vectors/forms/sv_writer/gui）一律 isinstance +
     结构字段访问，多几个属性不进任何输出 → Topout .sv 逐字节不变（byte_gate 6 sha 已验）。
     永不抛：拿不到属性就静默跳过（图少一个标注，绝不连累主流程）。
+
+    ⭐【不覆盖已有标签】：纯透传行（out = A）走 _substitute 时对裸变量返回的是【同一个对象】，
+    上层再打标就会把下层的网名盖掉。一根线在 RTL 里本来就可能串着好几个名字
+    （d_wl_rf_freq_sel_line → assign …_to_mux），一个都不能丢：origin_net 保留【最内层】
+    （离源头最近的真名），后续各级依次追加进 origin_chain，由 sigflow 画成薄改名块。
     """
     try:
+        prev = getattr(node, "origin_net", None)
+        if prev is not None:
+            if prev == net:
+                return                      # 幂等重打（cone.expand 打完 generator._tag 再打一次）
+            chain = list(getattr(node, "origin_chain", None) or [prev])
+            if net not in chain:
+                chain.append(net)
+            node.origin_chain = chain       # [最内层, …, 最外层]
+            return
         node.origin_net = net
         node.origin_kind = kind
         node.origin_width = width

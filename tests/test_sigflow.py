@@ -221,6 +221,77 @@ def test_origin_net_on_non_cone_path(btlp):
     assert r.node.origin_kind == "logic" and r.node.origin_width == 4
 
 
+def test_passthrough_row_net_name_survives(wl):
+    """M6：纯透传行（out = A）的网名不能整条丢。
+
+    cone._substitute 对裸变量返回【同一个对象】，改动点 A 的标签就落在了叶子 Var 上；不处理
+    的话 d_wl_rf_linectrl_freq_sel_to_mux 在图上彻底消失——而它恰恰是 RTL 里真实存在、
+    工程师要拿去 grep / 看波形的那个名字。修完画成一个薄「透传」改名块，两级名字都在。
+    """
+    r = _analyze(*wl, name="d_wl_rf_tx_epa_2g_mixer_en", want_graph=True)
+    g = r.graph
+    nets = {e.net for e in g.edges if e.net}
+    assert any(str(x).startswith("d_wl_rf_linectrl_freq_sel") for x in nets), sorted(nets)
+    pt = next(n for n in g.nodes if n.kind == "RENAME" and n.meta.get("passthrough"))
+    assert pt.meta["source"] == "d_wl_rf_freq_sel_line"
+    assert pt.meta["probe"] == "d_wl_rf_linectrl_freq_sel_to_mux"
+    ein = next(e for e in g.edges if e.dst == pt.id)
+    eout = next(e for e in g.edges if e.src == pt.id)
+    assert ein.net == "d_wl_rf_freq_sel_line" and eout.net == "d_wl_rf_linectrl_freq_sel_to_mux"
+    # 薄块不许变出新叶子（否则就与 .sv 的驱动集对不上了）
+    assert _binding_leaf_bases(r) == {str(n.meta.get("base", "")).lower() for n in g.nodes
+                                      if n.kind in ("REG", "PIN")}
+
+
+def test_tag_origin_does_not_clobber_inner_name():
+    """M6 的根：_tag_origin 遇到【已经打过标的同一个对象】不覆盖，把后续各级追加进 origin_chain。
+    幂等重打（cone.expand 打完 generator._tag 再打一次同样的值）不许伪造出链。"""
+    from dreg_verify import cone
+    n = E.Var("A")
+    cone._tag_origin(n, net="inner_net", kind="logic", width=1)
+    cone._tag_origin(n, net="inner_net", kind="logic", width=1)          # 幂等
+    assert n.origin_net == "inner_net" and not getattr(n, "origin_chain", None)
+    cone._tag_origin(n, net="outer_net", kind="logic", width=1)
+    cone._tag_origin(n, net="outest_net", kind="logic", width=1)
+    assert n.origin_net == "inner_net"                                   # 最内层（离源头最近）保留
+    assert n.origin_chain == ["inner_net", "outer_net", "outest_net"]
+
+
+def test_bustap_output_is_named(wl):
+    """M6：抽头出来的仍是一根有名字的线（上游网名 + 位段），别让 BUSTAP 后面那截凭空变匿名。"""
+    r = _analyze(*wl, name="d_wl_rf_tx_epa_2g_mixer_en", want_graph=True)
+    g = r.graph
+    taps = [n for n in g.nodes if n.kind == "BUSTAP"]
+    assert taps
+    for t in taps:
+        out = [e for e in g.edges if e.src == t.id]
+        assert out and all(e.net and "[" in e.net for e in out), \
+            "抽头输出线没名字: %s" % t.label
+    assert "d_wl_rf_freq_sel[1]" in {e.net for e in g.edges if e.net}
+
+
+def test_unnamed_edges_are_only_anonymous_terms(btlp, wl):
+    """无名的线只允许是【一个 assign 表达式内部的中间项】（比较结果 / 门与内层三元的输出），
+    它们在 RTL 里本来就没有网名。凡是【必然对应一根真网】的源——寄存器/管脚叶子、mux 组输出、
+    改名块、dft 门、顶层端子——出去的线一条都不许无名。"""
+    must_be_named = ("REG", "PIN", "MUXN", "RENAME", "GATE", "TOPOUT")
+    tot, un = 0, 0
+    for wb, res in (btlp, wl):
+        for topo in wb.topout:
+            r = T.analyze_signal(wb, res, topo, mode="min", max_tests=32, want_graph=True)
+            if r.graph is None:
+                continue
+            idx = {n.id: n for n in r.graph.nodes}
+            tot += len(r.graph.edges)
+            for e in r.graph.edges:
+                if e.net:
+                    continue
+                un += 1
+                assert idx[e.src].kind not in must_be_named, \
+                    "%s: %s(%s) 的输出线没名字" % (topo.name, idx[e.src].kind, idx[e.src].label)
+    assert un <= tot * 0.10, "无名线占比 %d/%d 偏高" % (un, tot)
+
+
 def test_graph_edges_carry_intermediate_net_names(wl):
     """图上确实用上了那些中间网名（不是只挂在 AST 上没画出来）。"""
     r = _analyze(*wl, name="d_wl_rf_tx_epa_2g_mixer_en", want_graph=True)

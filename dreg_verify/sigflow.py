@@ -312,6 +312,35 @@ class _Builder:
         return self._emit(n, net=base, width=(abs(msb - lsb) + 1) if msb is not None else w,
                           trusted=trusted)
 
+    def _wrap_passthrough(self, src, node, base, width):
+        """叶子/子树被一串【纯透传 logic 行】(out = A) 改过名 → 补一个薄改名块，两级网名都留住（M6）。
+
+        cone._substitute 对裸变量返回的是【同一个对象】，所以改动点 A 的标签直接落在了叶子 Var 上；
+        不处理的话这一级的网名（如 d_wl_rf_linectrl_freq_sel_to_mux）在图上彻底消失——而它恰恰是
+        RTL 里真实存在、工程师要拿去 grep / 看波形的那个名字。RTL 里这就是一句 `assign b = a;`，
+        画成一个薄块既准确又能把两个名字都摆出来。
+        """
+        names, seen = [], {str(base).lower()}
+        chain = getattr(node, "origin_chain", None)
+        if not chain:
+            one = getattr(node, "origin_net", None)
+            chain = [one] if one else []
+        for x in chain:
+            if x and str(x).lower() not in seen:
+                seen.add(str(x).lower())
+                names.append(str(x))
+        if not names:
+            return src
+        _net, w0, tr = self._out.get(src.id, (None, None, True))
+        n = self.g.add_node("RENAME", "透传", sub=" → ".join([str(base)] + names),
+                            ports=[{"name": "A", "side": "left", "label": ""}],
+                            meta={"source": str(base), "probe": names[-1],
+                                  "passthrough": True, "chain": names})
+        self._link(src.id, n, "A")
+        return self._emit(n, net=names[-1],
+                          width=getattr(node, "origin_width", None) or w0 or width,
+                          trusted=tr)
+
     # ───────── AST 路线（logic 根 / 结构路线里的 logic 行） ─────────
     def _key(self, n):
         """CSE 键 = 结构哈希 + **这棵子树的来源网名**。
@@ -379,7 +408,8 @@ class _Builder:
             # 表达式，一层）。一个 logic 行【自己的输入】引擎是 resolve_signal_inputs 停在
             # binding 上的（discover_ctrl_paths 选 line/local 透传），我们也必须停在这儿，
             # 否则图上写的 force 目标就不是 .sv 里那根网。
-            return self._leaf_node(base, b, w, node.msb, node.lsb)
+            leaf = self._leaf_node(base, b, w, node.msb, node.lsb)
+            return self._wrap_passthrough(leaf, node, base, w)
         if isinstance(node, E.Const):
             lab = ("%d'b%s" % (node.width, format(node.value, "0%db" % max(node.width, 1)))
                    if node.width <= 4 else "%d'h%X" % (node.width, node.value))
@@ -520,8 +550,13 @@ class _Builder:
             n = self.g.add_node("BUSTAP", E._slice_suffix(node.msb, node.lsb), sub="抽头",
                                 ports=[{"name": "A", "side": "left", "label": ""}],
                                 meta={"msb": node.msb, "lsb": node.lsb})
-            self._link(self._ast(node.operand, binds, env, _d + 1).id, n, "A")
-            return fin(n)
+            child = self._ast(node.operand, binds, env, _d + 1)
+            self._link(child.id, n, "A")
+            # 抽头出来的仍是一根【有名字】的线：上游网名 + 位段（d_wl_rf_freq_sel[1]）。
+            # 与结构路线 _maybe_tap 同口径——别让 BUSTAP 后面那截凭空变匿名（M6）。
+            cnet = self._out.get(child.id, (None, None, True))[0]
+            tapped = ("%s%s" % (cnet, E._slice_suffix(node.msb, node.lsb))) if cnet else None
+            return fin(n, net=tapped)
 
         return fin(self.g.add_node("OP", type(node).__name__))
 
@@ -698,13 +733,25 @@ class _Builder:
         finally:
             self._scope = outer_scope
             self._stack.pop()
-        self._memo[lkey] = n.id
-        # 这一行的输出线 = 它的 RTL 网名（origin_net 在结构路线上的对等物）。
-        # 行表达式就是一个裸 Var（纯透传行）时不要覆盖——那个叶子盒可能被别处 CSE 共用。
-        if n.kind not in ("REG", "PIN"):
-            self._emit(n, net=(getattr(sig, "rtl_base", None) or sig.out_base),
-                       width=sig.out_width,
+        rtl = getattr(sig, "rtl_base", None) or sig.out_base
+        if n.kind in ("REG", "PIN"):
+            # 纯透传行（out = A）：AST 根就是那个叶子盒，而叶子盒可能被别处 CSE 共用 → 不能就地
+            # 改它的网名。补一个薄改名块把这一级的真名留住（M6，与 AST 路线的 _wrap_passthrough 同理）。
+            _net, w0, tr = self._out.get(n.id, (None, None, True))
+            src_name = str(n.meta.get("base") or n.label)
+            if str(rtl).lower() != src_name.lower():
+                rn = self.g.add_node("RENAME", "透传", sub="%s → %s" % (src_name, rtl),
+                                     ports=[{"name": "A", "side": "left", "label": ""}],
+                                     meta={"source": src_name, "probe": rtl,
+                                           "passthrough": True, "row": sig.out_base})
+                self._link(n.id, rn, "A")
+                self._emit(rn, net=rtl, width=sig.out_width, trusted=tr)
+                n = rn
+        else:
+            # 这一行的输出线 = 它的 RTL 网名（origin_net 在结构路线上的对等物）
+            self._emit(n, net=rtl, width=sig.out_width,
                        trusted=self._out.get(n.id, (None, None, True))[2])
+        self._memo[lkey] = n.id
         return n
 
     def _maybe_tap(self, src, msb, lsb, full_width):
