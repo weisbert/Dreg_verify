@@ -811,23 +811,33 @@ FLOW_HL_W = 2.2
 FLOW_DASH_BAD = "6 3"
 FLOW_DASH_GHOST = "5 3"
 
-_FILL = {"REG": "#eef2ff", "PIN": "#f8fafc", "AND": "#dbeafe", "NAND": "#dbeafe",
-         "OR": "#dcfce7", "NOR": "#dcfce7", "XOR": "#e0f2fe", "NOT": "#fee2e2",
-         "MUX2": "#fef3c7", "MUXN": "#fef3c7", "GATE": "#fce7f3", "REDUCE": "#ede9fe",
-         "CMP": "#ffe4e6", "OP": "#f1f5f9", "BUSTAP": "#ede9fe", "BUSMERGE": "#ede9fe",
-         "RENAME": "#f0fdfa", "CONST": "#e5e7eb", "TOPOUT": "#111827"}
-_STROKE = "#334155"
-_WIRE = "#475569"
-_NETC = "#0f766e"
+# 白底 + 五色线框的工程图（Design §6.1）：17 种糖果色底全部作废，颜色只剩「状态」这一个维度
+# —— 谁是猜的(AMB)、谁冲突(BAD)、谁被选中(HL)，其余一律 INK/MUTE。形状负责区分种类，不靠颜色。
+_BODY_BG = "#ffffff"          # 图元体底（白）
+_SHADE_BG = "#fbfcfd"         # MUX / 拼接这类「有内部结构」的体，极浅一层灰蓝
+_PAPER = "#ffffff"            # 画布底
 _FONT = "Consolas,Menlo,'DejaVu Sans Mono',monospace"
 _SANS = "'Segoe UI',Arial,'Noto Sans CJK SC','Microsoft YaHei',sans-serif"
 
 _CH = 6.6          # 等宽字体 11px 的字符宽度估计
 _CH9 = 5.4         # 同上，9px（net 名用这一号字）
+_CH8 = 4.8         # 同上，8px（MUX 支标用这一号字）
 _HGAP = 74         # 列间距下限（折点 + net 名都写在这段缝隙里）
 _HGAP_MAX = 230    # 列间距上限：再长的 net 名就截断 + <title> 兜全名，别把画布拉爆
 _VGAP = 18
 _PORT_H = 15       # MUX 每个数据口占的高度
+_LEGEND_H = 26     # 底部图例行占的高度
+_LEGEND_W = 560    # 图例四项排下来的最小宽度（画布比这还窄就撑到这里）
+_MUX_BODY_MIN = 96  # 梯形体最窄多少（支标挪到体外后，体里还要放得下 "MUX 13:1 (mux157)"）
+
+# 门体里写的符号（ANSI：形状表种类，体内符号只是复读）。原 label（AND/NAND/…）进 <title> 兜底。
+_GLYPH = {"AND": "&", "NAND": "&", "OR": "≥1", "NOR": "≥1", "XOR": "=1", "NOT": "1",
+          "GATE": "&"}
+# 每种 KIND 的画法 → data-shape 钩子（GUI 命中层 / 测试按它认形状，别去猜 path 的 d）
+_SHAPE = {"REG": "reg", "PIN": "pin", "AND": "and", "NAND": "and", "OR": "or", "NOR": "or",
+          "XOR": "xor", "NOT": "not", "GATE": "and", "MUX2": "mux", "MUXN": "mux",
+          "BUSTAP": "tap", "BUSMERGE": "merge", "RENAME": "rename", "CONST": "const",
+          "TOPOUT": "topout", "REDUCE": "box", "CMP": "box", "OP": "box"}
 
 
 def _esc(s):
@@ -843,13 +853,50 @@ def _disp_w(s):
     return n
 
 
+def _sub_text(node):
+    """框上第二行的最终文字 —— **猜名提示并进副标**（Design §6.1：`RO force · 名字来自命名约定`）。
+
+    以前提示另起一行画在框下方（`※ …`），既要给它在布局里留一行、又和下一个框的上沿贴着。
+    并进副标后那一行就省了。顺带：`RO force <网名>` 里的网名与主标一模一样时不再抄一遍
+    （Design 的副标就是 `RO force · …`，名字只在主标出现一次）。
+    """
+    sub = str(node.sub or "")
+    if node.kind == "TOPOUT":
+        return ("顶层输出 " + sub).strip()
+    tip = node.meta.get("tip") if node.meta.get("trusted") is False else None
+    if not tip:
+        return sub
+    tip = str(tip)
+    if tip in sub:                      # _cycle_stub 的 sub 本来就是那句话，别写两遍
+        return sub
+    base = str(node.meta.get("base") or "")
+    if base and sub.endswith(" " + base):
+        sub = sub[:-(len(base) + 1)]
+    return (sub + " · " + tip) if sub else tip
+
+
+def _port_gutter(node):
+    """MUX 梯形体左侧留给支标的那条竖带宽度（Design §6.1：**端口标签在左外侧**）。
+
+    支标不进梯形体：Excel 的 case 原文（`4'b000x ✗死分支 ·本轮不驱动`）动辄 20+ 字符，塞进体里
+    要么把梯形撑成一块板、要么压住 `MUX 13:1 (mux157)`。摆在体外左侧那条带里，线进来正好指着
+    自己那一支的 case 值——这也是读 mux 图时眼睛真正要找的东西。
+    """
+    if node.kind not in ("MUX2", "MUXN"):
+        return 0
+    plab = max([_disp_w(p["label"]) for p in node.ports if p["side"] == "left"] or [0])
+    if not plab:
+        return 0
+    return int(plab * _CH8) + 12
+
+
 def _head_h(node):
     """框顶给主标/副标留的高度。**只有左侧端口带文字时才需要让位**（m1②）：否则 MUX 的
     case 标签(y≈y0+15) 必然压在主标(y0+14)/副标(y0+27)上，两行字叠成一团谁都读不出。
     端口没文字的门（AND/OR/NOT 的输入）不留，免得图白白变高。"""
     if not any(p["side"] == "left" and p["label"] for p in node.ports):
         return 0
-    return 36 if node.sub else 22          # 主标基线 y0+17、副标 y0+31，各留 ~5px 下缘
+    return 36 if _sub_text(node) else 22   # 主标基线 y0+17、副标 y0+31，各留 ~5px 下缘
 
 
 def _left_band(node, y0, h):
@@ -863,15 +910,23 @@ def _left_port_y(node, y0, h, i, n):
 
 
 def _box_size(node):
-    labw = max(_disp_w(node.label), _disp_w(node.sub))
-    plabw = max([_disp_w(p["label"]) for p in node.ports if p["side"] == "left"] or [0])
-    w = max(96, int(max(labw, plabw) * _CH) + 22)
+    sub = _sub_text(node)
+    labw = max(_disp_w(node.label), _disp_w(sub))
+    if node.kind == "RENAME":            # 左源名 │ 右顶层口名，两半各要放得下
+        labw = max(labw, _disp_w(node.meta.get("source", "")) +
+                   _disp_w(node.meta.get("probe", "")) + 3)
+    gut = _port_gutter(node)
+    if gut:                              # 梯形体（放主标/副标）+ 左侧支标带，两段并排
+        w = max(96, gut + max(_MUX_BODY_MIN, int(labw * _CH) + 16))
+    else:
+        plabw = max([_disp_w(p["label"]) for p in node.ports if p["side"] == "left"] or [0])
+        w = max(96, int(max(labw, plabw) * _CH) + 22)
     nleft = len([p for p in node.ports if p["side"] == "left"])
-    h = 40 if node.sub else 30
+    h = 40 if sub else 30
     if nleft:
         h = max(h, _head_h(node) + nleft * _PORT_H + 6)
     if node.kind == "TOPOUT":
-        w = max(w, 120)
+        w = max(w, 120) + 16             # 箭头形右端那个尖（Design STUB=14）另外占宽
     return w, h
 
 
@@ -998,23 +1053,31 @@ def layout_graph(graph):
         for nid in cols.get(r, []):
             w, h = size[nid]
             pos[nid] = (xs[r], y, w, h)
-            n = idx.get(nid)
-            # 不可信叶子的「※ 名字来自命名约定」角标画在框下方 → 给它留一行
-            y += h + _VGAP + (12 if (n is not None and n.meta.get("trusted") is False
-                                     and n.meta.get("tip")) else 0)
+            # 猜名提示已经并进副标（_sub_text），不再需要给框下方的「※ …」角标留一行
+            y += h + _VGAP
         total_h = max(total_h, y)
-    total_h += 24
+    total_h += 24 + _LEGEND_H          # 底部图例行（Design §6.2 第 7 项）
+    total_w = max(total_w, _LEGEND_W)  # 图例四项排不下就把画布撑到放得下
 
     # 列间缝隙里的【走线通道】：同一条缝里多条边各占一条竖直通道，否则全挤在中点糊成一根粗棍
     _NCH = 6
     gap_use = {}
 
-    def channel(gap_r, left_x, right_x):
+    def channel(gap_r):
+        """第 gap_r 条列缝里的第 k 条竖直通道的 x。
+
+        ⭐ 通道必须按【这条缝本身的左右边界】排，不能按每条边自己的起点排：起点是源框的右缘，
+        同一列里框有宽有窄，各算各的就会让两条边算出同一个 x —— 两根竖线叠成一根粗棍，看起来
+        像一根线，实际是两根不同的网（C-286 抓的就是这个）。按缝排之后，缝里 ≤6 条线必然各占
+        一条通道；顺带也不会再出现「往左倒一截再往右」的倒钩。
+        """
+        gap_r = max(gap_r, 0)
         k = gap_use.get(gap_r, 0)
         gap_use[gap_r] = k + 1
-        span = max(right_x - left_x, 16)
+        lo = xs[gap_r] + colw[gap_r]
+        span = max(xs.get(gap_r + 1, lo + _HGAP) - lo, 16)
         step = max(6.0, (span - 14.0) / _NCH)
-        return left_x + 8 + (k % _NCH) * step
+        return lo + 8 + (k % _NCH) * step
 
     # ⑤ 端口锚点
     def anchor_out(nid):
@@ -1056,11 +1119,11 @@ def layout_graph(graph):
         for did in routes.get(id(e), []):
             r = rank[did]
             dy = pos[did][1]
-            xm = channel(r - 1, prev_x, xs[r])
+            xm = channel(r - 1)
             pts += [(xm, y1), (xm, dy), (xs[r] + colw[r], dy)]
             prev_x, y1 = xs[r] + colw[r], dy
         px, py, side = anchor_in(e.dst, e.dst_port)
-        xm = channel(rank[e.dst] - 1, prev_x, px)
+        xm = channel(rank[e.dst] - 1)
         if side == "top":
             yup = py - 16
             pts += [(xm, y1), (xm, yup), (px, yup), (px, py)]
@@ -1103,19 +1166,27 @@ def render_svg(graph, title=None, layout=None, highlight_net=None):
 
     out = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" '
            'font-family="%s" font-size="11">' % (total_w, total_h, total_w, total_h, _FONT),
-           '<rect x="0" y="0" width="%d" height="%d" fill="#ffffff"/>' % (total_w, total_h),
+           '<rect x="0" y="0" width="%d" height="%d" fill="%s"/>' % (total_w, total_h, _PAPER),
            '<text x="16" y="24" font-size="14" font-weight="bold" font-family="%s" '
-           'fill="#0f172a">%s</text>' % (_SANS, _esc(title or "")),
+           'fill="%s">%s</text>' % (_SANS, FLOW_INK, _esc(title or "")),
            '<g id="wires">']
 
     # ⑥ 连线
     for e, pts, side in lay.edges:
-        x1, y1 = pts[0]
-        px, py = pts[-1]
+        x1 = pts[0][0]                  # 源框右缘中点：net 名就写在它右上方那条列缝里
+        px, py = pts[-1]                # 目标口锚点：箭头 + 支标画在这儿
         ehl = hl_key is not None and _hl_key(e.net) == hl_key
-        sw = 2.6 if (e.width or 1) > 1 else 1.2
-        dash = ' stroke-dasharray="5,3"' if not e.trusted else ""
-        color = "#b45309" if not e.trusted else _WIRE
+        bmode, brow = _branch_mode(idx.get(e.dst), e.dst_port)
+        # 四种线型（Design §6.1「线型」）：普通 1.2 / bus 2.4 / hl 2.2 / bad 红虚线 6 3；
+        # 另有 ghost 5 3：猜名的线(AMB) 与 mux 死分支(MUTE)
+        sw = FLOW_BUS_W if (e.width or 1) > 1 else FLOW_WIRE_W
+        color, dash = FLOW_INK, ""
+        if bmode == "bad":            # 规格冲突的 case 支
+            color, dash = FLOW_BAD, ' stroke-dasharray="%s"' % FLOW_DASH_BAD
+        elif bmode == "ghost":        # 被前面的 case 盖掉的死分支
+            color, dash = FLOW_MUTE, ' stroke-dasharray="%s"' % FLOW_DASH_GHOST
+        elif not e.trusted:           # 网名是按命名约定猜的
+            color, dash = FLOW_AMB, ' stroke-dasharray="%s"' % FLOW_DASH_GHOST
         if ehl:                       # hl：选中的那根网压过虚线/粗细，一眼从图里挑出来
             color, sw = FLOW_HL, max(sw, FLOW_HL_W)
         out.append('<polyline points="%s" fill="none" stroke="%s" stroke-width="%.1f"%s '
@@ -1142,67 +1213,257 @@ def render_svg(graph, title=None, layout=None, highlight_net=None):
             out.append('<text x="%.0f" y="%.0f" font-size="9" fill="%s" data-net="%s">'
                        '<title>%s</title>%s</text>'
                        % (x1 + 5, pts[0][1] - 4,
-                          FLOW_HL if ehl else ("#b45309" if not e.trusted else _NETC),
+                          FLOW_HL if ehl else (FLOW_AMB if not e.trusted else FLOW_MUTE),
                           _esc(e.net or ""), _esc(lbl), _esc(shown)))
         # 支路标签（MUXN 的 case 值等）画在目标口外侧；与框内的端口标重复时不再画一遍（去噪）
         dstn = idx.get(e.dst)
         dup = dstn is not None and any(p["name"] == e.dst_port and p["label"] == e.label
                                        for p in dstn.ports)
         if e.label and not dup:
-            out.append('<text x="%.0f" y="%.0f" font-size="8.5" fill="#b91c1c" '
-                       'text-anchor="end">%s</text>' % (px - 9, py + 3, _esc(e.label)))
+            out.append('<text x="%.0f" y="%.0f" font-size="8.5" fill="%s" '
+                       'text-anchor="end">%s</text>'
+                       % (px - 9, py + 3, FLOW_BAD if bmode == "bad" else FLOW_MUTE,
+                          _esc(e.label + (_row_note(brow) if bmode == "bad" else ""))))
     out.append("</g><g id=\"cells\">")
 
     # ⑦ 图元
     for n in graph.nodes:
         x0, y0, w, h = pos[n.id]
-        fill = _FILL.get(n.kind, "#f8fafc")
         untrusted = (n.meta.get("trusted") is False)
-        dash = ' stroke-dasharray="5,3"' if untrusted else ""
-        stroke = "#b45309" if untrusted else _STROKE
         self_net = (n.meta.get("base") or n.meta.get("out_base") or n.label)
         nhl = hl_key is not None and _hl_key(self_net) == hl_key
-        out.append('<g data-node="%s" data-kind="%s" data-net="%s"%s>'
-                   % (n.id, n.kind, _esc(self_net), ' data-hl="1"' if nhl else ""))
-        if nhl:                       # hl 盒：HL 2px 边框 + 浅蓝底（Design §6.1「选中高亮」）
-            fill, stroke = FLOW_HL_BG, FLOW_HL
-        out.append('<rect x="%d" y="%d" width="%d" height="%d" rx="5" fill="%s" stroke="%s" '
-                   'stroke-width="%s"%s/>'
-                   % (x0, y0, w, h, fill, stroke, "2" if nhl else "1.2", dash))
-        tc = "#ffffff" if n.kind == "TOPOUT" else "#0f172a"
-        # 有 sub 或有带文字的端口 → 主标钉在框顶那条 header 带里（否则居中的主标会插在
-        # 端口标签中间，两行字叠一起，m1②）；两者都没有才居中
-        main_y = y0 + 17 if (n.sub or _head_h(n)) else y0 + h / 2 + 4
-        out.append('<text x="%d" y="%.0f" font-size="11" fill="%s">%s</text>'
-                   % (x0 + 8, main_y, tc, _esc(_clip(n.label, w))))
-        if n.sub:
-            out.append('<text x="%d" y="%d" font-size="8.5" fill="%s">%s</text>'
-                       % (x0 + 8, y0 + 31, "#cbd5e1" if n.kind == "TOPOUT" else "#64748b",
-                          _esc(_clip(n.sub, w))))
-        if n.meta.get("bubble"):
-            out.append('<circle cx="%d" cy="%.0f" r="3.4" fill="#ffffff" stroke="%s"/>'
-                       % (x0 + w + 3, y0 + h / 2.0, stroke))
-        # 端口标（MUX 数据口的 case 标签画在框内左侧）——与锚点共用 _left_port_y，
-        # 顶部已由 _head_h 给主标/副标让出一条，不会再叠在一起（m1②）
+        # 五色：常态 INK 实线白底；猜名 AMB 虚线 + 浅橙底；选中 HL 2px + 浅蓝底（压过前两者）
+        stroke, fill, sw = FLOW_INK, _BODY_BG, "1.3"
+        dash = ""
+        if untrusted:
+            stroke, fill = FLOW_AMB, FLOW_GUESS_BG
+            dash = ' stroke-dasharray="%s"' % FLOW_DASH_GHOST
+        if nhl:
+            stroke, fill, sw, dash = FLOW_HL, FLOW_HL_BG, "2", ""
+        out.append('<g data-node="%s" data-kind="%s" data-shape="%s" data-net="%s" '
+                   'data-box="%d,%d,%d,%d"%s>'
+                   % (n.id, n.kind, _SHAPE.get(n.kind, "box"), _esc(self_net),
+                      x0, y0, w, h, ' data-hl="1"' if nhl else ""))
+        # 体（十三种形 + REG/PIN 盒）：bx/bw = 体的左缘与宽，文字都写在体里
+        bx, bw = _draw_body(out, n, x0, y0, w, h, fill, stroke, sw, dash, nhl, untrusted)
+
+        sub = _sub_text(n)
+        # 有 sub 或有带文字的端口 → 主标钉在体顶那条 header 带里（否则居中的主标会插在端口
+        # 标签中间，两行字叠一起，m1②）；两者都没有才居中——门体里居中的就是 & / ≥1 / =1
+        glyph = _GLYPH.get(n.kind) if not (sub or _head_h(n)) else None
+        main = glyph or n.label
+        main_y = y0 + 17 if (sub or _head_h(n)) else y0 + h / 2 + 5
+        if glyph:                       # ANSI 门体：符号居中、加粗，原 label 进 <title> 兜底
+            out.append('<text x="%.0f" y="%.0f" font-size="15" font-weight="bold" fill="%s" '
+                       'text-anchor="middle"><title>%s</title>%s</text>'
+                       % (bx + bw / 2.0, main_y, FLOW_INK, _esc(n.label), _esc(main)))
+        else:
+            shown = _clip(main, bw)
+            out.append('<text x="%d" y="%.0f" font-size="11" fill="%s">'
+                       '<title>%s</title>%s</text>'
+                       % (bx + 8, main_y, FLOW_INK, _esc(main), _esc(shown)))
+        if sub:
+            out.append('<text x="%d" y="%d" font-size="8.5" fill="%s">'
+                       '<title>%s</title>%s</text>'
+                       % (bx + 8, y0 + 31,
+                          FLOW_AMB if untrusted else (FLOW_HL if n.kind == "TOPOUT"
+                                                      else FLOW_MUTE),
+                          _esc(sub), _esc(_clip(sub, bw))))
+        _draw_bubble(out, n, x0, y0, w, h, stroke)
+        # 端口标（MUX 的 case 支标画在梯形体【左外侧】那条带里，其余画在体内左侧）——
+        # 与锚点共用 _left_port_y，顶部已由 _head_h 给主标/副标让出一条（m1②）
         left = [p for p in n.ports if p["side"] == "left"]
+        gut = bx - x0
         for i, p in enumerate(left):
             if not p["label"]:
                 continue
             py = _left_port_y(n, y0, h, i, len(left))
-            out.append('<text x="%d" y="%.0f" font-size="8" fill="#475569">'
-                       '<title>%s</title>%s</text>'
-                       % (x0 + 6, py + 3, _esc(p["label"]), _esc(_clip(p["label"], w - 12))))
-        if untrusted and n.meta.get("tip"):
-            out.append('<text x="%d" y="%d" font-size="8" fill="#b45309">※ %s</text>'
-                       % (x0, y0 + h + 10, _esc(n.meta["tip"])))
+            bmode, brow = _branch_mode(n, p["name"])
+            lab = p["label"] + (_row_note(brow) if bmode == "bad" else "")
+            col = FLOW_BAD if bmode == "bad" else FLOW_MUTE
+            if gut:                     # 体外左侧：右对齐贴着梯形左缘
+                out.append('<text x="%.0f" y="%.0f" font-size="8" fill="%s" '
+                           'text-anchor="end"><title>%s</title>%s</text>'
+                           % (bx - 5, py + 3, col, _esc(lab), _esc(_clip8(lab, gut - 8))))
+            else:
+                out.append('<text x="%d" y="%.0f" font-size="8" fill="%s">'
+                           '<title>%s</title>%s</text>'
+                           % (bx + 6, py + 3, col, _esc(lab), _esc(_clip(lab, bw - 12))))
         out.append("</g>")
-    out.append("</g></svg>")
+    out.append("</g>")
+    _draw_legend(out, total_w, total_h)
+    out.append("</svg>")
     return "\n".join(out)
+
+
+def _row_note(row):
+    """冲突支旁边那句 Excel 行号（Design：`… · Excel mux 页 行 214`）。"""
+    return (" · Excel 行 %s" % row) if row is not None else ""
+
+
+def _branch_mode(node, port):
+    """MUXN 的某一支的线型：规格冲突 →（"bad", Excel 行号）；被盖掉的死分支 →（"ghost", None）。
+
+    行号来自 `meta.case_rows` / `meta.conflict_rows`（数据层早就算好了，这里只负责画出来）——
+    Design §6.1 里冲突支就是「红虚线 + 旁边写清楚是 Excel 哪一行」，光标一个 ⚠ 没法让人去核对。
+    """
+    if node is None or node.kind != "MUXN" or not str(port).startswith("D"):
+        return None, None
+    try:
+        i = int(str(port)[1:])
+    except ValueError:                  # "Dd" = AST 折叠出来的 default 支
+        return None, None
+    rows = node.meta.get("case_rows") or []
+    if i < len(rows) and rows[i] in set(node.meta.get("conflict_rows") or ()):
+        return "bad", rows[i]
+    if i in set(node.meta.get("shadowed") or ()):
+        return "ghost", None
+    return None, None
+
+
+def _path(out, d, fill, stroke, sw, dash=""):
+    out.append('<path d="%s" fill="%s" stroke="%s" stroke-width="%s"%s/>'
+               % (d, fill, stroke, sw, dash))
+
+
+def _draw_body(out, n, x0, y0, w, h, fill, stroke, sw, dash, nhl, untrusted):
+    """画一个图元的体，返回 (体左缘 bx, 体宽 bw)。十三种形按 V2Spec §4「电路图图元」文字规范。"""
+    k = n.kind
+    x1, y1 = x0 + w, y0 + h
+    cy = y0 + h / 2.0
+
+    if k == "TOPOUT":                   # 端子箭头形 + 浅蓝底 + HL 2px 框（Design TOP）
+        tip = 14
+        _path(out, "M%d,%d H%d L%d,%.1f L%d,%d H%d Z"
+              % (x0, y0, x1 - tip, x1, cy, x1 - tip, y1, x0),
+              FLOW_HL_BG if nhl else (FLOW_TOP_BG if not untrusted else fill),
+              FLOW_HL if not untrusted else stroke, "2", dash)
+        return x0, w - tip
+
+    if k in ("AND", "NAND", "GATE"):    # ANSI 半圆体：平背 + 右半圆（Design AND）
+        r = h / 2.0
+        _path(out, "M%d,%d H%.1f A%.1f,%.1f 0 0 1 %.1f,%d H%d Z"
+              % (x0, y0, x1 - r, r, r, x1 - r, y1, x0), fill, stroke, sw, dash)
+        return x0, w - r * 0.7
+
+    if k in ("OR", "NOR", "XOR"):       # ANSI 曲线体：三段二次贝塞尔（Design OR）
+        back = x0 + (10 if k == "XOR" else 0)      # XOR 多一道背弧
+        if k == "XOR":
+            _path(out, "M%d,%d Q%.1f,%.1f %d,%d" % (x0, y0, x0 + 11, cy, x0, y1),
+                  "none", stroke, sw, dash)
+        _path(out, "M%d,%d Q%.1f,%d %d,%.1f Q%.1f,%d %d,%d Q%.1f,%.1f %d,%d Z"
+              % (back, y0, back + w * 0.5, y0, x1, cy, back + w * 0.5, y1, back, y1,
+                 back + w * 0.26, cy, back, y0), fill, stroke, sw, dash)
+        return back, w - (10 if k == "XOR" else 0) - h * 0.30
+
+    if k == "NOT":                      # 三角，尖顶正好顶住输出侧那个反相气泡（_draw_bubble）
+        _path(out, "M%d,%d L%d,%.1f L%d,%d Z" % (x0, y0, x1, cy, x0, y1),
+              fill, stroke, sw, dash)
+        return x0, w * 0.55
+
+    if k in ("MUX2", "MUXN"):           # 梯形：左缘满高、右缘上下各切进 cut（Design MUX）
+        gut = _port_gutter(n)
+        bx, bw = x0 + gut, w - gut
+        cut = min(16.0, h * 0.16)
+        _path(out, "M%d,%d L%d,%.1f L%d,%.1f L%d,%d Z"
+              % (bx, y0, x1, y0 + cut, x1, y1 - cut, bx, y1),
+              _SHADE_BG if fill == _BODY_BG else fill, stroke, sw, dash)
+        return bx, bw
+
+    if k == "BUSTAP":                   # 位段抽头：入线处一个实心三角抽头（V2Spec「切片 三角抽头」）
+        out.append('<rect x="%d" y="%d" width="%d" height="%d" rx="3" fill="%s" stroke="%s" '
+                   'stroke-width="%s"%s/>' % (x0, y0, w, h, fill, stroke, sw, dash))
+        _path(out, "M%d,%.1f L%d,%.1f L%d,%.1f Z"
+              % (x0, cy - 7, x0 + 11, cy, x0, cy + 7), stroke, stroke, "1")
+        return x0 + 12, w - 12
+
+    if k == "BUSMERGE":                 # 拼接：梯形合并（多支进、一根出）
+        cut = min(14.0, h * 0.18)
+        _path(out, "M%d,%d L%d,%.1f L%d,%.1f L%d,%d Z"
+              % (x0, y0, x1, y0 + cut, x1, y1 - cut, x0, y1),
+              _SHADE_BG if fill == _BODY_BG else fill, stroke, sw, dash)
+        return x0, w - cut
+
+    if k == "RENAME":                   # 改名 / 电平移位透传块（副标已是「左源名 → 右顶层口名」）
+        _path(out, "M%d,%d H%d V%d H%d Z" % (x0, y0, x1, y1, x0), fill, stroke, sw, dash)
+        _path(out, "M%.1f,%.1f L%.1f,%.1f L%.1f,%.1f Z"      # 右缘一个 ▷：只是透传，不改值
+              % (x1 - 12, cy - 5, x1 - 4, cy, x1 - 12, cy + 5), "none", FLOW_MUTE, "1.1")
+        return x0, w - 14
+
+    if k == "CONST":                    # 常量：左缘加一道竖杠（「这不是一根网，是写死的值」）
+        _path(out, "M%d,%d H%d V%d H%d Z" % (x0, y0, x1, y1, x0), fill, stroke, sw, dash)
+        out.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="2.4"/>'
+                   % (x0 + 3, y0 + 4, x0 + 3, y1 - 4, FLOW_MUTE))
+        return x0 + 3, w - 3
+
+    # REG / PIN / REDUCE / CMP / OP：矩形盒。REG 左侧 5px 色条（高亮时蓝），猜名盒不画色条
+    out.append('<rect x="%d" y="%d" width="%d" height="%d" rx="%s" fill="%s" stroke="%s" '
+               'stroke-width="%s"%s/>' % (x0, y0, w, h, "0" if k in ("REG", "PIN") else "3",
+                                          fill, stroke, sw, dash))
+    if k == "REG" and not untrusted:
+        out.append('<rect x="%d" y="%d" width="5" height="%d" fill="%s" data-bar="1"/>'
+                   % (x0, y0, h, FLOW_HL if nhl else FLOW_REG_BAR))
+        return x0 + 5, w - 5
+    return x0, w
+
+
+def _draw_bubble(out, n, x0, y0, w, h, stroke):
+    """反相气泡。**输入侧还是输出侧不是画法问题，是语义问题**：
+
+    `~(A&B)` / `~A` 是【输出】取反 → 气泡在右；而 dft 门 `iddq ? 0 : x ≡ x & ~iddq` 是拿
+    **取反后的 iddq** 去与 —— 反的是那个【输入】，气泡必须扣在 G 口上。以前一律画在输出侧，
+    等于告诉人「整个门的输出被反了」，与 .sv 里生成的激励对不上（Design §6.1 抓到的就是这条）。
+    """
+    if not n.meta.get("bubble"):
+        return
+    if n.kind == "GATE":
+        top = [p["name"] for p in n.ports if p["side"] == "top"]
+        i = top.index("G") if "G" in top else 0
+        cx = x0 + w * (i + 1.0) / (len(top) + 1.0)
+        out.append('<circle cx="%.1f" cy="%.1f" r="5" fill="%s" stroke="%s" '
+                   'data-bubble="in"/>' % (cx, y0 - 5.5, _BODY_BG, stroke))
+        return
+    out.append('<circle cx="%.1f" cy="%.1f" r="5" fill="%s" stroke="%s" data-bubble="out"/>'
+               % (x0 + w + 5, y0 + h / 2.0, _BODY_BG, stroke))
+
+
+_LEGEND = (("reg", FLOW_MUTE, "", "寄存器（表里查到地址）"),
+           ("guess", FLOW_AMB, FLOW_DASH_GHOST, "名字来自命名约定，表里未查到"),
+           ("hl", FLOW_HL, "", "当前选中线网"),
+           ("bad", FLOW_BAD, FLOW_DASH_BAD, "规格冲突的 case 支"))
+
+
+def _draw_legend(out, total_w, total_h):
+    """底部图例行（Design §6.2 第 7 项）：四种线型各一条样线 + 一句人话。
+
+    没有它，虚线橙 / 红虚线 / 蓝粗线三种状态就得靠人猜；这张图给的是 designer 看的结论，
+    图例是它能被独立看懂的前提（报告 HTML 里也是同一份 SVG）。
+    """
+    y = total_h - 10
+    out.append('<g id="legend" font-family="%s">' % _SANS)
+    out.append('<line x1="0" y1="%.1f" x2="%d" y2="%.1f" stroke="#e3e7eb" stroke-width="1"/>'
+               % (y - 15.5, total_w, y - 15.5))
+    x = 16
+    for key, color, dash, text in _LEGEND:
+        out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s" stroke-width="%s"%s '
+                   'data-legend="%s"/>'
+                   % (x, y - 3.5, x + 18, y - 3.5, color,
+                      FLOW_HL_W if key == "hl" else FLOW_WIRE_W,
+                      (' stroke-dasharray="%s"' % dash) if dash else "", key))
+        out.append('<text x="%d" y="%.1f" font-size="9" fill="%s">%s</text>'
+                   % (x + 23, y, color, _esc(text)))
+        x += 23 + int(_disp_w(text) * 4.6) + 18
+    out.append("</g>")
 
 
 def _clip9(s, roomw):
     """9px 小字按【可用像素宽】截断（net 名写在列缝里，缝有多宽就写多少）。"""
     return _clip_to(s, max(4, int(roomw / _CH9)))
+
+
+def _clip8(s, roomw):
+    """8px 小字按可用像素宽截断（MUX 支标写在梯形体外那条带里，带就是按这个字号量的）。"""
+    return _clip_to(s, max(4, int(roomw / _CH8)))
 
 
 def _clip(s, boxw):

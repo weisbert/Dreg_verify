@@ -32,27 +32,27 @@ from dreg_verify import topout as T            # noqa: E402
 # RO 回读根 pll_lock_indicator 的空图）。**录法**：SF.render_svg(图) 的 utf-8 sha256 前 16 位。
 # 抽 layout_graph 那一次（C0-c 第1步）逐信号比对为 21/21 相同 —— 这是布局搬家没有走样的证据。
 _SVG_SHA = {
-    ("btlp", "clk_force_on"): "7974737a91d006d3",
-    ("btlp", "d_bt_lp_lna_itrim"): "df1aac4a678681b9",
-    ("btlp", "d_en_refbuf_ls"): "1b4a7da7b3c65b4b",
-    ("btlp", "d_logic_bt_lp_lna_agc"): "4f17f24d8a6178fa",
-    ("btlp", "d_logic_bt_lp_lpf_agc"): "e41a1710a99593c1",
-    ("btlp", "d_logic_bt_lp_reserve"): "dcf61a4bb4655a33",
-    ("btlp", "d_logic_bt_lp_rx_dcoc_i"): "4b779b15d627d984",
-    ("btlp", "d_logic_bt_lp_rx_dcoc_q"): "4372f7a0b7fcb055",
-    ("btlp", "d_logic_bt_lp_rx_en"): "03cf1a8a83e249a3",
-    ("btlp", "d_logic_bt_lp_tsensor"): "6a1f613d8aee99ff",
-    ("btlp", "en_dig_clk"): "b95c283d777440eb",
+    ("btlp", "clk_force_on"): "13bbcf9323001c64",
+    ("btlp", "d_bt_lp_lna_itrim"): "5e92669ce69bd017",
+    ("btlp", "d_en_refbuf_ls"): "e059f790358188e1",
+    ("btlp", "d_logic_bt_lp_lna_agc"): "ec270c1d5a191c60",
+    ("btlp", "d_logic_bt_lp_lpf_agc"): "5da31e1a1cc97ab9",
+    ("btlp", "d_logic_bt_lp_reserve"): "9da3b13977dbb7cd",
+    ("btlp", "d_logic_bt_lp_rx_dcoc_i"): "f10cd40b8219421c",
+    ("btlp", "d_logic_bt_lp_rx_dcoc_q"): "3256ec40da06b3f9",
+    ("btlp", "d_logic_bt_lp_rx_en"): "8a6f1d9e6ba58b86",
+    ("btlp", "d_logic_bt_lp_tsensor"): "133cce6e964d80b8",
+    ("btlp", "en_dig_clk"): "b69709ae294490a1",
     ("btlp", "pll_lock_indicator"): "16374709e214e68f",
-    ("wl", "d_wl_rf_lo2g5g_bias_en"): "2b3fe298638f2e8b",
-    ("wl", "d_wl_rf_tx_epa_2g_mixer_en"): "87936fdad712435a",
-    ("wl", "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim"): "cc7b94378d968829",
-    ("wl", "d_wl_rf_lo2g5g_mixer2g_trim"): "05620249a07b0535",
-    ("wl", "d_wl_rf_lo2g5g_mixer5g_trim"): "ab123efca3a81139",
-    ("wl", "d_wl_rf_lp5g_rxrf_lna_lctune"): "3e6dd4ed863e90a7",
-    ("wl", "d_bt_rx_slna_1st_bias_trim_gain_cal_wl"): "a9e7ff796fd93b5c",
-    ("wl", "d_wl_rf_lp5g_gm_itrim"): "e6d4bf2fc7117cb8",
-    ("wl", "d_wl_rf_lpf_cmain"): "bbfe6061791d0907",
+    ("wl", "d_wl_rf_lo2g5g_bias_en"): "f2c5399628658988",
+    ("wl", "d_wl_rf_tx_epa_2g_mixer_en"): "9919e21e5b7489a2",
+    ("wl", "d_wl_rf_lo2g5g_lcbufc0_2g_pfb_band_trim"): "c1ee9ba0a1172116",
+    ("wl", "d_wl_rf_lo2g5g_mixer2g_trim"): "c1732fc03aa46acd",
+    ("wl", "d_wl_rf_lo2g5g_mixer5g_trim"): "f7e7b924867b0b8b",
+    ("wl", "d_wl_rf_lp5g_rxrf_lna_lctune"): "49d290f21be9a752",
+    ("wl", "d_bt_rx_slna_1st_bias_trim_gain_cal_wl"): "4e6fad74ed87bab7",
+    ("wl", "d_wl_rf_lp5g_gm_itrim"): "d6840e145caa6541",
+    ("wl", "d_wl_rf_lpf_cmain"): "3665431536f6b538",
 }
 
 
@@ -129,9 +129,10 @@ def test_layout_graph_fields_and_coords(wl):
     svg = SF.render_svg(g, layout=lay)
     m = re.search(r'width="(\d+)" height="(\d+)" viewBox="0 0 (\d+) (\d+)"', svg)
     assert m and (int(m.group(1)), int(m.group(2))) == tuple(lay.size)
-    # 每个盒的 x/y/w/h 都能在 SVG 里找到同样的 rect（命中层与画面不许漂）
+    # 每个图元的包围盒都原样写在 SVG 上（data-box）——十三种形里矩形只剩几种，命中层不能再靠
+    # 认 <rect>；有了 data-box，「命中层坐标 == 画面坐标」就是一条可机检的等式
     for nid, (x, y, w, h) in lay.pos.items():
-        assert 'x="%d" y="%d" width="%d" height="%d"' % (x, y, w, h) in svg, nid
+        assert 'data-box="%d,%d,%d,%d"' % (x, y, w, h) in svg, nid
     # 输出锚点 = 盒右缘中点；每条边的第一个点就是它
     for e, pts, _side in lay.edges:
         assert pts[0] == lay.ports[(e.src, "Y")]
@@ -196,8 +197,190 @@ def test_c282_highlight_node_box(btlp):
     topo = next(t for t in wb.topout if t.name == "clk_force_on")
     g = T.analyze_signal(wb, res, topo, mode="min", max_tests=32, want_graph=True).graph
     svg = SF.render_svg(g, highlight_net="clk_force_on")
-    assert '<g data-node="n1" data-kind="REG" data-net="clk_force_on" data-hl="1">' in svg
+    assert 'data-node="n1" data-kind="REG" data-shape="reg" data-net="clk_force_on"' in svg
+    assert re.search(r'data-node="n1"[^>]*data-hl="1"', svg)
     assert SF.FLOW_HL_BG in svg                          # 选中盒底 #eef4fd
+    assert SF.FLOW_HL in svg                             # REG 左色条高亮时也转蓝
+
+
+# ═══════════════ ③ 第3步：样式层重写（C-279 十三种图元 / C-286 版面） ═══════════════
+def _qt_ok(svg):
+    """SVG 能被 QtSvg 真解析（GUI 就是拿 QSvgRenderer 显示它的，吐半截会白屏）。"""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtSvg import QSvgRenderer
+    r = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    return r.isValid() and r.defaultSize().width() > 0
+
+
+def _one_kind_graph(kind):
+    """造一张「该图元 → TOPOUT」的最小图（数据层照常只读，这里只用公开的 add_node/add_edge）。"""
+    g = SF.Graph("kind_" + kind)
+    meta, ports, sub = {}, [], ""
+    if kind == "REG":
+        meta = {"trusted": True, "base": "some_reg", "address": 0x2d}
+        sub = "RW @0x2d[4:4]"
+    elif kind == "PIN":
+        meta = {"trusted": False, "base": "some_wire", "tip": SF.UNTRUSTED_TIP,
+                "found_in": "wire"}
+        sub = "RO force some_wire"
+    elif kind == "GATE":
+        meta = {"bubble": True, "gate_base": "iddq_mode", "transparent": 0}
+        sub = "iddq_mode ? 0 : D"
+        ports = [{"name": "G", "side": "top", "label": "iddq_mode"},
+                 {"name": "D", "side": "left", "label": "功能"}]
+    elif kind in ("NAND", "NOR", "NOT"):
+        meta = {"bubble": True}
+        ports = [{"name": "A", "side": "left", "label": ""}]
+    elif kind == "MUX2":
+        ports = [{"name": "S", "side": "top", "label": "sel"},
+                 {"name": "D1", "side": "left", "label": "1"},
+                 {"name": "D0", "side": "left", "label": "0"}]
+    elif kind == "MUXN":
+        sub = "case(sel)"
+        meta = {"group": 3, "cases": ["2'b00", "2'b11"], "case_rows": [58, 214],
+                "conflict_rows": [214], "shadowed": [], "undriven_cases": []}
+        ports = [{"name": "S0", "side": "top", "label": "sel"},
+                 {"name": "D0", "side": "left", "label": "2'b00"},
+                 {"name": "D1", "side": "left", "label": "2'b11 ⚠conflict"}]
+    elif kind == "RENAME":
+        meta = {"source": "src_net", "probe": "top_port"}
+        sub = "src_net → top_port"
+        ports = [{"name": "A", "side": "left", "label": ""}]
+    elif kind in ("BUSTAP", "BUSMERGE", "REDUCE", "CMP", "OP"):
+        sub = "抽头"
+        ports = [{"name": "A", "side": "left", "label": ""}]
+    elif kind == "TOPOUT":
+        ports = [{"name": "A", "side": "left", "label": ""}]
+    else:
+        ports = [{"name": "A", "side": "left", "label": ""}]
+    n = g.add_node(kind, kind.title(), sub=sub, ports=ports, meta=meta)
+    if kind == "TOPOUT":
+        src = g.add_node("REG", "some_reg", sub="RW @0x2d[4:4]",
+                         meta={"trusted": True, "base": "some_reg", "address": 0x2d})
+        g.add_edge(src.id, n.id, "A", net="some_reg", width=1)
+        return g, n
+    top = g.add_node("TOPOUT", "fake_out", ports=[{"name": "A", "side": "left", "label": ""}])
+    for p in n.ports:
+        src = g.add_node("REG", "in_" + p["name"], sub="RW @0x1[0:0]",
+                         meta={"trusted": True, "base": "in_" + p["name"], "address": 1})
+        g.add_edge(src.id, n.id, p["name"], net="in_" + p["name"], label=p["label"])
+    if not n.ports:
+        src = g.add_node("REG", "in_a", sub="RW @0x1[0:0]",
+                         meta={"trusted": True, "base": "in_a", "address": 1})
+        g.add_edge(src.id, n.id, "A", net="in_a")
+    g.add_edge(n.id, top.id, "A", net="fake_out", width=4)
+    return g, n
+
+
+def test_c279_all_kinds_render():
+    """C-279：`KINDS` 每一种都造一张图渲染 —— 不抛、QtSvg 解析得了、带自己那个形状标记。
+
+    Design 只画了 reg/AND/OR/MUX/TOP 五种，剩下的按 V2Spec §4「电路图图元」的文字规范补形。
+    形状用 `data-shape` 钩子认（别去比 path 的 d：那是随盒子尺寸变的），种类仍挂 data-kind。
+    """
+    assert len(SF.KINDS) == len(set(SF.KINDS)) == 19       # 17 种逻辑图元 + GATE + TOPOUT
+    seen = set()
+    for kind in SF.KINDS:
+        g, n = _one_kind_graph(kind)
+        svg = SF.render_svg(g)
+        assert _qt_ok(svg), "%s 渲出来的 SVG QtSvg 解析不了" % kind
+        assert 'data-kind="%s"' % kind in svg, kind
+        shape = SF._SHAPE[kind]
+        assert 'data-shape="%s"' % shape in svg, kind
+        assert 'data-node="%s"' % n.id in svg and 'data-box="' in svg
+        seen.add(shape)
+        # 五色以外的糖果色底一个都不许再冒出来
+        assert "#eef2ff" not in svg and "#111827" not in svg and "#fef3c7" not in svg, kind
+    assert seen == set(SF._SHAPE.values())
+
+    # 逐条核对九项样式（Design §6.2）落到了具体图元上
+    svg = SF.render_svg(_one_kind_graph("REG")[0])
+    assert 'data-bar="1"' in svg and SF.FLOW_REG_BAR in svg          # ① REG 左 5px 色条
+    svg = SF.render_svg(_one_kind_graph("MUXN")[0])
+    assert '<path d="M' in svg                                       # ② MUX 梯形
+    assert "Excel 行 214" in svg                                     # ⑥ 冲突支写出 Excel 行号
+    assert SF.FLOW_BAD in svg and 'stroke-dasharray="%s"' % SF.FLOW_DASH_BAD in svg
+    svg = SF.render_svg(_one_kind_graph("GATE")[0])
+    assert 'data-bubble="in"' in svg                                 # ③ 门的气泡在【输入侧】
+    assert 'data-bubble="out"' not in svg
+    for k in ("NAND", "NOR", "NOT"):                                 # 输出取反的仍在输出侧
+        assert 'data-bubble="out"' in SF.render_svg(_one_kind_graph(k)[0]), k
+    assert "≥1" in SF.render_svg(_one_kind_graph("OR")[0])           # ④ OR 曲线体写 ≥1
+    svg = SF.render_svg(_one_kind_graph("TOPOUT")[0])
+    assert SF.FLOW_TOP_BG in svg and "顶层输出" in svg               # ⑤ TOP 箭头形 + 浅蓝底
+    svg = SF.render_svg(_one_kind_graph("PIN")[0])
+    assert SF.UNTRUSTED_TIP in svg and "※" not in svg                # ⑨ 猜名提示并进副标
+    assert "RO force ·" in svg                                       # 网名不再抄第二遍
+    assert SF.FLOW_GUESS_BG in svg
+
+
+def test_c279_legend_and_line_styles(wl):
+    """⑦ 图例行四项 + ⑧ 四种线型都在真图上出现过。"""
+    wb, res = wl
+    topo = next(t for t in wb.topout if t.name == "d_wl_rf_lp5g_rxrf_lna_lctune")
+    g = T.analyze_signal(wb, res, topo, mode="min", max_tests=32, want_graph=True).graph
+    svg = SF.render_svg(g, highlight_net="d_wl_rf_lp5g_rxrf_lna_lctune")
+    for key in ("reg", "guess", "hl", "bad"):
+        assert 'data-legend="%s"' % key in svg, key
+    for word in ("寄存器（表里查到地址）", "名字来自命名约定，表里未查到",
+                 "当前选中线网", "规格冲突的 case 支"):
+        assert word in svg, word
+    # 四种线型：普通 1.2 / bus 2.4 / hl 2.2 / 猜名 ghost 虚线
+    assert 'stroke-width="1.2"' in svg and 'stroke-width="2.4"' in svg
+    assert 'stroke-width="2.2"' in svg
+    assert 'stroke-dasharray="%s"' % SF.FLOW_DASH_GHOST in svg
+    assert _qt_ok(svg)
+
+
+def _rects_overlap(a, b):
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+
+def test_c286_layout_no_overlap(btlp, wl):
+    """C-286：① 任意两个图元的包围盒不重叠；② 一条列缝里 ≤6 条竖段时，通道两两不重叠。
+
+    重叠 = 两个盒糊在一起 / 两根线并成一根粗棍，图当场废掉。通道只有 `_NCH`=6 条，超过 6 条
+    的缝会绕回去共用通道（那是已知取舍，不在这条断言的范围里）。
+    """
+    bad = []
+    for tag, (wb, res) in (("btlp", btlp), ("wl", wl)):
+        for name, g in _graphs(wb, res):
+            if not g.nodes:
+                continue
+            lay = SF.layout_graph(g)
+            boxes = sorted(lay.pos.items())
+            for i, (na, ra) in enumerate(boxes):
+                for nb, rb in boxes[i + 1:]:
+                    if _rects_overlap(ra, rb):
+                        bad.append("%s/%s 盒重叠 %s%s %s%s" % (tag, name, na, ra, nb, rb))
+
+            # 列带：每一列的 [左缘, 右缘]，缝 g 就是 列g 右缘 → 列g+1 左缘 之间那段
+            band = {}
+            for nid, (x, _y, w, _h) in lay.pos.items():
+                r = lay.rank[nid]
+                lo, hi = band.get(r, (x, x + w))
+                band[r] = (min(lo, x), max(hi, x + w))
+            gaps = {}                       # 缝号 → [(lane_x, y0, y1)…]
+            for _e, pts, _side in lay.edges:
+                for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                    if abs(ax - bx) > 0.5 or abs(ay - by) < 0.5:
+                        continue            # 只看竖段
+                    for r, (_lo, hi) in band.items():
+                        nxt = band.get(r + 1)
+                        if nxt is not None and hi < ax < nxt[0]:
+                            gaps.setdefault(r, []).append((ax, min(ay, by), max(ay, by)))
+                            break
+            for r, segs in gaps.items():
+                if len(segs) > 6:           # 通道只有 6 条，更多就必然共用（已知取舍）
+                    continue
+                for i, (xa, a0, a1) in enumerate(segs):
+                    for xb, b0, b1 in segs[i + 1:]:
+                        if abs(xa - xb) < 1.0 and a0 < b1 and b0 < a1:
+                            bad.append("%s/%s 缝%d 两条竖段重叠于 x=%.0f" % (tag, name, r, xa))
+    assert not bad, "\n".join(bad[:20])
 
 
 def test_flow_colors_match_ui_theme():

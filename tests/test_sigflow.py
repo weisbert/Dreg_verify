@@ -738,12 +738,14 @@ def test_net_labels_fit_in_the_column_gap(wl):
     import re
     r = _analyze(*wl, name="d_wl_rf_tx_epa_2g_mixer_en", want_graph=True)
     svg = SF.render_svg(r.graph)
-    # 所有 9px 的 net 文字都必须带 <title> 全名
-    for m in re.finditer(r'<text [^>]*font-size="9"[^>]*>(.*?)</text>', svg, re.S):
+    # 所有 net 文字（9px + 挂着 data-net 的那批）都必须带 <title> 全名
+    # ——「9px」这一条现在也被底部图例行用着（C0-c 第3步），所以按 data-net 认，别按字号认
+    for m in re.finditer(r'<text [^>]*font-size="9"[^>]*data-net=[^>]*>(.*?)</text>', svg, re.S):
         assert m.group(1).startswith("<title>"), m.group(1)[:60]
     # 32 字符的长网名确实完整画出来了（缝加宽了），没被截成省略号
     shown = [m.group(2) for m in
-             re.finditer(r'<text [^>]*font-size="9"[^>]*><title>(.*?)</title>(.*?)</text>', svg)]
+             re.finditer(r'<text [^>]*font-size="9"[^>]*data-net=[^>]*><title>(.*?)</title>'
+                         r'(.*?)</text>', svg)]
     assert "d_wl_rf_linectrl_freq_sel_to_mux[1:0]" in shown, shown
     assert not any(s.endswith("…") for s in shown), [s for s in shown if s.endswith("…")]
     # 位段不能补两遍（抽头出来的网名本身已带 [1:0]）
