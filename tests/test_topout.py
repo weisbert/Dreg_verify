@@ -243,6 +243,40 @@ def test_c060_mux_ctrl_has_binding(wl_wb, wl_res):
     assert seen >= 4, "WL 镜像应有多组 mux 级联控制口"
 
 
+def test_c131_dft_gate_skipped_reported(wl_wb, wl_res):
+    """§7-5：有 iddq 门但【没钉上】时，原因进 res.meta["dft_gate_skipped"] → an 同名键。
+
+    此前这两种跳过完全静默（界面只看到「没有 DFT 门行」，说不清是本来没门还是钉不上，
+    违护栏3『跳过必有名字+原因』）。门本来就没有（wb.dft 查无）不算跳过、不写键。"""
+    from dreg_verify import analysis_norm as AN
+    from dreg_verify import generator as G
+    name = "d_wl_rf_lo2g5g_bias_en"
+    gate = wl_wb.dft[name]["gate_base"]
+    topo = next(t for t in wl_wb.topout if t.name == name)
+
+    # ① 正常钉上 → 不写键
+    r = T.analyze_signal(wl_wb, wl_res, topo, mode="min")
+    assert r.dft_gate is not None
+    assert AN.norm_topout_result(r, wl_wb)["dft_gate_skipped"] is None
+    # ② 门不是可 force 的 RO 网（这里把它当 RW 字段）→ 钉不上，点名 + 原因
+    rr = R.Resolver(wl_wb, rfwrite_overrides={gate})
+    r2 = T.analyze_signal(wl_wb, rr, topo, mode="min")
+    sk = AN.norm_topout_result(r2, wl_wb)["dft_gate_skipped"]
+    assert r2.dft_gate is None and sk is not None
+    assert sk["gate_base"] == gate and "RO" in sk["reason"]
+    # ③ 门网已是本信号的显式输入 → 去重跳过，同样点名 + 原因
+    meta = {}
+    assert G.pin_dft_gate(name, [], wl_wb, wl_res, input_bases={gate}, meta=meta) is None
+    assert meta["dft_gate_skipped"]["gate_base"] == gate
+    assert "显式输入" in meta["dft_gate_skipped"]["reason"]
+    # ④ 本来就没门（btlp 无 dft 页）→ 不是跳过，不写键
+    meta2 = {}
+    assert G.pin_dft_gate("nonexistent_sig", [], wl_wb, wl_res, meta=meta2) is None
+    assert meta2 == {}
+    # ⑤ meta 默认 None = 旧行为（不传也不炸）
+    assert G.pin_dft_gate(name, [], wl_wb, wl_res, input_bases={gate}) is None
+
+
 def test_view_models_carry_form_label(wb):
     """#2：视图模型带 form/form_label(展开后表达式形态 F0-F4)——信号清单『逻辑类型』列。"""
     ms = {m["name"]: m for m in T.topout_view_models(wb, mode="max")}

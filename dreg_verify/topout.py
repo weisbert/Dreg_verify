@@ -583,7 +583,8 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
                     if _skip:
                         res.meta["iddq_skipped"] = _skip
-                    res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
+                    res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib,
+                                                  meta=res.meta)   # §7-5：没钉上的原因进 meta
                     _prepend_gate_chain(res, root, sig.out_base)   # #1/#4-6：iddq 折进展开链显示
         except (cone.ConeError, E.ExprError) as ex:
             res.status = "error"
@@ -638,7 +639,8 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                     _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
                     if _skip:
                         res.meta["iddq_skipped"] = _skip
-                    res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
+                    res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib,
+                                                  meta=res.meta)   # §7-5：没钉上的原因进 meta
                     _prepend_gate_chain(res, root, base)   # #1/#4-6：iddq 折进展开链显示(寄存器根)
         except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛
             res.status = "error"
@@ -675,7 +677,8 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
                 _skip = G._append_dft_vectors(obs, res.vectors, wb, resolver, input_bases=_ib)
                 if _skip:
                     res.meta["iddq_skipped"] = _skip
-                res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib)
+                res.dft_gate = G.pin_dft_gate(obs, res.vectors, wb, resolver, input_bases=_ib,
+                                              meta=res.meta)   # §7-5：没钉上的原因进 meta
         except cone.ConeError as ex:
             res.status = "error"
             res.issues.append("mux 展开失败: %s" % ex)

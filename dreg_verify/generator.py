@@ -767,7 +767,7 @@ def _append_dft_vectors(out_base, vecs, wb, resolver, input_bases=None):
     return None
 
 
-def pin_dft_gate(out_base, vecs, wb, resolver, input_bases=None):
+def pin_dft_gate(out_base, vecs, wb, resolver, input_bases=None, meta=None):
     """被 dft 页门控的输出：把门(iddq)当作每条测试的【显式输入】，force 到透传值。
 
     2026-06-10 用户三轮澄清后定稿：designer 的 for_test 输入信号清单里有 iddq
@@ -783,15 +783,32 @@ def pin_dft_gate(out_base, vecs, wb, resolver, input_bases=None):
 
     幂等（同一门只加一次 extra_forces），GUI/build/report 可重复调用。
     返回 (门绑定, 透传值) 或 None——调用方拿去做显示（GUI 输入行 / 报告 inputs 行）。
+
+    meta（GUI v2 §7-5，additive，默认 None = 旧行为逐字节不变）：传一个 dict（通常是
+    `res.meta`）进来，**门有、但没钉上**时写 `meta["dft_gate_skipped"] = {"gate_base","reason"}`。
+    此前这两种跳过完全静默：界面只看到「没有 DFT 门行」，说不清是本来没门还是钉不上（护栏3
+    『跳过必有名字+原因』）。本页无门（wb.dft 查无）不算跳过，不写键。
     """
     g = wb.dft.get(out_base) if getattr(wb, "dft", None) else None
     if not g:
         return None
     if input_bases and g["gate_base"] in input_bases:
+        if isinstance(meta, dict):
+            meta["dft_gate_skipped"] = {
+                "gate_base": g["gate_base"],
+                "reason": "门网已经是本信号的显式输入（被扫 0/1，比钉到透传值更完整）——"
+                          "不再重复列一行 DFT 门"}
         return None                                   # 门网已是显式输入 → 不重复当 DFT 门
     info = {"raw": g["gate_base"], "base": g["gate_base"], "width": 1, "msb": None, "lsb": None}
     b = resolver.resolve("dft_gate_" + g["gate_base"], info)
     if not (b.resolved and b.kind == "RO"):
+        if isinstance(meta, dict):
+            meta["dft_gate_skipped"] = {
+                "gate_base": g["gate_base"],
+                "reason": ("门网 %s 不是可 force 的 RO 网（%s）——钉不上，每条向量都不驱动它，"
+                           "实际取 RTL 默认值" % (g["gate_base"],
+                                                 b.note or ("未解析" if not b.resolved
+                                                            else "类型 %s" % (b.kind or "?"))))}
         return None
     transp = int(g["transparent"])
     for v in vecs:

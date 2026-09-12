@@ -36,6 +36,7 @@ GUI v2 C0-a（2026-09-12）新增的键全部 additive（只加不改），老�
     out_net       见上。前缀由 provider 另补 an["probe_prefix"]（它才有 probe_prefixes 配置）。
     status_detail 判据只取结构化字段，缺判据的档退回 "clean" 并保留 issues 原文（绝不猜文本）。
     ctrl_keys_missing [键]  §7-4：used_vars 里没被任何驱动器点到名的赋值键（mux 根才可能非空）。
+    dft_gate_skipped {"gate_base","reason"} 或 None  §7-5：有 iddq 门但没钉上时的原因。
 
 搬家说明（2026-09-12，GUI v2 阶段 A4c）：本模块四个函数原本长在 gui.py 里，
 是纯函数、不碰 Qt；抽出来后 gui.py 保留同名薄委托，行为逐字节不变。
@@ -270,6 +271,8 @@ def norm_topout_result(res, wb=None, include_risky=True, probe_prefix=""):
                                         probe_prefix=probe_prefix)
     # §7-4：used_vars 里没被任何驱动器点到名的键（真值表有行、输入信号表没行 → 消费方据此补行）
     an["ctrl_keys_missing"] = _ctrl_keys_missing(an["expansion"])
+    # §7-5：有门但没钉上时的原因（generator.pin_dft_gate 写进 meta）；没门 / 钉上了都是 None
+    an["dft_gate_skipped"] = (getattr(res, "meta", None) or {}).get("dft_gate_skipped")
     return an
 
 
@@ -306,4 +309,6 @@ def norm_page_result(res, wb=None, include_risky=True, probe_prefix=""):
                                         probe_prefix=probe_prefix)
     # §7-4：used_vars 里没被任何驱动器点到名的键（真值表有行、输入信号表没行 → 消费方据此补行）
     an["ctrl_keys_missing"] = _ctrl_keys_missing(an["expansion"])
+    # §7-5：有门但没钉上时的原因（generator.pin_dft_gate 写进 meta）；没门 / 钉上了都是 None
+    an["dft_gate_skipped"] = (getattr(res, "meta", None) or {}).get("dft_gate_skipped")
     return an
