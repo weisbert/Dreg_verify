@@ -1537,7 +1537,10 @@ class SignalView(QtWidgets.QWidget):
                 self._commit()
                 self._populate_truth()
             elif self.cur_an["editable"] == "mux" and e.get("mux_data_base"):
-                self._set_mux_data(e["mux_data_base"], e["width"], item.text())
+                if col.get("user"):      # 用户手编列：只改本列（legacy _on_mux_user_data_changed）
+                    self._set_mux_user_data(col, e, item.text())
+                else:                    # 自动生成列：按物理基名整表同步（by_base）
+                    self._set_mux_data(e["mux_data_base"], e["width"], item.text())
             return
         elif r == ni + 1:                            # 期望编辑
             txt = item.text().strip()
@@ -1580,8 +1583,68 @@ class SignalView(QtWidgets.QWidget):
         if not ent["data"]:
             self._mux_data.pop(self.cur_name, None)
         real = next((m["name"] for m in self.models if m["name"].lower() == self.cur_name), None)
-        if real is not None:
-            self._load_signal(real)        # 带 data_overrides 重析 → 真值表整表同步
+        if real is None:
+            return
+        self._load_signal(real)            # 带 data_overrides 重析 → 真值表整表同步
+        # 已自定义过的信号：_load_signal 会拿【冻结的旧列】回填，屏幕就停在改之前的值(所见≠所得：
+        # 屏幕 0x3、内部/导出 9)。这里把冻结列模型与新分析对齐，保住用户意图。
+        if self.cur_name in self.edits and self.cur_an is not None \
+                and self.cur_an["editable"] == "mux":
+            self.cur_cols = self._mux_resync_cols(self.cur_an, self.cur_cols)
+            self._commit()
+            self._populate_truth()
+        self.main.status.showMessage(
+            "已按物理寄存器 %s 同步整表数据值（清空该格可恢复自动分配）" % base_low)
+
+    def _mux_resync_cols(self, an, old_cols):
+        """mux 数据值改动后，把冻结的编辑列模型与【新分析】对齐 —— 所见即所得。
+
+        自动生成列整表按新数据值重建（取值 by_base 同步 + auto_out 重算），只把用户意图贴回来：
+        已手填的期望 / 负向标记；用户删掉的自动列不复活（清零过就还是零用例）；
+        用户手编列原样保留（它们的数据值归自己管，与 legacy 的 _mux_user_vecs 一样不随整表走）。
+        """
+        old = list(old_cols or [])
+        old_auto = {str(c.get("name")): c for c in old if not c.get("user")}
+        cols = []
+        for c in self._cols_from_vectors(an):
+            o = old_auto.get(str(c["name"]))
+            if o is None:
+                continue                       # 老模型里没有这列 = 用户删过 → 不复活
+            c["exp"] = o.get("exp")
+            c["neg"] = bool(o.get("neg"))
+            cols.append(c)
+        cols.extend(c for c in old if c.get("user"))
+        return cols
+
+    def _set_mux_user_data(self, col, e, text):
+        """mux【用户手编列】数据行手填：只改本列该键的取值 + 按路由源重算 auto_out，不整表联动
+        （对齐 legacy _on_mux_user_data_changed；自动生成列才走 _set_mux_data 的 by_base 同步）。"""
+        vec = col.get("vec")
+        if vec is None:
+            return
+        try:
+            val = TE.parse_int(text) & E.mask(e["width"])
+        except ValueError as ex:
+            self._parse_failed(ex)
+            return
+        vec.assignments[e["key"]] = val
+        col["vals"][e["key"]] = val
+        self._recompute_mux_user_auto(col)
+        self._commit(); self._populate_truth()
+        self.main.status.showMessage("已改本列数据值（仅这一列）；auto_out 已按路由源重算")
+
+    def _recompute_mux_user_auto(self, col):
+        """用户列 auto_out = 它路由的那条 case 的数据源取值——vec 克隆自某条真实 case，
+        case_index 即路由 case，expansion['data_keys'][case_index] 即路由源的绑定键。"""
+        vec = col.get("vec")
+        exp = (self.cur_an or {}).get("expansion") or {}
+        dkeys = exp.get("data_keys") or []
+        ci = getattr(vec, "case_index", None) if vec is not None else None
+        if ci is None or not (0 <= ci < len(dkeys)):
+            return
+        val = vec.assignments.get(dkeys[ci], 0) & E.mask(col.get("auto_w") or 1)
+        col["auto"] = val
+        vec.exp_value = val
 
     def _recompute_col(self, col):
         self._recompute_col_an(self.cur_an, col)

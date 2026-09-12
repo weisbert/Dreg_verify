@@ -274,6 +274,56 @@ def test_topout_mux_data_manual_value(topo_win):
     assert w.topout_view._mux_data == {}                     # 换表清空，不跨表泄漏
 
 
+def _mux_data_row(v):
+    """(数据行号, 物理基名, 位宽, 绑定键) —— mux 第一条可手填的数据行。"""
+    i = next(k for k, e in enumerate(v.e_inputs) if e.get("mux_data_base"))
+    e = v.e_inputs[i]
+    return i, e["mux_data_base"], e["width"], e["key"]
+
+
+def test_mux_data_edit_is_wysiwyg_after_customizing(topo_win):
+    """轨0-②：mux 数据值改完，【屏幕上的值】必须与 edited['mux']['data'] / 导出一致。
+    此前『先加列(信号进 edits)再改数据值』→ _load_signal 拿冻结的旧列回填，
+    屏幕停在 0xA、内部与导出已是 9（所见≠所得，人工核对的表就是错的）。"""
+    from dreg_verify import generator as GEN
+    v = _sel(topo_win, "d_bt_lp_lna_itrim")
+    assert v.cur_an["editable"] == "mux"
+    drow, base, width, key = _mux_data_row(v)
+    v.truth.setCurrentCell(0, 0)
+    v._e_add()                                     # mux 的「加列」= 复制选中列 → 信号进 edits
+    assert "d_bt_lp_lna_itrim" in v.edits
+    v._set_mux_data(base, width, "9")
+    rec = v._compute_edited()["d_bt_lp_lna_itrim"]["mux"]
+    assert rec["data"][base] == 9
+    for j, c in enumerate(v.cur_cols):             # ⭐屏幕 == 列模型
+        assert v.truth.item(drow, j).text() == GEN._fmt_cell(c["vals"][key], width)
+    auto_vals = {c["vals"][key] for c in v.cur_cols if not c["user"]}
+    assert 9 in auto_vals and 0xA not in auto_vals  # 新值上屏、旧自动分配值消失
+    assert rec["dropped"] == []                     # 重建自动列不该被误判成"用户删了列"
+    assert sum(1 for c in v.cur_cols if c["user"]) == 1   # 用户手编列原样保留
+
+
+def test_mux_user_col_data_edit_is_column_local(topo_win):
+    """轨0-②：用户手编列改数据值【只改本列】+ 按路由源重算 auto_out
+    （legacy _on_mux_user_data_changed 的语义；整表联动是自动生成列才有的）。"""
+    v = _sel(topo_win, "d_bt_lp_lna_itrim")
+    drow, base, width, key = _mux_data_row(v)
+    v.truth.setCurrentCell(0, 0)
+    v._e_add()
+    j = next(i for i, c in enumerate(v.cur_cols) if c["user"])
+    before = [c["vals"][key] for c in v.cur_cols]
+    v.truth.item(drow, j).setText("0x7")
+    after = [c["vals"][key] for c in v.cur_cols]
+    assert after[j] == 7                                                 # 本列改了
+    assert [x for i, x in enumerate(after) if i != j] == \
+           [x for i, x in enumerate(before) if i != j]                   # 其它列一动不动
+    col = v.cur_cols[j]
+    ci = col["vec"].case_index
+    route_key = v.cur_an["expansion"]["data_keys"][ci]
+    assert col["auto"] == col["vals"][route_key]                         # auto_out = 路由源取值
+    assert not v._mux_data.get("d_bt_lp_lna_itrim")                      # 没污染整表 data_overrides
+
+
 def test_topout_export_single_signal_csv(topo_win, tmp_path, monkeypatch):
     """⭐N7：单信号真值表 CSV(转置：每列一条测试)，含 auto_out/期望/期望来源/负向 行。"""
     from PySide6 import QtWidgets
