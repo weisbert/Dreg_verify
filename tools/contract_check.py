@@ -343,6 +343,12 @@ def build_parser():
 
 
 def main(argv=None):
+    # Windows 控制台默认 GBK，报告里有 ✔ / ✅ 之类符号会直接崩；能重配就重配，重配不了就替换
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args(argv)
     try:
         if not args.junit and not args.run:
