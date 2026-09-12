@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""app.py —— v2 组合根 `MainWindow` + `main()`（C1-d 骨架 → C1-int 接线；之后每波集成 agent 接管）。
+"""app.py —— v2 组合根 `MainWindow` + `main()`（C1-d 骨架 → 每波集成 agent 接线；C4-int 接完最后两块）。
 
-版面（Design §1.2 区号）：
+版面（Design §1.2 区号）—— 十六区**一块不缺**：
 
     QMainWindow(WIN_MAIN)
       ├ ① 顶栏 TOP_BAR（品牌 · 真表路径 · 浏览 Ctrl+O · 载入/重新载入 Ctrl+L · 诊断 Ctrl+Shift+D · 导出中心 Ctrl+G）
@@ -17,7 +17,12 @@
       │                            MainView = 标签条 + MAIN_VIEW 堆叠：
       │                              页 0 = ⑥ `truth.panel.TruthPanel` / ⑦ `sigflow_view.SigflowView`
       │                              页 1 = ⑧ `sv_preview.SvPreview`
+      ├ ⑬ 诊断抽屉 `diagnostics.DiagnosticsDrawer`（**覆盖层**：以窗口为父、setGeometry 贴右边缘，
+      │    不进任何布局 —— 见 `_build_drawer`）
       └ ⑩ 状态栏 STATUS_BAR（STATUS_LEFT / STATUS_RIGHT / STATUS_AUTOSAVE）
+
+    ⑪ 导出中心 `export_center.ExportCenterDialog` / ⑫ 完成弹层 `ExportDoneDialog` 是**模态框**，
+    由 `openExportCenter()` 现起现关（Ctrl+G / Ctrl+R / 抽屉第 1 步 / 空态「导入配置…」四个入口）。
 
 ⚠ 载入态**不是** WIN_STACK 的独立一页：C-276 / 场景⑧ 要求「清单立刻可点」，
   所以载入卡片挂在工作台详情列顶部（架构 §6.1「详情列 = 载入态⑮卡片 + 标题栏④ + WIN_SPLIT_SIDE」）。
@@ -36,6 +41,8 @@
 真实 `ui.state.WorkbenchState` / `ui.worker.AnalysisWorker` **只在默认工厂里惰性 import**。
 
 占位区（见 `PLACEHOLDER_AREAS`）：C3-int 之后**一块不剩**（最后一块 TRUTH_PANEL 已换真件）。
+场景路由三个信号（`diagnosticsRequested` / `exportCenterRequested` / `svPreviewRequested`）
+在 C4-int 之后**照发不误**：它们是「谁把用户送到这儿」的观测点，接上真件不等于这条线可以省。
 
 「当前信号」这一下的分工（C2-int 定版）：
     ④ 标题栏 / ⑧ .sv 预览 / ⑨ 右栏 自己订阅 `state.currentChanged`（各自 `set_state` 干的）；
@@ -53,6 +60,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from . import contracts, dialogs, names, persist, terms, theme
 from .bus import HighlightBus
 from .detail_header import DetailHeader
+from .diagnostics import DiagnosticsDrawer
+from .export_center import ExportCenterDialog
 from .filter_bar import FilterBar
 from .main_view import MainView
 from .side_panel import SidePanel
@@ -68,7 +77,11 @@ from .widgets import ErrorBar, ProgressBadge, mono_font, ui_font
 #: 都按它断言「窗口里一块占位都不剩」—— 留一个空 dict 比删掉更说明问题。
 PLACEHOLDER_AREAS = {}
 
-#: 组合根在**窗口级**绑的快捷键。
+#: 组合根在**窗口级**绑的快捷键。落点（C4-int 起全是真件，不再是「只发个信号」）：
+#:   open Ctrl+O → `on_browse`（C-001/C-253）      load Ctrl+L → `on_load`（C-002/C-254）
+#:   sv_preview Ctrl+P → `on_sv_preview`（C-255）   export_report Ctrl+R → 导出中心预选报告行（C-256）
+#:   export_center Ctrl+G → ⑪ 导出中心（C-257）     diagnostics Ctrl+Shift+D → ⑬ 诊断抽屉
+#: 另有一个不在表里的 Esc（`on_escape`）：先收⑬ 抽屉，没开抽屉才退出独占态（C-280 / C-297）。
 #: ⚠ copy_col(Ctrl+D) / undo(Ctrl+Z) / redo(Ctrl+Y) / paste(Ctrl+V) 故意**不在这里**：
 #: 它们是真值表网格的**视图级**键位（`truth/view.TruthTableView.keyPressEvent`），
 #: 网格有焦点时才生效——绑成 WindowShortcut 的话，在清单里按 Ctrl+D 会去复制真值表的列，
@@ -125,22 +138,9 @@ def _btn_label(text, shortcut_key=None):
     return "%s　%s" % (text, contracts.SHORTCUTS[shortcut_key])
 
 
-def _fmt_when(ts):
-    """ISO 时间串 → 「今天 09:14」/「昨天 17:02」/「2026-09-01 17:02」；空串 → ""。"""
-    import datetime
-    s = str(ts or "").strip()
-    if not s:
-        return ""
-    try:
-        t = datetime.datetime.fromisoformat(s)
-    except ValueError:
-        return s
-    today = datetime.date.today()
-    if t.date() == today:
-        return "今天 %02d:%02d" % (t.hour, t.minute)
-    if (today - t.date()).days == 1:
-        return "昨天 %02d:%02d" % (t.hour, t.minute)
-    return t.strftime("%Y-%m-%d %H:%M")
+#: C4-int：本模块与 `export_center.py` 各有一份逐字相同的 `_fmt_when` → 收成 `terms.fmt_when`。
+#: 这里留个别名（「上次导出」列与空态「最近打开」两处调用点不动）。
+_fmt_when = terms.fmt_when
 
 
 def _tone_of(model):
@@ -186,6 +186,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._side_visible = True
         self._flow_full = False            # ⑦ 电路图全屏（C-280）
         self._truth_max = False            # ⑥ 真值表放大（C-297）
+        self.export_center = None          # ⑪ 当前那一个导出中心（`openExportCenter` 现起现关）
         self._sizes = self._read_sizes()
 
         self.setFont(ui_font(theme.FS_UI))
@@ -228,6 +229,33 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
         self._build_status_bar()
+        self._build_drawer()
+
+    # ⑬ 诊断抽屉（C4-b 的真件）：**不进任何布局**，直接盖在窗口右侧
+    def _build_drawer(self):
+        """抽屉是覆盖层，不是第三栏。
+
+        进布局的话它一出现就会把右栏（⑨）与主视图挤窄一次、收起时再弹回去 —— 用户按
+        Ctrl+Shift+D 只是想看一眼三步流程，不该让底下那张真值表重排。所以它直接以窗口为父、
+        用 `setGeometry` 贴在右边缘（`theme.DIAG_W` 620px 定宽），几何只在 `resizeEvent`
+        与每次打开时算一次（Design ⑬ 的 box-shadow 由抽屉自己带，视觉上就是浮在上层）。
+
+        ⚠ state 这里**不挂**（传 None）：与详情区五件同一个理由，见 `__init__` 的顺序注释
+        —— `set_state` 会订阅 configChanged / workbookChanged，还会立刻取一次快照
+        （扫全表输入行）。真正挂 state 在 `_attach_detail_state`。"""
+        self.diag_drawer = DiagnosticsDrawer(None, self)
+        self.diag_drawer.hide()
+        return self.diag_drawer
+
+    def _place_drawer(self):
+        """把抽屉贴到中央区的右边缘（顶栏之下、状态栏之上）。"""
+        drawer = getattr(self, "diag_drawer", None)
+        central = self.centralWidget()
+        if drawer is None or central is None:
+            return
+        top = central.mapTo(self, QtCore.QPoint(0, 0)).y()
+        w = drawer.width() or int(theme.DIAG_W)
+        drawer.setGeometry(max(0, self.width() - w), top, w, central.height())
 
     # ① 顶栏
     def _build_top_bar(self):
@@ -552,12 +580,12 @@ class MainWindow(QtWidgets.QMainWindow):
             sc.setContext(QtCore.Qt.WindowShortcut)
             sc.activated.connect(slots[key])
             self.shortcuts[key] = sc
-        # Esc 退出「主视图独占中央区」（电路图全屏 C-280 / 真值表放大 C-297）。
+        # Esc：先收诊断抽屉⑬，没开抽屉才退出「主视图独占中央区」（电路图全屏 C-280 / 真值表放大 C-297）。
         # 不进 `contracts.SHORTCUTS`：那张表是「顶栏按钮上要印出来的快捷键」，Esc 不印在任何按钮上。
         self.esc_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
         self.esc_shortcut.setObjectName(fmt_shortcut("exit_fullscreen"))
         self.esc_shortcut.setContext(QtCore.Qt.WindowShortcut)
-        self.esc_shortcut.activated.connect(self.exit_fullscreen)
+        self.esc_shortcut.activated.connect(self.on_escape)
 
     # ───────────────────────── state 接线 ─────────────────────────
     def _connect_state(self):
@@ -610,11 +638,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flow_view.exported.connect(self._on_flow_exported)           # C-284
         self.sv_preview.statusMessage.connect(self.set_status)            # ⑧ C-172
 
+        dr = self.diag_drawer                                    # ⑬ C4-b 的真件
+        dr.exportNetsRequested.connect(lambda: self.openExportCenter("nets"))   # 第 1 步
+        dr.coverageRequested.connect(self.open_coverage)         # 折叠项 ③ → ⑯ 覆盖度弹层
+        dr.statusMessage.connect(self.set_status)                # C-269
+        dr.closed.connect(self._on_drawer_closed)                # 收起后焦点回清单
+
     def _attach_detail_state(self):
-        """把会话状态挂给详情区五件（构造时都传的 `None`，见 `__init__` 里的顺序注释）。"""
+        """把会话状态挂给详情区五件 + ⑬ 抽屉（构造时都传的 `None`，见 `__init__` 里的顺序注释）。"""
         self.detail_header.set_state(self._state)     # 内含覆盖度控件的 set_state
         self.sv_preview.set_state(self._state)
         self.side_panel.set_state(self._state)
+        # ⑬ 诊断抽屉：`set_state` 订阅 configChanged / workbookChanged / exportRecorded，
+        # 并立刻取一次快照（要扫全表输入行）。挂在这里而不是构造时，同样是为了不抢在组合根
+        # 前面订阅 —— 它自己也只在**可见**时才按信号重取快照（`_on_state_changed`）。
+        self.diag_drawer.set_state(self._state)
         # ⑥ 真值表：`set_state` 订阅 currentChanged / coverageChanged / configChanged /
         # scopeChanged / workbookChanged 五条，自己按当前信号装表（空态 / 换表 / 切范围都自理）。
         # 组合根只保证这一句在 `_connect_state` **之后**、在任何 `workbookChanged` 之前跑。
@@ -1032,22 +1070,82 @@ class MainWindow(QtWidgets.QMainWindow):
     # ───────────────────────── 场景路由 ─────────────────────────
     @QtCore.Slot(str)
     def openDiagnostics(self, symptom=""):
-        """⑬ 诊断抽屉（C4-b）。本波只发信号 + 状态栏提示，C4 接上真件。"""
+        """⑬ 诊断抽屉（C4-b 的真件）：滑出右侧覆盖层并滚到 `symptom` 那一条。
+
+        三条直链都走这一个口（`terms.REASON_TARGETS` 里 `diag_` 开头的键即 symptom）：
+        清单行内原因块的「去诊断 · …」、详情「解析明细」末尾的直链、导出完成弹层的
+        「去处理这 N 个信号」。Ctrl+Shift+D / 顶栏「诊断」按钮给空串 = 只打开、滚到顶。
+
+        `diagnosticsRequested` 仍然照发：它是「谁把用户送到诊断」的观测点，测试与后续的
+        场景路由都盯着它 —— 抽屉接上了不等于这条线可以省掉。"""
         sym = str(symptom or "")
         self.diagnosticsRequested.emit(sym)
         self.set_status(terms.REASON_TARGETS.get(sym) or terms.DIAG_TITLE)
+        self._place_drawer()                          # 几何按当前窗口大小算（窗口可能刚改过尺寸）
+        self.diag_drawer.open_for(sym)
         return sym
 
     @QtCore.Slot(str)
     def openExportCenter(self, preselect=""):
-        """⑪ 导出中心（C4-a）。preselect ∈ contracts.EXPORT_KINDS 时预选那一行。"""
+        """⑪ 导出中心（C4-a 的真件）：模态起框。preselect ∈ `contracts.EXPORT_KINDS` 时只勾那一行。
+
+        入口共四个：Ctrl+G / 顶栏按钮 `""`（六行按默认勾选）、Ctrl+R `"report"`（C-256）、
+        诊断抽屉第 1 步 `"nets"`、空态「导入配置…」`"config"`（C-192：开完直接进导入文件框）。
+
+        四条回信都在这里接（对话框自己不碰别的区，见 `export_center` 模块头）：
+          goFixRequested → ⑬ 诊断抽屉；svPreviewRequested → ⑧ .sv 预览标签（C-168）；
+          statusMessage → ⑩ 状态栏；exported → 刷新状态栏右侧的「上次导出」（C-197/C-198）。
+
+        ⚠ `exec()` 期间事件循环是嵌套的：`exported` 发生在框还没关的时候，
+        `_refresh_last_export` 读的是 `state.last_export`（`run_plan` 已经逐个 `record_export`
+        写完了），所以这一刷新拿到的就是刚写出的那份，不必等框关。"""
         pre = str(preselect or "")
         self.exportCenterRequested.emit(pre)
         if pre in contracts.EXPORT_KINDS:
             self.set_status("%s · %s" % (terms.EXPORT_TITLE, terms.EXPORT_ROWS[pre][0]))
         else:
             self.set_status(terms.EXPORT_TITLE)
+        # 上一次那个框收掉：它以窗口为父，只把属性指走的话 Qt 那边还留着 ——
+        # 按一次 Ctrl+G 攒一个隐藏对话框，一天下来几十个（每个都还订着 state 的信号）。
+        old, self.export_center = self.export_center, None
+        if old is not None:
+            old.setParent(None)
+            old.deleteLater()
+        dlg = ExportCenterDialog(self._state, self, preselect=pre)
+        self.export_center = dlg                      # 测试拿得到；也免得被 GC
+        dlg.goFixRequested.connect(self.openDiagnostics)          # C-167 →「去处理这 N 个信号」
+        dlg.svPreviewRequested.connect(self.on_sv_preview)        # C-168
+        dlg.statusMessage.connect(self.set_status)                # C-269
+        dlg.exported.connect(self._on_exported)
+        dlg.exec()
         return pre
+
+    def _on_exported(self, _result=None):
+        """导出中心跑完一趟：状态栏右侧的「上次导出」当场翻新（C-197 / C-198）。
+
+        `state.exportRecorded` 本来也会走到 `_refresh_last_export`，但那条信号只有在
+        `persist.record_last_export` 真写成时才发；这里再刷一次是为了「一趟导了三种产物」
+        的那一下——右边应当显示最新的那份，而不是三条信号里最先到的那份。"""
+        self._refresh_last_export()
+
+    def open_coverage(self):
+        """⑯ 覆盖度弹层的唯一打开口（诊断抽屉折叠项 ③ 「打开覆盖度设置…」的落点）。
+
+        弹层锚在标题栏④ 自己的按钮上 —— 空态（还没载表）时标题栏不可见，弹层也就无处可锚，
+        此时只在状态栏说一句，不弹一个飘在角落里的空弹层。"""
+        if self.is_empty_state():
+            self.set_status(terms.EMPTY_TITLE)
+            return False
+        self.coverage.open_popover()
+        return True
+
+    def _on_drawer_closed(self):
+        """⑬ 收起后焦点回③ 清单：抽屉是覆盖层，收起时键盘焦点留在一块看不见的控件上，
+        下一次方向键 / 空格就会「按了没反应」。空态时没有清单可回，什么都不做。"""
+        if self.is_empty_state():
+            return False
+        self.list_panel.view.setFocus(QtCore.Qt.OtherFocusReason)
+        return True
 
     def on_sv_preview(self):
         """Ctrl+P（C-255 / 裁决①）：主视图切到 .sv 预览标签。
@@ -1137,6 +1235,19 @@ class MainWindow(QtWidgets.QMainWindow):
         """主视图是不是正独占中央区（电路图全屏 或 真值表放大）。"""
         return bool(self._flow_full or self._truth_max)
 
+    def on_escape(self):
+        """Esc 的优先级：**先收诊断抽屉⑬，再退出独占态**（电路图全屏 C-280 / 真值表放大 C-297）。
+
+        为什么是这个次序：抽屉是盖在最上面的那一层，用户按 Esc 想关的是「刚打开的那个东西」。
+        反过来先退全屏的话，在「电路图全屏 + 抽屉开着」时按一次 Esc，屏幕上抽屉纹丝不动、
+        底下的版面却换了一副样子 —— 而那正是用户此刻没在看的地方。
+
+        两件都没有时返回 False（**不吞掉 Esc**）：对话框 / 编辑器自己的 Esc 还要用。"""
+        if self.diag_drawer.isVisible():
+            self.diag_drawer.close_drawer()
+            return True
+        return self.exit_fullscreen()
+
     def exit_fullscreen(self):
         """Esc：从两种「独占」态里退出来（都没开就什么都不做，别吞掉 Esc）。"""
         if not self.is_fullscreen():
@@ -1160,7 +1271,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._side_visible and not self.is_narrow() and not self.is_fullscreen())
 
     def _on_flow_exported(self, path):
-        """⑦ 导出 SVG / PNG 落盘成功（C-284）：状态栏报一句，并记进「上次导出」。"""
+        """⑦ 导出 SVG / PNG 落盘成功（C-284）：状态栏报一句，**不进 `state.record_export`**。
+
+        主控裁决（C4-int）：电路图的 SVG / PNG 不是六种交付物之一
+        （`contracts.EXPORT_KINDS` 没有这一档）。硬塞进去会让状态栏右侧的「上次导出 …」
+        指向一张图片 —— 那一格说的是「上次交出去的产物在哪」，而一张电路图不是交付物，
+        它是看图时顺手存的一张截图。同理单信号 CSV 也不记（C3-int 已同此裁决）。"""
         p = str(path or "")
         if not p:
             return ""
@@ -1377,6 +1493,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        self._place_drawer()                          # ⑬ 覆盖层不在布局里，几何得自己跟
         narrow = self.width() <= theme.WIN_MIN_W      # C-260：1366×768 时清单收到 420、右栏折叠
         if narrow == self._narrow:
             return

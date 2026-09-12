@@ -54,71 +54,13 @@ from dreg_verify.ui import contracts, names, persist, terms, theme
 from dreg_verify.ui.dialogs import DupLabelsDialog, ImportReportDialog
 from dreg_verify.ui.widgets import Popover, mono_font, ui_font
 
-# ═════════════════════════ 0. PENDING（C4-int 搬进 names.py / terms.py）═════════════════════════
-#: 本模块要用、但 `names.py` 还没有的 objectName。**先 `getattr` 读真表、读不到才回退这里**，
-#: C4-int 把它们搬进 `names.py` 后本字典应当整条删掉（`_n()` 读到真值即可，无需改调用点）。
-PENDING_NAMES = {
-    "EXPORT_SUMMARY_SKIPPED_LIST": "export_summary_skipped_list",   # 裁决⑯ 展开后的名字 + 原因
-    "EXPORT_NETS_MORE_BTN": "export_nets_more_btn",                 # nets 选项「更多（按页分类）」
-    "DONE_ACCOUNTED": "done_accounted",                             # C-166 一行
-    "DONE_ERRORS": "done_errors",                                   # C-171 红行
-    "DONE_SKIPPED_MORE_BTN": "done_skipped_more_btn",               # C-167 展开明细
-}
-#: 动态名（每行 / 每个选项一个）——`names.py` 已有 `fmt_export_*` 五个，这里补选项弹层里的。
-_OPT_FMT = "export_opt_%s_%s"          # export_opt_<kind>_<key>
-_NETS_PAGE_FMT = "export_opt_nets_page_%s"
-
-#: 本模块要用、但 `terms.py` 还没有的文案。同样 `getattr` 优先。
-PENDING_TERMS = {
-    # 文件对话框过滤器（用户可见）
-    "EXPORT_FILTER_SV": "SystemVerilog (*.sv)",
-    "EXPORT_FILTER_FORTEST": "Excel 工作簿 (*.xlsx)",
-    "EXPORT_FILTER_NETS": "信号清单 (*.txt);;全部文件 (*)",
-    "EXPORT_FILTER_JSON": "JSON (*.json)",
-    # 默认文件名
-    "EXPORT_DEFAULT_FORTEST_FMT": "{stem}_fortest.xlsx",
-    # 导入配置
-    "EXPORT_IMPORT_KIND_FULL": "完整配置",
-    "EXPORT_IMPORT_KIND_LEGACY": "测试项编辑",
-    "EXPORT_IMPORT_DONE_FMT": "已导入{kind}：恢复了 {n} 个信号的手填编辑",
-    "EXPORT_IMPORT_IGNORED": "这份配置里的级联模式与输出引用尾缀四项当前版本已不再使用，已忽略；"
-                             "覆盖度档、用例上限、缺前缀是否强制生成照常套用",
-    "EXPORT_IMPORT_APPLIED_FMT": "已套用：勾选 {k} 个 · 覆盖度档与用例上限 · 前缀 {np} 条 · "
-                                 "强制 force {nf} 个 · 补充逻辑 {no} 条",
-    # 导出中心表格 / 弹层
-    "EXPORT_SKIPPED_ROW_FMT": "{name}　{reason}",
-    "EXPORT_OPT_BTN_FMT": "{summary}　▾",
-    "EXPORT_SUMMARY_SKIPPED_MORE": "展开名字和原因",
-    "EXPORT_SUMMARY_SKIPPED_LESS": "收起",
-    "EXPORT_SUMMARY_UNAVAILABLE": "导出前摘要这次算不出来（{reason}）——仍可导出，"
-                                  "跳过了哪些信号会在导出完成后点名",
-    # 完成弹层
-    "DONE_SKIPPED_MORE": "展开明细",
-    "DONE_SKIPPED_LESS": "收起明细",
-    "DONE_WRITTEN_ROW_FMT": "{path}　{detail}",
-    "DONE_ERROR_ROW_FMT": "{kind}：{message}",
-}
-
-
-def _n(key):
-    """objectName：`names.py` 有就用真的，没有才用 `PENDING_NAMES`（C4-int 搬完这里自动改口）。"""
-    return getattr(names, key, None) or PENDING_NAMES[key]
-
-
-def _t(key):
-    """界面文案：同上，`terms.py` 优先。"""
-    v = getattr(terms, key, None)
-    return PENDING_TERMS[key] if v is None else v
-
-
-def fmt_export_opt(kind, key):
-    """选项弹层里某个勾选/单选的 objectName：`export_opt_<kind>_<key>`。"""
-    return _OPT_FMT % (str(kind), str(key))
-
-
-def fmt_export_nets_page(page):
-    """nets「更多（按页分类）」里某一页的勾选名：`export_opt_nets_page_<page>`。"""
-    return _NETS_PAGE_FMT % str(page).replace("-", "_")
+# ═════════════════════════ 0. 名字 / 文案（唯一真相源在 names.py / terms.py）═══════════════
+#: C4-int：本模块原来的 `PENDING_NAMES`（5 条）/ `PENDING_TERMS`（19 条）已整块搬进
+#: `ui/names.py` / `ui/terms.py`，两个 `getattr` 回退（`_n()` / `_t()`）一并删掉 ——
+#: 回退存在期间，名字搬没搬过去从代码上看不出来，两份字面量漂开也不会有人发现。
+#: 动态名两个工厂也进了 `names.py`（与既有 `fmt_export_*` 五个并列），这里只留别名。
+fmt_export_opt = names.fmt_export_opt
+fmt_export_nets_page = names.fmt_export_nets_page
 
 
 # ═════════════════════════ 1. 常量 ═════════════════════════
@@ -145,25 +87,8 @@ GO_FIX_SYMPTOM = "diag_cuvunf"
 
 
 # ═════════════════════════ 2. Qt-free：小工具 ═════════════════════════
-def _fmt_when(ts):
-    """ISO 时间串 → 「今天 09:14」/「昨天 17:02」/「2026-09-01 17:02」；空串 → ""。
-
-    ⚠ 与 `ui/app.py._fmt_when` 逐字相同 —— 两处各一份是眼下的实情（app.py 是 C1 交付、本模块
-    不 import 视图）。C4-int 收口时应当搬进 `terms.py` 只留一份。"""
-    import datetime
-    s = str(ts or "").strip()
-    if not s:
-        return ""
-    try:
-        t = datetime.datetime.fromisoformat(s)
-    except ValueError:
-        return s
-    today = datetime.date.today()
-    if t.date() == today:
-        return "今天 %02d:%02d" % (t.hour, t.minute)
-    if (today - t.date()).days == 1:
-        return "昨天 %02d:%02d" % (t.hour, t.minute)
-    return t.strftime("%Y-%m-%d %H:%M")
+#: C4-int：`_fmt_when` 本模块与 `ui/app.py` 各一份（逐字相同）→ 收成 `terms.fmt_when` 一份。
+_fmt_when = terms.fmt_when
 
 
 def last_text(last):
@@ -171,7 +96,7 @@ def last_text(last):
     path = str(getattr(last, "path", "") or "")
     if not path:
         return terms.EXPORT_LAST_NEVER
-    return terms.EXPORT_LAST_FMT.format(path=path, when=_fmt_when(getattr(last, "ts", "")))
+    return terms.EXPORT_LAST_FMT.format(path=path, when=terms.fmt_when(getattr(last, "ts", "")))
 
 
 def scope_text(row, state):
@@ -206,7 +131,7 @@ def summary_text(plan):
     k = sum(1 for r in plan.rows if r.enabled)
     why = getattr(plan, "summary_error", "")
     if why:                                   # 摘要没算出来时说实话，不给「0 个会被跳过」
-        return _t("EXPORT_SUMMARY_UNAVAILABLE").format(reason=why)
+        return terms.EXPORT_SUMMARY_UNAVAILABLE.format(reason=why)
     s = len(plan.will_skip)
     if s:
         return terms.EXPORT_SUMMARY_FMT.format(k=k, n=plan.n_signals, s=s)
@@ -218,7 +143,7 @@ def skipped_lines(pairs):
     out = []
     for name, reason in (pairs or ()):
         body = terms.scrub(str(reason or "")).replace("\n", " ")
-        out.append(_t("EXPORT_SKIPPED_ROW_FMT").format(name=name, reason=body))
+        out.append(terms.EXPORT_SKIPPED_ROW_FMT.format(name=name, reason=body))
     return out
 
 
@@ -250,14 +175,14 @@ def file_filter(row):
     """该行的文件对话框过滤器。"""
     kind = row.kind
     if kind == "sv":
-        return _t("EXPORT_FILTER_SV")
+        return terms.EXPORT_FILTER_SV
     if kind == "report":
         return X.REPORT_FILTER_STR
     if kind == "fortest":
-        return _t("EXPORT_FILTER_FORTEST")
+        return terms.EXPORT_FILTER_FORTEST
     if kind == "nets":
-        return _t("EXPORT_FILTER_NETS")
-    return _t("EXPORT_FILTER_JSON")
+        return terms.EXPORT_FILTER_NETS
+    return terms.EXPORT_FILTER_JSON
 
 
 def _cov_args(state, view_id=None):
@@ -350,7 +275,7 @@ def default_filename(row, state):
     if kind == "fortest":
         src = state.loaded_path or state.excel_path or ""
         stem = os.path.splitext(os.path.basename(src))[0] or "for_test"
-        return _t("EXPORT_DEFAULT_FORTEST_FMT").format(stem=stem)
+        return terms.EXPORT_DEFAULT_FORTEST_FMT.format(stem=stem)
     if kind == "nets":
         return terms.EXPORT_DEFAULT_NETS
     if kind == "claims":
@@ -612,27 +537,11 @@ class ImportReport(object):
 def reset_config_state(state):
     """导入【完整配置】前清空可编辑状态（C-192「先清空再照单恢复」，= 加载这份工作状态而非叠加）。
 
-    ⚠ `state.py` **没有** `reset_config_state()`（简报里点名要找的那个方法不存在）——这里按
-    `WorkbenchStateProto` 的公开 API 逐项清，并优先调 state 自己的实现（C4-int 真加上之后
-    本函数自动改口，调用点不用动）。不碰已载入的 wb / provider / 清单模型。"""
-    fn = getattr(state, "reset_config_state", None)
-    if callable(fn):
-        return fn()
-    with state.suspend_persist():
-        for vid in contracts.VIEW_IDS:
-            for name in [m["name"] for m in state.models(vid)
-                         if str(m["name"]).lower() in state.edits(vid)]:
-                state.drop_edit(name, vid)
-            state.edits(vid).clear()
-            state.mux_data(vid).clear()
-            state.set_checked([m["name"] for m in state.models(vid)], True, vid)
-            cov = state.coverage(vid)
-            cov.sig_cov.clear()
-            cov.set_form_cov({})
-    state.set_probe_prefixes({})
-    state.set_force_signals(set())
-    state.set_logic_overrides({})
-    return None
+    ⚠ C4-int：`state.reset_config_state()` 已 additive 落进 `ui/state.py`（C4-a 期间它还不存在，
+    本函数当时按 Proto 的公开 API 逐项清并用 `getattr` 优先调 state 的实现）。那条回退已删 ——
+    「清哪些东西」是状态层的事，两份实现迟早会漂开（而漂开的表现是「导入后还留着上一份配置」，
+    界面上看不出来）。本函数现在只是个薄壳，留着是因为它是本模块对外的编排口。"""
+    return state.reset_config_state()
 
 
 def _apply_global(state, g):
@@ -714,7 +623,7 @@ def import_config(state, path):
     if rep.is_full:
         reset_config_state(state)
         if _apply_global(state, payload.get("global")):
-            rep.notes.append(_t("EXPORT_IMPORT_IGNORED"))
+            rep.notes.append(terms.EXPORT_IMPORT_IGNORED)
         if plan["probe_prefixes"] is not None:
             state.set_probe_prefixes(plan["probe_prefixes"])
         if plan["force_signals"] is not None:
@@ -722,10 +631,10 @@ def import_config(state, path):
         if plan["logic_overrides"] is not None:
             state.set_logic_overrides(plan["logic_overrides"])
     rep.n_restored, rep.missing = _apply_view_edits(state, payload)
-    kind = _t("EXPORT_IMPORT_KIND_FULL") if rep.is_full else _t("EXPORT_IMPORT_KIND_LEGACY")
-    rep.counts.append(_t("EXPORT_IMPORT_DONE_FMT").format(kind=kind, n=rep.n_restored))
+    kind = terms.EXPORT_IMPORT_KIND_FULL if rep.is_full else terms.EXPORT_IMPORT_KIND_LEGACY
+    rep.counts.append(terms.EXPORT_IMPORT_DONE_FMT.format(kind=kind, n=rep.n_restored))
     if rep.is_full:
-        rep.counts.append(_t("EXPORT_IMPORT_APPLIED_FMT").format(
+        rep.counts.append(terms.EXPORT_IMPORT_APPLIED_FMT.format(
             k=len(payload.get("signals_checked") or ()),
             np=len(state.probe_prefixes or {}), nf=len(state.force_signals or ()),
             no=len(state.logic_overrides or {})))
@@ -808,6 +717,7 @@ class ExportCenterDialog(QtWidgets.QDialog):
         self._rows = default_rows(state)
         self._plan = None
         self._plan_cache = {}           # `_plan_key` → ExportPlan（同一份输入只渲染一次）
+        self.done_dialog = None         # ⑫ 最近一次的完成弹层（`run()` 里赋值）
         self._skipped_open = False
         self._auto_import = (str(preselect or "") == "config")
         self._shown = False
@@ -929,7 +839,7 @@ class ExportCenterDialog(QtWidgets.QDialog):
             b.setFont(ui_font())
             b.setCursor(QtCore.Qt.PointingHandCursor)
             b.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
-            b.setText(_t("EXPORT_OPT_BTN_FMT").format(summary=options_text(row)))
+            b.setText(terms.EXPORT_OPT_BTN_FMT.format(summary=options_text(row)))
             b.setStyleSheet("QToolButton{background:%s;color:%s;border:1px solid %s;"
                             "border-radius:3px;padding:2px 10px;text-align:left;}"
                             % (theme.WHITE, theme.TEXT, theme.BORDER))
@@ -953,7 +863,7 @@ class ExportCenterDialog(QtWidgets.QDialog):
         self.skipped_btn.clicked.connect(self._toggle_skipped)
         lay.addWidget(self.skipped_btn)
         self.skipped_list = QtWidgets.QPlainTextEdit(self)
-        self.skipped_list.setObjectName(_n("EXPORT_SUMMARY_SKIPPED_LIST"))
+        self.skipped_list.setObjectName(names.EXPORT_SUMMARY_SKIPPED_LIST)
         self.skipped_list.setReadOnly(True)
         self.skipped_list.setFont(mono_font())
         self.skipped_list.setMaximumHeight(110)
@@ -1018,9 +928,10 @@ class ExportCenterDialog(QtWidgets.QDialog):
     def _store_sv_options(self, row):
         """C-162 / C-231 / I-03：四个选项经 `persist.store_export_options` 记住，本模块不写键名。
 
-        ⚠ `sv_scope="split"` 存得进、读不回 —— `exports.SCOPE_LABEL` 只认 all/pos/neg，
-        `load_export_options` 会把它兜底成 "all"。这是 Qt-free 层的口径，I-03 规定本模块
-        不另写一套归一化，故照实存、下次预选回「全部」（已报给 C4-int）。"""
+        ⚠ 四档 `all/pos/neg/split` 现在**存得进也读得回**：C4-int 在 `exports.SCOPE_LABEL` 里
+        补上了 `split`（C4-a 期间它只认三档，`load_export_options` 会把 split 静默兜底成 "all"
+        —— 用户上次选的「分文件」下次开窗变回「全部」，界面上看不出是谁改的）。
+        归一化仍然只在 Qt-free 层那一份，本模块一个字节都不自己判（I-03）。"""
         opt = dict(row.options or {})
         opt["scope"] = row.sv_scope
         persist.store_export_options(opt)
@@ -1040,7 +951,7 @@ class ExportCenterDialog(QtWidgets.QDialog):
         if w is None:
             return
         txt = options_text(self.row_of(kind))
-        w.setText(_t("EXPORT_OPT_BTN_FMT").format(summary=txt)
+        w.setText(terms.EXPORT_OPT_BTN_FMT.format(summary=txt)
                   if isinstance(w, QtWidgets.QToolButton) else txt)
         w.setToolTip(txt)
 
@@ -1076,8 +987,8 @@ class ExportCenterDialog(QtWidgets.QDialog):
         self.skipped_list.setVisible(bool(rows) and self._skipped_open)
         self.skipped_btn.setText("%s　%s" % (
             terms.EXPORT_SUMMARY_SKIPPED_HEAD,
-            _t("EXPORT_SUMMARY_SKIPPED_LESS") if self._skipped_open
-            else _t("EXPORT_SUMMARY_SKIPPED_MORE")))
+            terms.EXPORT_SUMMARY_SKIPPED_LESS if self._skipped_open
+            else terms.EXPORT_SUMMARY_SKIPPED_MORE))
         k = sum(1 for r in self._rows if r.enabled)
         self.run_btn.setEnabled(bool(k))
         self.run_btn.setText(terms.EXPORT_BTN_RUN_FMT.format(k=k) if k
@@ -1089,8 +1000,8 @@ class ExportCenterDialog(QtWidgets.QDialog):
         self.skipped_list.setVisible(self._skipped_open and bool(self._plan.will_skip))
         self.skipped_btn.setText("%s　%s" % (
             terms.EXPORT_SUMMARY_SKIPPED_HEAD,
-            _t("EXPORT_SUMMARY_SKIPPED_LESS") if self._skipped_open
-            else _t("EXPORT_SUMMARY_SKIPPED_MORE")))
+            terms.EXPORT_SUMMARY_SKIPPED_LESS if self._skipped_open
+            else terms.EXPORT_SUMMARY_SKIPPED_MORE))
 
     def skipped_text(self):
         """导出前摘要里点名的那段（测试 / 状态栏读它）。"""
@@ -1160,7 +1071,7 @@ class ExportCenterDialog(QtWidgets.QDialog):
             cb.toggled.connect(lambda on, k=key: self._set_nets_purpose(k, on))
             lay.addWidget(cb)
         more = QtWidgets.QToolButton(parent)
-        more.setObjectName(_n("EXPORT_NETS_MORE_BTN"))
+        more.setObjectName(names.EXPORT_NETS_MORE_BTN)
         more.setText(terms.EXPORT_NETS_MORE)
         more.setFont(ui_font())
         more.setCheckable(True)
@@ -1224,7 +1135,9 @@ class ExportCenterDialog(QtWidgets.QDialog):
         result = run_plan(self.state, plan, self._ask_path)
         self.exported.emit(result)
         if result.outcomes or result.errors:
-            done = ExportDoneDialog(result, self)
+            #: ⑫ 完成弹层留一份引用（C4-int）：组合根测试要在它上面点「去处理这 N 个信号」，
+            #: 而 harness 把 `exec` 换成了立刻返回 —— 局部变量一出这个 if 就被 GC，谁也点不到。
+            self.done_dialog = done = ExportDoneDialog(result, self)
             done.goFixRequested.connect(self.goFixRequested)
             done.exec()
         if any(o.kind == "sv" for o in result.outcomes):             # C-168
@@ -1237,7 +1150,7 @@ class ExportCenterDialog(QtWidgets.QDialog):
         """「导入配置…」：读文件 → 套用 → `ImportReportDialog` 三段（C-193 / C-194 / C-195）。"""
         path, _f = QtWidgets.QFileDialog.getOpenFileName(
             self, terms.EXPORT_BTN_IMPORT_CONFIG, start_dir(self.row_of("config"), self.state),
-            _t("EXPORT_FILTER_JSON"))
+            terms.EXPORT_FILTER_JSON)
         if not path:
             return None
         rep = import_config(self.state, str(path))
@@ -1312,8 +1225,8 @@ class ExportDoneDialog(QtWidgets.QDialog):
         self.skipped_view.setMaximumHeight(96)
         v.addWidget(self.skipped_view)
         self.more_btn = QtWidgets.QToolButton(box)
-        self.more_btn.setObjectName(_n("DONE_SKIPPED_MORE_BTN"))
-        self.more_btn.setText(_t("DONE_SKIPPED_MORE"))
+        self.more_btn.setObjectName(names.DONE_SKIPPED_MORE_BTN)
+        self.more_btn.setText(terms.DONE_SKIPPED_MORE)
         self.more_btn.setFont(ui_font(theme.FS_UI_SMALL))
         self.more_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.more_btn.setStyleSheet("QToolButton{border:none;color:%s;text-align:left;}"
@@ -1341,15 +1254,15 @@ class ExportDoneDialog(QtWidgets.QDialog):
         names_ = self.result.accounted or []
         self.accounted_label = _label(
             self, terms.DONE_ACCOUNTED_FMT.format(names="、".join(names_)) if names_ else "",
-            _n("DONE_ACCOUNTED"), size=theme.FS_UI_SMALL, color=theme.MUTE)
+            names.DONE_ACCOUNTED, size=theme.FS_UI_SMALL, color=theme.MUTE)
         self.accounted_label.setWordWrap(True)
         self.accounted_label.setVisible(bool(names_))
         lay.addWidget(self.accounted_label)
 
     def _build_errors(self, lay):
-        rows = [_t("DONE_ERROR_ROW_FMT").format(kind=terms.EXPORT_ROWS[k][0], message=m)
+        rows = [terms.DONE_ERROR_ROW_FMT.format(kind=terms.EXPORT_ROWS[k][0], message=m)
                 for k, m in (self.result.errors or ())]
-        self.errors_label = _label(self, "\n".join(rows), _n("DONE_ERRORS"), color=theme.BAD_FG)
+        self.errors_label = _label(self, "\n".join(rows), names.DONE_ERRORS, color=theme.BAD_FG)
         self.errors_label.setWordWrap(True)
         self.errors_label.setVisible(bool(rows))
         lay.addWidget(self.errors_label)
@@ -1393,7 +1306,7 @@ class ExportDoneDialog(QtWidgets.QDialog):
         out = []
         for oc in (self.result.outcomes or ()):
             detail = terms.scrub(getattr(oc, "ui_detail", "") or oc.counts_text())
-            out.append(_t("DONE_WRITTEN_ROW_FMT").format(path=oc.path, detail=detail).strip())
+            out.append(terms.DONE_WRITTEN_ROW_FMT.format(path=oc.path, detail=detail).strip())
             for extra in (oc.paths or ())[1:]:               # C-177：报告一次写多份，逐份列出
                 out.append(str(extra))
         return out
@@ -1418,8 +1331,8 @@ class ExportDoneDialog(QtWidgets.QDialog):
         self._detail_open = not self._detail_open
         self.skipped_view.setPlainText(self.skipped_text())
         self.skipped_view.setMaximumHeight(300 if self._detail_open else 96)
-        self.more_btn.setText(_t("DONE_SKIPPED_LESS") if self._detail_open
-                              else _t("DONE_SKIPPED_MORE"))
+        self.more_btn.setText(terms.DONE_SKIPPED_LESS if self._detail_open
+                              else terms.DONE_SKIPPED_MORE)
 
     def open_out_dir(self):
         """N6：打开输出目录（纯 GUI 一行，不进 Qt-free 层）。"""

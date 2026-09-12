@@ -12,7 +12,7 @@ Design（`docs/GUI_v2_Design对齐_20260912.md` §1.2 ⑬）的版面：右侧 6
     其它症状（五条折叠项）                             DIAG_SYM_SUPPLEMENT / _FORCE / _COVERAGE
       ① 规格缺一级逻辑 → RTL 补充逻辑编辑器             / _RISKY / _LEGACY
       ② 两个东西撞名   → 强制 force 名单编辑器
-      ③ 覆盖度不够     → 打开覆盖度弹层（发信号，C4-int 接）
+      ③ 覆盖度不够     → 打开覆盖度弹层（只发信号；组合根 `app.open_coverage` 接，用标题栏那一个）
       ④ 还有网没前缀   → 「缺前缀是否强制生成」全局开关（默认 True，I-11 / C-217）
       ⑤ 以前在旧版界面填过期望 → 旧版真值表编辑迁移（C-302，一次性显式动作）
     「这里的每一项都是逃生阀，不是日常主力。」           DIAG_FOOTER
@@ -46,6 +46,7 @@ from dreg_verify import inputs_table as IT
 from dreg_verify import session as S
 
 from . import contracts as C
+from . import dialogs as DLG
 from . import names as N
 from . import persist as P
 from . import terms as T
@@ -59,78 +60,23 @@ __all__ = [
     "SupplementEditorDialog", "LegacyImportDialog",
     "LegacyPlan", "make_snapshot", "prefix_impact", "nets_summary",
     "plan_legacy_import", "apply_legacy_import",
-    "SYMPTOM_TARGETS", "PENDING_NAMES", "PENDING_TERMS", "STATE_REQUIREMENTS",
+    "SYMPTOM_TARGETS", "STATE_REQUIREMENTS",
 ]
 
 
-# ═════════════════════════════ 待搬的名字 / 文案 ═════════════════════════════
-#: `ui/names.py` 里还没有、本波要用的 objectName（C4-int 搬进 `names.py` 并删掉这张表）。
-PENDING_NAMES = {
-    "DIAG_SCROLL": "diag_scroll",                    # 抽屉滚动区（open_for 要它滚）
-    "DIAG_CUVUNF_BODY": "diag_cuvunf_body",          # 主症状蓝框正文
-    "DIAG_STEP1_TITLE": "diag_step1_title",
-    "DIAG_STEP2_TITLE": "diag_step2_title",
-    "DIAG_STEP3_TITLE": "diag_step3_title",
-    "DIAG_SUPP_OPEN_BTN": "diag_supp_open_btn",      # 折叠项 ① 的入口按钮
-    "DIAG_FORCE_OPEN_BTN": "diag_force_open_btn",    # ②
-    "DIAG_COVERAGE_BTN": "diag_coverage_btn",        # ③
-    "DIAG_PREFIX_HINT": "diag_prefix_hint",
-    "DIAG_FORCE_HINT": "diag_force_hint",
-    "DIAG_SUPP_HINT": "diag_supp_hint",
-    "DIAG_SUPP_UNKNOWN": "diag_supp_unknown",        # C-214 提示条
-    "DIAG_LEGACY_SKIPPED": "diag_legacy_skipped",    # C-302 点名不迁的那块
-}
-
-#: `ui/terms.py` 里还没有、本波要用的文案（C4-int 搬进 `terms.py` 并删掉这张表）。
-#: 取值一律经 `_t()`：`terms` 里有就用 `terms` 的，搬完自动一致。
-PENDING_TERMS = {
-    # 五条折叠项里的入口按钮
-    "DIAG_SUPP_OPEN": "补一段等价表达式…",
-    "DIAG_FORCE_OPEN": "编辑强制 force 名单…",
-    "DIAG_COVERAGE_OPEN": "打开覆盖度设置…",
-    "DIAG_LEGACY_OPEN": "看看能迁过来什么…",
-    # 三个编辑器的通用按钮
-    "DIAG_SAVE": "保存",
-    "DIAG_CANCEL": "取消",
-    "DIAG_PREFIX_IMPORT": "导入 .txt…",
-    "DIAG_PREFIX_EXPORT_SHORT": "导出 .txt…",
-    "DIAG_FORCE_IMPORT": "导入 .txt…",
-    "DIAG_FORCE_EXPORT": "导出 .txt…",
-    # 关掉「缺前缀是否强制生成」的二次确认（改产物是显式动作，C-217）
-    "DIAG_RISKY_OFF_TITLE": "关掉「缺前缀是否强制生成」",
-    # 保存后的状态栏反馈
-    "DIAG_SUPP_DONE_FMT": "RTL 补充逻辑已更新（共 {n} 条，{n_on} 条启用）",
-    "DIAG_SUPP_CLEARED": "RTL 补充逻辑已清空",
-    "DIAG_SUPP_BAD_JSON_FMT": "不是合法 JSON：{err}",
-    "DIAG_SUPP_TMPL_BAD_JSON": "当前内容不是合法 JSON，合并不进去；请先修好或清空。",
-    # 文件读写失败（走编辑器里的错误行，不弹窗、不写路径以外的东西）
-    "DIAG_FILE_READ_FAIL_FMT": "读不进来：{err}",
-    "DIAG_FILE_WRITE_FAIL_FMT": "写不出去：{err}",
-    # C-302 迁移
-    "DIAG_LEGACY_SKIP_HEAD": "不迁的名字和原因：",
-    "DIAG_LEGACY_SKIP_MUX": "mux 用的是 case / 数据列坐标（c:A / d:0），与旧版按物理基名存的取值对不上",
-    "DIAG_LEGACY_SKIP_UNKNOWN": "当前表里找不到这个名字（表改名 / 删行？）",
-    "DIAG_LEGACY_SKIP_KIND_FMT": "根是「{kind}」，不是 logic / 直连寄存器",
-    "DIAG_LEGACY_SKIP_EMPTY": "旧版桶里这个名字下没有可迁的行",
-    "DIAG_LEGACY_ROW_FMT": "{name}　旧版 {n} 行 → 新版 {n} 列",
-    "DIAG_LEGACY_NOTE_LOST": "旧版行上的备注不迁（新版列模型没有备注这一格）",
-    "DIAG_LEGACY_DONE_FMT": "已迁入 {n_sig} 个信号、{n_col} 列；旧版数据只读不删，原样还在",
-}
-
-
+# ═════════════════════════════ 名字 / 文案（唯一真相源在 names.py / terms.py）═══════════════
+#: C4-int：本模块原来的 `PENDING_NAMES`（13 条）/ `PENDING_TERMS`（25 条）已整块搬进
+#: `ui/names.py` / `ui/terms.py`；`_nm()` 连同 `_t()` 的 `getattr` 回退一并删掉 ——
+#: 有回退在，「搬没搬过去」从代码上看不出来，两份字面量漂开也没人会发现。
 def _t(key, **fmt):
-    """文案取值：`terms` 里有就用 `terms` 的，没有退回 `PENDING_TERMS`（C4-int 搬完即一致）。
+    """界面文案：`ui/terms.py` 里的同名常量（没有 = 编码错误，立刻炸）。
 
     ⚠ 第一个形参叫 `key` 不叫 `name`：好几条文案的占位符本身就是 `{name}`。"""
-    s = getattr(T, key, None)
-    if s is None:
-        s = PENDING_TERMS[key]
+    try:
+        s = getattr(T, key)
+    except AttributeError:
+        raise KeyError("文案 %s 不在 ui/terms.py 里" % key)
     return s.format(**fmt) if fmt else s
-
-
-def _nm(key):
-    """objectName 取值：`names` 里有就用 `names` 的，没有退回 `PENDING_NAMES`。"""
-    return getattr(N, key, None) or PENDING_NAMES[key]
 
 
 #: 行内原因块「去处理」的跳转目标（`terms.REASON_TARGETS` 里 `diag_` 开头的那些）→ 抽屉里滚到哪。
@@ -576,7 +522,7 @@ class PrefixEditorDialog(_EditorDialog):
 
     def __init__(self, state, parent=None):
         super().__init__(state, parent, N.DIAG_PREFIX_DIALOG, _t("DIAG_PREFIX_TITLE"), 720, 540)
-        self._lay.addWidget(_label(_t("DIAG_PREFIX_HINT"), self, _nm("DIAG_PREFIX_HINT"),
+        self._lay.addWidget(_label(_t("DIAG_PREFIX_HINT"), self, N.DIAG_PREFIX_HINT,
                                    color=TH.MUTE, font=W.ui_font(TH.FS_UI_SMALL)))
         cur = dict(getattr(state, "probe_prefixes", {}) or {})
         self.edit = _mono_edit(self, N.DIAG_PREFIX_TEXT, S.render_probe_prefix_text(cur))
@@ -584,7 +530,7 @@ class PrefixEditorDialog(_EditorDialog):
         self.impact = _result_box(_t("DIAG_PREFIX_IMPACT_FMT", n=len(cur), m=0),
                                   self, N.DIAG_PREFIX_IMPACT)
         self._lay.addWidget(self.impact)
-        self._add_errors("diag_prefix_errors")
+        self._add_errors(N.DIAG_PREFIX_ERRORS)
         b_imp = _button(_t("DIAG_PREFIX_IMPORT"), self, N.DIAG_PREFIX_IMPORT_BTN)
         b_imp.clicked.connect(self.on_import)
         b_exp = _button(_t("DIAG_PREFIX_EXPORT_SHORT"), self, N.DIAG_PREFIX_EXPORT_BTN)
@@ -652,12 +598,12 @@ class ForceEditorDialog(_EditorDialog):
 
     def __init__(self, state, parent=None):
         super().__init__(state, parent, N.DIAG_FORCE_DIALOG, _t("DIAG_FORCE_TITLE"), 640, 480)
-        self._lay.addWidget(_label(_t("DIAG_FORCE_HINT"), self, _nm("DIAG_FORCE_HINT"),
+        self._lay.addWidget(_label(_t("DIAG_FORCE_HINT"), self, N.DIAG_FORCE_HINT,
                                    color=TH.MUTE, font=W.ui_font(TH.FS_UI_SMALL)))
         cur = set(getattr(state, "force_signals", set()) or set())
         self.edit = _mono_edit(self, N.DIAG_FORCE_TEXT, S.render_force_signal_text(cur))
         self._lay.addWidget(self.edit, 1)
-        self._add_errors("diag_force_errors")
+        self._add_errors(N.DIAG_FORCE_ERRORS)
         b_imp = _button(_t("DIAG_FORCE_IMPORT"), self, N.DIAG_FORCE_IMPORT_BTN)
         b_imp.clicked.connect(self.on_import)
         b_exp = _button(_t("DIAG_FORCE_EXPORT"), self, N.DIAG_FORCE_EXPORT_BTN)
@@ -717,12 +663,12 @@ class SupplementEditorDialog(_EditorDialog):
 
     def __init__(self, state, parent=None):
         super().__init__(state, parent, N.DIAG_SUPP_DIALOG, _t("DIAG_SUPP_TITLE"), 760, 600)
-        self._lay.addWidget(_label(_t("DIAG_SUPP_HINT"), self, _nm("DIAG_SUPP_HINT"),
+        self._lay.addWidget(_label(_t("DIAG_SUPP_HINT"), self, N.DIAG_SUPP_HINT,
                                    color=TH.MUTE, font=W.ui_font(TH.FS_UI_SMALL)))
         cur = {k: dict(v) for k, v in (getattr(state, "logic_overrides", {}) or {}).items()}
         self.edit = _mono_edit(self, N.DIAG_SUPP_TEXT, S.render_supplements_json(cur))
         self._lay.addWidget(self.edit, 1)
-        self.unknown = _label("", self, _nm("DIAG_SUPP_UNKNOWN"),
+        self.unknown = _label("", self, N.DIAG_SUPP_UNKNOWN,
                               font=W.mono_font(TH.FS_MONO), color=TH.AMBER_FG)
         self.unknown.setStyleSheet("QLabel{background:%s;border:1px solid %s;color:%s;padding:6px 8px;}"
                                    % (TH.AMBER_BG, TH.AMBER_BORDER, TH.AMBER_FG))
@@ -831,7 +777,7 @@ class LegacyImportDialog(QtWidgets.QDialog):
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(8)
-        self.skipped = _label("", self, _nm("DIAG_LEGACY_SKIPPED"),
+        self.skipped = _label("", self, N.DIAG_LEGACY_SKIPPED,
                               font=W.mono_font(TH.FS_MONO), color=TH.AMBER_FG)
         self.skipped.setStyleSheet("QLabel{background:%s;border:1px solid %s;color:%s;padding:8px 10px;}"
                                    % (TH.AMBER_BG, TH.AMBER_BORDER, TH.AMBER_FG))
@@ -928,7 +874,7 @@ class DiagnosticsDrawer(QtWidgets.QFrame):
         outer.setSpacing(0)
         outer.addLayout(self._build_header())
         self.scroll = QtWidgets.QScrollArea(self)
-        self.scroll.setObjectName(_nm("DIAG_SCROLL"))
+        self.scroll.setObjectName(N.DIAG_SCROLL)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.scroll.setStyleSheet("QScrollArea,QScrollArea>QWidget>QWidget{background:%s;}" % TH.WHITE)
@@ -984,16 +930,16 @@ class DiagnosticsDrawer(QtWidgets.QFrame):
         lay.setSpacing(8)
         lay.addWidget(_label(_t("DIAG_CUVUNF_TITLE"), box, N.DIAG_CUVUNF_TITLE,
                              font=W.ui_font(TH.FS_UI, bold=True), color=TH.LIGHT_BLUE_FG))
-        lay.addWidget(_label(_t("DIAG_CUVUNF_BODY"), box, _nm("DIAG_CUVUNF_BODY"), color=TH.TEXT))
+        lay.addWidget(_label(_t("DIAG_CUVUNF_BODY"), box, N.DIAG_CUVUNF_BODY, color=TH.TEXT))
 
         steps = T.DIAG_STEPS
         self.step_boxes, self.step_btns = {}, {}
-        titles = ("DIAG_STEP1_TITLE", "DIAG_STEP2_TITLE", "DIAG_STEP3_TITLE")
+        title_names = (N.DIAG_STEP1_TITLE, N.DIAG_STEP2_TITLE, N.DIAG_STEP3_TITLE)
         box_names = (N.DIAG_STEP1_BOX, N.DIAG_STEP2_BOX, N.DIAG_STEP3_BOX)
         btn_names = (N.DIAG_STEP1_BTN, N.DIAG_STEP2_BTN, N.DIAG_STEP3_BTN)
         handlers = (self.on_step1, self.on_step2, self.on_step3)
         for i, (no, title, text, result, btn_text) in enumerate(steps):
-            lay.addWidget(_label("%s　%s" % (no, title), box, _nm(titles[i]),
+            lay.addWidget(_label("%s　%s" % (no, title), box, title_names[i],
                                  font=W.ui_font(TH.FS_UI, bold=True), color=TH.INK))
             lay.addWidget(_label(text, box, color=TH.TEXT, font=W.ui_font(TH.FS_UI_SMALL)))
             rb = _result_box(result, box, box_names[i])
@@ -1023,15 +969,15 @@ class DiagnosticsDrawer(QtWidgets.QFrame):
             out.append(it)
 
         # ① 规格缺了一级逻辑 → RTL 补充逻辑
-        b = _button(_t("DIAG_SUPP_OPEN"), self, _nm("DIAG_SUPP_OPEN_BTN"))
+        b = _button(_t("DIAG_SUPP_OPEN"), self, N.DIAG_SUPP_OPEN_BTN)
         b.clicked.connect(self.open_supplement_editor)
         self.items[N.DIAG_SYM_SUPPLEMENT].content_layout().addWidget(b, 0, Qt.AlignLeft)
         # ② 两个东西撞名 → 强制 force
-        b = _button(_t("DIAG_FORCE_OPEN"), self, _nm("DIAG_FORCE_OPEN_BTN"))
+        b = _button(_t("DIAG_FORCE_OPEN"), self, N.DIAG_FORCE_OPEN_BTN)
         b.clicked.connect(self.open_force_editor)
         self.items[N.DIAG_SYM_FORCE].content_layout().addWidget(b, 0, Qt.AlignLeft)
         # ③ 覆盖度不够 → 发信号，弹层归 C4-int
-        b = _button(_t("DIAG_COVERAGE_OPEN"), self, _nm("DIAG_COVERAGE_BTN"))
+        b = _button(_t("DIAG_COVERAGE_OPEN"), self, N.DIAG_COVERAGE_BTN)
         b.clicked.connect(self.coverageRequested.emit)
         self.items[N.DIAG_SYM_COVERAGE].content_layout().addWidget(b, 0, Qt.AlignLeft)
         # ④ 缺前缀是否强制生成（默认 True，I-11 / C-217）
@@ -1232,12 +1178,13 @@ class DiagnosticsDrawer(QtWidgets.QFrame):
         return True
 
     def _confirm_risky_off(self):
-        """二次确认。`dialogs.ConfirmDialog` 的三个 kind（清零 / 删反例 / auto→期望）都不是这件事，
-        不去硬塞一个第四种 kind —— 这里用标准问答框，文案仍取 `terms`。"""
-        btn = QtWidgets.QMessageBox.question(
-            self, _t("DIAG_RISKY_OFF_TITLE"), T.DIAG_RISKY_OFF_WARNING,
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
-        return btn == QtWidgets.QMessageBox.Yes
+        """二次确认（C-217）：`dialogs.ConfirmDialog` 的第四种 kind `risky_off`。
+
+        ⚠ C4-b 当时用的是 `QMessageBox.question`，理由是「现有三个 kind 都不是这件事」。
+        C4-int 改口：这四件事的性质是同一件（一句话说清会丢什么 + 默认按钮=否），
+        标准问答框的按钮文字不受 `terms` 管、offscreen 下还要 harness 单拦一条
+        —— 界面上同一类动作出现两种框，用户与测试都得记两套。"""
+        return bool(DLG.ConfirmDialog.ask(DLG.CONFIRM_RISKY_OFF, parent=self))
 
 
 # ═════════════════════════ 对 state 的接口假设（C4-int 逐条核对）═════════════════════════

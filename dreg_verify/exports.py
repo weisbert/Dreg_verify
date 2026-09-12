@@ -51,7 +51,13 @@ EXPORT_OPTION_KEYS = {
     "sv_summary": "export_sv_summary",
     "owner_in_msg": "export_owner_in_msg",
 }
-SCOPE_LABEL = {"all": "全部（正向 + 负向）", "pos": "仅正向", "neg": "仅负向"}
+#: scope 取值 → 人读标签。`split`（正向 / 负向各写一个文件，走 `export_sv_split`）是
+#: **界面上的第四档**：v2 导出中心把它当 `export_scope` 存进 settings，而 `load_export_options`
+#: 只放行本表里认识的键 —— 不列它就会「存得进、读不回」（下次打开静默退回「全部」，
+#: 用户看不出是自己没选还是工具忘了）。渲染路径一个字节不变：`export_sv_split` 自己按
+#: pos / neg 各渲一趟，`render_sv` 永远收不到 `scope="split"`。
+SCOPE_LABEL = {"all": "全部（正向 + 负向）", "pos": "仅正向", "neg": "仅负向",
+               "split": "正向 + 负向分文件"}
 
 
 def load_export_options(settings):

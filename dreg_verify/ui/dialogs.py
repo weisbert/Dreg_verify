@@ -87,6 +87,7 @@ TITLES = {
     "confirm_clear": _confirm_titles()["clear"],
     "confirm_del_neg": _confirm_titles()["del_neg"],
     "confirm_auto_fill": _confirm_titles()["auto_fill"],
+    "confirm_risky_off": _confirm_titles()["risky_off"],
     "rename_col": T.DLG_RENAME_TITLE,
     "mux_data": T.DLG_MUX_DATA_TITLE,
     "columns": T.DLG_COLUMNS_TITLE,
@@ -253,26 +254,33 @@ class _BaseDialog(QtWidgets.QDialog):
         return self
 
 
-# ═════════════════════════ ① 三处确认 ═════════════════════════
+# ═════════════════════════ ① 四处确认 ═════════════════════════
 CONFIRM_CLEAR = "clear"
 CONFIRM_DEL_NEG = "del_neg"
 CONFIRM_AUTO_FILL = "auto_fill"
-#: 三处确认的 kind（V2Spec §5 M22「三处都加二次确认」）
-CONFIRM_KINDS = (CONFIRM_CLEAR, CONFIRM_DEL_NEG, CONFIRM_AUTO_FILL)
+CONFIRM_RISKY_OFF = "risky_off"
+#: 四处确认的 kind（V2Spec §5 M22「三处都加二次确认」+ C4-int 补第四种）。
+#: ⚠ 第四种 `risky_off` 是 C4-int 加的：诊断抽屉关掉「缺前缀是否强制生成」原先用
+#: `QMessageBox.question`，它在 offscreen 下要靠 harness 单拦一条、按钮文字也不受
+#: `terms` 管 —— 而这四件事的性质完全一样（**一句话说清会丢什么，默认按钮是否**），
+#: 没有理由让其中一件走另一套控件（C-217）。
+CONFIRM_KINDS = (CONFIRM_CLEAR, CONFIRM_DEL_NEG, CONFIRM_AUTO_FILL, CONFIRM_RISKY_OFF)
 
 
 def confirm_title(kind):
-    """三处确认的窗口标题（harness 按它拦截，必须稳定）。"""
+    """四处确认的窗口标题（harness 按它拦截，必须稳定）。"""
     return _confirm_titles()[str(kind)]
 
 
 def confirm_text(kind, n=0):
-    """三处确认的正文（全部来自 terms；删反例按「有没有值得保护的反例」分强弱两句）。"""
+    """四处确认的正文（全部来自 terms；删反例按「有没有值得保护的反例」分强弱两句）。"""
     kind = str(kind)
     if kind == CONFIRM_CLEAR:
         return T.TRUTH_CONFIRM_CLEAR                                     # C-089 / C-090
     if kind == CONFIRM_AUTO_FILL:
         return T.TRUTH_CONFIRM_AUTO_FILL                                 # C-094 / C-095
+    if kind == CONFIRM_RISKY_OFF:
+        return _txt("DIAG_RISKY_OFF_WARNING")                            # C-217
     if kind == CONFIRM_DEL_NEG:
         if int(n or 0) > 0:                                              # C-103：自定义命名 / 手调过错值
             return T.TRUTH_CONFIRM_DEL_NEG_FMT.format(n=int(n))
@@ -281,13 +289,15 @@ def confirm_text(kind, n=0):
 
 
 class ConfirmDialog(_BaseDialog):
-    """① 三处确认：清零（C-089/C-090）/ 删反例（C-102/C-103/C-036）/ auto→期望（C-094/C-095）。
+    """① 四处确认：清零（C-089/C-090）/ 删反例（C-102/C-103/C-036）/ auto→期望（C-094/C-095）/
+    关掉「缺前缀是否强制生成」（C-217）。
 
     构造：`ConfirmDialog(kind, n=0, names=(), parent=None)`
-      kind  —— "clear" / "del_neg" / "auto_fill"
+      kind  —— "clear" / "del_neg" / "auto_fill" / "risky_off"
       n     —— 删反例时 = 值得保护（自定义命名或手调过错值）的反例条数，>0 走加强文案
       names —— 这些反例列的名字：**点名在前、计数在后**（C-270 / I-20）
     返回：`answer() -> bool`；一句话用法 `dialogs.confirm(kind, n, names, parent) -> bool`。
+    四种的默认按钮一律是**否**（C-090 / C-095 / C-103 / C-217：手滑回车不该改掉产物）。
     """
 
     OBJECT_NAME = N.DLG_CONFIRM
