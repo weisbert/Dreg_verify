@@ -759,7 +759,9 @@ def test_key_role_matches_mux_gen(btlp, wl):
 def test_model_module_imports_only_allowed_layers():
     """I-19 的本地加强版：`ui/truth/*` 只准 import 允许的那几层（theme 也不许，model 只给键名）。"""
     src_dir = os.path.dirname(TM.__file__)
-    allowed = {"edits", "truth_edit", "inputs_table", "analysis_norm",
+    # exports：C3-d 的 `io.py` 走它导 CSV / 拿 .sv build（架构 §6.15 明写）——它自己也是
+    # Qt-free 的编排层，不是引擎（`test_ui_layering` 的 ENGINE_MODULES 里没有它）。
+    allowed = {"edits", "truth_edit", "inputs_table", "analysis_norm", "exports",
                "contracts", "names", "terms", "commands", "rows", "model", "io"}
     #: 视图层（C3-b）另外准 import `theme` / `widgets` —— 架构 §6.13：底色字色**只**在
     #: delegate/表头里按 role 查 theme 的表。model 那半边照旧不许（它只给 CELL_STATE 键名）。
