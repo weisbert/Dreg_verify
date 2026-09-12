@@ -368,7 +368,15 @@ def cols_from_vectors(an, e_inputs):
 
 
 def cols_to_vectors(an, cols):
-    """列模型 → TestVector 列表（logic/register 路的 vector_overrides 回流）。"""
+    """列模型 → TestVector 列表（logic/register 路的 vector_overrides 回流）。
+
+    ⚠ iddq 漏电态自检拍的身份要**重新贴回去**（P-01）：`make_vector_from_base_values`
+    只认输入取值，`dft_pitch` / `extra_forces` / `release_nets` 全丢。功能拍无所谓
+    （生成期 `pin_dft_gate` 会把门重新钉到透传值），但 DFT 拍丢了标记之后也被钉成
+    **透传**——那一拍的 `force …=1'b1` 变成 `=1'b0`、release 也没了，断言却照旧写着
+    常量支的期望。表现是「只要动过这个信号一格，iddq 自检拍必 FAIL」，而屏幕上
+    那一列看着一切正常。判据走 `is_dft_pitch_col`（门值 != 透传值 = DFT 拍）。"""
+    gate = an.get("dft_gate")
     vecs = []
     for i, c in enumerate(cols):
         nm = c["name"] if c["user"] else None
@@ -386,6 +394,11 @@ def cols_to_vectors(an, cols):
             v = V.make_vector_from_base_values(
                 an["node"], an["bindings"], an["groups"], c["vals"], an["out_width"],
                 index=i, name=nm, designer_expected=c["exp"])
+        if gate and is_dft_pitch_col(an, c):
+            gv = c.get("vals", {}).get(gate["key"], 1 - int(gate["transp"]))
+            v.dft_pitch = True
+            v.extra_forces = [(gate["wire_lhs"], int(gv), int(gate.get("width") or 1))]
+            v.release_nets = [gate["wire_lhs"]]     # 本拍后 release，让门回 RTL 默认（S4）
         vecs.append(v)
     return vecs
 
@@ -396,7 +409,14 @@ def mux_derive(an, cols):
     ⚠ 用户列的 `uv.name` 必须按**列名**贴（R2-03）：`clone_vector` 复制的是它被复制那一刻的
     源向量，源是自动列时 `name is None`（.sv 里退回自动 T<n> 标号）、源是别的用户列时带的是
     **那一列**的名字。屏幕表头写 U0、.sv 里却写 T25，改名成 MY_CASE 更是整个搜不到——
-    三处标号必须是同一个。`cols_to_vectors`（logic 路）与 `restore_cols` 本来就是这个口径。"""
+    三处标号必须是同一个。`cols_to_vectors`（logic 路）与 `restore_cols` 本来就是这个口径。
+
+    ⚠ iddq 漏电态自检拍**不算 designer 手填期望**（P-01）：它的门在 `extra_forces` 里、
+    **不在 assignments 里**，所以它与同一组取值的功能拍 `mux_assign_key` 完全相同。
+    把它那条工具推导出来的常量期望（多半是 0）塞进 `expected`，生成器就按键号把它盖到
+    **功能拍**头上 —— 表现是「什么都不改按一次『重新生成』，.sv 里 `==4'b1010` 变成
+    `==4'b0000`」，屏幕上那一格还写着未填。判据与 `vectors.TestVector.designer_filled`
+    一致（那边也明写「DFT 拍的期望来自门、不计入 designer 手填」）。"""
     auto_keys = {generator.mux_assign_key(v.assignments) for v in an["vectors"]}
     cur_auto_keys, expected, user_vecs = set(), {}, []
     for c in cols:
@@ -414,7 +434,7 @@ def mux_derive(an, cols):
             user_vecs.append(uv)
         else:
             cur_auto_keys.add(key)
-            if c["exp"] is not None and not c["neg"]:
+            if c["exp"] is not None and not c["neg"] and not is_dft_pitch_col(an, c):
                 expected[key] = c["exp"]
     return {"cleared": len(cols) == 0, "dropped": list(auto_keys - cur_auto_keys),
             "expected": expected, "user_vecs": user_vecs}

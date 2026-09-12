@@ -658,16 +658,35 @@ class TruthPanel(QtWidgets.QWidget):
 
     # ── C-085 重新生成 ──
     def _do_regen(self):
+        """重新生成 = **丢弃这个信号的全部自定义**，按当前覆盖度重出（C-085 / C-119）。
+
+        P-01：v1 `_e_regen` 第一行就是 `edits.pop(name)`；v2 这里不但不删，重出之后
+        `colsChanged` 还把「引擎默认列集」当成一份编辑 `put_edit` 回去 —— 于是
+        「什么都不改按一次重新生成」也会在 `state.edits` 里留下一条记录，落盘、重启还在。
+        本身不该有可见后果（那份列集就是引擎默认），但它把「有没有编辑」这件事说谎了，
+        而 `compute_edited` 走的是另一条路（mux 的 `expected` 按键号打补丁），一旦哪条
+        列的期望来源不是 designer（比如 iddq 漏电态自检拍），补丁就落到别的拍头上。
+
+        所以这里两件事一起做：先 `drop_edit` 去掉记录，再在**不回写**的状态下重出。
+        之后用户真改了哪一格，`_persist` 自然会把记录建回来；`Ctrl+Z` 撤销重新生成时
+        `Regenerate.undo` 也照常发 `colsChanged`，老列集连同记录一起回来。
+        """
         st = self.state
         an = self._an
         if st is not None and self._name and hasattr(st, "analyze"):
             an = st.analyze(self._name) or an       # 覆盖度可能已经改过，按现在这一档重出
         if not an:
             return
+        if st is not None and self._name and hasattr(st, "drop_edit"):
+            st.drop_edit(self._name)
         self._an = an
         self._e_inputs = e_inputs_from_an(an)
-        with self._bulk():
-            self.model.regenerate(an, self._e_inputs)
+        was_loading, self._loading = self._loading, True    # 重出本身不算「用户改了什么」
+        try:
+            with self._bulk():
+                self.model.regenerate(an, self._e_inputs)
+        finally:
+            self._loading = was_loading
         self.frozen.set_source(self.model, an, self._e_inputs)
         self._net_rows = self._build_net_rows()
         self._sync_toolbar()

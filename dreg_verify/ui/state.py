@@ -392,9 +392,17 @@ class WorkbenchState(QtCore.QObject):
         return names if ch is None else [n for n in names if n.lower() in ch]
 
     def set_checked(self, names, on, view_id=None):
-        """勾上/取消一批信号（C-022 / C-242）。全勾 → 回到 None（默认态，不写桶，C-243）。"""
+        """勾上/取消一批信号（C-022 / C-242）。全勾 → 回到 None（默认态，不写桶，C-243）。
+
+        P-09：**清单还没跑过的范围直接不受理**。此前 `all_low` 是空集，
+        `None if (all_low and cur >= all_low) else cur` 这一句就把它判成 `set()` ——
+        「一个都没勾」，还跟着落了盘。用户导入一次完整配置（`reset_config_state` 对
+        五个范围都调这里），另外四个还没分析的范围就被固化成「0 勾选」：下次打开
+        那几页一个信号都不勾，一导出什么都没有，而他从没在那几页点过一下。"""
         vid = self._vid(view_id)
         all_low = {str(m["name"]).lower() for m in self.models(vid)}
+        if not all_low:
+            return
         cur = self._checks.get(vid)
         cur = set(all_low) if cur is None else set(cur)
         for n in (names or []):
@@ -748,7 +756,7 @@ class WorkbenchState(QtCore.QObject):
             # R2-01：mux 数据值手填也是劳动成果，legacy 桶的 `mux_data` 段形状 + 一层 view_id
             vm[vid] = {low: (dict((cur_mux.get(low) or {}).get("data") or {})
                              or None) for low in tmux}
-            if vid in self._touched_checks:
+            if vid in self._touched_checks and self._models.get(vid):
                 ch = self._checks.get(vid)
                 # C-243：全勾（None）= 默认态 → 写 None，`write_edits_bucket` 会把这一格删掉
                 vc[vid] = None if ch is None else [m["name"] for m in self.models(vid)

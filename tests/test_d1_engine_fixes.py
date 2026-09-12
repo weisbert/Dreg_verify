@@ -344,6 +344,39 @@ def test_r2_01_mux_data_segment_does_not_touch_legacy(qapp, iso, wl):
     assert now["view_mux_data"][VID][nm.lower()]
 
 
+# ═══════════════ P-01：默认列集不许在产物里变出一条 designer 手填期望 ═══════════════
+@pytest.mark.contract("C-085", "C-119")
+def test_p01_default_cols_render_the_same_sv_as_no_edits(qapp, btlp, wl):
+    """P-01（引擎侧根因）：把**引擎默认列集**原样当成一份编辑喂回去，`.sv` 必须逐字节不变。
+
+    这是「什么都不改按一次重新生成，产物却变了」的根，也是整个编辑层的地基：
+    `cols_from_vectors` 出来的列集经 `compute_edited` 再渲染，就该等于「根本没有编辑」。
+
+    真实破口：iddq 漏电态自检拍那条**工具推导**的常量期望（designer_expected=0）被
+    `mux_derive` 当成 designer 手填收进 `expected`；而它的门在 `extra_forces` 里、
+    **不在 assignments 里**，于是它与同一组取值的功能拍 `mux_assign_key` 完全相同 ——
+    生成器按键号把 0 盖到功能拍头上（wl 上 `==4'b1010` 变 `==4'b0000`）。
+    """
+    n_sig, n_gated = 0, 0
+    for path in (btlp, wl):
+        st = loaded(path)
+        for m in st.models(VID):
+            nm = m["name"]
+            an = st.analyze(nm, VID)
+            if not (an and an.get("editable")):
+                continue
+            cols = ED.cols_from_vectors(an, e_inputs_from_an(an))
+            if not cols:
+                continue
+            n_sig += 1
+            n_gated += 1 if an.get("dft_gate") else 0
+            plain = sv_of(st, nm, {})                        # 完全没有编辑
+            asis = sv_of(st, nm, ED.compute_edited({nm.lower(): rec_of(st, nm, cols)}, {}))
+            assert plain == asis, "%s：默认列集喂回去，.sv 就变了" % nm
+    assert n_sig >= 20, "只对了 %d 条信号，覆盖太窄" % n_sig
+    assert n_gated >= 2, "一条带 iddq 门的信号都没对上，这条测不到根因"
+
+
 # ═══════════════ R2-04 / R2-06：view_edits 逐信号合并（I-05 / C-300 / C-241）═══════════════
 LOGIC_SIG = "d_logic_bt_lp_rx_en"          # btlp 镜像里一个 logic 根、可编辑
 
