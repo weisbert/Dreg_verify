@@ -1,31 +1,38 @@
 # -*- coding: utf-8 -*-
-"""app.py —— v2 组合根 `MainWindow` + `main()`（C1-d 骨架；之后每波集成 agent 接管）。
+"""app.py —— v2 组合根 `MainWindow` + `main()`（C1-d 骨架 → C1-int 接线；之后每波集成 agent 接管）。
 
 版面（Design §1.2 区号）：
 
     QMainWindow(WIN_MAIN)
       ├ ① 顶栏 TOP_BAR（品牌 · 真表路径 · 浏览 Ctrl+O · 载入/重新载入 Ctrl+L · 诊断 Ctrl+Shift+D · 导出中心 Ctrl+G）
       ├ 错误条 ERROR_BAR（C-005 / C-272：载表出错用工程师语言，**不弹窗不退出**）
-      ├ ② 筛选行 FILTER_BAR（C1-c 的 filter_bar，本波占位）
+      ├ ② 筛选行 FILTER_BAR（`filter_bar.FilterBar`）
       ├ WIN_STACK（QStackedWidget）
       │    ├ ⑭ 空态 EMPTY_PANEL（620px 居中；xlsx 虚线框 / 标题 / 说明 / 两个按钮 / 最近打开）
       │    └ 工作台 WIN_WORKBENCH
-      │         └ WIN_SPLIT_MAIN（③ 清单 LIST_PANEL | 详情列）
-      │              └ 详情列 = ⑮ 载入态 LOADING_PANEL + ④ 标题栏 HDR_BAR
+      │         └ WIN_SPLIT_MAIN（③ 清单 LIST_PANEL = `signal_list.SignalListPanel` | 详情列）
+      │              └ 详情列 = ⑮ 载入态 LOADING_PANEL + ④ 标题栏 HDR_BAR（暂只挂 `coverage.CoverageControl`）
       │                          + WIN_SPLIT_SIDE（⑤⑥⑦⑧ MAIN_VIEW | ⑨ SIDE_PANEL）
       └ ⑩ 状态栏 STATUS_BAR（STATUS_LEFT / STATUS_RIGHT / STATUS_AUTOSAVE）
 
 ⚠ 载入态**不是** WIN_STACK 的独立一页：C-276 / 场景⑧ 要求「清单立刻可点」，
   所以载入卡片挂在工作台详情列顶部（架构 §6.1「详情列 = 载入态⑮卡片 + 标题栏④ + WIN_SPLIT_SIDE」）。
-  names.WIN_STACK 注释里的「三页」是 B3 阶段的旧说法，以本实现为准。
 
-依赖注入（C1 各 agent 并行的关键）：
+一趟载表的数据流（§2.2 的唯一写法，C-265 / C-276）：
+
+    load_path → state.load → workbookChanged
+      → start_analysis：provider.skeleton_models() → state.set_models(vid, 骨架, partial=True)
+        —— 清单**立刻**出 N 行「分析中」且可点、可勾、可排序；
+      → 指纹没变（state.needs_analysis 为假）就到此为止，一个引擎调用都不起（切页不重跑）；
+      → 起 worker：progress/signalDone 逐行 update_model（清单只 dataChanged 那一行，不重建）
+        finished/cancelled 收尾 → 载入态收起。
+
+依赖注入（C1 各 agent 并行的关键，集成后仍然保留——测试要能换假件）：
     MainWindow(state=None, worker_factory=None, providers_factory=None)
-真实 `ui.state.WorkbenchState` / `ui.worker.AnalysisWorker` **只在默认工厂里惰性 import**，
-测试传自己的 FakeState / FakeWorker（按 `contracts.WorkbenchStateProto` / `WORKER_SIGNALS` 写）即可起窗。
+真实 `ui.state.WorkbenchState` / `ui.worker.AnalysisWorker` **只在默认工厂里惰性 import**。
 
-占位区（C1-int / C2 / C3 换成真件，见 `PLACEHOLDER_AREAS`）：
-    FILTER_BAR · LIST_PANEL · HDR_BAR · MAIN_VIEW（含 TRUTH_PANEL / FLOW_PANEL / SV_PANEL）· SIDE_PANEL
+占位区（C2 / C3 换成真件，见 `PLACEHOLDER_AREAS`）：
+    HDR_BAR · MAIN_VIEW（含 TRUTH_PANEL / FLOW_PANEL / SV_PANEL）· SIDE_PANEL
 """
 
 import os
@@ -34,25 +41,14 @@ import sys
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import contracts, names, terms, theme
+from .coverage import CoverageControl
+from .filter_bar import FilterBar
+from .signal_list import SignalListPanel, build_reason_block
 from .widgets import ErrorBar, ProgressBadge, mono_font, ui_font
 
-# ── 本波用到、但 names.py 里还没有的 objectName（C1-int 请把它们并进 names.py）──
-PENDING_NAMES = {
-    "EMPTY_ICON": "empty_icon",                 # ⑭ 88px「xlsx」虚线方块
-    "EMPTY_RECENT_TITLE": "empty_recent_title",  # ⑭「最近打开」小标题
-    "EMPTY_CARD": "empty_card",                 # ⑭ 620px 居中卡片
-    "LOADING_CARD": "loading_card",             # ⑮ 520px 居中卡片（LOADING_PANEL 是它的外壳）
-    "TOP_TABLE_TAG": "top_table_tag",           # ①「真表」标签
-    "DETAIL_COLUMN": "detail_column",           # 详情列容器（载入态 + 标题栏 + WIN_SPLIT_SIDE）
-    "SHORTCUT_FMT": "shortcut_%s",              # fmt_shortcut(key)：QShortcut 也要能按名找
-    "RECENT_ROW_FMT": "empty_recent_row_%d",    # fmt_recent_row(i)
-}
-
-#: 本波留的占位控件（objectName → 哪个波换成真件）
+#: 还没换成真件的区（objectName → 哪个波接手）。测试断言它们都带 property("placeholder")。
 PLACEHOLDER_AREAS = {
-    names.FILTER_BAR: "C1-c ui/filter_bar.py",
-    names.LIST_PANEL: "C1-b ui/signal_list.py",
-    names.HDR_BAR: "C2-c ui/detail_header.py",
+    names.HDR_BAR: "C2-c ui/detail_header.py（覆盖度按钮已挂进来）",
     names.MAIN_VIEW: "C2-c ui/main_view.py",
     names.TRUTH_PANEL: "C3-c ui/truth/panel.py",
     names.FLOW_PANEL: "C2-b ui/sigflow_view.py",
@@ -68,18 +64,21 @@ SIZE_KEYS = ("listW", "sideW", "truthH", "chainH")
 SIZE_DEFAULTS = {"listW": theme.LIST_W, "sideW": theme.SIDE_W,
                  "truthH": theme.TRUTH_H, "chainH": theme.CHAIN_H}
 
+#: 关窗时等后台线程在信号边界停下来的上限（ms）——QThread 还在跑就析构 = 进程级崩溃
+CLOSE_WAIT_MS = 3000
 
-def fmt_shortcut(key):
-    return PENDING_NAMES["SHORTCUT_FMT"] % key
-
-
-def fmt_recent_row(i):
-    return PENDING_NAMES["RECENT_ROW_FMT"] % int(i)
+fmt_shortcut = names.fmt_shortcut          # 名字已并进 names.py；这两个别名保住既有引用
+fmt_recent_row = names.fmt_recent_row
 
 
-# ═════════════════════════ 默认工厂（惰性 import，C1-a 的实物不在时也能起窗）═════════════
+# ═════════════════════════ 默认工厂（惰性 import，测试可整体替换）═════════════
 def default_state_factory(providers_factory=None):
-    """真实会话状态。**函数内 import**：C1-a 还没合入时，传 state=FakeState() 照样起窗。"""
+    """真实会话状态。**函数内 import**：测试传 state=FakeState() 时一行 state.py 都不用加载。
+
+    `WorkbenchState` 自己就是 `providers.ConfigSourceProto`（wb / 三套诊断配置 /
+    include_risky / engine_lock），载表时按范围建 `TopoutProvider` + 四个 `PageProvider`，
+    所以正常路径下没有 `providers_factory` 什么事；它留给「想换数据源」的测试，
+    真 state 不认这个参数就照常裸建（I-21 的锁仍在 state 手上）。"""
     from .state import WorkbenchState
     if providers_factory is not None:
         try:
@@ -175,6 +174,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._state = state if state is not None else default_state_factory(providers_factory)
         self._worker_factory = worker_factory or default_worker_factory
         self._worker = None
+        self._retired = []             # 已经作废、但线程还没停下来的旧 worker（见 _retire_worker）
+        self._run_id = 0               # 分析「第几趟」：旧趟迟到的信号按它丢掉
+        self._analysis_vid = ""        # 这一趟 worker 在跑哪个范围（迟到的信号按它对齐）
         self._excel_path = ""
         self._load_error = ""
         self._narrow = None
@@ -185,6 +187,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._build_shortcuts()
         self._connect_state()
+        self._connect_views()
         self._refresh_title()
         self._refresh_recent()
         self._show_empty()
@@ -202,10 +205,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.error_bar = ErrorBar(central)
         root.addWidget(self.error_bar)
 
-        self.filter_bar = _placeholder(names.FILTER_BAR, central, min_h=theme.BTN_H + 12,
-                                       bg=theme.WHITE)
-        self.filter_bar.setMaximumHeight(theme.BTN_H + 12)
-        self.filter_bar.setVisible(False)            # ② 只在 loaded 时出现
+        self.filter_bar = FilterBar(self._state, central)          # ② C1-c 的真件
+        self.filter_bar.setVisible(False)            # 只在 loaded 时出现
         root.addWidget(self.filter_bar)
 
         self.stack = QtWidgets.QStackedWidget(central)
@@ -238,7 +239,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(sep)
 
         tag = QtWidgets.QLabel(terms.TOP_TABLE_TAG, bar)
-        tag.setObjectName(PENDING_NAMES["TOP_TABLE_TAG"])
+        tag.setObjectName(names.TOP_TABLE_TAG)
         tag.setStyleSheet("color:%s;" % theme.MUTE)
         lay.addWidget(tag)
 
@@ -297,14 +298,14 @@ class MainWindow(QtWidgets.QMainWindow):
         row = QtWidgets.QHBoxLayout()
         row.addStretch(1)
         card = QtWidgets.QWidget(page)
-        card.setObjectName(PENDING_NAMES["EMPTY_CARD"])
+        card.setObjectName(names.EMPTY_CARD)
         card.setFixedWidth(theme.EMPTY_W)
         lay = QtWidgets.QVBoxLayout(card)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
         icon = QtWidgets.QLabel("xlsx", card)
-        icon.setObjectName(PENDING_NAMES["EMPTY_ICON"])
+        icon.setObjectName(names.EMPTY_ICON)
         icon.setFixedSize(88, 88)
         icon.setAlignment(QtCore.Qt.AlignCenter)
         icon.setStyleSheet("border:2px dashed %s;color:%s;border-radius:6px;"
@@ -343,7 +344,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addLayout(btns)
 
         rtitle = QtWidgets.QLabel(terms.EMPTY_RECENT_TITLE, card)
-        rtitle.setObjectName(PENDING_NAMES["EMPTY_RECENT_TITLE"])
+        rtitle.setObjectName(names.EMPTY_RECENT_TITLE)
         rtitle.setStyleSheet("color:%s;" % theme.MUTE)
         lay.addWidget(rtitle)
 
@@ -375,7 +376,7 @@ class MainWindow(QtWidgets.QMainWindow):
         outer.setContentsMargins(14, 10, 14, 10)
         outer.addStretch(1)
         card = QtWidgets.QWidget(panel)
-        card.setObjectName(PENDING_NAMES["LOADING_CARD"])
+        card.setObjectName(names.LOADING_CARD)
         card.setFixedWidth(theme.LOADING_W)
         lay = QtWidgets.QVBoxLayout(card)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -427,20 +428,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.split_main.setChildrenCollapsible(False)              # C-262：两侧都拖不没
         self.split_main.setHandleWidth(theme.HANDLE_W)
 
-        self.list_panel = _placeholder(names.LIST_PANEL, self.split_main)
+        self.list_panel = SignalListPanel(self._state, self._scope(), self.split_main)   # ③ C1-b 的真件
         self.list_panel.setMinimumWidth(theme.CLAMP_LIST[0])
         self.list_panel.setMaximumWidth(theme.CLAMP_LIST[1])
         self.split_main.addWidget(self.list_panel)
 
         self.detail_column = QtWidgets.QWidget(self.split_main)
-        self.detail_column.setObjectName(PENDING_NAMES["DETAIL_COLUMN"])
+        self.detail_column.setObjectName(names.DETAIL_COLUMN)
         dlay = QtWidgets.QVBoxLayout(self.detail_column)
         dlay.setContentsMargins(0, 0, 0, 0)
         dlay.setSpacing(0)
         self.loading_panel = self._build_loading_card(self.detail_column)
         dlay.addWidget(self.loading_panel)
-        self.hdr_bar = _placeholder(names.HDR_BAR, self.detail_column, min_h=2 * theme.ROW_H)
-        self.hdr_bar.setMaximumHeight(2 * theme.ROW_H)
+        self.hdr_bar = self._build_hdr_bar(self.detail_column)
         dlay.addWidget(self.hdr_bar)
 
         self.split_side = QtWidgets.QSplitter(QtCore.Qt.Horizontal, self.detail_column)
@@ -461,6 +461,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.split_side.splitterMoved.connect(lambda *_: self._save_sizes())
         self._apply_sizes()
         return wb
+
+    # ④ 详情标题栏（C2-c 的 detail_header 换掉整块；本波先把覆盖度按钮挂在右上角）
+    def _build_hdr_bar(self, parent):
+        bar = _placeholder(names.HDR_BAR, parent, min_h=2 * theme.ROW_H)
+        bar.setMaximumHeight(2 * theme.ROW_H)
+        lay = bar.layout()
+        lay.setContentsMargins(12, 4, 12, 4)
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch(1)
+        self.coverage = CoverageControl(self._state, bar)    # ⑯ C1-c 的真件
+        row.addWidget(self.coverage, 0, QtCore.Qt.AlignTop)
+        lay.addLayout(row)
+        lay.addStretch(1)
+        return bar
 
     def _build_main_view(self, parent):
         """⑤⑥⑦⑧ 主视图：QStackedWidget（真值表+电路图 页 / .sv 预览 页）。C2-c 换真件。"""
@@ -561,7 +576,23 @@ class MainWindow(QtWidgets.QMainWindow):
         _connect(s, "exportRecorded", self._on_export_recorded)
         _connect(s, "editsChanged", lambda *_: self._touch_autosave())
         _connect(s, "checksChanged", lambda *_: self._touch_autosave())
+        _connect(s, "coverageChanged", self._on_recompute_needed)
+        _connect(s, "configChanged", lambda *_: self._on_recompute_needed())
         _connect(s, "settingsChanged", lambda *_: None)
+
+    # ───────────────────────── 视图接线（信号 → 槽，唯一一处）─────────────────────────
+    def _connect_views(self):
+        """三个真件与组合根之间的全部往来。视图只发信号，写 state 的活在这里做（§1.2）。"""
+        fb, lp = self.filter_bar, self.list_panel
+        fb.scopeChanged.connect(self.on_scope_selected)          # ② → state.set_scope（C-038）
+        fb.filterChanged.connect(self._on_filters_changed)       # ② → proxy.set_filters（§2.3）
+        fb.statusMessage.connect(self.set_status)                # C-031
+        fb.presetSaveRequested.connect(self.save_preset)         # C-291
+        fb.presetLoadRequested.connect(self.load_preset)
+        fb.pasteNamesRequested.connect(lp.open_paste_names_dialog)   # C-290（入口在②，对话框在③）
+        lp.diagRequested.connect(self.on_reason_action)          # ③ 行内原因块按钮 → 场景路由
+        lp.statusMessage.connect(self.set_status)                # C-269
+        self.coverage.coverageChanged.connect(lambda *_: self.coverage.refresh())
 
     @property
     def state(self):
@@ -570,6 +601,9 @@ class MainWindow(QtWidgets.QMainWindow):
     @property
     def worker(self):
         return self._worker
+
+    def _scope(self):
+        return getattr(self._state, "scope", contracts.DEFAULT_VIEW_ID)
 
     # ───────────────────────── 载表 ─────────────────────────
     def on_browse(self):
@@ -591,7 +625,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.load_path(path)
 
     def load_path(self, path):
-        """真正的载表入口：state.load(path) → 成功进工作台并起 worker；失败只写错误条（C-005/C-272）。"""
+        """真正的载表入口：state.load(path) → 成功进工作台并起 worker；失败只写错误条（C-005/C-272）。
+
+        ⚠ 第一件事是把上一趟停掉：`state.load` 一执行，上一张表的 models 就被清空了，
+        此刻还在跑的旧 worker 每回调一次就往新表的清单里塞一行上一张表的信号。"""
+        self._retire_worker()
         path = str(path or "")
         self._set_path_text(path)
         self.error_bar.dismiss()
@@ -639,37 +677,143 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_path_text(getattr(self._state, "loaded_path", "") or self._excel_path)
         self._refresh_title()
         self._refresh_recent()
-        self._refresh_status_counts()
+        self.filter_bar.set_scope(self._scope())
+        self.filter_bar.reset_filters()               # 换表 = 筛选复位（owner 菜单随 models 重建）
+        self.list_panel.set_view_id(self._scope())
+        self.coverage.set_current("")
         self._refresh_last_export()
         self.start_analysis()
 
-    def _on_scope_changed(self, _view_id=""):
+    def _on_scope_changed(self, view_id=""):
+        """范围换了（C-038）：三个视图跟上，清单要不要重跑由 `needs_analysis` 判（C-265）。"""
+        vid = str(view_id or self._scope())
+        if self._analysis_vid and self._analysis_vid != vid:
+            self._retire_worker()                     # 上一趟跑的是别的范围，先收掉
+        self.filter_bar.set_scope(vid)
+        self.coverage.refresh()
         self.start_analysis()
 
-    def _on_models_changed(self, _view_id=""):
-        self._refresh_status_counts()
+    def _on_models_changed(self, view_id=""):
+        if view_id not in ("", self._scope()):
+            return
+        self.filter_bar.rebuild(self._models())       # owner / 分类下拉只列本表真有的（C-027/C-028）
+        self._refresh_status_counts()                 # 顺序：先重建（它会发筛选计数）再写载表小结
 
-    def _on_model_updated(self, _view_id="", _name=""):
-        self._refresh_status_counts()
+    def _on_model_updated(self, view_id="", _name=""):
+        if view_id in ("", self._scope()):
+            self._refresh_status_counts()
 
     def _on_current_changed(self, name=""):
+        self.coverage.set_current(name)               # C-149：只回显本信号的生效档，不重算
         self._relayout_loading(bool(name))
 
     def _on_export_recorded(self, _kind=""):
         self._refresh_last_export()
 
-    # ───────────────────────── 后台分析（N8 / C-276）─────────────────────────
-    def start_analysis(self):
-        """骨架先出（清单立刻可点）→ 起 worker 逐信号升级。"""
-        vid = getattr(self._state, "scope", contracts.DEFAULT_VIEW_ID)
+    def _on_recompute_needed(self, view_id=""):
+        """覆盖度 / 诊断配置变了（C-148 / C-205）：指纹翻篇 → 清单按新档重跑，勾选一个不动。"""
+        if view_id in ("", self._scope()):
+            self.coverage.refresh()
+            self.start_analysis()
+
+    # ───────────────────────── ② 筛选行 ─────────────────────────
+    @QtCore.Slot(str)
+    def on_scope_selected(self, view_id):
+        """用户点了范围段：写 state（视图自己不改 state，§1.2）。"""
+        self._state.set_scope(str(view_id))
+        hint = self.filter_bar.missing_pages_text()
+        if hint:
+            self.set_status(hint)                     # C-042：本表少哪几页，写在状态栏
+        return self._scope()
+
+    def _on_filters_changed(self, d):
+        """② 的一份筛选 → ③ 的 proxy，再把**清单真正数出来的**可见数回写给②（C-031）。
+
+        回写这一步不是多余的：筛选行自己也能按 `match_row` 算一份，但它算的是「status 四档」，
+        清单按的是 `status_detail` 八档的 tone —— 两份数会在 `risky-generated` 这类行上差开。
+        屏幕上只该有一个数，且必须是「清单里真能看见的那些行」的数（`set_counts` 的注释
+        写的就是这个交接）。"""
+        self.list_panel.set_filters(**dict(d or {}))
+        px = self.list_panel.proxy
+        self.filter_bar.set_counts(px.n_visible(), px.n_total(), px.n_by_input())
+
+    def save_preset(self):
+        """C-291 存预设：勾选集由 state 出、筛选由②出，落 settings["presets"]。
+
+        ⏳ 取名用的是标准 `QInputDialog`；C2-d 的 `DLG_PRESETS` 到位后换成它（本处三行）。"""
+        name, ok = QtWidgets.QInputDialog.getText(self, terms.PRESETS, terms.PRESET_SAVE)
+        name = str(name or "").strip()
+        if not ok or not name:
+            return ""
+        presets = dict((self._state.settings() or {}).get("presets") or {})
+        spec = dict(self.filter_bar.preset_payload())
+        spec["checks"] = list(self._state.checked_names(self._scope()))
+        presets[name] = spec
+        self._state.save_settings({"presets": presets})
+        self.filter_bar.rebuild_presets_menu()
+        self.set_status("%s · %s" % (terms.PRESETS, name))
+        return name
+
+    @QtCore.Slot(str)
+    def load_preset(self, name):
+        """C-291 取预设：范围 → 筛选 → 勾选，三样一起回到当时的样子。"""
+        nm = str(name or "")
+        if not nm:
+            self.set_status(terms.PRESET_MANAGE)
+            return ""
+        spec = ((self._state.settings() or {}).get("presets") or {}).get(nm)
+        if not isinstance(spec, dict):
+            return ""
+        if spec.get("scope"):
+            self._state.set_scope(spec["scope"])
+        self.filter_bar.set_filters(spec.get("filters") or {})
+        checks = spec.get("checks")
+        if checks is not None:
+            with self._state.suspend_persist():       # C-244：一次写盘
+                self._state.set_checked([], False, self._scope())
+                self._state.set_checked(list(checks), True, self._scope())
+        self.set_status("%s · %s" % (terms.PRESETS, nm))
+        return nm
+
+    # ───────────────────────── ③ 清单 ─────────────────────────
+    @QtCore.Slot(str, str)
+    def on_reason_action(self, target, signal_name=""):
+        """行内原因块的按钮（C-015/C-016/C-127）→ 场景路由，带上这一行的原因全文 / 行号。"""
+        return self.route_reason_action(target, self._reason_payload(signal_name))
+
+    def _reason_payload(self, signal_name):
+        """copy_rows / copy_detail 要复制的东西：点名的 Excel 行号在前、原因全文在后（I-20）。
+
+        原因块的拼法只有一份（`signal_list.build_reason_block`），这里不另写一套。"""
+        name = str(signal_name or "")
+        model = self._state.model_of(name, self._scope()) if name else None
+        block = build_reason_block(model) if model else None
+        if block is None:
+            return {"name": name, "text": name}
+        # 正文里本来就带着点名的 Excel 行号（模板 `行 {rows}` / issues 原文的「第 N 行」），
+        # 这里不再另拼一句——多拼一份就多一处会和界面漂的文案。
+        return {"name": name, "rows": block.rows,
+                "text": "\n".join(x for x in (name, block.title, block.body) if x)}
+
+    # ───────────────────────── 后台分析（N8 / C-276 / C-265）─────────────────────────
+    def start_analysis(self, force=False):
+        """骨架先出（清单立刻可点）→ 起 worker 逐信号升级。返回「这一趟真的开跑了没有」。
+
+        ⚠ `needs_analysis` 要在**推骨架之前**问：骨架行是 `status="pending"`，
+        而 `set_models(partial=True)` 是按名覆盖——对一个已经分析好的范围推一遍骨架，
+        整张清单会倒退回「分析中」，然后因为指纹没变又不重跑，就永远停在那儿了（C-265）。"""
+        vid = self._scope()
         try:
             provider = self._state.provider(vid)
         except Exception:                             # noqa: BLE001
             provider = None
         if provider is None:
             return False
-        if self._worker is not None and self._worker.is_running():
-            self._worker.cancel()
+        if not force and not self._state.needs_analysis(vid):
+            self.coverage.refresh()                   # 切页回来：清单原样留着，只刷一下回显
+            self._refresh_status_counts()
+            return False
+        self._retire_worker()                         # §2.2 规矩 4：同一时刻只跑一个 job
         try:
             skeleton = list(provider.skeleton_models() or [])
         except Exception as exc:                      # noqa: BLE001
@@ -677,39 +821,65 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         self._state.set_models(vid, skeleton, True)
         total = len(skeleton)
+        self._analysis_vid = vid
         self._set_loading(True, 0, total, "")
         self._worker = self._worker_factory()
-        _connect(self._worker, "started", self._on_worker_started)
-        _connect(self._worker, "progress", self._on_worker_progress)
-        _connect(self._worker, "signalDone", self._on_worker_signal_done)
-        _connect(self._worker, "finished", self._on_worker_finished)
-        _connect(self._worker, "cancelled", self._on_worker_cancelled)
-        _connect(self._worker, "failed", self._on_worker_failed)
+        self._connect_worker(self._worker, self._run_id)
         self.analysisStarted.emit(vid, total)
-        self._worker.start(provider, self._analysis_request(vid), self._engine_lock())
+        self._worker.start(provider, self._state.analysis_request(vid), self._engine_lock(), total)
         return True
 
-    def _analysis_request(self, vid):
-        mode, exhaustive, max_tests, sig_cov, form_cov = "max", False, 256, None, None
-        try:
-            cov = self._state.coverage(vid)
-            mode, exhaustive = cov.mode()
-            max_tests = int(cov.max_tests)
-            sig_cov = dict(cov.sig_cov)
-            form_cov = dict(cov.form_cov)
-        except Exception:                             # noqa: BLE001  覆盖度是 C1-c/C1-a 的事，缺了用默认
-            pass
-        fp = ""
-        try:
-            fp = str(self._state.fingerprint(vid) or "")
-        except Exception:                             # noqa: BLE001
-            fp = ""
-        return contracts.AnalysisRequest(view_id=vid, mode=mode, max_tests=max_tests,
-                                         exhaustive=exhaustive, sig_cov=sig_cov,
-                                         form_cov=form_cov, fingerprint=fp)
-
     def _engine_lock(self):
+        """I-21：worker 与主线程共用同一个 wb，锁从这里传进去（worker 在信号边界收放）。"""
         return getattr(self._state, "engine_lock", None)
+
+    def _connect_worker(self, w, run):
+        """接这一趟 worker 的六条信号，每条都带「趟号」闸门。
+
+        为什么光 disconnect 不够：`emit` 发生在 worker 线程，跨线程是**队列连接**——
+        信号已经排进主线程事件队列之后再 disconnect，那一条照样会被投递
+        （Qt 只保证接收方析构时清掉待投递事件，不保证断连能撤回已排队的）。
+        所以真正的闸门是趟号：`_retire_worker` 一加号，旧趟所有迟到的信号当场作废。"""
+        def gate(fn):
+            def slot(*args):
+                if run == self._run_id:
+                    fn(*args)
+            return slot
+        _connect(w, "started", gate(self._on_worker_started))
+        _connect(w, "progress", gate(self._on_worker_progress))
+        _connect(w, "signalDone", gate(self._on_worker_signal_done))
+        _connect(w, "finished", gate(self._on_worker_finished))
+        _connect(w, "cancelled", gate(self._on_worker_cancelled))
+        _connect(w, "failed", gate(self._on_worker_failed))
+
+    def _retire_worker(self):
+        """让上一趟停下来、作废它之后发的一切。
+
+        为什么非作废不可：换表 / 换范围会新建一个 worker，旧 worker 是另一个对象，
+        它的 serial 号只挡得住「自己那一趟」的迟到信号，挡不住「上一张表那一趟」。
+        放任不管的话，旧趟的 `signalDone` 会带着上一张表的信号名走 `update_model`，
+        而那个名字在新清单里没有 —— `update_model` 于是把它**追加**进去：
+        新表的清单里凭空多出上一张表的行（C-237 最恨的那类串味，且没有任何报错）。
+
+        断完还要留着引用：QThread 还在跑时对象被 Python 回收 = 进程直接没。
+        `_retired` 就是这个用处，跑完自然清掉。"""
+        self._run_id += 1                              # ← 真正的闸门（见 _connect_worker）
+        w, self._worker = self._worker, None
+        if w is None:
+            return
+        if w.is_running():
+            w.cancel()
+        for nm in contracts.WORKER_SIGNALS:
+            sig = getattr(w, nm, None)
+            if sig is None:
+                continue
+            try:
+                sig.disconnect()
+            except (RuntimeError, TypeError):          # 本来就没接过：没什么可断的
+                pass
+        self._retired = [x for x in self._retired if x.is_running()]
+        if w.is_running():
+            self._retired.append(w)
 
     def on_stop_analysis(self):
         """⑮「停止分析」：已展开完的保留，其余仍显示「分析中」（C-276）。"""
@@ -726,11 +896,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_loading(True, int(done), int(total), str(name or ""))
 
     def _on_worker_signal_done(self, name, lite_model):
-        vid = getattr(self._state, "scope", contracts.DEFAULT_VIEW_ID)
-        try:
-            self._state.update_model(vid, dict(lite_model or {}))
-        except Exception:                             # noqa: BLE001
-            pass
+        """逐行升级（C-276）：只 `update_model` 那一行 —— 清单发 dataChanged，不重建整表。"""
+        self._state.update_model(self._analysis_vid or self._scope(), dict(lite_model or {}))
 
     def _on_worker_finished(self, view_id, models):
         self._state.set_models(view_id, list(models or []), False)
@@ -827,12 +994,15 @@ class MainWindow(QtWidgets.QMainWindow):
         """C-269：逐操作反馈都走 statusLeft。"""
         self.status_left.setText(terms.scrub(str(text or "")))
 
+    def _models(self):
+        try:
+            return list(self._state.models(self._scope()) or [])
+        except Exception:                             # noqa: BLE001
+            return []
+
     def _refresh_status_counts(self):
         """C-006：载完在状态栏报信号总数 / logic+mux / 要验几个 / 有问题几个。"""
-        try:
-            models = list(self._state.models() or [])
-        except Exception:                             # noqa: BLE001
-            models = []
+        models = self._models()
         if not models:
             return
         n = len(models)
@@ -890,16 +1060,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _code_version(self):
         """C-259 / 裁决⑬：标题写「版本 <短HEAD>」，不写 git 字样。
-        走 state（C1-a 补 `code_version()` 后这里就只剩第一支）；缺了才惰性回落到 session。"""
-        fn = getattr(self._state, "code_version", None)
-        if callable(fn):
-            try:
-                return str(fn() or "")
-            except Exception:                         # noqa: BLE001
-                return ""
-        from dreg_verify import session as _session   # 惰性，见 I-19
+
+        只走 state（`code_version` 已进 `WorkbenchStateProto`）——C1-d 那条「缺了就惰性
+        import session 兜底」的回落已删：组合根不该绕过状态层直接问引擎层（I-19）。"""
         try:
-            return str(_session.code_version() or "")
+            return str(self._state.code_version() or "")
         except Exception:                             # noqa: BLE001
             return ""
 
@@ -1023,11 +1188,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.side_panel.setVisible(self._side_visible and not self.is_narrow())
 
     def closeEvent(self, ev):
-        if self._worker is not None and self._worker.is_running():
-            try:
-                self._worker.cancel()
-            except Exception:                         # noqa: BLE001
-                pass
+        """关窗前把后台线程收干净：QThread 还在跑就被析构 = 进程级崩溃（不是报错，是直接没）。"""
+        for w in [self._worker] + list(getattr(self, "_retired", [])):
+            if w is None or not w.is_running():
+                continue
+            w.cancel()
+            wait = getattr(w, "wait", None)
+            if callable(wait):
+                wait(CLOSE_WAIT_MS)
         super().closeEvent(ev)
 
 

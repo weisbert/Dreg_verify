@@ -9,6 +9,7 @@
 与 `contracts.WORKER_SIGNALS` 写）。C1-a 的实物落地后，C1-int 拿这三个假件与 §2.1 / §2.2
 逐条核对签名；`tests/test_ui_scenes.py` 也从这里 import 它们。
 """
+import contextlib
 import os
 
 import pytest
@@ -19,6 +20,7 @@ pytest.importorskip("PySide6")
 
 from PySide6 import QtCore, QtGui, QtWidgets      # noqa: E402
 
+from dreg_verify import session                   # noqa: E402
 from dreg_verify.ui import app as A               # noqa: E402
 from dreg_verify.ui import contracts, names, terms, theme   # noqa: E402
 from dreg_verify.ui import widgets as W           # noqa: E402
@@ -55,17 +57,13 @@ def skeleton_of(models):
     return out
 
 
-class FakeCoverage(object):
-    """session.CoverageState 的最小面（app 只读 mode() / max_tests / sig_cov / form_cov）。"""
+def fake_coverage(view_id="topout", store=None):
+    """真 `session.CoverageState`，只是 load/save 指到内存 dict。
 
-    def __init__(self):
-        self.global_label = "全面"
-        self.max_tests = 256
-        self.sig_cov = {}
-        self.form_cov = {}
-
-    def mode(self):
-        return ("max", False)
+    C1-int：覆盖度控件要读 `effective_label` / `effective_chain` / `sig_cov_of`，
+    自己捏一个「最小面」只会漏方法——三层档的口径本来就只该有一份。"""
+    st = store if store is not None else {}
+    return session.CoverageState(view_id, load=lambda: st, save=lambda d: st.update(d))
 
 
 class FakeProvider(object):
@@ -134,11 +132,16 @@ class FakeState(QtCore.QObject):
         self._settings = dict(settings or {})
         self._recent = list(recent)
         self._exports = {}
-        self._cov = FakeCoverage()
+        self._cov = fake_coverage()
         self._fail = fail
         self._version = version
+        self._fingerprint = {}          # C-265：跑完一趟记一次
+        self._checks = {}               # view_id -> set | None（None = 全勾）
+        self._negs = {}
+        self._suspended = 0
         self.load_calls = []
         self.saved_settings = []
+        self.persisted = []             # 每「写一次盘」记一条（C-244 数次数用）
 
     # ── 表与范围 ──
     def load(self, path):
@@ -149,6 +152,9 @@ class FakeState(QtCore.QObject):
         self.excel_path = self.loaded_path = str(path)
         self.wb = object()
         self._models = {}
+        self._fingerprint = {}          # 换表 = 上一张表的一切清干净（真 state 同）
+        self._checks = {}
+        self._negs = {}
         self._recent.insert(0, contracts.RecentExcel(path=str(path), ts="", n_signals=len(self._full)))
         self.workbookChanged.emit()
         return True
@@ -185,6 +191,8 @@ class FakeState(QtCore.QObject):
         else:
             by = {m.get("name"): m for m in models}
             self._models[view_id] = [dict(by.get(m.get("name"), m)) for m in cur]
+        if not partial:
+            self._fingerprint[view_id] = self.fingerprint(view_id)
         self.modelsChanged.emit(view_id)
 
     def update_model(self, view_id, model):
@@ -196,21 +204,70 @@ class FakeState(QtCore.QObject):
                 return
 
     def fingerprint(self, view_id=None):
-        return "fp|%s" % (view_id or self.scope)
+        vid = view_id or self.scope
+        return "fp|%s|%s|%d" % (vid, self._cov.global_label, int(self._cov.max_tests))
+
+    def needs_analysis(self, view_id=None):
+        vid = view_id or self.scope
+        return self._fingerprint.get(vid) != self.fingerprint(vid)
+
+    def analysis_request(self, view_id=None):
+        vid = view_id or self.scope
+        mode, exh = self._cov.mode()
+        return contracts.AnalysisRequest(view_id=vid, mode=mode, max_tests=int(self._cov.max_tests),
+                                         exhaustive=bool(exh), fingerprint=self.fingerprint(vid))
 
     def set_current(self, name):
         self.current_name = str(name or "")
         self.currentChanged.emit(self.current_name)
 
-    # ── 勾选 / 覆盖度 / 偏好 ──
+    # ── 勾选 / 反例 ──
     def checked(self, view_id=None):
-        return None
+        return self._checks.get(view_id or self.scope)
 
     def is_checked(self, name, view_id=None):
-        return True
+        ch = self.checked(view_id)
+        return True if ch is None else (str(name).lower() in ch)
 
+    def checked_names(self, view_id=None):
+        ch = self.checked(view_id)
+        got = [m["name"] for m in self.models(view_id)]
+        return got if ch is None else [n for n in got if n.lower() in ch]
+
+    def set_checked(self, names, on, view_id=None):
+        vid = view_id or self.scope
+        all_low = {str(m["name"]).lower() for m in self.models(vid)}
+        cur = self._checks.get(vid)
+        cur = set(all_low) if cur is None else set(cur)
+        for n in names or []:
+            cur.add(str(n).lower()) if on else cur.discard(str(n).lower())
+        self._checks[vid] = None if (all_low and cur >= all_low) else cur
+        self.checksChanged.emit(vid)
+        self.persist_edits()
+
+    def negs(self, view_id=None):
+        return self._negs.setdefault(view_id or self.scope, set())
+
+    def has_negatives(self, name, view_id=None):
+        return str(name).lower() in self.negs(view_id)
+
+    def set_neg(self, name, on, view_id=None):
+        vid = view_id or self.scope
+        negs = self.negs(vid)
+        negs.add(str(name).lower()) if on else negs.discard(str(name).lower())
+        self.negsChanged.emit(vid)
+        self.persist_edits()
+        return (1, 0)
+
+    def protected_negatives(self, names, view_id=None):
+        return []
+
+    # ── 覆盖度 / 偏好 / 存盘 ──
     def coverage(self, view_id=None):
         return self._cov
+
+    def coverage_touched(self, view_id=None):
+        self.coverageChanged.emit(view_id or self.scope)
 
     def settings(self):
         return dict(self._settings)
@@ -220,8 +277,30 @@ class FakeState(QtCore.QObject):
         self.saved_settings.append(dict(patch or {}))
         self.settingsChanged.emit()
 
+    @contextlib.contextmanager
+    def suspend_persist(self):
+        """C-244：批量操作期间不逐格写盘，退出时统一写一次。"""
+        self._suspended += 1
+        try:
+            yield self
+        finally:
+            self._suspended -= 1
+            if self._suspended <= 0 and self._pending:
+                self._pending = False
+                self.persist_edits()
+
+    _pending = False
+
     def persist_edits(self):
-        pass
+        if self._suspended > 0:
+            self._pending = True
+            return False
+        self.persisted.append(dict((k, sorted(v) if v else v) for k, v in self._checks.items()))
+        return True
+
+    def status(self, text):
+        if text:
+            self.statusMessage.emit(str(text))
 
     def recent_excels(self):
         return list(self._recent)
@@ -255,14 +334,17 @@ class FakeWorker(QtCore.QObject):
         self._vid = ""
         self._all = []
         self._done = []
+        self.starts = []                            # 每开一趟记一条（C-265 数趟数用）
 
-    def start(self, provider, request, engine_lock=None):
+    def start(self, provider, request, engine_lock=None, total=0):
+        """签名 = `contracts.AnalysisWorkerProto.start` 定版的四参（实物同）。"""
+        self.starts.append((request.view_id, request.fingerprint, engine_lock, int(total or 0)))
         self._vid = request.view_id
         self._all = list(provider.view_models(request.mode, request.max_tests, request.exhaustive,
                                               request.sig_cov, request.form_cov, lite=True))
         self._done = []
         self._running = True
-        self.started.emit(self._vid, len(self._all))
+        self.started.emit(self._vid, int(total or 0) or len(self._all))
         if self._fail_with:
             self._running = False
             self.failed.emit(self._vid, self._fail_with)

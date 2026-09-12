@@ -47,6 +47,12 @@ _TONE_ORDER = {"bad": 0, "warn": 1, "note": 2, "ok": 3}
 #: 「仅有问题」筛选口径 = 非 ok 档（note 的只读回读 / 裸名不算问题）
 _PROBLEM_TONES = ("warn", "bad")
 
+#: 状态筛选两档的取值。筛选行发的是 `filter_bar.STATUS_VALUES` 的 "ok" / "issues"；
+#: 这里连中文项与 clean/problem 一起认——两个模块各写各的字面量，漏一个就是「筛了等于没筛」，
+#: 而且界面上看不出来（行数不变，用户以为本来就这么多）。
+_STATUS_OK_KEYS = ("ok", "clean", T.STATUS_FILTER_ITEMS[1])
+_STATUS_PROBLEM_KEYS = ("issues", "problem", T.STATUS_FILTER_ITEMS[2])
+
 #: 原因块正文里「点名的 Excel 行号」——引擎暂未给结构化 meta 时从 issues 文本里取（C-127 / copy_rows）
 _ROW_RE = re.compile(r"第\s*(\d+)\s*行")
 
@@ -569,7 +575,12 @@ class SignalListProxy(QtCore.QSortFilterProxyModel):
 
     # ── 筛选条件（filter_bar 调）──
     def set_filters(self, owners=None, kind="", status="", regex=""):
-        self._owners = None if owners is None else {str(o) for o in owners}
+        """② 的一份筛选。签名 = §2.3，`filter_bar.filterChanged` 的 dict 可直接 `**` 进来。
+
+        ⚠ `owners` **空集合 = 不按 owner 筛**（与 `filter_bar.match_row` 同口径）：
+        筛选行一个 owner 都没勾时发的就是空集合，把它当成「只要 owner 在这 0 个里面的行」，
+        整张清单会一行不剩 —— C1-int 端到端第一次载 mirror 就是这个现象。"""
+        self._owners = {str(o) for o in owners} if owners else None
         self._kind = str(kind or "")
         self._status = str(status or "")
         self._rx = None
@@ -641,9 +652,9 @@ class SignalListProxy(QtCore.QSortFilterProxyModel):
             return (False, False)
         if self._status:
             tone = _tone_of(m)
-            if self._status in ("clean", T.STATUS_FILTER_ITEMS[1]) and tone != "ok":
+            if self._status in _STATUS_OK_KEYS and tone != "ok":
                 return (False, False)
-            if self._status in ("problem", T.STATUS_FILTER_ITEMS[2]) and tone not in _PROBLEM_TONES:
+            if self._status in _STATUS_PROBLEM_KEYS and tone not in _PROBLEM_TONES:
                 return (False, False)
         if self._rx is None:
             return (True, False)
