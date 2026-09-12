@@ -28,6 +28,10 @@ an 的字段（两条流水线保证同名同义）::
     editable      "" / "logic" / "mux"
     renamed       bool             改名根（编辑走寄存器路径按顶层名键）
     dft_gate      None 或 {"key","label","wire_lhs","transp","width","binding"}
+    out_net       str              该信号 assert LHS 的网名（**不带探针前缀**；GUI v2 §7-1）
+
+GUI v2 C0-a（2026-09-12）新增的键全部 additive（只加不改），老消费方逐字节不受影响：
+    out_net       见上。前缀由 provider 另补 an["probe_prefix"]（它才有 probe_prefixes 配置）。
 
 搬家说明（2026-09-12，GUI v2 阶段 A4c）：本模块四个函数原本长在 gui.py 里，
 是纯函数、不碰 Qt；抽出来后 gui.py 保留同名薄委托，行为逐字节不变。
@@ -108,7 +112,19 @@ def norm_topout_result(res, wb=None):
     # 钉上的 iddq DFT 门 → 真值表只读输入行（门在向量 extra_forces 里、不在展开后的输入分组里，
     # 否则 GUI 真值表看不见这根门，与 .sv/报告不一致，2026-06-25 d_en_vco_fc_ls 实证）
     an["dft_gate"] = _gate_dict(res)
+    # §7-1：assert LHS 的网名（与 build_for_topout 的 .sv 同口径，**不带探针前缀**——前缀是配置，
+    # 由拿着 probe_prefixes 的 provider 另补 an["probe_prefix"]，免此处再吃一份配置参数）。
+    an["out_net"] = _topout_out_net(res)
     return an
+
+
+def _topout_out_net(res):
+    """Topout 结果的 assert LHS 网名；惰性 import topout（topout 也会 import 本模块，避免环）。"""
+    try:
+        from . import topout as T
+        return T._topout_probe_net(res)
+    except Exception:      # noqa: BLE001 —— 归一化绝不抛（拿不到就空串，显示层自行兜底）
+        return ""
 
 
 def norm_page_result(res, wb=None):
@@ -128,4 +144,6 @@ def norm_page_result(res, wb=None):
     # M2：钉上的 iddq DFT 门 → 真值表只读输入行（与 Topout 视图 norm_topout_result 同口径，门在向量
     # extra_forces 里、不在输入分组里，否则页子视图真表看不见门、与同页 .sv 不一致）。
     an["dft_gate"] = _gate_dict(res)
+    # §7-1：页本地视图的 assert LHS = 本页源对象的 RTL 网基名（同样不带探针前缀）。
+    an["out_net"] = getattr(res.sig, "rtl_base", None) or res.name
     return an
