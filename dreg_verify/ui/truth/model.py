@@ -49,11 +49,19 @@ PENDING_TERMS = {
     "TRUTH_BATCH_FILL_REPORT_FMT": "批量填了 {n} 列的期望",
     # 按列名回填期望的结果（C-298；读文件那半边在 C3-d 的 truth/io.py）
     "TRUTH_APPLY_EXP_MISSING_FMT": "这些列名在本信号里没有：{names}",
+    # 文件读不了（不存在 / 没权限 / 被 Excel 占用）：照实说一句，不把异常抛到面板上（绝不崩）
+    "TRUTH_IMPORT_READ_FAILED_FMT": "读不了这个文件：{err}",
     # 列下标越界（按钮/右键菜单在没选中列时也可能点进来，不许崩）
     "TRUTH_COL_OUT_OF_RANGE": "没有选中的测试列",
     # 粘贴里没认出写法的格子要【点名】（行标签×列名），不能只报个数（C-083 的粘贴面）
     "TRUTH_PASTE_BAD_FMT": "，{n} 格没认出写法：{names}",
     "TRUTH_PASTE_BAD_CELL_FMT": "{row}×{col}",
+    # 粘贴时跳过的另外两种原因（护栏：跳过必有名字 + 原因，不能一律说成「只读」）
+    "TRUTH_PASTE_NO_COL_FMT": "，{n} 格右边没有测试列了（{why}）",
+    "TRUTH_PASTE_NO_NEW_COL_MUX": "mux 信号清零后没有 case 可克隆，加不出新列——先「重新生成」",
+    "TRUTH_PASTE_NO_NEW_COL": "这个信号加不出新列",
+    "TRUTH_PASTE_MUX_WHOLE_FMT":
+        "，{n} 格是自动生成列的 mux 数据值（要整表一起改：工具条的「设置 mux 数据值」）",
     # 整表 mux 数据值同步的结果（C-110）
     "TRUTH_MUX_DATA_DONE_FMT": "已按物理寄存器 {base} 同步整表数据值（清空该格可恢复自动分配）",
     "TRUTH_MUX_DATA_NO_BASE_FMT": "本信号没有物理寄存器 {base} 的 mux 数据行",
@@ -65,11 +73,15 @@ PENDING_TERMS = {
 }
 
 
-def _t(name, **fmt):
-    """文案取值：`terms` 里有就用 `terms` 的，没有退回 `PENDING_TERMS`（C3-int 搬完即一致）。"""
-    s = getattr(terms, name, None)
+def _t(_name, **fmt):
+    """文案取值：`terms` 里有就用 `terms` 的，没有退回 `PENDING_TERMS`（C3-int 搬完即一致）。
+
+    第一个形参故意带下划线：占位符里已经有 `{name}` 这种叫法（`TRUTH_APPLY_EXP_MISSING_FMT`
+    一族），叫 `name` 的话 `_t("X", name="y")` 会撞成「重复传参」而不是格式化。
+    """
+    s = getattr(terms, _name, None)
     if s is None:
-        s = PENDING_TERMS[name]
+        s = PENDING_TERMS[_name]
     return s.format(**fmt) if fmt else s
 
 
@@ -852,49 +864,96 @@ class TruthModel(QAbstractTableModel):
     def _paste_land(self, plan):
         """把规划落进表里（追加列 + 一批格子），整次一步撤销（C-294）。返回结果说明。"""
         rows, r0, c0, need = plan["rows"], plan["r0"], plan["c0"], plan["need"]
-        if need > 0:                       # 追加列 + 落值 = 两个命令 → 必须裹成一步（C-294）
+        # 加不出列时**别开宏**：`beginMacro` 一调就压进撤销栈了，空宏照样占一步
+        # （用户看到的是「什么都没发生，但 Ctrl+Z 得按两下」）。
+        if need > 0 and self._can_append():   # 追加列 + 落值 = 两个命令 → 裹成一步（C-294）
             self._undo.beginMacro("粘贴")
             added = self.append_test_column(int(need))
-            n_ok, n_skip, bad, cells = self._paste_cells(rows, r0, c0)
+            cells, tally = self._paste_cells(rows, r0, c0)
             if cells:
                 self._undo.push(SetCells(self, cells, "粘贴取值"))
             self._undo.endMacro()
         else:                              # 只落值 = 本来就一个命令，不用空宏占一步撤销
             added = []
-            n_ok, n_skip, bad, cells = self._paste_cells(rows, r0, c0)
+            cells, tally = self._paste_cells(rows, r0, c0)
             if cells:
                 self._undo.push(SetCells(self, cells, "粘贴取值"))
-        return _t("TRUTH_PASTE_REPORT_FMT", n=n_ok,
+        # 加不出那么多列时说清**为什么**（mux 清零过就没有 case 可克隆了，不是「只读」）
+        why = ("TRUTH_PASTE_NO_NEW_COL_MUX" if self.editable_kind() == "mux"
+               else "TRUTH_PASTE_NO_NEW_COL")
+        skipped = ""
+        if tally["ro"]:
+            skipped += _t("TRUTH_PASTE_SKIPPED_FMT", n=tally["ro"])
+        if tally["no_col"]:
+            skipped += _t("TRUTH_PASTE_NO_COL_FMT", n=tally["no_col"], why=_t(why))
+        if tally["mux_whole"]:
+            skipped += _t("TRUTH_PASTE_MUX_WHOLE_FMT", n=tally["mux_whole"])
+        if tally["bad"]:
+            names = tally["bad"][:_BAD_NAMES_MAX]
+            skipped += _t("TRUTH_PASTE_BAD_FMT", n=len(tally["bad"]),
+                          names="、".join(names)
+                          + ("…" if len(tally["bad"]) > _BAD_NAMES_MAX else ""))
+        return _t("TRUTH_PASTE_REPORT_FMT", n=tally["ok"],
                   added=(_t("TRUTH_PASTE_ADDED_FMT", names=", ".join(added)) if added else ""),
-                  skipped=((_t("TRUTH_PASTE_SKIPPED_FMT", n=n_skip) if n_skip else "")
-                           + (_t("TRUTH_PASTE_BAD_FMT", n=len(bad),
-                                 names="、".join(bad[:_BAD_NAMES_MAX])
-                                 + ("…" if len(bad) > _BAD_NAMES_MAX else ""))
-                              if bad else "")))
+                  skipped=skipped)
+
+    def _can_append(self):
+        """现在还加得出测试列吗（`append_test_column` 会不会白跑一趟）。
+
+        mux 的「加列」= 克隆一条 case（C-115，不能凭空造输入），所以清零过 = 零用例时
+        一条都克隆不出来；logic 的 `edits.add_col` 任何时候都造得出（输入全 0）。
+        """
+        kind = self.editable_kind()
+        if not kind:
+            return False
+        return bool(self._cols) if kind == "mux" else True
+
+    def _is_mux_auto_data_cell(self, r, c):
+        """这一格是不是【自动生成列】的 mux 数据值格（C-110：只能整表一起改）。
+
+        `flags()` 上它照旧可编辑 —— 单格编辑由 `setData` 路由去整表同步（与 v1 同）。但
+        **粘贴不能走那条路**：一片格子逐个触发整表重分析，后一格把前一格覆盖掉，落下来的是
+        「所有自动列都等于最后一格」这种胡来的结果，而且屏幕值与导出值会当场分家（C-112）。
+        所以粘贴按「跳过并点名原因」办。
+        """
+        if self.editable_kind() != "mux":
+            return False
+        if not (0 <= c < len(self._cols)) or not (0 <= r < len(self._e_inputs)):
+            return False
+        return bool(self._e_inputs[r]["mux_data_base"]) and not self._cols[c].get("user")
 
     def _paste_cells(self, rows, r0, c0):
-        """把 TSV 二维表折算成 `SetCells` 的清单。返回 (落了几格, 跳过几格, 认不出的格名, cells)。
+        """把 TSV 二维表折算成 `SetCells` 的清单。返回 `(cells, tally)`。
 
-        C-083 的粘贴面：认不出写法的格子要【点名】（行标签×列名），不是只报个数——
-        一次粘 150 格、报「跳过 3 格」等于让人自己去找那三格在哪。
+        `tally` = `{"ok", "ro", "no_col", "mux_whole", "bad": [格名…]}` —— 跳过的格子按
+        **原因分桶**，结果说明逐条点名（护栏：跳过必有名字 + 原因）。C-083 的粘贴面：
+        认不出写法的格子报行标签×列名，不是只报个数——一次粘 150 格、报「跳过 3 格」
+        等于让人自己去找那三格在哪。
         """
-        n_ok, n_skip, bad, cells = 0, 0, [], []
+        cells = []
+        tally = {"ok": 0, "ro": 0, "no_col": 0, "mux_whole": 0, "bad": []}
         for dr, line in enumerate(rows):
             for dc, txt in enumerate(line):
                 r, c = r0 + dr, c0 + dc
+                if not (0 <= c < len(self._cols)):
+                    tally["no_col"] += 1
+                    continue
+                if self._is_mux_auto_data_cell(r, c):
+                    tally["mux_whole"] += 1
+                    continue
                 if not self._is_editable(r, c):
-                    n_skip += 1
+                    tally["ro"] += 1
                     continue
                 v = self._parse_for_cell(r, c, txt)
                 if v is _BAD:
-                    bad.append(_t("TRUTH_PASTE_BAD_CELL_FMT", row=self.row_label(r),
-                                  col=self.all_names()[c]))
+                    tally["bad"].append(_t("TRUTH_PASTE_BAD_CELL_FMT", row=self.row_label(r),
+                                           col=self.all_names()[c]))
                     continue
                 old = self._get_cell(r, c)
                 if old != v:
                     cells.append((r, c, old, v))
-                n_ok += 1
-        return n_ok, n_skip, bad, cells
+                tally["ok"] += 1
+        return cells, tally
 
     def _parse_for_cell(self, r, c, txt):
         """粘贴用的单格解析：认不出来 → `_BAD`（那一格跳过，整次粘贴照常落别的格）。"""
@@ -956,11 +1015,23 @@ class TruthModel(QAbstractTableModel):
         if read is None:
             raise NotImplementedError(
                 "C3-d io：读 CSV/xlsx 在 truth/io.py，读完调 apply_expectations")
-        n, missing = self.apply_expectations(read(path))
-        msg = _t("TRUTH_IMPORT_EXP_REPORT_FMT", n=n,
-                 missing=("；" + _t("TRUTH_APPLY_EXP_MISSING_FMT", names=", ".join(missing))
-                          if missing else ""))
-        return n, missing, msg
+        try:
+            got = read(path)
+        except OSError as ex:              # 不存在 / 没权限 / 被 Excel 占用 —— 照实说，别崩
+            msg = _t("TRUTH_IMPORT_READ_FAILED_FMT", err=ex)
+            self.parseFailed.emit(msg)
+            return 0, [], msg
+        # io 回的是 `(by_name, notes)`：by_name 已经是**解析好的 int**（表里写的是 8 种写法，
+        # `int()` 一个都不认，文本→值的翻译归读文件那一侧）；notes 是「这一列写法没认出来 /
+        # 列名重了取了哪一处 / 没找到期望行」之类的逐条提示，原样接进结果说明（跳过必有原因）。
+        by_name, notes = got if isinstance(got, tuple) else (got, [])
+        n, missing = self.apply_expectations(by_name)
+        tail = ""
+        if missing:
+            tail += "；" + _t("TRUTH_APPLY_EXP_MISSING_FMT", names=", ".join(missing))
+        for note in (notes or ()):
+            tail += "；" + str(note)
+        return n, missing, _t("TRUTH_IMPORT_EXP_REPORT_FMT", n=n, missing=tail)
 
     def batch_fill(self, cs, text):
         """把同一个值批量填进选中列的期望格（C-298 的「批量填…」）。返回 (落了几列, 提示文本)。"""

@@ -110,6 +110,23 @@ def _apply_plan(m, plan):
     return added
 
 
+#: 报告文案里【两边一定一致】的那一截：「粘贴落了 N 格」+「，新增列 …」
+_RE_REPORT_HEAD = re.compile(r"^粘贴落了 \d+ 格(，新增列 [^，]*)?")
+
+
+def _report_head(s):
+    """⚠ C3-a（2026-09-12）起「跳过」那一截两边口径不同，**只比得了这个头**。
+
+    `model.paste_tsv` 现在按原因分桶逐条点名（只读 / 右边没有测试列（原因）/ 自动生成列的
+    mux 数据值要整表改 / 写法没认出来 + 逐格名字）；`io.paste_plan` 还是一句「跳过 N 格
+    （只读行/列）」、把逐格原因留在 `plan.skipped` 里。**C3-int 把两个报告构造函数合成一份
+    之后，请把下面的 `_report_head(...)` 比较改回 `plan.report_text == msg` 逐字相等。**
+    行为等价（落了哪几格）照旧由 `_dump(ma) == _dump(mb)` 逐格钉死，没有放水。
+    """
+    m = _RE_REPORT_HEAD.match(str(s or ""))
+    return m.group(0) if m else str(s or "")
+
+
 # ═══════════════════ TSV：解析 / 复制 ═══════════════════
 def test_parse_tsv_excel_dialect():
     """Excel 口径：三种换行都认、制表符分列、**中间空串格保留**、只剔末尾空行。"""
@@ -231,7 +248,10 @@ def test_c294_paste_plan_equivalent_to_model_paste(btlp, wl):
             _apply_plan(ma, plan)
             ok, msg = mb.paste_tsv(text, r0, c0)
             assert plan.ok == ok, (sig, text, r0, c0)
-            assert plan.report_text == msg, (sig, text, r0, c0, plan.report_text, msg)
+            assert _report_head(plan.report_text) == _report_head(msg), \
+                (sig, text, r0, c0, plan.report_text, msg)
+            assert bool(plan.skipped) == (_report_head(msg) != msg), \
+                "一边说跳过了、另一边没说：%r / %r" % (plan.report_text, msg)
             assert _dump(ma) == _dump(mb), (sig, text, r0, c0)
     # 确实测到了「追加列」和「拒绝」两条路，不是全走了平凡分支
     m, _an, _p = _fresh(btlp, LOGIC_SIG)
@@ -256,7 +276,10 @@ def test_c294_paste_plan_equivalent_on_cleared_table(btlp, wl):
         plan = IO.paste_plan(ma, text, 0, 0)
         _apply_plan(ma, plan)
         ok, msg = mb.paste_tsv(text, 0, 0)
-        assert plan.ok == ok and plan.report_text == msg, (sig, plan.report_text, msg)
+        assert plan.ok == ok, sig
+        assert _report_head(plan.report_text) == _report_head(msg), \
+            (sig, plan.report_text, msg)
+        assert bool(plan.skipped) == (_report_head(msg) != msg), (sig, plan.report_text, msg)
         assert _dump(ma) == _dump(mb), sig
     # 清零后的 logic 确实落进去了东西（不是两边都空所以恰好相等）
     m, _an, _p = _fresh(btlp, LOGIC_SIG)

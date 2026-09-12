@@ -582,9 +582,14 @@ def test_c298_apply_expectations_and_batch_fill(btlp):
     n, msg = m.batch_fill([0], "zz+")
     assert n == 0 and len(got) == 1
 
-    # 读文件那半边归 C3-d
-    with pytest.raises(NotImplementedError):
-        m.import_expectations("nope.csv")
+    # 读文件那半边归 C3-d 的 truth/io.py（下面两条单测它的接线）；文件读不了时**不许崩**：
+    # 照实报一句就返回（面板是从文件对话框拿的路径，用户可能选完就把文件挪走了）
+    got[:] = []
+    n, missing, msg = m.import_expectations("nope.csv")
+    assert (n, missing) == (0, [])
+    assert TM.PENDING_TERMS["TRUTH_IMPORT_READ_FAILED_FMT"].split("{")[0] in msg
+    assert len(got) == 1 and got[0] == msg
+    assert m.undo_stack().index() == n_undo + 1, "读失败不该动撤销栈"
 
 
 # ═══════════════════ I-15 / C-299 ═══════════════════
@@ -1413,6 +1418,63 @@ def test_c294_paste_names_the_cells_it_could_not_read(btlp):
     assert m._paste_plan("", 0, 0)["rows"] is None
 
 
+@pytest.mark.contract("C-110", "C-112", "C-294")
+def test_c294_paste_cannot_sneak_past_whole_table_mux_data(btlp):
+    """C-110/C-112：粘贴**不许**从旁门改自动生成列的 mux 数据值（C3-d 报告的可疑点）。
+
+    单格编辑走 `setData` 会被路由去整表同步，粘贴不能走那条路（一片格子逐个触发整表重分析，
+    后一格盖掉前一格）。此前粘贴直接写 `col["vals"]`，而 mux 的 `recompute_col_an` 对 mux 早退、
+    `vec.assignments` 一个字没动 → 屏幕 5、导出还是 10，正是 C-112 要堵的洞。
+    """
+    m, _an, ei, rean = _mux_model(btlp)
+    data_r = next(i for i, e in enumerate(ei) if e["mux_data_base"])
+    key = ei[data_r]["key"]
+    before_vals = [c["vals"][key] for c in m.cols()]
+    before_asg = [c["vec"].assignments[key] for c in m.cols()]
+    reports = []
+    m.pasteReport.connect(reports.append)
+
+    ok, msg = m.paste_tsv("\t".join(["0b0011"] * m.columnCount()), data_r, 0)
+    assert ok is True
+    assert [c["vals"][key] for c in m.cols()] == before_vals, "粘贴绕过 C-110 改了自动列"
+    assert [c["vec"].assignments[key] for c in m.cols()] == before_asg
+    assert rean.calls == [], "粘贴不该逐格触发整表重分析"
+    assert m.undo_stack().count() == 0
+    assert TM.PENDING_TERMS["TRUTH_PASTE_MUX_WHOLE_FMT"].split("{")[0] in msg
+    assert str(m.columnCount()) in msg and reports[-1] == msg
+
+    # 手编列的数据格照旧能粘（C-111：只改本列，`vec.assignments` 跟着走）
+    at, _nm = m.duplicate_column(0)
+    assert m.paste_tsv("0b0011", data_r, at)[0] is True
+    assert m.cols()[at]["vals"][key] == 3
+    assert m.cols()[at]["vec"].assignments[key] == 3, "手编列的粘贴没落进 vec（导出会与屏幕不一致）"
+
+
+@pytest.mark.contract("C-294")
+def test_c294_paste_says_why_it_could_not_add_columns(btlp):
+    """C-294：加不出新列时结果说明要讲**真原因**，不能一律说成「只读行/列」。
+
+    mux 清零过 = 一条 case 都没有 → `edits.copy_cols` 没有源列可克隆，`append_test_column`
+    只能返回空（C-115：mux 的加列就是克隆选中 case，不能凭空造输入）。
+    """
+    m, _an, _ei = _fresh(btlp, MUX_SIG)
+    m.clear_all()
+    assert m.columnCount() == 0
+    n_undo = m.undo_stack().index()
+    ok, msg = m.paste_tsv("1\t1\t1", _exp_row(m), 0)
+    assert ok is True and m.columnCount() == 0
+    assert TM.PENDING_TERMS["TRUTH_PASTE_NO_NEW_COL_MUX"] in msg, \
+        "没说清「mux 清零后没 case 可克隆」，只说了「只读」：%s" % msg
+    assert TM.PENDING_TERMS["TRUTH_PASTE_SKIPPED_FMT"].split("{")[0] not in msg
+    assert m.undo_stack().index() == n_undo, "一格都没落，不该占一步撤销"
+    # logic 信号清零后是加得出列的（对照：证明上面那句 mux 的原因不是随口一说）
+    lm, lan, lei = _fresh(btlp, LOGIC_SIG)
+    lm.clear_all()
+    ok, msg2 = lm.paste_tsv("1\t1\t1", _exp_row(lm), 0)
+    assert ok is True and lm.columnCount() == 3
+    assert TM.PENDING_TERMS["TRUTH_PASTE_NO_NEW_COL_MUX"] not in msg2
+
+
 @pytest.mark.contract("C-298")
 def test_c298_import_expectations_goes_through_io(btlp, monkeypatch):
     """C-298：`import_expectations` 惰性接 `truth/io.read_expectations`，读完交给 `apply_expectations`。"""
@@ -1424,26 +1486,54 @@ def test_c298_import_expectations_goes_through_io(btlp, monkeypatch):
     stub = types.ModuleType("dreg_verify.ui.truth.io")
 
     def _read(path):
+        # io 的真实返回是 `(by_name, notes)`：值已解析成 int，notes 是逐条提示
         seen.append(path)
-        return {names[0]: 1, names[1].lower(): 0, "T_NOT_THERE": 7}
+        return ({names[0]: 1, names[1].lower(): 0, "T_NOT_THERE": 7},
+                ["T9 这一列写法怪：zz+"])
 
     stub.read_expectations = _read
     monkeypatch.setitem(sys.modules, "dreg_verify.ui.truth.io", stub)
+    # 包上已经绑好 io 属性了（C3-d 的 io.py 已入库），`from . import io` 会先拿属性——
+    # 只改 sys.modules 换不掉它，两处都得换
+    import dreg_verify.ui.truth as _PKG
+    monkeypatch.setattr(_PKG, "io", stub, raising=False)
 
     n_undo = m.undo_stack().index()
     n, missing, report = m.import_expectations("whatever.csv")
     assert seen == ["whatever.csv"]
     assert (n, missing) == (2, ["T_NOT_THERE"])
+    assert "这一列写法怪" in report, "io 的逐条提示要原样进结果说明"
     assert m.undo_stack().index() == n_undo + 1, "整次导入必须是一步撤销"
     assert m.cols()[0]["exp"] == 1 and m.cols()[1]["exp"] == 0
     assert report and "T_NOT_THERE" in report
     m.undo_stack().undo()
     assert m.cols()[0]["exp"] is None
 
-    # io 里没有 read_expectations（C3-d 还没落地）→ 抛 NotImplementedError，不是 ImportError
+    # io 里没有 read_expectations（比如 C3-d 还没落地）→ 抛 NotImplementedError，不是 ImportError
     del stub.read_expectations
     with pytest.raises(NotImplementedError):
         m.import_expectations("whatever.csv")
+
+
+@pytest.mark.contract("C-298")
+def test_c298_import_expectations_reads_a_real_csv(btlp, tmp_path):
+    """C-298 落地版：接【真的】`truth/io.read_expectations`（C3-d 已合入），读一张真 CSV。
+
+    上一条用替身钉的是「接线对不对」；这一条钉的是「两边的返回形状真的对得上」——
+    io 回的是 `(by_name, notes)` 且值已解析成 int（表里写的是 `0xA` / `4'b1010` 这类
+    IC 写法，`int()` 一个都不认），model 这边多解一层、少解一层都会当场炸。
+    """
+    m, _an, _ei = _fresh(btlp, LOGIC_SIG)
+    names = m.all_names()
+    p = tmp_path / "exp.csv"
+    p.write_text("信号\\测试,%s,%s,T_NOT_THERE\n期望,0x1,0b0,7\n" % (names[0], names[1]),
+                 encoding="utf-8-sig")
+    n_undo = m.undo_stack().index()
+    n, missing, report = m.import_expectations(str(p))
+    assert n == 2 and missing == ["T_NOT_THERE"]
+    assert m.cols()[0]["exp"] == 1 and m.cols()[1]["exp"] == 0
+    assert m.undo_stack().index() == n_undo + 1
+    assert "T_NOT_THERE" in report
 
 
 @pytest.mark.contract("C-106")
