@@ -51,7 +51,7 @@
 | C-020 | 探针前缀列标出输入侧命中：『<输入名>→<前缀>』——某根 force 输入的路径带前缀 | MW._prefix_cell（found_in=='prefixed-wire'） | resolver.Resolver | 保留 | 主控补位: 探针前缀列单元格文案「<输入名>→<前缀>」，沿用旧门面写法 | | 已落点(补位) | gui:_prefix_cell |
 | C-021 | 用例数列（本信号会产出几条测试） | SV._populate_table（TOPO_NTEST） | topout.topout_view_models | 保留 | 清单「用例」列（默认可见，右对齐 Consolas） | | 已落点 | 方案§4.1; Design§10 |
 | C-022 | 逐信号勾选（决定哪些信号进导出/预览） | SV._checked_names / SV._on_sig_item_changed | topout.render_topout_sv(only=) | 保留 | 清单第 1 列勾选框（state 键 S.checks，box() 蓝 #2f6fd0）—— 用户标注截图 c22c965c 圈定此列 | | 已落点 | 方案§4.1; Design§10 |
-| C-023 | 逐信号反例勾选（给该信号加 1 条故意填错的自检用例） | SV._toggle_signal_negative | vectors.make_negative / vectors.add_negatives | 保留 | 清单第 2 列反例勾选（state 键 S.negs，box() 琥珀 #b4690e，✕ 标记） | | 已落点 | 方案§4.1; Design§10 |
+| C-023 | 逐信号反例勾选（给该信号加 1 条故意填错的自检用例） | SV._toggle_signal_negative; MW.on_signal_table_item_changed（legacy_gui:3379，含取消勾选前对命名过/手填过错值的反例弹确认 + mux 分支另存 _mux_neg） | vectors.make_negative / vectors.add_negatives | 保留 | 清单第 2 列反例勾选（state 键 S.negs，box() 琥珀 #b4690e，✕ 标记） |  | 已落点 | 方案§4.1; Design§10 |
 | C-024 | 按 owner 多选筛（勾多个=任一命中即显示；不勾=全部） | SV._rebuild_owner_menu / SV._on_owner_toggled（_CheckableMenu） | topout.topout_view_models | 保留 | 筛选行「全部 owner ▾」多选下拉 | | 已落点 | 方案§4.1; Design§10; 审计B |
 | C-025 | owner 下拉里『（无 owner）』单列一项并带条数 | MW._rebuild_owner_menu（NO_OWNER） | — | 保留 | 主控补位: owner 下拉里「（无 owner）」单列一项并带条数（Design 只画了收起态按钮） | | 已落点(补位) | gui:_rebuild_owner_menu |
 | C-026 | owner 按钮文字随已选个数变化，悬停列全部已选 owner | MW._update_owner_btn_text | — | 保留 | 主控补位: owner 按钮文字随已选个数变、悬停列全部已选（Design 只画了「全部 owner ▾」） | | 已落点(补位) | gui:_update_owner_btn_text |
@@ -64,7 +64,7 @@
 | C-033 | 清空全部勾选 | SV._check_all(False) | — | 保留 | 清单底部工具条「清空勾选」 | | 已落点 | 方案§4.1; Design§10 |
 | C-034 | 把表里框选/Ctrl 多选的行一次勾上 | SV._check_selected / MW.on_check_selected_rows | — | 保留 | 清单底部工具条「勾选选中行」 | | 已落点 | 方案§4.1; Design§10; 审计B |
 | C-035 | 一键给一批信号各加 1 条反例（有勾选只作用勾选，否则作用于全部可见） | SV._bulk_neg(True) / MW.on_all_signals_neg(True) | vectors.add_negatives | 保留 | 清单底部工具条「全部加反例」 | | 已落点 | 方案§4.1; Design§10; 审计B |
-| C-036 | 一键清除一批信号的反例；含自定义命名/手填错值的先弹确认 | SV._bulk_neg(False) / MW.on_all_signals_neg(False) + MW._confirm_lose_named | — | 保留 | 清单底部工具条「清除反例」；二次确认按 V2Spec §5 M22「三处确认」同款补 | | 已落点 | 方案§4.1; 审计A; gui:_confirm_lose_named |
+| C-036 | 一键清除一批信号的反例；含自定义命名/手填错值的先弹确认 | SV._bulk_neg(False) / MW.on_all_signals_neg(False) + MW._confirm_lose_named; MW.on_signal_table_item_changed（真正触达 _confirm_lose_named 的入口） | — | 保留 | 清单底部工具条「清除反例」；二次确认按 V2Spec §5 M22「三处确认」同款补 |  | 已落点 | 方案§4.1; 审计A; gui:_confirm_lose_named |
 | C-037 | 点表头按列排序（211 行按 owner / 用例数 / 状态排） | MW.table.setSortingEnabled(True)（legacy 独有） | — | 保留 | 清单表头点击排序（表头「信号 ▴」）+ 清单头部「排序」入口 | | 已落点 | 方案§4.1; Design§10; 审计B; 审计Top10-7 |
 | C-038 | 范围切换：全链 / 只看 logic 页 / mux 页 / dft 页 / iddq 页（页本地、不跨页） | MainWindow.main_tabs 的 4 个 _PageProvider 子视图 | pageviews.page_view_models / pageviews.PAGES | 合并 | 筛选行第一个控件「范围」5 段（Topout 全 / 只看 logic / 只看 mux / dft / iddq，state 键 scopes；scopeHint「Topout = 全链展到源寄存器；其余 = 只看本页输入输出，不跨页」）—— 用户标注截图 2bca924f 圈定此处 | | 已落点 | 方案§4.1; 方案§4.3; Design§5-H1; Design§10; 主控裁决: 按 Design§5-H1 归清单范围筛选 |
 | C-039 | RTL 补充逻辑信号在清单里琥珀高亮 + ⚠[RTL补充] 标记 + 悬停给理由 | MW._populate_table（_is_supplement 分支） | generator._logic_with_overrides | 保留 | 清单信号名后琥珀圆点 + 悬停给理由（V2Spec §5 M11）；原横幅改为状态栏一行 | | 已落点 | 方案§4.1; Design§10; 审计B; 审计次要 |
@@ -134,7 +134,7 @@
 | C-088 | 删除选中的测试列（支持多选） | SV._e_del / MW.on_ti_del | — | 保留 | 真值表工具条「删列」 | | 已落点 | 方案§4.1; Design§10; 审计A |
 | C-089 | 清零本信号=零用例（导出时本信号只记账不产断言） | SV._e_clear / MW.on_ti_clear | topout.build_for_topout(edit_overrides=) | 保留 | 真值表工具条「清零…」 | | 已落点 | 方案§4.1; Design§10; 审计A |
 | C-090 | 清零前弹确认框（说明后果、默认按钮=否） | SV._confirm / MW.on_ti_clear | — | 保留 | 「清零…」省略号即二次确认（V2Spec §5 M22「三处都加二次确认并在表上留痕」） | | 已落点 | 方案§4.1; 审计A; 审计Top10-6 |
-| C-091 | 给用户新增的列改名（双击列头或按钮） | SV._e_rename / SV._e_rename_col / MW.on_ti_rename_col | truth_edit.check_col_name | 保留 | 真值表工具条「重命名列…」；也可双击列头 | | 已落点 | 方案§4.1; Design§10; 审计A |
+| C-091 | 给用户新增的列改名（双击列头或按钮） | SV._e_rename / SV._e_rename_col / MW.on_ti_rename_col; MW.on_ti_rename_current（:5895，工具条「重命名列…」，没选列时先提示） | truth_edit.check_col_name | 保留 | 真值表工具条「重命名列…」；也可双击列头 |  | 已落点 | 方案§4.1; Design§10; 审计A |
 | C-092 | 改名三道校验：非法字符清成下划线且不得为空 / 不许占 T<编号> 保留名 / 不得与其它列最终标号重名 | truth_edit.check_col_name（SV._e_rename_col / MW._ti_set_test_name 共用） | truth_edit.check_col_name | 保留 | 「重命名列…」接 truth_edit.check_col_name 三道关（V2Spec §5 M23「名称校验 + 拒 T<n> + 查重」） | | 已落点 | 方案§4.1; 审计A; 审计Top10-4 |
 | C-093 | 自动生成的 T 列不许改名，点了给明确提示 | SV._e_rename_col / MW.on_ti_rename_col（user_added 判定） | — | 保留 | 同 V2Spec §5 M23：自动生成的 T 列拒改名并给明确提示 | | 已落点 | gui:_e_rename_col |
 | C-094 | auto→期望：把 auto_out 一次填进所有未填的期望格，已填的不动 | SV._e_fill / MW.on_ti_fill_expected | — | 保留 | 真值表工具条「auto→期望…」（琥珀描边 #c9922a，与普通按钮区分） | | 已落点 | 方案§4.1; Design§10; 审计A |
@@ -222,9 +222,9 @@
 | C-162 | 导出选项记住上次选择，下次预选 | SV._ask_export_options / MW._ask_export_options（_save_settings） | — | 保留 | 主控补位: 四个选项记住上次选择、下次预选（exports.load_export_options / store_export_options）；Design 的「选项」列是只读摘要，需做成可点开的选项弹层 | | 已落点(补位) | 清单§3; gui:_ask_export_options |
 | C-163 | 两个『导出 .sv 选项』对话框（默认值不同却共用同一份设置）合成一个 | SV._ask_export_options + MW._ask_export_options | — | 合并 | 导出中心第 1 行合二为一，统一默认值 = exports.EXPORT_OPTION_DEFAULTS（scope=all / comments=False / sv_summary=False / owner_in_msg=False） | | 已落点 | 方案§4.2; 清单§3; 清单§7; 主控裁决: 统一默认值=SignalView 版（sv_summary/owner_in_msg 默认关，exports.EXPORT_OPTION_DEFAULTS 唯一定义）；v2 预览与导出同读 exports.load_export_options；legacy _opts 的 True 兜底随旧门面删 |
 | C-164 | 重复 assert 标号（非法 SV）在写文件前弹确认，列出冲突的标号与两个信号 | MW._confirm_dup_labels（SV.on_export_sv / MW.on_generate 都调） | generator.build（dup_labels）/ topout.build_for_topout | 保留 | 主控补位: 写文件前弹重复 assert 标号确认并列出冲突标号与两个信号（Design 导出中心只有「导出勾选的 N 项」按钮） | | 已落点(补位) | 方案§4.1; Design§10; 审计C; 6月审计N9 |
-| C-165 | 导出完成摘要：信号数 / 断言块数 / 测试用例数（其中反例几条、designer 手填期望几条）/ 只记账不产断言几个 | SV._export_summary_text | topout.render_topout_sv（summary） | 保留 | 导出完成弹层「已写出」段「7 信号 · 断言块 7 · 测试用例 168 · 手填期望 7 · 其余用程序算的值兜底 161」 | | 已落点 | 方案§4.1; 6月审计#3 |
-| C-166 | 导出完成摘要点名有哪些信号只记账不产断言 | SV._export_summary_text（accounted） | topout.render_topout_sv（accounted） | 保留 | 主控补位: 导出完成摘要点名「只记账不产断言」的信号（Design 只点名了被跳过的 2 个） | | 已落点(补位) | Design§8-2; 清单§7; gui:_export_summary_text |
-| C-167 | 导出 .sv 完成后点名跳过了哪些信号、每个缺哪几根输入（可展开明细） | MW.on_generate（box.setDetailedText + gui._skipped_detail_text） | generator.build（skipped） | 保留 | 导出完成弹层顶部琥珀块「2 个信号没有进 .sv —— 名字和原因：」+ 每信号一条 └ 原因 | | 已落点 | 方案§4.1; Design§3-Q1; Design§8-2; 清单§7 |
+| C-165 | 导出完成摘要：信号数 / 断言块数 / 测试用例数（其中反例几条、designer 手填期望几条）/ 只记账不产断言几个 | SV._export_summary_text; MW._outcome_box（:127，v1 四处完成反馈的唯一出口；静态 information()，跳过项直接进正文） | topout.render_topout_sv（summary） | 保留 | 导出完成弹层「已写出」段「7 信号 · 断言块 7 · 测试用例 168 · 手填期望 7 · 其余用程序算的值兜底 161」 |  | 已落点 | 方案§4.1; 6月审计#3 |
+| C-166 | 导出完成摘要点名有哪些信号只记账不产断言 | SV._export_summary_text（accounted; MW._outcome_box（:127，v1 四处完成反馈的唯一出口；静态 information()，跳过项直接进正文） | topout.render_topout_sv（accounted） | 保留 | 主控补位: 导出完成摘要点名「只记账不产断言」的信号（Design 只点名了被跳过的 2 个） |  | 已落点(补位) | Design§8-2; 清单§7; gui:_export_summary_text |
+| C-167 | 导出 .sv 完成后点名跳过了哪些信号、每个缺哪几根输入（可展开明细） | MW.on_generate; MW._outcome_box（:127，v1 四处完成反馈的唯一出口；静态 information()，跳过项直接进正文） | generator.build（skipped） | 保留 | 导出完成弹层顶部琥珀块「2 个信号没有进 .sv —— 名字和原因：」+ 每信号一条 └ 原因 |  | 已落点 | 方案§4.1; Design§3-Q1; Design§8-2; 清单§7 |
 | C-168 | 导出完成后自动跳到 .sv 预览页显示这次的内容 | SV.on_export_sv（inner.setCurrentIndex(1)） | — | 保留 | 主控补位: 关掉「导出完成」弹层后自动切到 .sv 预览标签显示本次内容（Design 用模态代替，两者不冲突） | | 已落点(补位) | gui:on_export_sv |
 | C-169 | 按导出范围给不同的默认文件名（wr_rf_tc.sv / _pos.sv / _neg.sv） | MW.on_generate（default_name） | — | 保留 | 主控补位: 按范围给默认文件名 wr_rf_tc.sv / _pos.sv / _neg.sv（Design「上次导出到哪」列显示 D:\work\wr_rf_tc.sv） | | 已落点(补位) | gui:on_generate |
 | C-170 | 汇总命名块按范围加后缀（_pos/_neg），两份贴进同一作用域也不重名 | MW.on_generate（block_suffix） | generator.render(block_suffix=) | 保留 | 主控补位: 汇总命名块按范围加 _pos/_neg 后缀（无界面元素） | | 已落点(补位) | gui:on_generate |
@@ -256,7 +256,7 @@
 | C-196 | 导出 claims.json（每个信号探哪根网、force/写哪些网、名字是查到的还是猜的）给红区诊断脚本 | GUI 无入口（仅 CLI --export-claims） | cli._export_claims / generator.NAMING_MODEL_TOPOUT | 新增 | 导出中心第 5 行「claims.json（红区比对）」+ 注「随 .sv 进红区，诊断脚本的唯一输入」+ 选项「每根探针：探哪根网 · 名字是查到的还是猜的」 | | 已落点 | 方案§4.1; 方案§5-4; Design§10; 清单§2 |
 | C-197 | 一个导出中心列全 6 种交付物：交付物 × 范围 × 选项 × 上次导出到哪 | 旧为 5 个分散按钮 + 2 个对话框 | — | 新增 | 导出中心表格 5 列（勾选 / 交付物 / 范围 / 选项 / 上次导出到哪）× 6 行（ER 数组） | | 已落点 | 方案§4.1; Design§5-H4; Design§11-2-⑥ |
 | C-198 | 每种交付物记住上次导出到哪个目录 | 无（只有 nets.txt 用源表目录做默认） | — | 新增 | 导出中心「上次导出到哪」列（D:\work\wr_rf_tc.sv 今天 14:22 / 从未导出）—— 后端目前无此持久化，见 Design对齐 §4 冲突⑦ | | 已落点 | Design§5-H4 |
-| C-199 | 所有导出完成反馈统一成『跳过项名字 + 原因在前、计数在后』 | SV.on_export_sv 现只给纯计数 | — | 新增 | 导出完成弹层版式即规范：跳过点名琥珀块在上、「已写出」计数在下；exportSummary 也写「2 个信号会被跳过（导完点名）」 | | 已落点 | Design§5-H4; Design§8-2; 清单§7 |
+| C-199 | 所有导出完成反馈统一成『跳过项名字 + 原因在前、计数在后』 | SV.on_export_sv 现只给纯计数; MW._outcome_box（:127，v1 四处完成反馈的唯一出口；静态 information()，跳过项直接进正文） | — | 新增 | 导出完成弹层版式即规范：跳过点名琥珀块在上、「已写出」计数在下；exportSummary 也写「2 个信号会被跳过（导完点名）」 |  | 已落点 | Design§5-H4; Design§8-2; 清单§7 |
 
 ## 诊断（27 条：降级(诊断抽屉) 17，删除 4，新增 3，保留 3）
 
@@ -275,9 +275,9 @@
 | C-208 | 强制 force 名单能导入/导出（跟探针前缀一样可复用） | 无（编辑器只有粘贴） | — | 新增 | 主控补位: 强制 force 名单导入 / 导出 .txt（与探针前缀同款） | | 已落点(补位) | 清单§7; Design§8-3 |
 | C-209 | 强制 force 名单对 Topout 视图与页本地视图的分析与 .sv 都真正生效 | _TopoutProvider._fo / _PageProvider._fo | topout.topout_view_models(force_overrides=) / pageviews.page_view_models(force_overrides=) | 保留 | V2Spec §5 M41「同时接通 Topout 后端（v1 不生效）」——名单对 Topout 与页本地视图的分析与 .sv 都真正生效 | | 已落点 | 方案§4.1; 审计C; 审计Top10-9 |
 | C-210 | RTL 补充逻辑编辑器：Excel 真表缺某信号的 ECO 级时手工补一条等价表达式来扫真值表 | MW.on_logic_overrides / SV.on_logic_overrides | generator._logic_with_overrides / generator.GenOptions(logic_overrides=) | 降级(诊断抽屉) | 诊断抽屉 otherSymptoms 第 1 条「规格缺了一级逻辑，工具展不下去 → 手工补一段等价表达式（RTL 补充逻辑）」 | | 已落点 | 方案§4.1; 方案§4.3; Design§10; 6月审计N4 |
-| C-211 | RTL 补充逻辑『插入模板(当前信号)』：预填原表达式与原输入映射 | MW._supplement_template | generator.make_supplement_signal | 降级(诊断抽屉) | 主控补位: 「插入模板(当前信号)」预填原表达式与原输入映射（Design 未画编辑器本体） | | 已落点(补位) | 方案§4.1; Design§10; 清单§3 |
+| C-211 | RTL 补充逻辑『插入模板(当前信号)』：预填原表达式与原输入映射 | MW.on_logic_overrides._insert_tmpl（:3776，→ MW._supplement_template；JSON 不合法时警告且不覆盖编辑框） | generator.make_supplement_signal | 降级(诊断抽屉) | 主控补位: 「插入模板(当前信号)」预填原表达式与原输入映射（Design 未画编辑器本体） |  | 已落点(补位) | 方案§4.1; Design§10; 清单§3 |
 | C-212 | RTL 补充逻辑从 .json 文件导入 | MW.on_logic_overrides._from_file | — | 降级(诊断抽屉) | 主控补位: RTL 补充逻辑从 .json 导入 | | 已落点(补位) | 方案§4.1; Design§10; 清单§3 |
-| C-213 | RTL 补充逻辑六道校验（信号名占位符未替换 / spec 非对象 / 缺 expr / inputs 非空列表 / 表达式解析 / 变量没有 input 映射），不通过不保存并逐条列错 | MW._validate_supplements | expr.parse / expr.collect_vars / generator.make_supplement_signal | 降级(诊断抽屉) | 主控补位: 六道校验不通过不保存并逐条列错（session.validate_supplements 已有） | | 已落点(补位) | gui:_validate_supplements |
+| C-213 | RTL 补充逻辑六道校验（信号名占位符未替换 / spec 非对象 / 缺 expr / inputs 非空列表 / 表达式解析 / 变量没有 input 映射），不通过不保存并逐条列错 | MW._validate_supplements | expr.parse / expr.collect_vars / generator.make_supplement_signal | 降级(诊断抽屉) | 主控补位: 六道校验不通过不保存并逐条列错（session.validate_supplements 已有）; 报错落点变了：SupplementEditorDialog 内联错误条（v1 是模态 critical），仍不保存、仍点名原因 |  | 已落点(补位) | gui:_validate_supplements |
 | C-214 | 补充的基名不在当前 Excel logic 页时提示『将作为纯新增合成信号生成』 | MW.on_logic_overrides（unknown） | — | 降级(诊断抽屉) | 主控补位: 补充基名不在当前 logic 页时提示「将作为纯新增合成信号生成」 | | 已落点(补位) | gui:on_logic_overrides |
 | C-215 | 用了 RTL 补充逻辑的信号，真值表头部挂琥珀横幅 + 理由 | MW._update_ti_header（supp_tag + setStyleSheet） | — | 保留 | V2Spec §5 M11「横幅改成状态栏一行」+ 清单信号名后琥珀圆点（真值表头部琥珀横幅降级） | | 已落点 | 方案§4.1; 审计A; 审计次要 |
 | C-216 | Topout 视图的展开也看得到 RTL 补充信号（补充的新输入自动成为真值表维度） | _TopoutProvider._supplemented（swap-and-restore） | generator._logic_with_overrides | 保留 | 主控补位: Topout 视图的展开也看得到补充信号（补充输入自动成为真值表维度）；无界面元素 | | 已落点(补位) | 6月审计N4; gui:_supplemented |
@@ -289,7 +289,7 @@
 | C-222 | 逻辑展开说明（工具怎么从顶层输出回溯到源寄存器） | 无 | — | 新增 | 右侧常驻栏「逐层展开」标题行右侧帮助文「从顶层输出往回到源寄存器 · 每层：Excel 原式 = 代入真实信号名」+ V2Spec §5 M44 | | 已落点 | Design§10 |
 | C-223 | logic 级联 / mux 级联下拉（展开上游 vs force级联网） | MW.cascade_logic_combo / MW.cascade_mux_combo / MW.on_cascade_mode_changed | resolver.Resolver(cascade_mode=) / generator.GenOptions(logic_cascade=,mux_cascade=) | 删除 | | | 待落点 | 方案§4.4; 方案§5-2; 用户2026-06-23; 清单§1 |
 | C-224 | 本信号级联下拉（单点压过全局） | MW.sig_cascade_combo / MW.on_sig_cascade_changed | generator.GenOptions(sig_cascade=) | 删除 | | | 待落点 | 方案§4.4; 方案§5-2; 用户2026-06-23; 审计A |
-| C-225 | logic 加尾缀 / mux 加尾缀 全局开关 | MW.append_to_logic_chk / MW.append_to_mux_chk | resolver.Resolver(append_to_logic=,append_to_mux=) | 删除 | | | 待落点 | 方案§4.4; 方案§5-2; 用户2026-06-23; 清单§1 |
+| C-225 | logic 加尾缀 / mux 加尾缀 全局开关 | MW.append_to_logic_chk / MW.append_to_mux_chk; MW.on_append_to_logic_changed（:2847） / MW.on_append_to_mux_changed（:2862） | resolver.Resolver(append_to_logic=,append_to_mux=) | 删除 | 不实现：配置里的旧键 append_to_logic / append_to_mux 被忽略并在导入报告里点名（export_center 的 ignored 名单；persist / state 不认旧键） |  | 已落点(补位) | 方案§4.4; 方案§5-2; 用户2026-06-23; 清单§1 |
 | C-226 | 本信号探尾缀网单点开关 | MW.suffix_chk / MW.on_suffix_changed / MW._save_suffix_override | resolver.Resolver(suffix_override=) / generator.GenOptions(suffix_override=) | 删除 | | | 待落点 | 方案§4.4; 方案§5-2; 用户2026-06-23; 审计A |
 
 ## 持久化与兼容（26 条：保留 25，删除 1）
@@ -351,7 +351,7 @@ RTL 补充逻辑 `.json`、完整配置 `.json`（`dreg_verify_config: 2`）、`
 | C-239 | 恢复/导入时，桶里有、当前表里找不到的信号跳过并点名 + 原因（改名？删行？mux 页不存在？） | MW._apply_edits_bucket（missing）/ MW._restore_edits | — | 保留 | 主控补位: 恢复/导入时点名桶里有、当前表没有的信号 + 原因，反馈落状态栏（与 C-194 同一通道） | | 已落点(补位) | Design§8-2; gui:_apply_edits_bucket |
 | C-240 | 桶里数值损坏（手改坏的 mux_expected / mux_data）逐条跳过并报个数，整个载入流程不崩 | gui._coerce_int_map / gui._deserialize_mux_vecs | — | 保留 | 主控补位: 无界面元素；桶里损坏数值逐条跳过并报个数，载入不崩（edits.coerce_int_map） | | 已落点(补位) | gui:_coerce_int_map |
 | C-241 | designer 手填期望关 GUI / 换表都不丢，下次自动恢复并在状态栏报恢复了几个信号 | MW._persist_edits / MW._restore_edits / SV._persist | — | 保留 | 主控补位: 手填期望关 GUI / 换表都不丢，恢复后在状态栏报恢复了几个信号 | | 已落点(补位) | 方案§4.1; 6月审计#2 |
-| C-242 | 信号勾选（哪些信号进导出）持久化并在开工具时恢复 | MW._collect_checked / MW._apply_signal_checks / SV._collect_view_checks / SV._apply_view_checks | — | 保留 | 主控补位: 无界面元素；清单勾选持久化并在开工具时恢复（Design 的 S.checks 只是会话态） | | 已落点(补位) | 方案§4.1; 6月审计N1 |
+| C-242 | 信号勾选（哪些信号进导出）持久化并在开工具时恢复 | MW._collect_checked / MW._apply_signal_checks / SV._collect_view_checks / SV._apply_view_checks; MW.on_signal_table_item_changed | — | 保留 | 主控补位: 无界面元素；清单勾选持久化并在开工具时恢复（Design 的 S.checks 只是会话态） |  | 已落点(补位) | 方案§4.1; 6月审计N1 |
 | C-243 | 全勾=默认状态时不写勾选桶（保持旧桶逐字节不变、向后兼容） | SV._collect_view_checks（names>=models 返回 None） | — | 保留 | 主控补位: 无界面元素；全勾=默认时不写勾选桶（保旧桶逐字节不变） | | 已落点(补位) | gui:_collect_view_checks |
 | C-244 | 批量操作（全选/清空/批量反例）挂起逐格存盘，结束统一写一次 | MW._persist_suspended（SV._check_all / SV._bulk_neg / MW.set_all_visible 等） | — | 保留 | 主控补位: 无界面元素；清单底部工具条的批量操作挂起逐格存盘、结束统一写一次 | | 已落点(补位) | gui:_persist_suspended |
 | C-245 | 单点覆盖档与单点级联档刻意不存盘（否则上次留的单点档会静默盖过全局下拉） | SV._sig_cov / MW._sig_cov / MW._sig_cascade（_persist_edits 注释） | — | 保留 | 主控补位: 无界面元素；覆盖度弹层里的「本信号」单点档刻意不存盘 | | 已落点(补位) | 6月审计N3; gui:_persist_edits |
