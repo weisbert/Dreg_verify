@@ -70,6 +70,16 @@ def _default_window_factory():
     return G.MainWindow()
 
 
+def v2_window_factory():
+    """v2 组合根（`dreg_verify.ui.app`）。**默认工厂还不是它**——C5 才整体切（拍板 #1）。
+
+    想让某条测试走 v2 窗口：`old = H.set_window_factory(H.v2_window_factory)` … 用完还原。
+    `make_window` 的 `_set_excel_path` / `_do_load` 在 v2 窗口上照样能用
+    （`path_edit` + `on_load`，`test_harness_can_drive_v2_window` 盯着这条）。"""
+    from dreg_verify.ui.app import MainWindow
+    return MainWindow()
+
+
 #: 可替换的窗口工厂 —— v2 切换点。
 WINDOW_FACTORY = _default_window_factory
 
@@ -142,13 +152,19 @@ def isolate_settings(monkeypatch, tmp_path):
     """把 GUI 持久化文件指到临时目录 —— 三份现有 GUI 测试都在做的同一件事。
 
     不隔离的话 `_load_settings` 会读用户真实 ~/.dreg_verify_gui.json（级联偏好等），
-    使默认值断言非确定性地失败。"""
+    使默认值断言非确定性地失败。
+
+    两套门面**同名同义**的两个模块级常量一起 patch（v1 `gui` 与 v2 `ui.persist`）：
+    v2 的落盘策略是「路径还是出厂默认值时 pytest 下 no-op」，所以不 patch 也不会污染真机，
+    但那样一来持久化本身就测不到了（写了等于没写）——指到 tmp 之后写入照常生效。"""
     import pytest
     pytest.importorskip("PySide6")
     from dreg_verify import gui as G
-    for attr, fname in (("SETTINGS_PATH", "gui_settings.json"), ("EDITS_PATH", "edits.json")):
-        if hasattr(G, attr):
-            monkeypatch.setattr(G, attr, str(tmp_path / fname))
+    from dreg_verify.ui import persist as P
+    for mod, prefix in ((G, "gui"), (P, "ui")):
+        for attr, fname in (("SETTINGS_PATH", "settings.json"), ("EDITS_PATH", "edits.json")):
+            if hasattr(mod, attr):
+                monkeypatch.setattr(mod, attr, str(tmp_path / ("%s_%s" % (prefix, fname))))
 
 
 # ─────────────────────────── ② 找控件 ───────────────────────────
@@ -367,6 +383,24 @@ def paste(widget, text):
     keys(widget, "Ctrl+V")
 
 
+def wait_for(pred, timeout_ms=10000, interval_s=0.002):
+    """跑事件循环直到 `pred()` 为真（或超时）。返回 `pred()` 的最终值。
+
+    后台分析 worker 在别的线程里 `emit`，信号是**队列投递**的——不 processEvents
+    就永远等不到 `finished`。PySide6 没有 `QTest.qWaitFor`（那是 C++ 侧的模板函数），
+    这是它的等价物；比 `QTest.qWait(固定毫秒)` 稳，机器慢也不会假红。"""
+    import time
+    a = app()
+    deadline = time.time() + float(timeout_ms) / 1000.0
+    while time.time() < deadline:
+        a.processEvents()
+        if pred():
+            return True
+        time.sleep(interval_s)
+    a.processEvents()
+    return bool(pred())
+
+
 # ─────────────────────────── ⑥ 模态对话框自动拦截 ───────────────────────────
 
 class REAL(object):
@@ -518,6 +552,16 @@ CUSTOM_MODALS = [
     ("dreg_verify.gui", "MainWindow", "_confirm_dup_labels", _def_confirm_dup),
 ]
 
+#: v2 自建对话框（模块, 类名）。`QDialog.exec` 那条已经把它们拦下了，这里**额外按类名**
+#: 再记一条：调用记成 `ColumnsDialog.exec`，于是测试可以写
+#: `answers={"ColumnsDialog.exec": QDialog.Rejected}`、`rec.of("PasteNamesDialog")`，
+#: 不必去猜窗口标题。模块还没落地的条目记进 `rec.missing`，不报错。
+#: ⏳ C2-d 的 `ui/dialogs.py` 到位后，这两条的模块名改成 `dreg_verify.ui.dialogs` 并把其余对话框补上。
+V2_DIALOGS = [
+    ("dreg_verify.ui.signal_list", "ColumnsDialog"),      # 列设置 C-008 / C-046
+    ("dreg_verify.ui.signal_list", "PasteNamesDialog"),   # 粘贴名单勾选 C-290
+]
+
 #: 自建对话框方法 → 它弹出的窗口标题（这样 `answers` 也能按标题写，与 exec 拦截口径一致）
 CUSTOM_TITLES = {
     "SignalView._ask_export_options": "导出 .sv 选项",
@@ -655,6 +699,20 @@ def auto_dialogs(monkeypatch, answers=None, save_dir=None):
         if answers.get(full) is REAL or answers.get(meth) is REAL:
             continue
         monkeypatch.setattr(cls, meth, _mk_exec(cls_name, meth))
+        rec.patched.append(full)
+
+    # ── 4b：v2 自建对话框（按类名记一条，见 V2_DIALOGS）──
+    for mod_name, cls_name in V2_DIALOGS:
+        try:
+            mod = __import__(mod_name, fromlist=[cls_name])
+            cls = getattr(mod, cls_name)
+        except (ImportError, AttributeError):
+            rec.missing.append("%s.%s" % (mod_name, cls_name))
+            continue
+        full = "%s.exec" % cls_name
+        if answers.get(full) is REAL or answers.get(cls_name) is REAL:
+            continue
+        monkeypatch.setattr(cls, "exec", _mk_exec(cls_name, "exec"))
         rec.patched.append(full)
 
     # ── 5：gui.py 自建对话框函数 ──
