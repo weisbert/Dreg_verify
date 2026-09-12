@@ -391,16 +391,26 @@ def _make_gui(tmp_path_factory, name, pll=False):
 
 
 def test_gui_export_dialog_new_checkboxes(tmp_path_factory, monkeypatch, tmp_path):
-    """导出对话框含 owner/汇总复选框(无历史配置时默认勾选)，返回 dict 带两个新键。"""
+    """导出对话框含 owner/汇总复选框，返回 dict 带两个新键；无历史配置时用【统一默认值】。
+
+    ⚠ 2026-09-12 契约变更：本对话框与 SignalView 的导出对话框共用同一批 settings 键
+    (export_owner_in_msg/export_sv_summary/…)，默认值却一边 True 一边 False ——"没配过"时
+    两个入口产物不同（静默不一致）。现统一到 exports.EXPORT_OPTION_DEFAULTS（以 SignalView
+    版为准 = 全 False）。断言随之改成"两个入口给同一套默认值"，比原来只钉一边更严。"""
+    from dreg_verify import exports as X
     gui, w = _make_gui(tmp_path_factory, "gui_dlg")
     from PySide6 import QtWidgets
     monkeypatch.setattr(gui, "SETTINGS_PATH", str(tmp_path / "no_settings.json"))
     monkeypatch.setattr(QtWidgets.QDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
     opt = w._ask_export_options("test")
     assert opt is not None
-    assert opt["owner_in_msg"] is True
-    assert opt["sv_summary"] is True
+    assert opt["owner_in_msg"] is X.EXPORT_OPTION_DEFAULTS["owner_in_msg"] is False
+    assert opt["sv_summary"] is X.EXPORT_OPTION_DEFAULTS["sv_summary"] is False
+    assert opt["comments"] is X.EXPORT_OPTION_DEFAULTS["comments"] is False
     assert opt["scope"] == "all"
+    # 两个导出入口的默认值必须一致（本次统一的靶子）
+    sv_opt = w.topout_view._ask_export_options()
+    assert sv_opt == opt
 
 
 def test_gui_opts_maps_settings(tmp_path_factory, monkeypatch):

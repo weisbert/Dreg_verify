@@ -1419,6 +1419,34 @@ def test_full_config_import_clears_stale_negatives(qapp, tmp_path_factory, monke
     w2.close()
 
 
+def test_legacy_logic_export_csv_rows(qapp, tmp_path_factory, tmp_path, monkeypatch):
+    """『排查(旧)』logic 信号「导出CSV」(2026-09-12 起走 exports.write_signal_csv)：
+    行序/行集合不变——输入行 → auto_out → 期望(进.sv) → 期望(bin) → 期望来源 → 负向? →
+    force → RF_WRITE；每列一条测试(转置)。此前这条路径无测试，抽导出层时顺手补上。"""
+    from PySide6 import QtWidgets
+    gui, w, sig = _reserve_window(tmp_path_factory, "legacy_csv")
+    try:
+        w._load_test_items(sig)
+        n = len(w._ti_rows)
+        assert n >= 1
+        out = tmp_path / "logic_tests.csv"
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                            staticmethod(lambda *a, **k: (str(out), "CSV (*.csv)")))
+        monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                            staticmethod(lambda *a, **k: None))
+        w.on_ti_export_csv()
+        text = out.read_text(encoding="utf-8-sig")
+        labels = [ln.split(",")[0] for ln in text.strip().splitlines()]
+        assert labels[0] == "信号\\测试"
+        assert len(text.splitlines()[0].split(",")) == n + 1          # 列=测试数+1(转置)
+        assert labels[-5:] == ["期望(bin)", "期望来源", "负向?", "force", "RF_WRITE"]
+        assert labels[-6].startswith("期望(进.sv)") and labels[-7].startswith("auto_out")
+        rf = next(ln for ln in text.splitlines() if ln.startswith("RF_WRITE"))
+        assert "'h" in rf                                            # 驱动明细真算出来了
+    finally:
+        w.close()
+
+
 def test_cleared_logic_stays_zero_in_negative_only_export(qapp, tmp_path_factory, monkeypatch):
     """自审 Finding2：清空的 logic 信号在『仅负向』导出里仍是零用例(空 override 保留，不回退自动重生)。"""
     from PySide6 import QtWidgets

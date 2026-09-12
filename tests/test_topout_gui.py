@@ -325,7 +325,8 @@ def test_mux_user_col_data_edit_is_column_local(topo_win):
 
 
 def test_topout_export_single_signal_csv(topo_win, tmp_path, monkeypatch):
-    """⭐N7：单信号真值表 CSV(转置：每列一条测试)，含 auto_out/期望/期望来源/负向 行。"""
+    """⭐N7：单信号真值表 CSV(转置：每列一条测试)，含 auto_out/期望/期望来源/负向 行。
+    2026-09-12 能力补齐：期望(bin)/force/RF_WRITE 三行（『排查(旧)』本就有，本视图此前缺）。"""
     from PySide6 import QtWidgets
     w = topo_win
     v = _sel(w, "d_logic_bt_lp_rx_en")
@@ -337,6 +338,29 @@ def test_topout_export_single_signal_csv(topo_win, tmp_path, monkeypatch):
     text = out.read_text(encoding="utf-8-sig")
     assert "信号\\测试" in text and "auto_out" in text and "期望来源" in text
     assert len(text.splitlines()[0].split(",")) == len(v.cur_cols) + 1   # 列=测试数+1(转置)
+    labels = [ln.split(",")[0] for ln in text.strip().splitlines()]
+    for must in ("期望(bin)", "force", "RF_WRITE"):
+        assert must in labels, must
+    rf = next(ln for ln in text.splitlines() if ln.startswith("RF_WRITE"))
+    assert "'h" in rf                       # 驱动明细真算出来了（不是空占位行）
+
+
+def test_topout_export_mux_signal_csv_has_drives(topo_win, tmp_path, monkeypatch):
+    """mux 根也走同一条 CSV 路径：行=控制/数据输入 + 三行驱动，force/RF_WRITE 不为空占位。"""
+    from PySide6 import QtWidgets
+    w = topo_win
+    v = _sel(w, "d_bt_lp_lna_itrim")
+    out = tmp_path / "mux_sig.csv"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    v.on_export_csv()
+    text = out.read_text(encoding="utf-8-sig")
+    labels = [ln.split(",")[0] for ln in text.strip().splitlines()]
+    for must in ("期望(bin)", "force", "RF_WRITE"):
+        assert must in labels, must
+    drive_lines = [ln for ln in text.splitlines() if ln.startswith(("force", "RF_WRITE"))]
+    assert any(len(ln.split(",", 1)[1].strip(",")) > 0 for ln in drive_lines)
 
 
 def test_topout_export_nets_from_signalview(topo_win, tmp_path, monkeypatch):

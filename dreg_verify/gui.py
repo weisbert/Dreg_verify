@@ -45,6 +45,7 @@ from dreg_verify import edits as ED               # noqa: E402
 from dreg_verify import session                   # noqa: E402  会话状态层(Qt-free)：设置IO/覆盖度/配置/诊断配置
 from dreg_verify import analysis_norm as AN       # noqa: E402  分析结果归一化(Qt-free)
 from dreg_verify import inputs_table as IT        # noqa: E402  驱动明细整族(Qt-free)
+from dreg_verify import exports as X              # noqa: E402  —— 导出编排层(Qt-free)
 
 # 记住上次加载的 Excel，下次启动自动加载（省去重复浏览/点击）
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".dreg_verify_gui.json")
@@ -117,18 +118,21 @@ def _save_last_excel(path):
     _save_settings(d)
 
 
-def _skipped_detail_text(skipped):
-    """被跳过信号的明细文本：每个信号一段，列出哪些输入不可驱动及原因。
-    skipped: list[(out_name, assert_id, risky)]，risky = list[(字母, 输入名, 原因)]。"""
-    parts = []
-    for name, _aid, risky in skipped:
-        reasons = "\n".join("    %s = %s：%s" % (letter, base, note or "不可驱动")
-                            for letter, base, note in risky)
-        parts.append("%s\n%s" % (name, reasons))
-    return ("跳过原因：以下输入在 ENV_RF 层探不到（force 会 elaboration 失败）。\n"
-            "如需强制生成：勾选工具栏「缺前缀强制生成」——\n"
-            "裸名 force 交给仿真验证；仿真过=此设计不需前缀，CUVUNF 则跑 scan_rtl 配前缀。\n\n"
-            + "\n\n".join(parts))
+# 被跳过信号的明细文本（实现搬到 exports.skipped_detail_text；这里留别名，老调用点/测试不动）
+_skipped_detail_text = X.skipped_detail_text
+
+
+def _outcome_box(parent, title, outcome, limit=12):
+    """显示一个 ExportOutcome：摘要一行 + 明细（跳过项在前：名字 + 原因）。
+
+    刻意用静态 information() 而不是自建 QMessageBox().exec()——后者在 offscreen/无人值守
+    环境会死等；而且跳过项直接进正文，不用再点一次『Show Details』才看得见（gui-feedback：
+    跳过内容必须可见）。正文里跳过项列前 limit 个，其余指向报告账目页。"""
+    text = outcome.summary_text()
+    detail = outcome.detail_text(limit=limit)
+    if detail:
+        text += "\n\n" + detail
+    QtWidgets.QMessageBox.information(parent, title, text)
 
 
 (COL_SEL, COL_NEG, COL_R, COL_K, COL_OWNER, COL_TYPE, COL_TOP, COL_STATUS,
@@ -420,6 +424,7 @@ class _TopoutProvider:
                                    only=only, sig_cov=sig_cov, form_cov=form_cov)
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
+        """回填 for_test（含 mux 表）。返回写出的组数——exports 拿它报「回填 N 组」。"""
         from . import topout as T
         from . import fortest_writer as F
         with self._supplemented():
@@ -427,7 +432,7 @@ class _TopoutProvider:
                                                           force_overrides=self._fo()),
                                       mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                       probe_prefixes=self._pp(), only=only)
-        F.write_fortest(src, out, rep, include_mux=True)
+        return F.write_fortest(src, out, rep, include_mux=True)
 
 
 def _topout_edit_overrides(edited):
@@ -511,10 +516,11 @@ class _PageProvider:
                              force_overrides=self._fo())
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
+        """回填 for_test（含 mux 表）。page_fortest 不回组数 → 返回 None，exports 就不报组数。"""
         from . import pageviews as P
-        P.page_fortest(self.wb, self.page, src, out, mode=mode, max_tests=max_tests,
-                       exhaustive=exhaustive, probe_prefixes=self._pp(), only=only,
-                       force_overrides=self._fo())
+        return P.page_fortest(self.wb, self.page, src, out, mode=mode, max_tests=max_tests,
+                              exhaustive=exhaustive, probe_prefixes=self._pp(), only=only,
+                              force_overrides=self._fo())
 
 
 class SignalView(QtWidgets.QWidget):
@@ -1792,8 +1798,9 @@ class SignalView(QtWidgets.QWidget):
     def _ask_export_options(self):
         """导出 .sv 选项对话框：范围(全部/仅正向/仅负向) + 注释 + 末尾汇总计数器 + owner 入消息。
         记忆上次选择。返回 {"scope","comments","sv_summary","owner_in_msg"} 或 None(取消)。
-        与『排查(旧)』共用 settings 记忆键。"""
+        默认值与 settings 键名统一来自 exports（与『排查(旧)』同一套，见 X.EXPORT_OPTION_DEFAULTS）。"""
         st = _load_settings()
+        last = X.load_export_options(st)
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("导出 .sv 选项")
         lay = QtWidgets.QVBoxLayout(dlg)
@@ -1806,16 +1813,16 @@ class SignalView(QtWidgets.QWidget):
         scope_combo.addItem("仅负向（故意填错，自检 checker 报错链路）", "neg")
         scope_combo.setToolTip("仅正向：剔除你标的负向用例。\n仅负向：只导出标了负向的故意填错用例；"
                                "无负向的信号在本次导出里不出现(记账，不静默丢)。")
-        si = scope_combo.findData(st.get("export_scope", "all"))
+        si = scope_combo.findData(last["scope"])
         scope_combo.setCurrentIndex(si if si >= 0 else 0)
         scope_row.addWidget(scope_combo, 1)
         lay.addLayout(scope_row)
         cm = QtWidgets.QCheckBox("加注释（每信号一行 // 名 + 文件头；默认关=纯语句体便于 diff）")
-        cm.setChecked(bool(st.get("export_comments", False)))
+        cm.setChecked(last["comments"])
         sm = QtWidgets.QCheckBox("末尾测试汇总 + 计数器（命名块统计真 FAIL / NEG-broken 数）")
-        sm.setChecked(bool(st.get("export_sv_summary", False)))
+        sm.setChecked(last["sv_summary"])
         ow = QtWidgets.QCheckBox("断言消息尾部追加 owner")
-        ow.setChecked(bool(st.get("export_owner_in_msg", False)))
+        ow.setChecked(last["owner_in_msg"])
         for c in (cm, sm, ow):
             lay.addWidget(c)
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
@@ -1825,35 +1832,27 @@ class SignalView(QtWidgets.QWidget):
             return None
         opt = {"scope": scope_combo.currentData() or "all", "comments": cm.isChecked(),
                "sv_summary": sm.isChecked(), "owner_in_msg": ow.isChecked()}
-        st.update({"export_scope": opt["scope"], "export_comments": opt["comments"],
-                   "export_sv_summary": opt["sv_summary"], "export_owner_in_msg": opt["owner_in_msg"]})
-        _save_settings(st)
+        _save_settings(X.store_export_options(st, opt))
         return opt
 
-    def _export_summary_text(self, path, b):
-        """导出/预览后的人读摘要：信号/断言块/测试用例(含负向、designer 手填期望拆分)/记账。"""
-        s = b.get("summary", {})
-        acc = b.get("accounted", [])
-        return ("%s\n\n信号 %d；断言块 %d；测试用例 %d（其中负向 %d、designer 手填期望 %d）；"
-                "记账(不产断言) %d%s"
-                % (path, s.get("n_total", 0), s.get("n_emitted", 0), s.get("n_vectors", 0),
-                   s.get("n_negative", 0), s.get("n_designer", 0), s.get("n_accounted", 0),
-                   ("\n（记账：%s）" % "、".join(a["name"] for a in acc)) if acc else ""))
+    def _show_outcome(self, title, outcome):
+        """统一显示一个 ExportOutcome：摘要一行 + 明细（跳过项在前，名字 + 原因）。"""
+        _outcome_box(self, title, outcome)
+        self.main.status.showMessage(outcome.summary_text())
 
     def on_preview(self):
         if not self._guard():
             return
         mode, exh = self._mode()
         only = self._checked_names() or None
-        text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
-                                          sig_cov=self._sig_cov, form_cov=self._form_cov)
+        # options=None → 用 provider 默认（预览逐字节与旧行为一致）
+        text, b = X.render_sv(self.provider, only=only, mode=mode, max_tests=self._maxt(),
+                              exhaustive=exh, edited=self._compute_edited(),
+                              sig_cov=self._sig_cov, form_cov=self._form_cov)
         self.sv.setPlainText(text)
         self.inner.setCurrentIndex(1)
-        s = b.get("summary", {})
-        self.main.status.showMessage(
-            "预览：信号 %d，断言块 %d，测试用例 %d（负向 %d、手填期望 %d），记账(不产断言) %d"
-            % (s.get("n_total", 0), s.get("n_emitted", 0), s.get("n_vectors", 0),
-               s.get("n_negative", 0), s.get("n_designer", 0), s.get("n_accounted", 0)))
+        out = X.sv_outcome("", b)
+        self.main.status.showMessage("预览：%s" % out.counts_text())
 
     def on_export_sv(self):
         if not self._guard():
@@ -1867,33 +1866,37 @@ class SignalView(QtWidgets.QWidget):
             return
         mode, exh = self._mode()
         only = self._checked_names() or None
-        text, b = self.provider.render_sv(only, mode, self._maxt(), exh, self._compute_edited(),
-                                          comments=eo["comments"], sv_summary=eo["sv_summary"],
-                                          owner_in_msg=eo["owner_in_msg"], scope=eo.get("scope", "all"),
-                                          sig_cov=self._sig_cov, form_cov=self._form_cov)
+        text, b = X.render_sv(self.provider, only=only, mode=mode, max_tests=self._maxt(),
+                              exhaustive=exh, edited=self._compute_edited(), options=eo,
+                              sig_cov=self._sig_cov, form_cov=self._form_cov)
         if not self.main._confirm_dup_labels(b):     # 重复 assert 标号(非法 SV) → 弹确认，别静默导出(N9)
             return
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
+        try:
+            _t, out = X.export_sv(self.provider, path, options=eo, text=text, build=b)
+        except X.ExportError as ex:
+            QtWidgets.QMessageBox.critical(self, "写出失败", str(ex))
+            return
         self.sv.setPlainText(text)
         self.inner.setCurrentIndex(1)
-        QtWidgets.QMessageBox.information(self, "已导出", self._export_summary_text(path, b))
+        self._show_outcome("已导出", out)
 
     def on_export_report(self):
         if not self._guard():
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出报告", "%s_report.html" % self.view_id,
-            "HTML (*.html);;CSV (*.csv);;Excel (*.xlsx)")
+        path, selfilter = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出报告", "%s_report.html" % self.view_id, X.REPORT_FILTER_STR)
         if not path:
             return
-        from . import cli
         mode, exh = self._mode()
         only = self._checked_names() or None          # 勾选项过滤（与 .sv 导出 only 同口径，N6）
         rep = self.provider.render_report(mode, self._maxt(), exh, only=only,
                                           sig_cov=self._sig_cov, form_cov=self._form_cov)
-        written = cli.write_report(path, rep, self.main._loaded_excel_path or "")
-        QtWidgets.QMessageBox.information(self, "已导出", "报告已导出：\n%s" % "\n".join(written))
+        try:
+            out = X.export_report(path, rep, self.main._loaded_excel_path or "", selfilter)
+        except X.ExportError as ex:
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
+            return
+        self._show_outcome("已导出", out)
 
     def on_export_csv(self):
         """导出【当前选中信号】真值表为 CSV（转置：第一列=输入/字段名，其后每列一条测试）。N7。
@@ -1905,24 +1908,16 @@ class SignalView(QtWidgets.QWidget):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出本信号真值表 CSV", default, "CSV (*.csv)")
         if not path:
             return
-        import csv
-        cols = self.cur_cols
-        out_w = self.cur_an["out_width"] or 1
-        wsuf = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
-        fc = generator._fmt_cell
-        with open(path, "w", encoding="utf-8-sig", newline="") as f:
-            wr = csv.writer(f)
-            wr.writerow(["信号\\测试"] + [c["name"] for c in cols])
-            for e in self.e_inputs:                       # 行序与编辑器一致（控制位/输入）
-                wr.writerow([e["label"]] + [fc(c["vals"].get(e["key"], 0), e["width"]) for c in cols])
-            wr.writerow(["auto_out%s" % wsuf] + [fc(c["auto"], c["auto_w"]) for c in cols])
-            wr.writerow(["期望(进.sv)%s" % wsuf]
-                        + [fc(c["exp"] if c["exp"] is not None else c["auto"], c["auto_w"]) for c in cols])
-            wr.writerow(["期望来源"] + [("负向(故意填错)" if c["neg"]
-                                        else ("designer手填" if c["exp"] is not None else "auto_out兜底"))
-                                       for c in cols])
-            wr.writerow(["负向?"] + ["是" if c["neg"] else "" for c in cols])
-        QtWidgets.QMessageBox.information(self, "已导出", "本信号真值表 CSV 已导出：\n%s" % path)
+        # 行序与编辑器一致；期望(bin)/force/RF_WRITE 三行由 exports 统一补齐（『排查(旧)』本就有）
+        drive_fn = X.make_drive_fn(*X.drive_context(self.cur_an))
+        try:
+            out = X.write_signal_csv(path, self.cur_cols, self.e_inputs,
+                                     out_width=self.cur_an["out_width"] or 1,
+                                     drive_fn=drive_fn, name=self.cur_an.get("name") or "")
+        except X.ExportError as ex:
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
+            return
+        self._show_outcome("已导出", out)
 
     def on_fortest(self):
         if not self._guard():
@@ -1936,8 +1931,13 @@ class SignalView(QtWidgets.QWidget):
             return
         mode, exh = self._mode()
         only = self._checked_names() or None          # 勾选项过滤（与 .sv 导出 only 同口径，N6）
-        self.provider.fortest(self.main._loaded_excel_path, path, mode, self._maxt(), exh, only=only)
-        QtWidgets.QMessageBox.information(self, "已回填", "for_test 已回填（含 mux 表）：\n%s" % path)
+        try:
+            out = X.export_fortest(self.main._loaded_excel_path, path, provider=self.provider,
+                                   mode=mode, max_tests=self._maxt(), exhaustive=exh, only=only)
+        except X.ExportError as ex:
+            QtWidgets.QMessageBox.critical(self, "回填失败", str(ex))
+            return
+        self._show_outcome("已回填", out)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -3602,18 +3602,8 @@ class MainWindow(QtWidgets.QMainWindow):
     }
 
     def _nets_categories(self):
-        """当前表【有内容】的导出类别(键)：Topout(有 Topout 页) + 四子模块页中可用的那些。
-        与 GUI 顶层 tab 一一对应——空页不出现在导出框里(空页导出也是空，无意义)。"""
-        cats = []
-        if getattr(self.wb, "topout", None):
-            cats.append("topout-cone")       # ⭐第一性推荐：探针 + cone 输入
-            cats.append("topout")            # 仅探针(降级保留)
-        try:
-            from . import pageviews as P
-            cats += [p for p in P.PAGES if P.page_available(self.wb, p)]
-        except Exception:  # noqa: BLE001
-            cats += ["logic", "mux", "dft", "iddq"]
-        return cats
+        """当前表【有内容】的导出类别(键)——委托 exports.nets_categories（对话框只管显示）。"""
+        return X.nets_categories(self.wb)
 
     def _ask_nets_pages(self):
         """导出 nets.txt 前选要导哪些类别的网（2026-06-25）。类别 = Topout + 所有【有内容】的
@@ -3668,12 +3658,10 @@ class MainWindow(QtWidgets.QMainWindow):
         pages = self._ask_nets_pages()
         if not pages:
             return
-        from dreg_verify import rtl_scan
         try:
-            nets = rtl_scan.collect_nets(self.wb, pages=pages)
-            per = {p: len(rtl_scan.collect_nets(self.wb, pages=[p])) for p in sorted(pages)}
-        except Exception as ex:  # noqa: BLE001
-            QtWidgets.QMessageBox.critical(self, "导出失败", "收集网清单出错：\n%s" % ex)
+            nets, per = X.collect_nets(self.wb, pages)
+        except X.ExportError as ex:
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
         finally:
             # collect_excel_nets/collect_topout_nets 会把 logic 信号 _append_to_logic 强设 True
@@ -3688,9 +3676,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(rtl_scan.render_nets_text(nets))
-        except OSError as ex:
+            from dreg_verify import rtl_scan
+            X.write_text(path, rtl_scan.render_nets_text(nets))
+        except X.ExportError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
         brk = " · ".join("%s %d" % (p, per[p]) for p in sorted(per))
@@ -6193,44 +6181,22 @@ class MainWindow(QtWidgets.QMainWindow):
                                                         "CSV (*.csv)")
         if not path:
             return
-        import csv
         rows = self._ti_rows
-        # 纵向(真值表)导出：第一列=信号/字段名，其后每列一条测试 T0/T1...
+        # 纵向(真值表)导出：第一列=信号/字段名，其后每列一条测试 T0/T1...（排版/行序由 exports 统一）
+        pin = getattr(self, "_ti_dft_pin", None)         # DFT 门输入行：每条测试驱透传值
+        cols, inputs = X.columns_from_rowdicts(
+            rows, self._ti_groups, self._ti_sig.out_width or 1,
+            label_col=self._ti_label, label_row=self._vheader_label,
+            gate_label=("%s (DFT门)" % pin[0]) if pin else None,
+            gate_value=(pin[1] if pin else None), gate_row=getattr(self, "_ti_gate_row", None))
         try:
-            with open(path, "w", encoding="utf-8-sig", newline="") as f:
-                wr = csv.writer(f)
-                wr.writerow(["信号\\测试"] + [self._ti_label(rd, i) for i, rd in enumerate(rows)])
-                disp_rows = [(self._vheader_label(g),
-                              [self._fmt_val(rd["base_values"].get(g["key"], 0), g["width"])
-                               for rd in rows]) for g in self._ti_groups]
-                if getattr(self, "_ti_dft_pin", None):   # DFT 门输入行：每条测试驱透传值
-                    _gr = (self._ti_gate_row if self._ti_gate_row is not None
-                           else len(disp_rows))
-                    disp_rows.insert(_gr, ("%s (DFT门)" % self._ti_dft_pin[0],
-                                           [str(self._ti_dft_pin[1])] * len(rows)))
-                for _lbl, _vals in disp_rows:            # 行序与编辑器/for_test 一致
-                    wr.writerow([_lbl] + _vals)
-                out_w = self._ti_sig.out_width or 1
-                wsuf = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
-                # auto_out(表达式计算) 与 期望(进 .sv 的对比值) 分两行——与编辑器/HTML 报告一致
-                wr.writerow(["auto_out%s" % wsuf] + [self._fmt_val(rd["correct"] & E.mask(rd.get("correct_width") or 1),
-                                                                   rd.get("correct_width") or 1) for rd in rows])
-                wr.writerow(["期望(进.sv)%s" % wsuf] + [self._fmt_val(rd["expected"] & E.mask(rd.get("correct_width") or 1),
-                                                                     rd.get("correct_width") or 1) for rd in rows])
-                wr.writerow(["期望(bin)"] + [W.fmt_bin(rd["expected"], rd.get("correct_width") or 1)
-                                            for rd in rows])
-                wr.writerow(["期望来源"] + [("负向(故意填错)" if rd["is_negative"] else
-                                            ("designer手填" if rd.get("designer_expected") is not None
-                                             else "auto_out兜底")) for rd in rows])
-                wr.writerow(["负向?"] + ["是" if rd["is_negative"] else "" for rd in rows])
-                drives = [self._drive_strs(rd) for rd in rows]
-                wr.writerow(["force"] + [fs for fs, _ in drives])
-                wr.writerow(["RF_WRITE"] + [ws for _, ws in drives])
-        except OSError as ex:
+            out = X.write_signal_csv(path, cols, inputs, out_width=self._ti_sig.out_width or 1,
+                                     drive_fn=lambda c: self._drive_strs(c["row"]),
+                                     name=sig.out_name)
+        except X.ExportError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
-        QtWidgets.QMessageBox.information(self, "完成", "已导出 %d 条测试项：\n%s"
-                                          % (len(self._ti_rows), path))
+        QtWidgets.QMessageBox.information(self, "完成", out.summary_text())
         self.status.showMessage("已导出测试项 CSV：%s" % path)
 
     def _mux_drive_strs(self, vec, bindings, used_vars):
@@ -6266,42 +6232,21 @@ class MainWindow(QtWidgets.QMainWindow):
                                                         "CSV (*.csv)")
         if not path:
             return
-        import csv
         out_w = grp.out_width or 1
-        wsuf = "[%d:0]" % (out_w - 1) if out_w > 1 else ""
+        pin = getattr(self, "_ti_mux_dft_pin", None)
+        cols, inputs = X.columns_from_mux_vectors(
+            vecs, bindings, used, data_keys=data_key_set, out_width=out_w,
+            disp=getattr(self, "_ti_mux_disp", None),
+            gate_label=("%s (DFT门)" % pin[0]) if pin else None,
+            gate_value=(pin[1] if pin else None))
         try:
-            with open(path, "w", encoding="utf-8-sig", newline="") as f:
-                wr = csv.writer(f)
-                wr.writerow(["信号\\测试"] + [W.test_label(v) for v in vecs])
-                pin = getattr(self, "_ti_mux_dft_pin", None)
-                disp = (getattr(self, "_ti_mux_disp", None)
-                        or [("key", k) for k in used] + ([("gate", None)] if pin else []))
-                for ent in disp:                  # 行序与编辑器/for_test 一致
-                    if ent[0] == "gate":          # DFT 门输入行：每条测试驱透传值
-                        wr.writerow(["%s (DFT门)" % pin[0]] + [str(pin[1])] * len(vecs))
-                        continue
-                    key = ent[1]
-                    b = bindings.get(key)
-                    width = b.width if b is not None else 1
-                    role = "数据" if key in data_key_set else "控制"
-                    label = "%s (%s)" % ((b.base if b is not None else key), role)
-                    wr.writerow([label] + [self._fmt_val(v.assignments.get(key, 0), width) for v in vecs])
-                wr.writerow(["auto_out%s" % wsuf] + [self._fmt_val(v.exp_value & E.mask(out_w), out_w)
-                                                     for v in vecs])
-                wr.writerow(["期望(进.sv)%s" % wsuf] + [self._fmt_val(v.asserted_value & E.mask(out_w), out_w)
-                                                       for v in vecs])
-                wr.writerow(["期望(bin)"] + [W.fmt_bin(v.asserted_value, out_w) for v in vecs])
-                wr.writerow(["期望来源"] + [("负向(故意填错)" if v.is_negative else
-                                            ("designer手填" if v.designer_expected is not None
-                                             else "auto_out兜底")) for v in vecs])
-                wr.writerow(["负向?"] + ["是" if v.is_negative else "" for v in vecs])
-                drives = [self._mux_drive_strs(v, bindings, used) for v in vecs]
-                wr.writerow(["force"] + [fs for fs, _ in drives])
-                wr.writerow(["RF_WRITE"] + [ws for _, ws in drives])
-        except OSError as ex:
+            out = X.write_signal_csv(path, cols, inputs, out_width=out_w,
+                                     drive_fn=X.make_drive_fn(bindings, used),
+                                     name=grp.out_name)
+        except X.ExportError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
-        QtWidgets.QMessageBox.information(self, "完成", "已导出 %d 条 mux 测试项：\n%s" % (len(vecs), path))
+        QtWidgets.QMessageBox.information(self, "完成", out.summary_text())
         self.status.showMessage("已导出 mux 测试项 CSV：%s" % path)
 
     def _rows_to_vectors(self, node, bindings, groups, out_width, rows):
@@ -6508,11 +6453,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _ask_export_options(self, title):
         """生成 .sv 前的导出选项：内容范围(全部/仅正向/仅负向) + 注释 + owner + 末尾汇总。
-        记住上次选择(下次预选)。返回 {"scope","comments","owner_in_msg","sv_summary"} 或 None。"""
+        记住上次选择(下次预选)。返回 {"scope","comments","owner_in_msg","sv_summary"} 或 None。
+
+        ⚠ 默认值与 settings 键名统一到 exports.EXPORT_OPTION_DEFAULTS（2026-09-12）：
+        本对话框此前 owner/汇总默认 True、SignalView 版默认 False，两边却共用同一批键 →
+        "没配过"时两个入口产物不同（静默不一致）。现以 SignalView 版为准（全 False）。"""
         st = _load_settings()
-        last_scope, last_cm = st.get("export_scope", "all"), bool(st.get("export_comments", False))
-        last_owner = bool(st.get("export_owner_in_msg", True))
-        last_summary = bool(st.get("export_sv_summary", True))
+        last = X.load_export_options(st)
+        last_scope, last_cm = last["scope"], last["comments"]
+        last_owner, last_summary = last["owner_in_msg"], last["sv_summary"]
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle(title)
         lay = QtWidgets.QVBoxLayout(dlg)
@@ -6551,25 +6500,21 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(bb)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return None
-        scope, comments = scope_combo.currentData(), cm_chk.isChecked()
-        owner_in_msg, sv_summary = owner_chk.isChecked(), sum_chk.isChecked()
-        st["export_scope"] = scope; st["export_comments"] = comments
-        st["export_owner_in_msg"] = owner_in_msg; st["export_sv_summary"] = sv_summary
-        _save_settings(st)               # 记住，下次预选
-        return {"scope": scope, "comments": comments,
-                "owner_in_msg": owner_in_msg, "sv_summary": sv_summary}
+        opt = {"scope": scope_combo.currentData() or "all", "comments": cm_chk.isChecked(),
+               "owner_in_msg": owner_chk.isChecked(), "sv_summary": sum_chk.isChecked()}
+        _save_settings(X.store_export_options(st, opt))    # 记住，下次预选
+        return opt
 
     def _confirm_dup_labels(self, res):
-        """有重复 assert 标号(非法 SV)就弹警告列出冲突对，让用户选『仍然生成/取消』。无冲突直接 True。"""
+        """有重复 assert 标号(非法 SV)就弹警告列出冲突对，让用户选『仍然生成/取消』。无冲突直接 True。
+        冲突清单的文本由 exports.dup_label_text 出（两个导出入口共用同一份措辞）。"""
         dups = res.get("dup_labels") or []
         if not dups:
             return True
-        lines = "\n".join("  %s  ←  %s / %s" % (lbl, a, b) for lbl, a, b in dups[:15])
-        more = "\n  …(共 %d 处)" % len(dups) if len(dups) > 15 else ""
         return QtWidgets.QMessageBox.warning(
             self, "重复 assert 标号（非法 SV）",
-            "检测到 %d 处重复的 assert 标号；同一作用域内重复会导致 elaboration 失败：\n%s%s\n\n"
-            "多因两个信号共用同一 R(序号)。仍要生成吗？" % (len(dups), lines, more),
+            "检测到 %d 处重复的 assert 标号；同一作用域内重复会导致 elaboration 失败：\n%s\n\n"
+            "多因两个信号共用同一 R(序号)。仍要生成吗？" % (len(dups), X.dup_label_text(dups)),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes
 
@@ -6614,42 +6559,19 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             # 汇总命名块后缀跟导出范围走：『仅正向』『仅负向』两份贴进同一作用域也不重名
             suffix = {"pos": "_pos", "neg": "_neg"}.get(scope, "")
-            self._write(path, generator.render(res, comments=cm, block_suffix=suffix))
-        except OSError as ex:
-            QtWidgets.QMessageBox.critical(
-                self, "写出失败",
-                "无法写入 %s：\n%s\n\n(文件是否正被仿真器/编辑器占用？)" % (path, ex))
+            X.write_text(path, generator.render(res, comments=cm, block_suffix=suffix))
+        except X.ExportError as ex:
+            QtWidgets.QMessageBox.critical(self, "写出失败", str(ex))
             return
-        nsk = res["summary"].get("n_skipped", 0)
-        skipped = res.get("skipped") or []
-        skipmsg = ""
-        if nsk:
-            names = [name for name, _aid, _risky in skipped]
-            shown = "\n".join("  ↷ %s" % n for n in names[:12])
-            more = "\n  …等共 %d 个（点『Show Details』看全部及原因）" % nsk if nsk > 12 else ""
-            skipmsg = ("\n\n跳过 %d 个含不可驱动输入的信号（保证产物能 elaborate）：\n%s%s"
-                       % (nsk, shown, more))
+        out = X.sv_outcome(path, res, scope=scope)
         # 已自定义信号数按"真正写进本次产物"的 block 统计(避免把未勾选/被范围过滤的也算进来)
         n_cust = sum(1 for (_l, st) in res["blocks"]
                      if st.get("out_name", "").lower() in self._customized)
-        custmsg = ("\n\n含 %d 个已自定义测试项的信号(编辑已写入产物)。" % n_cust
-                   if n_cust else "")
-        # 期望来源统计：designer 手填 vs auto_out 兜底（兜底=未经 designer 人工核对，有自证嫌疑）
-        s = res["summary"]
-        n_pos = s["n_vectors"] - s["n_negative"]
-        n_dsgn = s.get("n_designer", 0)
-        expmsg = ""
-        if n_pos and scope != "neg":
-            expmsg = "\n\n断言期望来源：designer 手填 %d 条，auto_out 兜底 %d 条。" % (n_dsgn, n_pos - n_dsgn)
-            if n_pos - n_dsgn:
-                expmsg += ("\n（兜底 = 期望未手填、直接用表达式计算值对比——有自证嫌疑；"
-                           "\n  建议在右侧编辑器手填期望，或用 HTML 报告『真值表检查』页核对）")
-        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Information, "完成",
-                                    "已写出：%s%s%s%s%s" % (path, scope_msg, expmsg, skipmsg, custmsg),
-                                    QtWidgets.QMessageBox.Ok, self)
-        if skipped:
-            box.setDetailedText(_skipped_detail_text(skipped))
-        box.exec()
+        if n_cust:
+            out.counts["n_customized"] = n_cust
+        if scope_msg:
+            out.note = scope_msg.strip("（）")
+        _outcome_box(self, "完成", out)
         self.status.showMessage("已生成：%s%s" % (path, scope_msg))
 
     def on_report(self):
@@ -6660,37 +6582,23 @@ class MainWindow(QtWidgets.QMainWindow):
         勾选了信号则只报告这些，否则覆盖全部信号；自动带上测试项编辑/负向。"""
         if not self.wb:
             return
-        from dreg_verify import cli            # 复用 CLI 的报告写出器(按扩展名出 HTML/Excel/CSV)
         sel = self._collect()
-        fmts = [("HTML 网页 (*.html)", ".html"),
-                ("Excel 工作簿 (*.xlsx)", ".xlsx"),
-                ("CSV 表格 (*.csv)", ".csv")]
         path, selfilter = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出测试用例报告", "dreg_report.html", ";;".join(f for f, _ in fmts))
+            self, "导出测试用例报告", "dreg_report.html", X.REPORT_FILTER_STR)
         if not path:
             return
-        # 按所选筛选器补正扩展名（筛选器=显式格式选择，权威）：先剥掉任何已知报告扩展名，
-        # 再补所选格式的扩展名。这样「默认名 dreg_report.html + 选 Excel」→ .xlsx；不会出双扩展名。
-        want_ext = next((e for f, e in fmts if f == selfilter), None)
-        if want_ext:
-            base = path
-            for e in (".html", ".htm", ".xlsx", ".csv"):
-                if base.lower().endswith(e):
-                    base = base[:-len(e)]
-                    break
-            path = base + want_ext
         try:
             rep = generator.report(self.wb, self._opts(sel or None))
-            written = cli.write_report(path, rep, self.path_edit.text() or "excel")
-        except Exception as ex:  # noqa: BLE001
+            out = X.export_report(path, rep, self.path_edit.text() or "excel", selfilter)
+        except X.ExportError as ex:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
             return
-        scope = "勾选的 %d 个" % len(sel) if sel else "全部"
-        n_tc = len(rep["detail"]); n_neg = sum(1 for r in rep["detail"] if r.get("neg") == "是")
-        QtWidgets.QMessageBox.information(
-            self, "完成", "已导出报告(%s信号，用例 %d 条，负向 %d 条)：\n%s"
-            % (scope, n_tc, n_neg, "\n".join(written)))
-        self.status.showMessage("已导出报告：%s" % "  ".join(written))
+        except Exception as ex:  # noqa: BLE001 —— 报告构建(generator.report)出错也不崩
+            QtWidgets.QMessageBox.critical(self, "导出失败", str(ex))
+            return
+        out.note = "勾选的 %d 个信号" % len(sel) if sel else "全部信号"
+        _outcome_box(self, "完成", out)
+        self.status.showMessage("已导出报告：%s" % "  ".join(out.paths))
 
     def on_fortest(self):
         """把当前测试项按 for_test 真值表排版回填到 Excel：复制源 Excel 全部 sheet、只替换
@@ -6702,37 +6610,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if not src or not os.path.isfile(src):
             QtWidgets.QMessageBox.warning(self, "提示", "请先加载有效的源 .xlsx —— 回填要复制它的全部 sheet")
             return
-        from dreg_verify import fortest_writer
         sel = self._collect()
         default = os.path.splitext(os.path.basename(src))[0] + "_fortest.xlsx"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "回填 for_test 到新 Excel", default, "Excel 工作簿 (*.xlsx)")
         if not path:
             return
-        if not path.lower().endswith(".xlsx"):
-            path += ".xlsx"
-        if os.path.abspath(path) == os.path.abspath(src):
-            QtWidgets.QMessageBox.warning(self, "提示", "输出文件不能是源 Excel 本身(回填产物是新文件，源文件不动)")
-            return
         try:
-            rep = generator.report(self.wb, self._opts(sel or None))
-            n_grp = fortest_writer.write_fortest(src, path, rep)
-        except Exception as ex:  # noqa: BLE001
-            QtWidgets.QMessageBox.critical(self, "回填失败", str(ex))
+            out = X.export_fortest(src, path, wb=self.wb, opts=self._opts(sel or None))
+        except X.ExportError as ex:
+            QtWidgets.QMessageBox.warning(self, "回填失败", str(ex))
             return
-        scope = "勾选的" if sel else "全部"
-        n_logic = sum(1 for t in rep.get("tables", []) if t.get("is_logic") and t.get("tests"))
-        n_mux = sum(1 for t in rep.get("tables", []) if not t.get("is_logic"))
-        mux_note = ("；mux 信号 %d 个未回填(for_test 是 logic cone 真值表排版，mux 结构不同)" % n_mux) if n_mux else ""
-        QtWidgets.QMessageBox.information(
-            self, "完成", "已回填 %s logic 信号(%d 组)到 for_test 页%s：\n%s\n\n"
-            "(源 Excel 各 sheet 数据已复制，源文件未改；图表/图片等非数据元素可能不保留)"
-            % (scope, n_grp, mux_note, path))
-        self.status.showMessage("已回填 for_test：%s（%d 组）" % (path, n_grp))
+        out.note = "%s信号" % ("勾选的 " if sel else "全部 ")
+        _outcome_box(self, "完成", out)
+        self.status.showMessage("已回填 for_test：%s（%d 组）"
+                                % (out.path, out.counts.get("n_groups", 0)))
 
     def _write(self, path, text):
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
+        """写文本产物（薄壳，实现在 exports.write_text：OSError 会翻成人读原因）。"""
+        return X.write_text(path, text)
 
 
 def main():
