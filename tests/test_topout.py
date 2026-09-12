@@ -277,6 +277,53 @@ def test_c131_dft_gate_skipped_reported(wl_wb, wl_res):
     assert G.pin_dft_gate(name, [], wl_wb, wl_res, input_bases={gate}) is None
 
 
+def _gold_shas():
+    """tools/byte_gate.py 的 6 个基线 sha（改前在 main HEAD 录的，本测试当『改前快照』用）。"""
+    import importlib.util
+    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "tools", "byte_gate.py")
+    spec = importlib.util.spec_from_file_location("byte_gate_for_test", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.GOLD
+
+
+def test_c217_include_risky_param_default_true_bytes_equal(wb, wl_wb):
+    """C-217/C-170：include_risky 与 block_suffix 变成形参，默认值 = 此前写死的值。
+
+    ① 默认渲染 == 显式传旧写死值(include_risky=True, block_suffix="") == tools/byte_gate.py
+       改前录的 6 个基线 sha —— 逐字节相同；
+    ② 两个形参都真接通了（不是挂着好看）：include_risky=False 会少产出缺前缀的块，
+       block_suffix="_pos" 会改汇总命名块名。"""
+    import hashlib
+    gold = _gold_shas()
+    for tag, wb_ in (("btlp", wb), ("wl", wl_wb)):
+        for m, kw in (("min", {"mode": "min"}), ("max", {"mode": "max"}),
+                      ("exh", {"mode": "min", "exhaustive": True})):
+            a, _b = T.render_topout_sv(wb_, max_tests=100000, **kw)
+            b, _b2 = T.render_topout_sv(wb_, max_tests=100000, include_risky=True,
+                                        block_suffix="", **kw)
+            assert a == b                                        # 默认值 == 旧写死值
+            assert hashlib.sha256(a.encode("utf-8")).hexdigest()[:8] == gold[(tag, m)]
+    # ② include_risky=False：WL 缺前缀的信号不再强制生成（块数变少、原因进 accounted）
+    on, b_on = T.render_topout_sv(wl_wb, mode="min", max_tests=64)
+    off, b_off = T.render_topout_sv(wl_wb, mode="min", max_tests=64, include_risky=False)
+    assert off != on and len(off) < len(on)
+    assert len([1 for _l, s in b_off["blocks"] if s.get("n_vectors", 0) > 0]) \
+        < len([1 for _l, s in b_on["blocks"] if s.get("n_vectors", 0) > 0])
+    # ② block_suffix：只动汇总命名块名，不带后缀时逐字节同旧
+    s_none, _ = T.render_topout_sv(wl_wb, mode="min", max_tests=64, sv_summary=True)
+    s_pos, bpos = T.render_topout_sv(wl_wb, mode="min", max_tests=64, sv_summary=True,
+                                     block_suffix="_pos")
+    assert s_pos != s_none and "_pos" in s_pos
+    assert bpos["block_suffix"] == "_pos"     # build 自己不渲染，原样带出去给分文件导出用
+    assert b_on["block_suffix"] == ""
+    # 报告/清单入口同样接通（默认 True → 与不传一致）
+    assert (T.topout_view_models(wl_wb, mode="min", max_tests=64)
+            == T.topout_view_models(wl_wb, mode="min", max_tests=64, include_risky=True))
+    assert T.topout_report(wl_wb, mode="min", max_tests=64, include_risky=False)["summary"]
+
+
 def test_view_models_carry_form_label(wb):
     """#2：视图模型带 form/form_label(展开后表达式形态 F0-F4)——信号清单『逻辑类型』列。"""
     ms = {m["name"]: m for m in T.topout_view_models(wb, mode="max")}
