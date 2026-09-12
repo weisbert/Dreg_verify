@@ -30,8 +30,11 @@ an 的字段（两条流水线保证同名同义）::
     dft_gate      None 或 {"key","label","wire_lhs","transp","width","binding"}
     out_net       str              该信号 assert LHS 的网名（**不带探针前缀**；GUI v2 §7-1）
 
+    status_detail str              状态细分档（STATUS_DETAILS 之一；GUI v2 §7-2）
+
 GUI v2 C0-a（2026-09-12）新增的键全部 additive（只加不改），老消费方逐字节不受影响：
     out_net       见上。前缀由 provider 另补 an["probe_prefix"]（它才有 probe_prefixes 配置）。
+    status_detail 判据只取结构化字段，缺判据的档退回 "clean" 并保留 issues 原文（绝不猜文本）。
 
 搬家说明（2026-09-12，GUI v2 阶段 A4c）：本模块四个函数原本长在 gui.py 里，
 是纯函数、不碰 Qt；抽出来后 gui.py 保留同名薄委托，行为逐字节不变。
@@ -44,7 +47,18 @@ from . import generator
 from . import vectors as V
 
 __all__ = ["SV_VAR_RE", "subst_expr", "order_groups_fortest",
-           "norm_topout_result", "norm_page_result"]
+           "norm_topout_result", "norm_page_result", "STATUS_DETAILS", "status_detail"]
+
+#: an["status_detail"] 的取值（= ui/terms.STATUS_KEYS 去掉 "pending"——那档是骨架清单专用、
+#: 引擎从不产出）。清单状态列/详情徽标/行内原因块按它取文案；老的 an["status"] 四档一字不动。
+STATUS_DETAILS = ("clean", "wire-fallback", "needs-prefix", "risky-generated", "bare-probe",
+                  "false-green", "spec-collision", "parse-err", "unresolved", "skip", "error")
+
+#: 输入网埋在子模块 / 是上游 mux 衔接网 → 必须配层级前缀才 force 得到（缺前缀 = 默认整组跳过）
+_RISKY_FOUND_IN = ("needs-prefix", "mux-output")
+#: 表里查无、按命名约定当线网 force（prefixed-wire = 配了前缀的同一类：前缀是用户填的、
+#: 网名仍未经任何校验，同属「名字是猜的」，R41）
+_GUESSED_FOUND_IN = ("wire", "prefixed-wire")
 
 # 表达式里的单字母变量（A-J）——代入真实信号名时用
 SV_VAR_RE = re.compile(r"(?<![A-Za-z0-9_])([A-J])(?![A-Za-z0-9_])")
@@ -85,7 +99,103 @@ def _gate_dict(res):
             "transp": int(g[1]), "width": 1, "binding": g[0]}
 
 
-def norm_topout_result(res, wb=None):
+def _leaf_bindings(res):
+    """该结果的全部叶子绑定：logic/register 在 res.bindings，mux 在 res.expansion["bindings"]。"""
+    out = []
+    for b in (getattr(res, "bindings", None) or {}).values():
+        if b is not None:
+            out.append(b)
+    exp = getattr(res, "expansion", None)
+    if isinstance(exp, dict):
+        for b in (exp.get("bindings") or {}).values():
+            if b is not None:
+                out.append(b)
+    return out
+
+
+def _src_obj(res):
+    """源对象（TopoutResult → root.obj，PageResult → sig）；直连寄存器/RO 回读根为 None。"""
+    root = getattr(res, "root", None)
+    if root is not None:
+        return getattr(root, "obj", None)
+    return getattr(res, "sig", None)
+
+
+def _is_bare_probe(res, probe_prefix):
+    """输出侧「名字是猜的」：断言 LHS 贴的不是声明的那个名字，而是按命名约定推出来的内部衔接网。
+
+    判据（结构化、两条流水线同一条）：**assert LHS 网名 ≠ 该信号声明的输出名**，且没配探针前缀。
+      · Topout 视图：声明名 = Topout B 列真名；out_net = 源对象 rtl_base——两者不等就说明断言贴的是
+        `d_x_to_mux` 这类内部衔接网（裸名 force/probe，探不探得到只有仿真知道）。
+      · 页本地视图：声明名 = 本页 D/输出列基名；out_net = 同一行的 rtl_base（带 _to_logic 等尾缀）。
+    刻意**不**用 `top_output`/`is_top`（N 列 / I 列）：topout.py 已实证真表里这两列全 0，据它判档
+    等于给每个 logic/mux 根都刷一条恒定告警——`_topout_report_core` 早有拍板「不刷 top_out=0 假警告」。
+    直连寄存器 / RO 回读根：输出就是 tmm/regmap 里查到的寄存器字段，不是猜的 → 永不命中。
+    dft 改名根：探针贴顶层真名（root.probe_name）→ 永不命中。
+    """
+    if probe_prefix:
+        return False
+    root = getattr(res, "root", None)
+    if root is not None:
+        if getattr(root, "kind", "") not in ("logic", "mux") or getattr(root, "renamed", False):
+            return False
+        declared, net = getattr(res.topo, "name", ""), _topout_out_net(res)
+    else:
+        obj = _src_obj(res)
+        declared = getattr(obj, "out_base", "") or getattr(res, "name", "")
+        net = getattr(obj, "rtl_base", "") or declared
+    return bool(net) and str(net).strip().lower() != str(declared).strip().lower()
+
+
+def status_detail(res, include_risky=True, probe_prefix=""):
+    """一个分析结果 → `an["status_detail"]`（STATUS_DETAILS 之一）。两条流水线共用。
+
+    判据**只**来自结构化字段（res.status / res.bindings / res.expansion / res.meta），
+    绝不在 issues/note 的文本里做字符串猜——缺判据的档一律退回 "clean" 并原样保留 issues。
+    优先级（严重度递减，与 generator.analyze_signal / analyze_mux_group 的既有档同口径）：
+
+      spec-collision  expansion["spec_conflicts"] / meta["spec_collision"]：同选择值选不同源
+      false-green     meta["value_collision"] / meta["override_collision"]：字段太窄=假的 PASS
+      unresolved      任一叶子 binding.resolved=False（照这样生成仿真会报找不到网）
+      needs-prefix    任一 binding.found_in ∈ needs-prefix/mux-output 且【没开】强制生成 → 跳过
+      risky-generated 同上但【开了】强制生成（include_risky=True，Topout/页视图当前写死 True）
+      wire-fallback   任一 binding.found_in ∈ wire/prefixed-wire：输入名是按命名约定猜的
+      bare-probe      输出侧名字是猜的：assert LHS ≠ 声明名且没配前缀（见 _is_bare_probe）
+      clean           以上都不命中
+
+    include_risky：调用方的『缺前缀是否强制生成』开关（默认 True = 引擎现状：topout 与
+    pageviews 都写死 include_risky=True），决定缺前缀落 needs-prefix 还是 risky-generated。
+    probe_prefix：该信号 out_net 配的探针前缀（provider 才有这份配置；没有就按裸名判）。
+    """
+    status = getattr(res, "status", "") or ""
+    if status == "unresolved":
+        return "unresolved"
+    if status == "error":
+        return "parse-err"
+    if status == "skip":
+        return "skip"
+    if status != "ok":
+        return "error"
+    meta = getattr(res, "meta", None) or {}
+    exp = getattr(res, "expansion", None)
+    exp = exp if isinstance(exp, dict) else {}
+    if exp.get("spec_conflicts") or meta.get("spec_collision"):
+        return "spec-collision"
+    if meta.get("value_collision") or meta.get("override_collision"):
+        return "false-green"
+    bs = _leaf_bindings(res)
+    if any(not getattr(b, "resolved", True) for b in bs):
+        return "unresolved"
+    if any(getattr(b, "found_in", None) in _RISKY_FOUND_IN for b in bs):
+        return "risky-generated" if include_risky else "needs-prefix"
+    if any(getattr(b, "found_in", None) in _GUESSED_FOUND_IN for b in bs):
+        return "wire-fallback"
+    if _is_bare_probe(res, probe_prefix):
+        return "bare-probe"
+    return "clean"
+
+
+def norm_topout_result(res, wb=None, include_risky=True, probe_prefix=""):
     """topout.TopoutResult → SignalView 统一分析 dict（编辑/导出消费）。wb 传入则 logic 根输入按
     for_test 行序排（m4，与报告/导出一致）。"""
     kind = res.root.kind
@@ -115,6 +225,9 @@ def norm_topout_result(res, wb=None):
     # §7-1：assert LHS 的网名（与 build_for_topout 的 .sv 同口径，**不带探针前缀**——前缀是配置，
     # 由拿着 probe_prefixes 的 provider 另补 an["probe_prefix"]，免此处再吃一份配置参数）。
     an["out_net"] = _topout_out_net(res)
+    # §7-2：状态八档细分（老的 an["status"] 四档不动；判据见 status_detail）
+    an["status_detail"] = status_detail(res, include_risky=include_risky,
+                                        probe_prefix=probe_prefix)
     return an
 
 
@@ -127,7 +240,7 @@ def _topout_out_net(res):
         return ""
 
 
-def norm_page_result(res, wb=None):
+def norm_page_result(res, wb=None, include_risky=True, probe_prefix=""):
     """pageviews.PageResult → SignalView 统一分析 dict。wb 传入则 logic 形态输入按 for_test 行序(m4)。"""
     an = {"kind": res.kind, "status": res.status, "issues": list(res.issues),
           "note": res.note, "node": res.node, "bindings": res.bindings,
@@ -146,4 +259,7 @@ def norm_page_result(res, wb=None):
     an["dft_gate"] = _gate_dict(res)
     # §7-1：页本地视图的 assert LHS = 本页源对象的 RTL 网基名（同样不带探针前缀）。
     an["out_net"] = getattr(res.sig, "rtl_base", None) or res.name
+    # §7-2：与 Topout 视图同一判据（两条流水线的状态档口径必须一致）
+    an["status_detail"] = status_detail(res, include_risky=include_risky,
+                                        probe_prefix=probe_prefix)
     return an
