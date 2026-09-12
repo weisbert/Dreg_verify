@@ -12,7 +12,6 @@ Topout 视图与四个页视图的差异全在这里面。实现是从 `gui._Top
 夹具一律用仓库里的 mirror 生成脚本（公开仓，不得出现真实信号名）。
 """
 
-import inspect
 import os
 import sys
 
