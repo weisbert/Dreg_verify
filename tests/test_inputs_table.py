@@ -653,8 +653,14 @@ def _tip_drives(tip):
     return fs, ws
 
 
-@pytest.mark.parametrize("fixture_name,least", [("btlp_path", 9), ("wl_path", 9)])
-def test_legacy_inputs_table_equals_input_rows(gui_app, request, fixture_name, least):
+#: §7-4 殿后补行的角色文案（`_mux_input_rows` 按 an["ctrl_keys_missing"] 补的那一批）
+_FILL_ROLE = "控制(line 路径，未展开)"
+
+
+@pytest.mark.parametrize("fixture_name,least,least_filled",
+                         [("btlp_path", 9, 0), ("wl_path", 9, 1)])
+def test_legacy_inputs_table_equals_input_rows(gui_app, request, fixture_name, least,
+                                               least_filled):
     """**等价性对照 · 输入信号表**：offscreen 起『排查(旧)』，对每个既在旧 logic/mux 表、
     又在 Topout 清单里的信号，逐格比较三样东西：
 
@@ -676,15 +682,18 @@ def test_legacy_inputs_table_equals_input_rows(gui_app, request, fixture_name, l
     | 2 | iddq 门已是本信号的显式输入 | 重复出一行 | 只出显式输入那一行 | 同上，`pin_dft_gate` 带 `input_bases` 去重 |
     | 3 | 断言探针名 | 带会话里配的层级前缀 | 不带前缀 | an 里没有 probe_prefix 字段（v2 待补） |
     | 4 | 测试列数 | 旧编辑器的正向列 | 末尾多一条 iddq 漏电态拍 | Topout 流水线自动补 DFT 拍 |
+    | 5 | `used_vars` 里没人点到名的控制键 | **少一行**（真值表有、输入表没有） | 殿后补一行 | §7-4：`an["ctrl_keys_missing"]`（C-060）。WL 4 个级联 mux 各有一个备用载体 `m<N>.d:<i>` 落在这里；btlp 全空 |
 
     1/2 只在门坏掉或与显式输入撞名时出现，镜像夹具两者都不触发，故本测试断言严格相等。
     3/4 不影响输入信号表（只影响解析明细的探针行与列数），见下一个测试。
+    5 是**有意的补齐**（旧门面那一行是缺的，C-060 的 bug），所以只把这几行摘出来单比，
+      其余行仍逐格严格相等；`least_filled` 保证这条差异在 WL 上真的发生过（不是空跳过）。
     """
     from dreg_verify import gui as G
     w = _open(gui_app, request.getfixturevalue(fixture_name))
     try:
         ans = _topout_ans(w)
-        compared = 0
+        compared = filled = 0
         for r in range(w.table.rowCount()):
             sig = w.signals[w._idx_of_row(r)]
             an = ans.get(sig.out_name.lower())
@@ -692,14 +701,25 @@ def test_legacy_inputs_table_equals_input_rows(gui_app, request, fixture_name, l
                 continue
             w.on_row_focus(r, G.COL_K, -1, -1)
             painted = _legacy_input_cells(w)
-            from_an = [IT.row_cells(x) for x in IT.input_rows(an)]
+            an_rows = IT.input_rows(an)
+            # 【允许差异 5】§7-4 殿后补的那几行：旧门面根本没有（C-060 少一行的那个 bug），
+            # 摘出来单独钉住内容，其余行照旧逐格严格相等——不是放宽，是把新增的一块分开钉。
+            missing = set(an.get("ctrl_keys_missing") or [])
+            fill_rows = [x for x in an_rows if x.get("key") in missing]
+            assert all(x["role"] == _FILL_ROLE and x["is_control"] and x["key"] in missing
+                       for x in fill_rows), sig.out_name
+            assert len(fill_rows) == len(missing), sig.out_name      # 每个缺口补且只补一行
+            from_an = [IT.row_cells(x) for x in an_rows if x.get("key") not in missing]
             from_legacy_objects = [IT.row_cells(x) for x in IT.input_rows(_legacy_an(w, sig))]
             assert painted, "%s 的输入信号表不该是空的" % sig.out_name
             assert painted == from_legacy_objects, "委托画错了：%s" % sig.out_name
             assert from_legacy_objects == from_an, \
                 "an 复刻不出旧对象那份驱动明细：%s" % sig.out_name
             compared += 1
+            filled += len(fill_rows)
         assert compared >= least, "对照到的信号太少(%d)，夹具或匹配规则退化了" % compared
+        assert filled >= least_filled, \
+            "§7-4 补行在本夹具上一条都没发生(%d)，允许差异 5 成了空跳过" % filled
     finally:
         w.close()
 
