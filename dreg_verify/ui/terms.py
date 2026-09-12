@@ -370,6 +370,9 @@ TRUTH_PASTE_SKIP_NO_COL = "这一格右边没有测试列了，而且这个信�
 TRUTH_PASTE_SKIP_MUX_WHOLE = "自动生成列的 mux 数据值，要整表一起改（工具条的「设置 mux 数据值」）"
 # ── C-110 / C-112 整表 mux 数据值同步 ──
 TRUTH_MUX_DATA_DONE_FMT = "已按物理寄存器 {base} 同步整表数据值（清空该格可恢复自动分配）"
+#: R2-09：改完数据值后，冻结的编辑列里有几条在新的 case 集里没有对应用例 —— 名字在前（I-20）。
+#: 此前 `mux_resync_cols` 把它们静默丢掉：25 列变 9 列、手填期望 5 条变 2 条，屏幕上没人说话。
+TRUTH_MUX_DATA_DROPPED_FMT = "{names}（共 {n} 列）在新的数据值下没有对应的用例了，已从表里去掉——Ctrl+Z 可撤"
 TRUTH_MUX_DATA_NO_BASE_FMT = "本信号没有物理寄存器 {base} 的 mux 数据行"
 TRUTH_MUX_DATA_NO_REANALYZER = "整表 mux 数据值同步还没接上会话状态（面板未调 set_reanalyzer），这一格已还原"
 # ── C-298 导入期望 / 批量填 ──

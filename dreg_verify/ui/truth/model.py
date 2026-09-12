@@ -434,6 +434,21 @@ class TruthModel(QAbstractTableModel):
         self.colsChanged.emit()
         self._emit_progress()
 
+    def _indexes_of(self, cols):
+        """这些列 dict 现在在第几列 —— 按**对象身份**找，不按下标（R2-10）。
+
+        `AddCols.undo` 要收回的是「它当初插进去的那几个对象」。中间来过一次 `MuxData`
+        （整表换列）之后下标早就不作数了，按下标收会越界、被 `_take_cols` 静默过滤成空操作。
+        `_insert_cols` / `_apply_shape` 里的 `norm_col` 是**就地**补键、返回同一个对象，
+        所以身份在这些动作之间是守恒的。找不到的（列集被整个换掉了）不在结果里。
+        """
+        want = {id(c) for c in (cols or [])}
+        return [i for i, c in enumerate(self._cols) if id(c) in want]
+
+    def _shape_snapshot(self):
+        """当前整体形状 `(an, e_inputs, cols)` —— `Regenerate` / `MuxData` 存来给撤销用。"""
+        return (self._an, list(self._e_inputs), list(self._cols))
+
     def _take_cols(self, idxs):
         """按下标摘走若干列，返回【按原表升序】的列 dict 列表（供 undo 插回去）。"""
         idxs = sorted({int(i) for i in idxs if 0 <= int(i) < len(self._cols)})
@@ -663,8 +678,7 @@ class TruthModel(QAbstractTableModel):
         if len(e_inputs) != len(self._e_inputs):
             self.load(an, new_cols, e_inputs)
             return
-        self._undo.push(Regenerate(self,
-                                   (self._an, self._e_inputs, list(self._cols)),
+        self._undo.push(Regenerate(self, self._shape_snapshot(),
                                    (an or {}, e_inputs, new_cols)))
 
     # ═════════════════ mux 专用写入口 ═════════════════
@@ -708,18 +722,31 @@ class TruthModel(QAbstractTableModel):
     def _mux_key(self, base_low):
         return (str(self._an.get("name") or "").lower(), str(base_low or "").lower())
 
-    def _apply_mux_data(self, base_low, text):
-        """`MuxData` 的落地：经 reanalyzer 拿新 an → 贴回编辑列 → 换表（做和撤销同一条路）。"""
+    def _apply_mux_data(self, base_low, text, shape=None):
+        """`MuxData` 的落地：经 reanalyzer 拿新 an → 贴回编辑列 → 换表（做和撤销同一条路）。
+
+        `shape`（R2-09，撤销专用）= 做这一步**之前**的完整 `(an, e_inputs, cols)`。给了就
+        原样装回去，不再走 `mux_resync_cols` —— 那一步是有损的（老模型里有、新分析里没有的
+        自动列丢掉），再 resync 一遍变不回原样。`state.mux_data` 那一格仍然经 reanalyzer
+        改回旧文本，所以 state 与屏幕不会各说各话（C-112）。
+        """
         if self._reanalyze is None:
             return
         an = self._reanalyze(base_low, text)
         if an is None:                            # 重分析失败：state 已由回路自己兜底，表不动
             return
-        cols = ED.mux_resync_cols(an, self._cols, self._e_inputs)
         self._mux_text[self._mux_key(base_low)] = text
+        if shape is not None:
+            self._apply_shape(*shape)
+            return
+        dropped = []
+        cols = ED.mux_resync_cols(an, self._cols, self._e_inputs, dropped=dropped)
         self._apply_shape(an, self._e_inputs, cols)
         if text:
             self.pasteReport.emit(terms.TRUTH_MUX_DATA_DONE_FMT.format(base=base_low))
+        if dropped:                               # R2-09：对不上新 case 集的列，点名再计数（I-20）
+            self.pasteReport.emit(terms.TRUTH_MUX_DATA_DROPPED_FMT.format(
+                names="、".join(dropped), n=len(dropped)))
         # C-113：≥2 条数据路取到相同值 = 选错路也测不出。撞值判据在引擎的 meta
         # （`mux_gen` 的 value_collision / override_collision），`an` 里它已经归到
         # `status_detail == "false-green"` 这一档（见「引擎层发现」：an 不带 expansion["meta"]）。

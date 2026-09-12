@@ -51,7 +51,15 @@ class AddCols(QUndoCommand):
     def undo(self):
         # 收回的就是刚插进去的那几个对象本身（同一批 dict，vec 也是同一个）——
         # 重做时再插回去，用户的手填期望/负向错值原样还在。
-        self._cols = self._m._take_cols(range(self._at, self._at + len(self._cols)))
+        #
+        # R2-10：按**对象身份**找，不按下标。中间来过一次 `MuxData`（整表换列）之后
+        # 列数可能已经缩了，`range(at, at+n)` 越界 → `_take_cols` 把越界的过滤掉 →
+        # 返回空 → `self._cols` 变成 []，这一步撤销**静默变成空操作**，而且重做也没得插了
+        # （fuzz seed=5 N=194 抓到的就是这条）。找不到（列集被整个换过）就保住手上这份，
+        # 宁可撤销这一步没动静，也不能把用户那几列弄丢。
+        taken = self._m._take_cols(self._m._indexes_of(self._cols))
+        if taken:
+            self._cols = taken
 
 
 class RemoveCols(QUndoCommand):
@@ -94,6 +102,14 @@ class MuxData(QUndoCommand):
     `model._apply_mux_data` 经同一个 reanalyzer 走一遍——所以 undo 之后 `state.mux_data` 里
     存的值与表上显示的值不会各说各话（只把列 dict 塞回去的话，state 还留着新值 = 屏幕 0x3 /
     导出 9 的老毛病，正是 C-112「所见即所得」要堵的那个洞）。
+
+    ⚠ R2-09：光有「那一格该填什么文本」**撤不回来**。`_apply_mux_data` 的落地要经
+    `edits.mux_resync_cols`，而那一步是**有损**的：老模型里有、新分析里没有的自动列
+    （换过覆盖度档、冻结下来的那些）会被丢掉，撤销时再 resync 一遍也变不回来 ——
+    实测「全面档手填 5 条期望共 25 列 → 换精简档 → 改一次数据值」之后 25 列变 9 列、
+    期望剩 2 条，Ctrl+Z 撤不回，而那时已经落了盘。所以这里**连做之前的完整列集一起存**
+    （与 `Regenerate` 同一个办法），撤销时把它原样装回去；`state.mux_data` 那一格
+    仍然经 reanalyzer 改回旧文本，两边不会各说各话。
     """
 
     def __init__(self, model, base_low, old, new, text="设置 mux 数据值"):
@@ -102,12 +118,14 @@ class MuxData(QUndoCommand):
         self._base = str(base_low)
         self._old = str(old or "")
         self._new = str(new or "")
+        self._before = None          # (an, e_inputs, cols)：做之前的完整形状
 
     def redo(self):
+        self._before = self._m._shape_snapshot()
         self._m._apply_mux_data(self._base, self._new)
 
     def undo(self):
-        self._m._apply_mux_data(self._base, self._old)
+        self._m._apply_mux_data(self._base, self._old, shape=self._before)
 
 
 class Regenerate(QUndoCommand):

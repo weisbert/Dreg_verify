@@ -494,24 +494,33 @@ def mux_derive(an, cols):
             "expected": expected, "user_vecs": user_vecs}
 
 
-def mux_resync_cols(an, old_cols, e_inputs):
+def mux_resync_cols(an, old_cols, e_inputs, dropped=None):
     """mux 数据值改动后，把冻结的编辑列模型与【新分析】对齐 —— 所见即所得。
 
     自动生成列整表按新数据值重建（取值 by_base 同步 + auto_out 重算），只把用户意图贴回来：
     已手填的期望 / 负向标记；用户删掉的自动列不复活（清零过就还是零用例）；
     用户手编列原样保留（它们的数据值归自己管，与 legacy 的 _mux_user_vecs 一样不随整表走）。
+
+    R2-09：`dropped` 传一个 list 进来，**老模型里有、新分析里没有**的自动列名会追加进去
+    （additive，不传 = 旧签名旧行为）。此前这一类是静默丢的：全面档手填 5 条期望共 25 列 →
+    换到精简档冻结 → 改一次数据值，屏幕上 25 列变 9 列、手填期望 5 条剩 2 条，
+    而界面上没有任何一处说得出哪几条没了。调用方（`truth/model._apply_mux_data`）据此点名。
     """
     old = list(old_cols or [])
     old_auto = {str(c.get("name")): c for c in old if not c.get("user")}
-    cols = []
+    cols, kept = [], set()
     for c in cols_from_vectors(an, e_inputs):
         o = old_auto.get(str(c["name"]))
         if o is None:
             continue                       # 老模型里没有这列 = 用户删过 → 不复活
+        kept.add(str(c["name"]))
         c["exp"] = o.get("exp")
         c["neg"] = bool(o.get("neg"))
         cols.append(c)
     cols.extend(c for c in old if c.get("user"))
+    if dropped is not None:
+        dropped.extend(str(c.get("name")) for c in old
+                       if not c.get("user") and str(c.get("name")) not in kept)
     return cols
 
 

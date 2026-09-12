@@ -161,6 +161,171 @@ def test_p01_c085_regen_discards_edits_and_undo_brings_them_back(win, qapp):
     assert _sv(w, name) == edited_sv, "撤销之后屏幕回来了、产物没回来"
 
 
+# ═══════════════ R2-09 / R2-10：mux 数据值那一步的撤销（C-110 / C-299）═══════════════
+#: btlp 镜像上一条 mux 信号：精简 9 列 / 全面 25 列 / 穷举 40 列，**行数三档都一样**
+#: —— 「换了档、列集冻结在老档上」这件事才做得出来（`_apply_shape` 要求行数不变）。
+COV_SPREAD_MUX = "d_bt_lp_lna_itrim"
+
+
+class _Cfg(object):
+    """`ConfigSourceProto` 的最小实现（与 `tests/test_ui_truth_model.py` 同形）。"""
+
+    def __init__(self, wb):
+        self.wb = wb
+        self.probe_prefixes = {}
+        self.force_signals = set()
+        self.logic_overrides = {}
+        self.include_risky = True
+
+
+class _Rean(object):
+    """`TruthModel.set_reanalyzer` 的替身 = 面板那条回路（照抄 state 的做法，真 provider 算）。
+
+    `mode/exh` 是**重分析**用的那一档 —— 与列集当初出自哪一档**可以不同**，
+    「切了覆盖度档、编辑列冻结在老档上」这件事就是这么发生的（R2-09 的现场）。"""
+
+    def __init__(self, prov, an, name, e_inputs, mode="min", maxt=256, exh=False):
+        from dreg_verify import edits as ED
+        self._ED = ED
+        self.prov, self.name, self.e_inputs = prov, name, list(e_inputs)
+        self.src_out_name, self.disp_name = an["src_out_name"].lower(), an["name"]
+        self.mode, self.maxt, self.exh = mode, maxt, exh
+        self.bucket = {}                      # = state.mux_data()（会话档）
+
+    def width_of(self, base_low):
+        return next(e["width"] for e in self.e_inputs
+                    if (e["mux_data_base"] or "") == base_low)
+
+    def data(self):
+        ent = self.bucket.get(self.name.lower())
+        return dict(ent["data"]) if ent and ent.get("data") else None
+
+    def __call__(self, base_low, text):
+        self._ED.set_mux_data_value(self.bucket, self.name.lower(), self.src_out_name,
+                                    self.disp_name, base_low, self.width_of(base_low), text)
+        return self.prov.analyze(self.name, self.mode, self.maxt, self.exh,
+                                 mux_data=self.data())
+
+
+def _frozen_mux_model(kind="btlp", name=COV_SPREAD_MUX, cols_mode=("max", False),
+                      rean_mode=("min", False)):
+    """(model, an, e_inputs, rean)：列集出自 `cols_mode` 档、重分析走 `rean_mode` 档。
+
+    = 「在全面档手填了一屏期望，然后把全局档拧到精简」之后的现场：屏幕上那 25 列还冻着，
+    而下一次重分析会按精简档只给 9 条 case。
+    """
+    from dreg_verify import edits as ED
+    from dreg_verify import excel_model as M
+    from dreg_verify import providers as PV
+    from dreg_verify.ui.truth import TruthModel, e_inputs_from_an
+    prov = PV.TopoutProvider(_Cfg(M.load_workbook(H.mirror_path(kind))))
+    an = prov.analyze(name, cols_mode[0], 256, cols_mode[1])
+    assert an is not None and an["editable"] == "mux", name
+    ei = e_inputs_from_an(an)
+    m = TruthModel()
+    m.load(an, ED.cols_from_vectors(an, ei), ei)
+    rean = _Rean(prov, an, name, ei, mode=rean_mode[0], exh=rean_mode[1])
+    m.set_reanalyzer(rean)
+    return m, an, ei, rean
+
+
+def _exp_snapshot(m):
+    return [(c["name"], c["exp"], bool(c["neg"])) for c in m.cols()]
+
+
+@pytest.mark.contract("C-110", "C-299")
+def test_r2_09_mux_data_undo_restores_the_whole_frozen_column_set(qapp):
+    """R2-09：全面档手填 5 条期望共 25 列 → 换精简档（列集冻结）→ 改一次 mux 数据值
+    → 屏幕 25 列变 9 列、期望只剩 2 条，**Ctrl+Z 撤不回来**（而那时已经落了盘）。
+
+    根因：`MuxData` 只记「那一格该填什么文本」，撤销时重走一遍 `mux_resync_cols`；
+    而 resync 是**有损**的 —— 老模型里有、新分析里没有的自动列直接丢掉，再走一遍变不回来。
+    改法与 `Regenerate` 同：连做之前的完整列集一起存，撤销时原样装回去。
+
+    顺带钉住 R2-09 的另一半：被丢掉的那几列**要点名**（此前一声不吭）。
+    """
+    m, _an, ei, _rean = _frozen_mux_model()
+    n0 = m.columnCount()
+    assert n0 >= 20, "冻结下来的列太少（%d），测不到「25 → 9」" % n0
+    exp_r = m.rowCount() - 1
+    for c in range(0, min(5 * 2, n0), 2):                # 手填 5 条期望
+        assert m.setData(m.index(exp_r, c), str(m.cols()[c]["auto"] ^ 1)) is True
+    before = _exp_snapshot(m)
+    n_filled0 = sum(1 for _n, e, _g in before if e is not None)
+    assert n_filled0 >= 5
+
+    said = []
+    m.pasteReport.connect(said.append)
+    base = next(e["mux_data_base"] for e in ei if e["mux_data_base"])
+    assert m.set_mux_data_value(base, "5") is True
+    assert m.columnCount() < n0, "这一步没缩列，R2-09 的现场没造出来"
+    assert any("Ctrl+Z" in s for s in said), "被丢掉的列一声不吭：%s" % said
+
+    m.undo_stack().undo()                                 # Ctrl+Z
+    assert m.columnCount() == n0, "撤销没把冻结的列集还回来（%d → %d）" % (n0, m.columnCount())
+    assert _exp_snapshot(m) == before, "撤销回来了，可手填的期望不是原来那份"
+
+    m.undo_stack().redo()                                 # 重做：回到缩过的那份
+    assert m.columnCount() < n0
+    m.undo_stack().undo()
+    assert _exp_snapshot(m) == before, "撤销 → 重做 → 再撤销之后对不上了"
+
+
+@pytest.mark.contract("C-299")
+def test_r2_10_addcols_undo_takes_back_by_identity(qapp):
+    """R2-10：列集被 `MuxData` 缩掉之后，**更早的**加列 / 复制列撤销静默变成空操作。
+
+    根因：`AddCols.undo` 按下标 `range(at, at+n)` 收，越界被 `_take_cols` 过滤掉 →
+    返回空 → `self._cols` 变成 `[]`，这一步撤销什么也没干、重做也没得插了
+    （fuzz seed=5 N=194 抓到的就是这条）。改成按**对象身份**收。
+    """
+    m, an, ei, _rean = _frozen_mux_model()
+    n0 = m.columnCount()
+    made = m.append_test_column(1, src_idx=0)             # 复制一列 = 一步 AddCols
+    assert made and m.columnCount() == n0 + 1
+    user_name = next(c["name"] for c in m.cols() if c["user"])
+
+    # 列集被换成「短得多的一份」，但那条手编列**还是同一个对象**
+    # （= `edits.mux_resync_cols` 缩完列之后的样子：自动列全是新造的，手编列原样带过去）
+    inner = m._cols                                       # 故意用内部那份：身份才是这条的主角
+    short = list(inner[:3]) + [c for c in inner if c["user"]]
+    m._apply_shape(an, ei, short)
+    assert m.columnCount() == 4
+
+    m.undo_stack().undo()                                 # 撤那一步 AddCols
+    assert not [c for c in m.cols() if c["user"]], "撤销没把手编列收回去（静默空操作）"
+    assert m.columnCount() == 3
+    m.undo_stack().redo()                                 # 重做还得插得回来
+    back = [c for c in m.cols() if c["user"]]
+    assert len(back) == 1 and back[0]["name"] == user_name, "重做插不回来了"
+
+
+@pytest.mark.contract("C-299")
+def test_r2_09_r2_10_full_undo_walk_back_to_the_start(qapp):
+    """R2-09 + R2-10 合起来：一串动作做完，**整条撤销回去**必须回到出发点；
+    再整条重做回来必须回到终点（`bisect_undo.py` 的口径）。"""
+    m, _an, ei, _rean = _frozen_mux_model()
+    start = _exp_snapshot(m)
+    exp_r = m.rowCount() - 1
+    base = next(e["mux_data_base"] for e in ei if e["mux_data_base"])
+
+    m.setData(m.index(exp_r, 0), str(m.cols()[0]["auto"] ^ 1))
+    m.append_test_column(1, src_idx=0)
+    m.add_negatives([0])
+    m.set_mux_data_value(base, "5")
+    m.setData(m.index(exp_r, 1), str(m.cols()[1]["auto"] ^ 3))
+    end = _exp_snapshot(m)
+    n_steps = m.undo_stack().count()
+    assert n_steps == 5, "五个动作该是五步撤销，实际 %d" % n_steps
+
+    for _ in range(n_steps):
+        m.undo_stack().undo()
+    assert _exp_snapshot(m) == start, "整条撤销回去，没回到出发点"
+    for _ in range(n_steps):
+        m.undo_stack().redo()
+    assert _exp_snapshot(m) == end, "整条重做回来，没回到终点"
+
+
 # ═══════════════ P-03 / P-09：导入完整配置不许殃及别的范围 ═══════════════
 def _write_config(w, path):
     """把当前会话导出成一份【完整配置】文件（= 导出中心那条路的 payload）。"""
