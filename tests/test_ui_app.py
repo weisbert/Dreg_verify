@@ -607,7 +607,10 @@ def test_status_right_last_export(qapp, tmp_path):
 
 
 # ══════════════════════════ app.py：快捷键 / 标题 / 版面 ══════════════════════════
-def test_c253_c254_c255_c256_c257_shortcuts_bound(qapp):
+def test_c253_c254_c255_c256_c257_shortcuts_bound(qapp, monkeypatch):
+    # C4-int 起 Ctrl+G / Ctrl+R 真的会 `exec()` 一个导出中心 —— offscreen 下模态框
+    # 不拦就是整条测试挂住（不是红，是永远不返回）。
+    H.auto_dialogs(monkeypatch)
     w = make_win(qapp)
     got = {sc.key().toString() for sc in w.findChildren(QtGui.QShortcut)}
     want = {contracts.SHORTCUTS[k] for k in A.APP_SHORTCUTS}
@@ -738,7 +741,8 @@ def test_harness_can_drive_v2_window(qapp, tmp_path):
 
 
 # ══════════════════════════ app.py：场景路由 ══════════════════════════
-def test_route_reason_action_targets(qapp):
+def test_route_reason_action_targets(qapp, monkeypatch):
+    H.auto_dialogs(monkeypatch)                     # export_nets 会真开一次导出中心（模态）
     w = make_win(qapp)
     diag, exp = [], []
     w.diagnosticsRequested.connect(diag.append)

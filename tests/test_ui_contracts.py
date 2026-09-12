@@ -176,6 +176,10 @@ def test_contracts_signal_tables_and_dataclasses():
     assert contracts.EXPORT_KINDS == names.EXPORT_KINDS
     assert set(terms.EXPORT_ROWS) == set(contracts.EXPORT_KINDS)
     assert "split" in contracts.EXPORT_SV_SCOPES and set(terms.EXPORT_SV_SCOPES) == set(contracts.EXPORT_SV_SCOPES)
+    # C4-int：四档的键**与引擎侧同一套** —— `exports.SCOPE_LABEL` 少一档 split 时，
+    # 导出中心选得出、`load_export_options` 却读不回（C-162 的「记住上次选择」静默少一档）。
+    from dreg_verify import exports as _X
+    assert tuple(_X.SCOPE_LABEL) == contracts.EXPORT_SV_SCOPES
     assert contracts.CHAIN_ENTRY_KEYS == ("out", "expr", "subst", "page", "kind")
 
 

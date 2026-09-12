@@ -641,8 +641,17 @@ CUSTOM_MODALS = [
 #: 再记一条：调用记成 `ColumnsDialog.exec`，于是测试可以写
 #: `answers={"ColumnsDialog.exec": QDialog.Rejected}`、`rec.of("PasteNamesDialog")`，
 #: 不必去猜窗口标题。模块还没落地的条目记进 `rec.missing`，不报错。
+#:
+#: ⚠ 为什么 `exec` 这一层一定要按类名各拦一条（而不是只靠 `QDialog.exec`）：
+#: `monkeypatch.setattr(QDialog, "exec", ...)` 打的是**基类**属性，子类自己没定义 `exec`
+#: 时确实会走到它 —— 但记下来的调用全叫 `QDialog.exec`，测试只能按窗口标题分辨是哪一个框。
+#: 按类名各拦一条之后，`rec.of("ExportCenterDialog")` 直接就是「导出中心被打开过几次」。
+#:
+#: 默认答案一律是 `QDialog.Accepted` —— 这十六个框「最常用的那个答案」恰好是同一个
+#: （关掉 / 知道了 / 保存）。要别的答案在用例里写 `answers={"ExportDoneDialog.exec": ...}`，
+#: 这里**不设**每条一个默认工厂：十六条全返回同一个值的工厂表，看着在生效、实际等于没有。
 V2_DIALOGS = [
-    ("dreg_verify.ui.dialogs", "ConfirmDialog"),          # 三处确认 C-089/C-102/C-094
+    ("dreg_verify.ui.dialogs", "ConfirmDialog"),          # 四处确认 C-089/C-102/C-094/C-217
     ("dreg_verify.ui.dialogs", "RenameColumnDialog"),     # 重命名列 C-091
     ("dreg_verify.ui.dialogs", "MuxDataDialog"),          # mux 数据值整表 C-110
     ("dreg_verify.ui.dialogs", "ColumnsDialog"),          # 列设置 C-008 / C-046
@@ -652,14 +661,27 @@ V2_DIALOGS = [
     ("dreg_verify.ui.dialogs", "ImportReportDialog"),     # 导入结果 C-194
     ("dreg_verify.ui.dialogs", "BatchFillDialog"),        # 批量填期望 C-298
     ("dreg_verify.ui.dialogs", "ExportOptionsDialog"),    # .sv 导出选项 C-159..C-161
+    # ── C4：导出中心 / 完成弹层（C4-a）与诊断抽屉的四个编辑器（C4-b）──
+    # 这六条以前是各自的测试文件在**用例里**临时 monkeypatch 的；C4-int 提到 harness，
+    # 于是组合根测试（起真窗、走真路由）也能用同一套答案，不必各写一遍拦截。
+    ("dreg_verify.ui.export_center", "ExportCenterDialog"),    # ⑪ C-197（默认：关掉 = Accepted）
+    ("dreg_verify.ui.export_center", "ExportDoneDialog"),      # ⑫ C-165（默认：按「知道了」）
+    ("dreg_verify.ui.diagnostics", "PrefixEditorDialog"),      # 探针前缀 C-200…C-205
+    ("dreg_verify.ui.diagnostics", "ForceEditorDialog"),       # 强制 force C-206…C-209
+    ("dreg_verify.ui.diagnostics", "SupplementEditorDialog"),  # RTL 补充逻辑 C-210…C-214
+    ("dreg_verify.ui.diagnostics", "LegacyImportDialog"),      # 旧版编辑迁移 C-302
 ]
 
 
 def _v2_dialog_titles():
     """v2 对话框入口 → 窗口标题，**取自 `dialogs.TITLES`**（别在这里另抄一份字面量）。
 
-    `ConfirmDialog.ask` 一个入口对三个标题（清零 / 删反例 / auto→期望），给不出唯一标题，
-    所以不进这张表 —— 它的标题仍由 `QDialog.exec` 那一层记（答案也按那一层的结果码写）。"""
+    `ConfirmDialog.ask` 一个入口对**四个**标题（清零 / 删反例 / auto→期望 / 关掉缺前缀强制生成，
+    C4-int 起是第四种 kind `risky_off`），给不出唯一标题，所以不进这张表 —— 它的标题仍由
+    `ConfirmDialog.exec` 那一层记（答案也按那一层的结果码写）。
+
+    ⑪ 导出中心 / ⑫ 完成弹层 / 四个诊断编辑器同理不进这张表：它们没有 `类.ask` 那层入口，
+    标题由 `exec` 拦截时现读 `windowTitle()`（`rec.saw(标题)` 照样命中）。"""
     try:
         from dreg_verify.ui import dialogs as _D
     except ImportError:                      # 还没落地（或没装 PySide6）：不记标题，不报错

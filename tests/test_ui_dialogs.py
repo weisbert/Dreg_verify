@@ -533,7 +533,11 @@ def test_dlg_export_options_c159_c160_c161_three_flags_and_scope(mk):
 def test_dlg_export_options_c163_defaults_come_from_caller_and_match_exports():
     """dialogs 不准 import exports：兜底默认值必须与 `exports.EXPORT_OPTION_DEFAULTS` 逐键相等。"""
     assert D.FALLBACK_EXPORT_OPTIONS == EX.EXPORT_OPTION_DEFAULTS
-    assert D.EXPORT_SCOPES == tuple(EX.SCOPE_LABEL)
+    # ⚠ C4-int 起 `exports.SCOPE_LABEL` 有**四**档：第四档 `split`（正向/负向分两个文件）
+    #   要两个落盘路径，这个三选框只问得出一个 —— 它是导出中心 sv 行那个四项下拉的档
+    #   （`contracts.EXPORT_SV_SCOPES` → `exports.export_sv_split`），不属于本框。
+    assert D.EXPORT_SCOPES == tuple(k for k in EX.SCOPE_LABEL if k != "split")
+    assert set(D.EXPORT_SCOPES) < set(EX.SCOPE_LABEL)
     assert set(D.EXPORT_FLAGS) | {"scope"} == set(EX.EXPORT_OPTION_DEFAULTS)
 
 

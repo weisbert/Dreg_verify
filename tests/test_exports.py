@@ -88,6 +88,25 @@ def test_export_options_bad_scope_falls_back():
     assert X.load_export_options({"export_scope": "垃圾"})["scope"] == "all"
 
 
+def test_c162_c169_c170_export_options_scope_split_roundtrips():
+    """C4-int：`scope="split"`（正向 / 负向各写一个文件，N2 / C-169 / C-170）**存得进也读得回**。
+
+    以前 `SCOPE_LABEL` 只认 all/pos/neg，导出中心把 split 存进 settings、下次开窗
+    `load_export_options` 又把它兜底成「全部」—— 用户看到的是自己上次的选择被静默改掉了，
+    而界面上分不出是「没选过」还是「工具忘了」（C-162 记住上次选择就此失效一档）。
+
+    ⚠ 渲染路径一个字节没动：`export_sv_split` 自己按 pos / neg 各渲一趟，
+    `render_sv` 永远收不到 `scope="split"`（byte-gate 6 个 .sv 因此不变）。"""
+    assert "split" in X.SCOPE_LABEL and X.SCOPE_LABEL["split"]
+    st = {}
+    opt = {"scope": "split", "comments": False, "sv_summary": True, "owner_in_msg": False}
+    X.store_export_options(st, opt)
+    assert st["export_scope"] == "split"
+    assert X.load_export_options(st) == opt            # ← 这一句以前会读回 "all"
+    # 四档的键集与次序（与 ui 那个四项下拉是同一套，在 test_ui_contracts 里对账）
+    assert tuple(X.SCOPE_LABEL) == ("all", "pos", "neg", "split")
+
+
 # ───────────── ③ ExportOutcome：跳过项在前、名字 + 原因 ─────────────
 def _outcome():
     return X.ExportOutcome(kind="sv", path="x.sv",

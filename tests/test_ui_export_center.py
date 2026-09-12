@@ -195,16 +195,16 @@ def test_c164_dup_labels_confirm_before_write(st, rec, tmp_path, monkeypatch):
                         lambda *a, **k: written.append(a[1]) or (_ for _ in ()).throw(
                             AssertionError("取消了还写文件")))
 
-    from dreg_verify.ui import dialogs as DLG
-    asked = []
-    monkeypatch.setattr(DLG.DupLabelsDialog, "ask",
-                        classmethod(lambda cls, dups=(), rows_text=None, parent=None:
-                                    asked.append(list(dups)) or False))
+    # C4-int：确认框的答案走 harness（`DupLabelsDialog.ask` 已在 `CUSTOM_MODALS` 里），
+    # 本文件不再自己 monkeypatch 对话框类 —— 同一个框两处各拦一套，改了一处就会各说各话。
+    rec2 = H.auto_dialogs(monkeypatch, save_dir=rec.save_dir,
+                          answers={"DupLabelsDialog.ask": False})
 
     d = _dlg(st)
     for k, cb in d.checks.items():
         cb.setChecked(k == "sv")
     assert d.run() is None, "按了取消还是导出了"
+    asked = [list(c.args[1]) for c in rec2.of("DupLabelsDialog.ask")]   # args[0] = cls
     assert asked == [[("R_DUP", "sig_a", "sig_b")]], "没弹确认或没把冲突标号列出来"
     assert not written
     assert not [f for f in os.listdir(rec.save_dir) if f.endswith(".sv")]
@@ -298,7 +298,7 @@ def test_c171_export_error_message_names_lock(st, qapp, tmp_path):
     d = EC.ExportDoneDialog(res)
     d.show()
     qapp.processEvents()
-    err = H.find(d, EC._n("DONE_ERRORS"))
+    err = H.find(d, names.DONE_ERRORS)
     assert err.isVisibleTo(d) and "占用" in err.text()
     assert terms.EXPORT_ROWS["sv"][0] in err.text()            # 哪一种交付物失败了
     d.close()
@@ -813,13 +813,12 @@ def test_import_config_button_and_preselect(st, qapp, tmp_path, monkeypatch):
     assert H.find(d, names.EXPORT_BTN_IMPORT_CONFIG).text() == terms.EXPORT_BTN_IMPORT_CONFIG
     d.close()
 
-    seen = []
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
-                        staticmethod(lambda *a, **k: seen.append(a) or ("", "")))
+    # 文件框走 harness（不再本地 monkeypatch QFileDialog）：答「取消」= 导入流程起了但没选文件
+    rec = H.auto_dialogs(monkeypatch, answers={"getOpenFileName": ("", "")})
     d2 = _dlg(st, preselect="config")
     d2.show()
     qapp.processEvents()
-    assert seen, "preselect='config' 没有直接进导入配置"
+    assert rec.count("QFileDialog.getOpenFileName") == 1, "preselect='config' 没有直接进导入配置"
     d2.close()
 
 
@@ -903,18 +902,23 @@ def test_v1_parity_six_deliverables(qapp, monkeypatch, tmp_path, btlp):
     v2_dir = tmp_path / "v2"
     v1_dir.mkdir()
     v2_dir.mkdir()
+    # 全部模态入口走 harness（C4-int：本文件不再自己 monkeypatch 任何对话框入口）。
+    # `_confirm_dup_labels`（默认 True）/ `_ask_export_options`（默认 = 全默认选项）
+    # 用 harness 的默认答案即可；只有两样要给：逐次「另存为」的落点、nets 的按页类别。
+    v1_saves = []                       # 按调用顺序弹出的落点（一次「另存为」取一个）
+    cats_box = []                       # v1 载表后才知道本表真有哪几页（w 在下一行才有）
+    H.auto_dialogs(monkeypatch, answers={
+        "getSaveFileName": lambda call, *a, **k: ((str(v1_saves.pop(0)), "") if v1_saves
+                                                  else pytest.fail("v1 多弹了一次「另存为」")),
+        "_ask_nets_pages": lambda call, *a, **k: list(cats_box[0]),
+    })
+    opts = dict(X.EXPORT_OPTION_DEFAULTS)      # = harness `_ask_export_options` 的默认答案
     w = _v1_window(monkeypatch, tmp_path, btlp)
     try:
         view = w.topout_view
-        monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
-        monkeypatch.setattr(QtWidgets.QMessageBox, "critical", staticmethod(lambda *a, **k: None))
-        monkeypatch.setattr(w, "_confirm_dup_labels", lambda *a, **k: True)
-        opts = {"scope": "all", "comments": False, "sv_summary": False, "owner_in_msg": False}
-        monkeypatch.setattr(view, "_ask_export_options", lambda: dict(opts))
 
         def save_to(p):
-            monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
-                                staticmethod(lambda *a, **k: (str(p), "")))
+            v1_saves.append(p)
 
         # ── v1 的六份产物 ──
         save_to(v1_dir / "wr_rf_tc.sv")
@@ -924,7 +928,7 @@ def test_v1_parity_six_deliverables(qapp, monkeypatch, tmp_path, btlp):
         save_to(v1_dir / "backfill.xlsx")
         view.on_fortest()
         cats = list(X.nets_categories(w.wb))
-        monkeypatch.setattr(w, "_ask_nets_pages", lambda *a, **k: cats)
+        cats_box.append(cats)
         save_to(v1_dir / "nets.txt")
         w.on_export_nets()
         save_to(v1_dir / "cfg.json")

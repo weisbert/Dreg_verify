@@ -181,7 +181,7 @@ def test_c200_c201_c202_c203_c204_c205_prefix_editor_roundtrip_and_keeps_checks(
     dlg = editor(D.PrefixEditorDialog, st)
     edit = H.find(dlg, N.DIAG_PREFIX_TEXT, QtWidgets.QPlainTextEdit)
     assert H.find(dlg, N.DIAG_PREFIX_IMPACT, QtWidgets.QLabel) is not None
-    hint = dlg.findChild(QtWidgets.QLabel, D.PENDING_NAMES["DIAG_PREFIX_HINT"])
+    hint = dlg.findChild(QtWidgets.QLabel, N.DIAG_PREFIX_HINT)
     assert hint is not None and hint.text() == T.DIAG_PREFIX_HINT
 
     # C-201：合并写法（路径一行、其下信号名逗号 / 换行分隔）与扁平写法混用 + `#` 注释
@@ -259,8 +259,8 @@ def test_diag_drawer_opens_four_editors(qapp, monkeypatch):
     d.refresh()
     H.auto_dialogs(monkeypatch)          # QDialog.exec 一律立刻 Accepted，不会卡住 offscreen
     for oname, cls in ((N.DIAG_PREFIX_EDIT_BTN, D.PrefixEditorDialog),
-                       (D.PENDING_NAMES["DIAG_FORCE_OPEN_BTN"], D.ForceEditorDialog),
-                       (D.PENDING_NAMES["DIAG_SUPP_OPEN_BTN"], D.SupplementEditorDialog),
+                       (N.DIAG_FORCE_OPEN_BTN, D.ForceEditorDialog),
+                       (N.DIAG_SUPP_OPEN_BTN, D.SupplementEditorDialog),
                        (N.DIAG_LEGACY_IMPORT_BTN, D.LegacyImportDialog)):
         btn = d.findChild(QtWidgets.QPushButton, oname)
         assert btn is not None and btn.isEnabled(), oname
@@ -323,7 +323,7 @@ def test_c206_c207_c208_c209_force_editor_import_export_effective_on_topout_and_
 
     dlg = editor(D.ForceEditorDialog, st)
     edit = H.find(dlg, N.DIAG_FORCE_TEXT, QtWidgets.QPlainTextEdit)
-    hint = dlg.findChild(QtWidgets.QLabel, D.PENDING_NAMES["DIAG_FORCE_HINT"])
+    hint = dlg.findChild(QtWidgets.QLabel, N.DIAG_FORCE_HINT)
     assert hint is not None and hint.text() == T.DIAG_FORCE_HINT
 
     # C-207：行尾 # 之后是注释、# 开头整行是注释、空行忽略
@@ -426,7 +426,7 @@ def test_c210_c211_c212_c213_c214_supplement_editor_validate(qapp, monkeypatch, 
     H.find(dlg2, N.DIAG_SUPP_TEXT, QtWidgets.QPlainTextEdit).setPlainText(
         json.dumps(spec, ensure_ascii=False))
     H.click(H.find(dlg2, N.DIAG_SUPP_SAVE_BTN, QtWidgets.QPushButton))
-    unknown = dlg2.findChild(QtWidgets.QLabel, D.PENDING_NAMES["DIAG_SUPP_UNKNOWN"])
+    unknown = dlg2.findChild(QtWidgets.QLabel, N.DIAG_SUPP_UNKNOWN)
     assert not unknown.isHidden(), "提示条要摆出来（保存成功后窗自己关了，只能看它自己的显隐）"
     assert unknown.text() == T.DIAG_SUPP_UNKNOWN_FMT.format(name="d_brand_new_eco_sig")
     assert set(st.logic_overrides) == {"d_brand_new_eco_sig"}, "提示归提示，仍然允许保存"
@@ -453,7 +453,12 @@ def test_c215_c216_supplement_visible_in_topout_expand(qapp):
 
 # ═══════════════════════ C-217 / I-11：缺前缀是否强制生成 ═══════════════════════
 def test_c217_risky_toggle_default_true_and_warns_off(qapp, monkeypatch):
-    """C-217：可见开关，默认 **是**；关掉前先确认一次，不确认就不改（改产物是显式动作）。"""
+    """C-217：可见开关，默认 **是**；关掉前先确认一次，不确认就不改（改产物是显式动作）。
+
+    ⚠ C4-int 起这一次确认走 `dialogs.ConfirmDialog` 的第四种 kind `risky_off`
+    （C4-b 当时用的是 `QMessageBox.question`）—— 所以答案按 `ConfirmDialog.ask` 的**领域值**
+    （True / False）给，不再按 `QMessageBox.Yes/No` 的按钮码。正文仍然是同一句
+    `terms.DIAG_RISKY_OFF_WARNING`，`rec.saw` 照样验得到（走真框 → `exec` 那一层记正文）。"""
     st = make_state()
     d = drawer(st)
     chk = H.find(d, N.DIAG_RISKY_TOGGLE, QtWidgets.QCheckBox)
@@ -462,16 +467,20 @@ def test_c217_risky_toggle_default_true_and_warns_off(qapp, monkeypatch):
     d.items[N.DIAG_SYM_RISKY].expand()
 
     # ① 确认框答「否」→ 开关弹回去、后端一个字节不动
-    rec = H.auto_dialogs(monkeypatch, answers={"question": QtWidgets.QMessageBox.No})
+    #    `ask: REAL` = 放真对话框跑到 `exec`：这一条要验的是**正文说没说清「.sv 会变」**，
+    #    在 ask 那一层直接给 False 的话框根本没造出来，正文也就无从验起。
+    rec = H.auto_dialogs(monkeypatch, answers={"ask": H.REAL,
+                                               "ConfirmDialog.exec": QtWidgets.QDialog.Rejected})
     click_check(chk)
-    assert rec.count("question") == 1
+    assert rec.count("ConfirmDialog.exec") == 1
     assert rec.saw(T.DIAG_RISKY_OFF_WARNING), "关掉前必须把「.sv 会变」说清楚"
+    assert rec.saw(T.DIAG_RISKY_OFF_TITLE), "标题要说清在关哪个开关"
     assert chk.isChecked() is True and st.include_risky is True
 
     # ② 确认框答「是」→ 真关掉，文案跟着变「否」，并把警告摆出来
-    rec2 = H.auto_dialogs(monkeypatch, answers={"question": QtWidgets.QMessageBox.Yes})
+    rec2 = H.auto_dialogs(monkeypatch, answers={"ConfirmDialog.ask": True})
     click_check(chk)
-    assert rec2.count("question") == 1
+    assert rec2.count("ConfirmDialog.ask") == 1
     assert chk.isChecked() is False and st.include_risky is False
     assert chk.text() == T.DIAG_OTHER[3][1].format(state=T.DIAG_RISKY_OFF)
     assert d.risky_warn.isVisible()
@@ -479,7 +488,7 @@ def test_c217_risky_toggle_default_true_and_warns_off(qapp, monkeypatch):
     # ③ 再打开不需要确认
     rec3 = H.auto_dialogs(monkeypatch)
     click_check(chk)
-    assert rec3.count("question") == 0
+    assert rec3.count("ConfirmDialog.ask") == 0 and rec3.count("ConfirmDialog.exec") == 0
     assert chk.isChecked() is True and st.include_risky is True
     d.close()
 
@@ -545,7 +554,7 @@ def test_c302_legacy_import_only_logic_register_names_mux(qapp, monkeypatch):
     assert plan.n_cols == 2
     skipped = dict(plan.skipped)
     assert MUX_SIG in skipped and "c:A" in skipped[MUX_SIG] and "d:0" in skipped[MUX_SIG]
-    assert GHOST in skipped and skipped[GHOST] == D.PENDING_TERMS["DIAG_LEGACY_SKIP_UNKNOWN"]
+    assert GHOST in skipped and skipped[GHOST] == T.DIAG_LEGACY_SKIP_UNKNOWN
 
     # 快照的 legacy 两格要真分类（`legacy_bucket_counts` 不给 kind_of 时会把 register 也算进 logic）
     snap = D.make_snapshot(st)
@@ -555,7 +564,7 @@ def test_c302_legacy_import_only_logic_register_names_mux(qapp, monkeypatch):
     # 弹窗：不迁的名字 + 原因在**前**，能迁的清单在后（C-270 的形状）
     dlg = editor(D.LegacyImportDialog, st)
     prev = H.find(dlg, N.DIAG_LEGACY_PREVIEW, QtWidgets.QLabel)
-    skip_lb = dlg.findChild(QtWidgets.QLabel, D.PENDING_NAMES["DIAG_LEGACY_SKIPPED"])
+    skip_lb = dlg.findChild(QtWidgets.QLabel, N.DIAG_LEGACY_SKIPPED)
     assert skip_lb.isVisible() and MUX_SIG in skip_lb.text() and GHOST in skip_lb.text()
     assert LOGIC_SIG in prev.text() and MUX_SIG in prev.text()
 
@@ -647,7 +656,7 @@ def test_diag_open_for_symptom_scrolls_to_item(qapp):
     # 折叠项 ③ 只发信号（覆盖度弹层归 C4-int）
     fired = []
     d.coverageRequested.connect(lambda: fired.append(1))
-    H.click(d.findChild(QtWidgets.QPushButton, D.PENDING_NAMES["DIAG_COVERAGE_BTN"]))
+    H.click(d.findChild(QtWidgets.QPushButton, N.DIAG_COVERAGE_BTN))
     assert fired == [1]
     # 收起
     H.click(H.find(d, N.DIAG_BTN_CLOSE, QtWidgets.QToolButton))
