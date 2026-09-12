@@ -164,3 +164,16 @@ def test_page_sv_applies_probe_prefix_to_force_leaf(wb):
     assert "`ENV_RF.U_SUB.d_bt_lp_linectrl_rx_en" in text     # RO force 叶子加前缀
     bare, _ = P.build_page_sv(wb, "logic", mode="max", max_tests=8)
     assert "d_bt_lp_linectrl_rx_en" in bare and "U_SUB" not in bare   # 默认无前缀=裸名(逐字节旧行为)
+
+
+def test_c158_page_sv_neg_scope_without_negatives_is_empty(mirror):
+    """C-158 导出范围「仅反例」：本页一条负向都没有 → 产物为空（0 块、无 assert），
+    而不是把全部正向用例写进 _neg.sv（C0-b 发现的既有缺陷：空集被 generator 当 None=不过滤）。"""
+    wb = M.load_workbook(mirror)
+    for page in ("logic", "mux"):
+        text, res = P.build_page_sv(wb, page, scope="neg")
+        assert res["summary"]["n_total"] == 0, (page, res["summary"])
+        assert "assert" not in text.lower(), (page, text[:200])
+    # 对照：all 范围照旧有产物
+    text_all, res_all = P.build_page_sv(wb, "logic", scope="all")
+    assert res_all["summary"]["n_total"] > 0 and "assert" in text_all.lower()

@@ -362,12 +362,17 @@ def build_page_sv(wb, page, mode="min", max_tests=256, exhaustive=False,
         if scope == "neg":
             ns = {str(s).lower() for s in (neg_src or set())}
             sigs = (sigs & ns) if sigs is not None else ns
-        opts = _page_gen_opts(page, mode, max_tests, exhaustive, eo,
-                              signals=sigs, comments=comments,
-                              probe_prefixes=probe_prefixes, sv_summary=sv_summary,
-                              owner_in_msg=owner_in_msg, force_overrides=force_overrides,
-                              include_risky=include_risky)
-        built = G.build(wb, opts)
+        if scope == "neg" and not sigs:
+            # 本页一条负向都没有 → 「仅反例」产物就是空的。以前这里把空集交给 GenOptions，
+            # generator._norm_set 把空集当 None（=不过滤）→ _neg.sv 装满正向用例（C0-b 发现）。
+            built = {"blocks": []}
+        else:
+            opts = _page_gen_opts(page, mode, max_tests, exhaustive, eo,
+                                  signals=sigs, comments=comments,
+                                  probe_prefixes=probe_prefixes, sv_summary=sv_summary,
+                                  owner_in_msg=owner_in_msg, force_overrides=force_overrides,
+                                  include_risky=include_risky)
+            built = G.build(wb, opts)
     finally:
         if saved is not None:
             wb.logic = saved
