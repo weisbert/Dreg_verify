@@ -210,10 +210,20 @@ def test_c028_c029_kind_status_filters(bar):
     H.app().processEvents()
     assert got[-1]["status"] == "ok"
     assert FB.count_visible(bar.models(), bar.filters())[0] == 4
-    status.setCurrentIndex(2)                                 # 仅有问题（非 ok 或带告警）
+    status.setCurrentIndex(2)                                 # 仅有问题
     H.app().processEvents()
     assert got[-1]["status"] == "issues"
+    # 判据 = 清单状态列上写着的那一档（`terms.match_status`，C2-int 主控裁决：与清单 proxy 共用一份）。
+    # 样例里只有 sig_gamma 是 unresolved（✗ 未解析 = bad）；sig_eps 虽带 issues，但引擎给的
+    # status 仍是 ok 且没给 status_detail —— 清单上它写着「可建」，这里就不能算它有问题，
+    # 否则同一块屏幕上筛选行说 2 个、清单说 1 个。
+    assert FB.count_visible(bar.models(), bar.filters())[0] == 1
+    # 引擎一旦给出八档 status_detail，两边一起跟着变（这才是「只写一处」的意思）
+    eps = next(m for m in bar.models() if m["name"] == "sig_eps")
+    eps["status_detail"] = "wire-fallback"                    # ⚠ 名字是猜的·已生成 = warn
+    assert terms.tone_of(eps) == "warn"
     assert FB.count_visible(bar.models(), bar.filters())[0] == 2
+    eps.pop("status_detail")
 
 
 # ───────────────────────── C-030 / C-031 / C-047 搜索 ─────────────────────────

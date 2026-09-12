@@ -29,7 +29,7 @@ from PySide6 import QtWidgets                                      # noqa: E402
 from dreg_verify import edits as ED                                # noqa: E402
 from dreg_verify import inputs_table as IT                         # noqa: E402
 from dreg_verify.ui import names, persist as P, state as ST, terms, theme   # noqa: E402
-from dreg_verify.ui.detail_header import DetailHeader, PENDING_NAMES        # noqa: E402
+from dreg_verify.ui.detail_header import DetailHeader                       # noqa: E402
 
 import ui_fakes as F                                               # noqa: E402
 
@@ -182,7 +182,7 @@ def test_c066_resolve_detail_links_to_diagnostics(real):
 
     seen = []
     hdr.diagRequested.connect(seen.append)
-    link = H.find(hdr, PENDING_NAMES["HDR_RESOLVE_DIAG_BTN"])
+    link = H.find(hdr, names.HDR_RESOLVE_DIAG_BTN)
     assert link.text() == terms.REASON_BTN_FMT.format(
         action=terms.REASON_TEMPLATES["needs-prefix"][2])
     H.click(link)
@@ -298,12 +298,12 @@ def test_hdr_pending_and_not_editable_rows(fake, real):
     m = dict(st.models()[0])
     m.update({"status": "pending", "status_detail": "pending", "n_vectors": None})
     hdr.show_signal(m)
-    assert H.find(hdr, PENDING_NAMES["HDR_PENDING"], QtWidgets.QLabel).isVisible()
+    assert H.find(hdr, names.HDR_PENDING, QtWidgets.QLabel).isVisible()
     assert not H.find(hdr, names.HDR_RESOLVE_BTN).isEnabled()
 
     hdr2, st2, host2 = real
     hdr2.show_signal(_ready_model(st2, "pll_lock_indicator"))      # RO 回读，不可建
-    assert H.find(hdr2, PENDING_NAMES["HDR_NOT_EDITABLE"], QtWidgets.QLabel).isVisible()
+    assert H.find(hdr2, names.HDR_NOT_EDITABLE, QtWidgets.QLabel).isVisible()
     assert H.find(hdr2, names.HDR_PROGRESS_LABEL, QtWidgets.QLabel).text() == ""
 
 
@@ -317,15 +317,12 @@ def test_hdr_follows_state_current_changed(fake):
 
 
 def test_hdr_all_object_names_findable(fake):
-    """I-14：本区每个可测控件都能按 `names.py`（+ 本波 PENDING_NAMES）找到。"""
+    """I-14：`names.py` 里每个 `HDR_*` 都能在本区找到（C2-int 起没有 PENDING 表了，直接对账注册表）。"""
     hdr, st, host = fake
     hdr.show_signal(st.models()[0])
     hdr.set_resolve_open(True)
-    for nm in (names.HDR_BAR, names.HDR_NAME, names.HDR_STATUS_BADGE, names.HDR_META,
-               names.HDR_COV_BTN, names.HDR_PROGRESS_LABEL, names.HDR_PROGRESS_BAR,
-               names.HDR_PROGRESS_DIFF, names.HDR_RESOLVE_BTN, names.HDR_RESOLVE_PANEL,
-               names.HDR_SIDE_TOGGLE, names.HDR_ERROR_LABEL):
-        assert H.find(hdr, nm) is not None
-    for nm in PENDING_NAMES.values():
-        assert H.find(hdr, nm) is not None
+    hdr_names = {k: v for k, v in names.all_names().items() if k.startswith("HDR_")}
+    assert len(hdr_names) >= 16, "HDR_* 的名字只剩 %d 个了" % len(hdr_names)
+    missing = [k for k, v in hdr_names.items() if H._find_opt(hdr, v) is None]
+    assert not missing, "这些 names.HDR_* 没落到控件上：%s" % missing
     assert os.path.exists(H.shot(host, "hdr_all_names"))

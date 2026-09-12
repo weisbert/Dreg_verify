@@ -44,22 +44,11 @@ from .widgets import ui_font
 Qt = QtCore.Qt
 
 __all__ = ["FlowCanvas", "SigflowView", "SigFlowPanel", "EdgeHit", "NodeHit",
-           "PENDING_NAMES", "HIT_PEN_W", "BUBBLE_PAD", "node_net", "node_tooltip",
+           "HIT_PEN_W", "BUBBLE_PAD", "node_net", "node_tooltip",
            "edge_tooltip", "HOST_REQUIREMENTS"]
 
-# ── 本波用到、但 names.py 里还没有的 objectName（C2-int 请把它们并进 names.py）──
-PENDING_NAMES = {
-    "FLOW_SUBTITLE": "flow_subtitle",        # ⑦ 工具条副标「源寄存器在左 · 顶层输出在右」
-    "FLOW_BODY": "flow_body",                # 画布 / 空态 两页的 QStackedWidget
-    "FLOW_EMPTY": "flow_empty",              # 空态文案（无图 / 分析中 / 构图失败）
-    "FLOW_VIEWPORT": "flow_view_viewport",   # FLOW_VIEW 的 viewport（鼠标事件真正的收件人）
-    "FLOW_LEGEND_ITEM_FMT": "flow_legend_%d",  # fmt_legend_item(i)：四条图例各自可测
-}
-
-
-def fmt_legend_item(i):
-    """第 i 条图例的 objectName（顺序 = `terms.FLOW_LEGEND`）。"""
-    return PENDING_NAMES["FLOW_LEGEND_ITEM_FMT"] % int(i)
+#: 第 i 条图例的 objectName（顺序 = `terms.FLOW_LEGEND`）——定义在 `ui/names.py`
+fmt_legend_item = N.fmt_flow_legend_item
 
 
 #: 命中层的笔宽（架构 §1.3②「透明 QGraphicsPathItem，笔宽 8」）。线只有 1.2–2.4px 粗，
@@ -83,9 +72,9 @@ ROLE_KIND = 3       # 节点 kind（REG / TOPOUT / MUXN …）；边为 None
 #: 图例四条的颜色（顺序与 `terms.FLOW_LEGEND` / `sigflow._LEGEND` 一致）
 _LEGEND_COLORS = (TH.FLOW_MUTE, TH.FLOW_AMB, TH.FLOW_HL, TH.FLOW_BAD)
 
-#: 「为什么判成 RW」的那句（C-283）——就是图例第一条去掉线型前缀：**表里查到地址**。
-#: terms 目前没有专门的 tooltip 文案（见 HOST_REQUIREMENTS），不在视图里自造一句新的。
-_WHY_REG = T.FLOW_LEGEND[0].lstrip("─ ").strip()
+#: 「为什么判成 RW」的那句（C-283）。C2-int 之前借的是图例第一条（去掉线型前缀）；
+#: 图例说的是「这条线是什么」、tooltip 说的是「为什么这么判」，两句话各改各的，现在各有各的常量。
+_WHY_REG = T.FLOW_WHY_REG
 
 
 # ═════════════════════════════ 文本 ═════════════════════════════
@@ -203,7 +192,7 @@ class FlowCanvas(QtWidgets.QGraphicsView):
     def __init__(self, parent=None):
         QtWidgets.QGraphicsView.__init__(self, parent)
         self.setObjectName(N.FLOW_VIEW)
-        self.viewport().setObjectName(PENDING_NAMES["FLOW_VIEWPORT"])
+        self.viewport().setObjectName(N.FLOW_VIEWPORT)
         self._scene = QtWidgets.QGraphicsScene(self)
         self.setScene(self._scene)
         self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(TH.WHITE)))
@@ -585,14 +574,14 @@ class SigflowView(QtWidgets.QWidget):
 
         self.canvas = FlowCanvas(self)
         self.empty = QtWidgets.QLabel("", self)
-        self.empty.setObjectName(PENDING_NAMES["FLOW_EMPTY"])
+        self.empty.setObjectName(N.FLOW_EMPTY)
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setWordWrap(True)
         self.empty.setFont(ui_font(TH.FS_UI))
         self.empty.setStyleSheet("color:%s;background:%s;padding:24px;"
                                  % (TH.MUTE, TH.HINT_BG))
         self.body = QtWidgets.QStackedWidget(self)
-        self.body.setObjectName(PENDING_NAMES["FLOW_BODY"])
+        self.body.setObjectName(N.FLOW_BODY)
         self.body.addWidget(self.canvas)     # index 0
         self.body.addWidget(self.empty)      # index 1
         root.addWidget(self.body, 1)
@@ -630,7 +619,7 @@ class SigflowView(QtWidgets.QWidget):
         lay.addWidget(self.title)
 
         self.subtitle = QtWidgets.QLabel(T.FLOW_SUBTITLE, bar)
-        self.subtitle.setObjectName(PENDING_NAMES["FLOW_SUBTITLE"])
+        self.subtitle.setObjectName(N.FLOW_SUBTITLE)
         self.subtitle.setFont(ui_font(TH.FS_UI_SMALL))
         self.subtitle.setStyleSheet("color:%s;" % TH.MUTE)
         lay.addWidget(self.subtitle)
@@ -719,7 +708,7 @@ class SigflowView(QtWidgets.QWidget):
     def set_pending(self):
         """后台还在展开这个信号（worker 的骨架行先出，图要等分析完）。"""
         self.an = None
-        self._show_empty(T.HDR_PENDING)
+        self._show_empty(T.FLOW_PENDING)
 
     def clear(self):
         """没选信号 / 换表。"""
@@ -735,7 +724,7 @@ class SigflowView(QtWidgets.QWidget):
         issues = list((an or {}).get("issues") or []) if isinstance(an, dict) else []
         named = [T.scrub(str(x)) for x in issues if _GRAPH_FAIL_RE.search(str(x))]
         if named:
-            return "\n".join(named)
+            return "\n".join([T.FLOW_BUILD_FAILED] + named)
         return T.FLOW_EMPTY
 
     def _bus_net(self):
@@ -833,8 +822,8 @@ HOST_REQUIREMENTS = (
      "**点中的那根不亮、亮的是同名的另外两根**。现由 `FlowCanvas._graph_spelling` 在 GUI 侧兜住；"
      "`_hl_key` 改成 `_strip_width` 后即可删掉那段（回归测试："
      "`test_c282_bit_sliced_net_still_highlights_after_bus_strips_width`）"),
-    ("★ names.py 补 5 个 objectName", "见 PENDING_NAMES：flow_subtitle / flow_body / flow_empty / "
-                                     "flow_view_viewport / flow_legend_%d"),
-    ("★ terms.py 缺的文案", "①「分析中」这一格现借 terms.HDR_PENDING；"
-                          "② 构图失败没有专门文案，现按 C-270 直接点名 an['issues'] 的 ⚠ 原文（过 scrub）"),
+    ("names.py 的 5 个 objectName", "✔ C2-int 已并进 names.py：FLOW_SUBTITLE / FLOW_BODY / FLOW_EMPTY / "
+                                   "FLOW_VIEWPORT / fmt_flow_legend_item(i)"),
+    ("terms.py 的两条文案", "✔ C2-int 已补：`FLOW_PENDING`（分析中）、`FLOW_BUILD_FAILED`（构图失败的抬头，"
+                         "后面仍按 C-270 点名 an['issues'] 的 ⚠ 原文）、`FLOW_WHY_REG`（C-283 tooltip）"),
 )

@@ -82,6 +82,50 @@ STATUS = {
 STATUS_FALLBACK = {"ok": "clean", "skip": "skip", "unresolved": "unresolved", "error": "error"}
 #: 「全部状态」筛选下拉的三项（C-029）
 STATUS_FILTER_ITEMS = ("全部状态", "仅可建", "仅有问题")
+#: 色档里算「有问题」的两档（清单状态列橙 / 红；note 的只读回读 / 输出裸名不算问题）
+PROBLEM_TONES = ("warn", "bad")
+#: 状态筛选下拉的取值（第 0 项 = 不筛）；筛选行发的 `filters["status"]` 就是这两个键之一或 ""。
+#: 中文项也一并认：两处各写各的字面量时，漏一个就是「筛了等于没筛」，而且界面上看不出来
+#: （行数不变，用户只会以为本来就这么多）。
+STATUS_FILTER_OK_KEYS = ("ok", "clean", STATUS_FILTER_ITEMS[1])
+STATUS_FILTER_PROBLEM_KEYS = ("issues", "problem", STATUS_FILTER_ITEMS[2])
+
+
+def status_key_of(model):
+    """模型行 → `STATUS` 的键（C-014 / C-016 / C-041）。**四档→八档的映射只有这一处。**
+
+    引擎给了 `status_detail`（八档）就用它；只给四档 `status` 时按 `STATUS_FALLBACK` 映射。
+    清单（`signal_list`）、筛选行（`filter_bar`）、详情标题栏（`detail_header`）共用本函数
+    —— 三边各带一份 5 行判定时，`risky-generated` 这类行会在「筛选说可建、清单说有问题」之间打架
+    （主控裁决：搬进 terms 这片共享叶子，只写一处）。"""
+    m = model or {}
+    key = str(m.get("status_detail") or "").strip()
+    if key in STATUS:
+        return key
+    st = str(m.get("status") or "").strip()
+    if st in STATUS_FALLBACK:
+        return STATUS_FALLBACK[st]
+    return st if st in STATUS else "error"
+
+
+def tone_of(model):
+    """模型行 → 色档 `ok` / `warn` / `bad` / `note`（= `STATUS[status_key_of(m)][1]`）。"""
+    return STATUS[status_key_of(model)][1]
+
+
+def match_status(model, status_filter):
+    """这一行是否通过「全部状态 / 仅可建 / 仅有问题」筛选（C-029）。
+
+    判据就是清单状态列上写着的那一档：可建 = 色档 ok，有问题 = 色档 warn/bad。
+    空串（或任何别的值）= 不筛。筛选行与清单 proxy 共用本函数 —— 以前筛选行按四档
+    `status` 判、清单按八档 tone 判，`risky-generated`（status 仍是 "ok"）这类行
+    会被筛选行算进「仅可建」、被清单算进「有问题」，同一块屏幕上两个数。"""
+    s = str(status_filter or "")
+    if s in STATUS_FILTER_OK_KEYS:
+        return tone_of(model) == "ok"
+    if s in STATUS_FILTER_PROBLEM_KEYS:
+        return tone_of(model) in PROBLEM_TONES
+    return True
 
 # ═════════ 三、行内原因块模板（Design D 数组 4 条实例的句式）═════════
 #: 键 = 状态键；值 = (标题, 正文模板, 按钮文案「去诊断 · {action}」的 action, 跳转目标)
@@ -194,7 +238,11 @@ LIST_PREFIX_LEVEL_SHIFT_FMT = "探针口={net} (level_shift)"                  #
 LIST_PREFIX_INPUT_HIT_FMT = "{input}→{prefix}"                             # C-020
 LIST_SUPPLEMENT_TIP = "用了 RTL 补充逻辑：{note}"                             # C-039 / C-215
 LIST_NORMALIZED_TIP = "嵌套 mux 已自动折叠：{note}"                           # C-040
+LIST_NORMALIZED_MARK = " ⚙"                                                 # C-040 状态格上的折叠标记
 LIST_STATUS_ERROR_FMT = "解析异常：{error}"                                  # C-007
+#: C-036 清单底部「清除反例」的保护性确认（真值表那条是单信号口吻，清单这条按「一批信号」说）
+LIST_CONFIRM_NEG_CLEAR_FMT = ("要清的 {k} 个信号里，有 {n} 个的反例是你自定义命名或手填过错值的，"
+                              "删了就是丢你的活。确定清除反例？")
 KIND_LABELS = {"logic": "选路/logic", "mux": "选路/mux", "register": "直连寄存器/logic",
                "ro-readback": "RO回读(跳过)", "unresolved": "未解析"}          # C-012
 FORM_LABELS = {"register": "直连寄存器", "boolean": "布尔/位运算", "select": "选路", "gated": "门控 iddq"}
@@ -287,6 +335,10 @@ FLOW_FOOTER = ("右键按住拖动平移 · Ctrl + 滚轮缩放 · 双击复位�
 FLOW_LEGEND = ("── 寄存器（表里查到地址）", "┈ 名字来自命名约定，表里未查到", "── 当前选中线网", "┈ 规格冲突的 case 支")
 FLOW_BROKEN = "展不下去"                                                      # 未解析断点红色端子
 FLOW_EMPTY = "这个信号没有可画的电路（只读回读 / 未解析），看左侧状态"
+FLOW_PENDING = "还在后台展开这个信号，展开完自动出图"                            # 电路图区的「分析中」
+#: 构图失败：引擎那条 ⚠ 原文点名在后（C-270 点名 + 原因），这句只交代「图没画出来、别的没事」
+FLOW_BUILD_FAILED = "这个信号的电路图没画出来（其余功能不受影响）——引擎给的原因："
+FLOW_WHY_REG = "判成 RW 的依据：地址表里查到了这个字段的地址"                     # C-283 寄存器盒 tooltip
 FLOW_ZOOM_FMT = "{pct}%"
 
 # ⑧ .sv 预览
@@ -300,6 +352,7 @@ SV_SKIPPED_TAIL_HEAD = "本次会跳过的信号（各缺哪根输入）："    
 SV_PREVIEW_STATUS_FMT = "预览：{counts}"                                      # C-172
 
 # ⑨ 右侧常驻栏
+SIDE_EMPTY_NO_SIGNAL = "在左边清单里选一个信号，这里出它的展开链和输入信号"       # 右栏空态
 SIDE_CHAIN_TITLE = "逐层展开"
 SIDE_CHAIN_HELP = "从顶层输出往回到源寄存器 · 每层：Excel 原式 = 代入真实信号名"   # C-222
 CHAIN_PAGE_TAGS = {"dft": "dft 页门控", "logic": "logic 页", "mux": "mux 页 · {group}", "iddq": "iddq 页",
@@ -412,7 +465,9 @@ EXPORT_DUP_LABELS_TITLE = "重复 assert 标号（非法 SV）"
 EXPORT_DUP_LABELS_FMT = "以下 {n} 处 assert 标号重复，同一作用域内重复会让 elaboration 失败。仍要写出？\n{rows}"
 EXPORT_WRITE_FAILED_FMT = "无法写入 {path}：\n{err}\n\n（文件是否正被仿真器 / 编辑器占用？）"        # C-171
 EXPORT_IMPORT_MISMATCH_FMT = "这份配置是为《{cfg}》导出的，当前是《{cur}》"                          # C-193
-EXPORT_IMPORT_MISSING_FMT = "配置里有、当前表没有的信号（{n} 个）：{names}"                          # C-194
+#: C-194 / C-270 / I-20 主控裁决：**名字在前、计数在后**（旧版是「（{n} 个）：{names}」，
+#: 计数先出现等于先让人看一个数字再去猜是哪些信号 —— 点名永远排在计数前面）
+EXPORT_IMPORT_MISSING_FMT = "配置里有、当前表没有的信号：{names}（共 {n} 个，这些跳过，其余照常导入）"
 EXPORT_IMPORT_BAD_FILE = "这不是本工具的配置文件：缺少 dreg_verify_config 段，也没有 edits / mux_* 段"   # C-195
 EXPORT_CONFIG_DONE_FMT = "配置已导出：勾选 {k} 个 · 全局档 {cov} · 前缀 {np} 条 · 强制 force {nf} 个 · 编辑 {ne} 个信号、手填期望 {nx} 条"   # C-191
 EXPORT_REPORT_DONE_FMT = "范围 {scope} · 用例 {n} 条 · 反例 {neg} 条"                                 # C-177
@@ -484,16 +539,59 @@ DIAG_LEGACY_NONE = "这张表没有旧版真值表编辑"
 DIAG_LEGACY_RUN = "开始迁移"
 
 # 对话框
+# ① 三处确认
+DLG_CONFIRM_TITLES = {"clear": "清零本信号", "del_neg": "删除全部反例", "auto_fill": "auto→期望"}
+DLG_CONFIRM_DEL_NEG_PLAIN_FMT = "将删除本信号全部 {n} 条反例，正向用例保留。确定删除？"
+DLG_CONFIRM_NAMES_HEAD = "会丢掉的反例列 —— 名字和原因："
+DLG_CONFIRM_NAMES_COUNT_FMT = "共 {n} 列"
+DLG_CONFIRM_REASON_NAMED = "自定义命名"
+DLG_CONFIRM_REASON_HAND = "手调过错值"
+# ② 重命名列
 DLG_RENAME_TITLE = "重命名列"
+DLG_RENAME_HINT = "只能用字母 / 数字 / 下划线；不能占 T<编号> 这个自动测试保留名；不能与其它列重名。"
+# ③ mux 数据值整表
 DLG_MUX_DATA_TITLE = "mux 数据值（整表，按物理寄存器同步）"
 DLG_MUX_DATA_HINT = "清空 = 恢复自动分配。两条数据路取到相同值时会提示假绿（驱不动，断言必过）。"
+DLG_MUX_DATA_HEADERS = ("数据寄存器", "位宽", "当前值", "新值")
+DLG_MUX_DATA_EMPTY = "这个信号没有可手填的数据寄存器行。"
+# ④ 列设置
 DLG_COLUMNS_TITLE = "列设置"
+DLG_COLUMNS_HINT = "勾选列常驻第一列，不在这里关。"
+# ⑤ 粘贴名单
 DLG_PASTE_NAMES_TITLE = "粘贴名单勾选"
 DLG_PASTE_NAMES_HINT = "每行一个信号名（可带位宽切片，大小写无关）。"
 DLG_PASTE_NAMES_RESULT_FMT = "勾上 {n} 个；找不到 {m} 个：{names}"
+DLG_PASTE_NAMES_EMPTY = "一个名字都没填。"
+# ⑥ 预设
 DLG_PRESETS_TITLE = "预设"
+DLG_PRESETS_SAVE_TITLE = "存为预设"
+DLG_PRESETS_MANAGE_TITLE = "管理预设"
+DLG_PRESETS_NAME_HINT = "给当前的勾选 + 筛选起个名字。"
+DLG_PRESETS_OVERWRITE_FMT = "已有同名预设「{name}」，存下去会覆盖它。"
+DLG_PRESETS_NAME_REQUIRED = "名字不能为空。"
+DLG_PRESETS_DELETE = "删除"
+DLG_PRESETS_EMPTY = "还没有存过预设。"
+# ⑦ 重复标号
+DLG_DUP_LABELS_CONTINUE = "仍要写出"
+DLG_DUP_LABELS_ROW_FMT = "  {label}  ←  {a} / {b}"
+# ⑧ 导入结果（名字在前、计数在后 —— C-194 / C-270 / I-20）
+DLG_IMPORT_REPORT_TITLE = "导入结果"
+DLG_IMPORT_MISSING_HEAD = "配置里有、当前表里找不到的信号 —— 名字和原因："
+DLG_IMPORT_MISSING_COUNT_FMT = "共 {n} 个（这些跳过，其余照常导入）"
+DLG_IMPORT_MISSING_MORE_FMT = "…（只列前 {k} 个）"
+DLG_IMPORT_ROW_FMT = "{name}　└ {reason}"
+DLG_IMPORT_MISSING_REASON = "当前表里没有这个信号（改名？删行？该页不存在？）"
+DLG_IMPORT_NONE = "没有找不到的信号。"
+# ⑨ 批量填期望
 DLG_BATCH_FILL_TITLE = "批量填期望"
 DLG_BATCH_FILL_HINT = "把这个值填进所有选中列的期望格（未选则全部未填的正向列）。"
+DLG_BATCH_FILL_MODES = {"const": "填一个固定值", "auto": "取程序算的值（auto）", "clear": "清空期望"}
+DLG_BATCH_FILL_SCOPE_SELECTED_FMT = "只填选中的 {n} 列"
+DLG_BATCH_FILL_SCOPE_ALL_FMT = "全部 {n} 列"
+DLG_BATCH_FILL_SCOPE_LABEL = "范围"
+# ⑩ .sv 导出选项
+DLG_EXPORT_OPTIONS_TITLE = "导出 .sv 选项"
+DLG_EXPORT_SCOPE_LABEL = "范围"
 DLG_YES = "确定"
 DLG_NO = "取消"
 

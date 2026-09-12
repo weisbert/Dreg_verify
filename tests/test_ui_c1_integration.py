@@ -147,21 +147,17 @@ def test_c244_bulk_check_single_write(win, monkeypatch):
 #: C2 / C3 / C4 才落地的区（本波 find 不到很正常）——每条注明谁交付
 LATER_WAVE_NAMES = {
     "HDR_NAME", "HDR_STATUS_BADGE", "HDR_META", "HDR_PROGRESS_LABEL", "HDR_PROGRESS_BAR",
-    "HDR_PROGRESS_DIFF", "HDR_RESOLVE_BTN", "HDR_RESOLVE_PANEL", "HDR_SIDE_TOGGLE",
+    "HDR_PROGRESS_DIFF", "HDR_RESOLVE_BTN", "HDR_RESOLVE_PANEL", "HDR_RESOLVE_BOX",
+    "HDR_RESOLVE_DIAG_BTN", "HDR_PENDING", "HDR_NOT_EDITABLE", "HDR_SIDE_TOGGLE",
     "HDR_ERROR_LABEL",                                           # C2-c detail_header
-    "TABS_BAR", "TABS_TRUTH", "TABS_SV",                          # C2-c main_view
+    "TABS_BAR", "TABS_TRUTH", "TABS_SV", "MAIN_VIEW_PANEL", "MAIN_PAGE_TRUTH",   # C2-c main_view
     "SV_TOOLBAR", "SV_TITLE", "SV_BTN_TOGGLE_SCOPE", "SV_BTN_COPY", "SV_TEXT",   # C2-c sv_preview
     "SIDE_CHAIN_TITLE", "SIDE_CHAIN_HELP", "SIDE_INPUTS_TITLE",
     "SIDE_INPUTS_GUESS_BADGE",                                    # C2-a side_panel
-    "FLOW_TOOLBAR", "FLOW_TITLE", "FLOW_BTN_FULLSCREEN", "FLOW_BTN_FIT", "FLOW_BTN_100",
-    "FLOW_ZOOM_LABEL", "FLOW_BTN_EXPORT_SVG", "FLOW_BTN_EXPORT_PNG", "FLOW_VIEW",
+    "FLOW_TOOLBAR", "FLOW_TITLE", "FLOW_SUBTITLE", "FLOW_BTN_FULLSCREEN", "FLOW_BTN_FIT",
+    "FLOW_BTN_100", "FLOW_ZOOM_LABEL", "FLOW_BTN_EXPORT_SVG", "FLOW_BTN_EXPORT_PNG",
+    "FLOW_VIEW", "FLOW_VIEWPORT", "FLOW_BODY", "FLOW_EMPTY",
     "FLOW_FOOTER", "FLOW_LEGEND",                                 # C2-b sigflow_view
-    "DLG_CONFIRM", "DLG_CONFIRM_TEXT", "DLG_RENAME_COL", "DLG_RENAME_COL_EDIT",
-    "DLG_RENAME_COL_ERROR", "DLG_MUX_DATA", "DLG_MUX_DATA_TABLE", "DLG_COLUMNS",
-    "DLG_COLUMNS_LIST", "DLG_PASTE_NAMES", "DLG_PASTE_NAMES_TEXT", "DLG_PASTE_NAMES_RESULT",
-    "DLG_PRESETS", "DLG_PRESETS_LIST", "DLG_PRESETS_NAME", "DLG_DUP_LABELS",
-    "DLG_DUP_LABELS_TEXT", "DLG_IMPORT_REPORT", "DLG_IMPORT_REPORT_TEXT",
-    "DLG_BATCH_FILL", "DLG_BATCH_FILL_VALUE",                     # C2-d dialogs（弹出时才存在）
     "EXPORT_DIALOG", "EXPORT_TABLE", "EXPORT_SUMMARY", "EXPORT_SUMMARY_SKIPPED",
     "EXPORT_BTN_CANCEL", "EXPORT_BTN_RUN", "EXPORT_BTN_IMPORT_CONFIG",
     "EXPORT_OPTIONS_POPOVER",                                     # C4-a export_center
@@ -170,8 +166,8 @@ LATER_WAVE_NAMES = {
     "LIST_REASON_RISKY_BTN",      # 只在 needs-prefix 且主按钮不是 diag_risky 的行上出现
     "HARNESS_EXCEL_PATH_EDIT",    # v1 的名字，harness 的退回路径用
 }
-#: 真值表 / 诊断抽屉整片（C3 / C4-b）
-LATER_WAVE_PREFIXES = ("TRUTH_", "DIAG_")
+#: 真值表 / 诊断抽屉整片（C3 / C4-b）+ 对话框整片（`ui/dialogs.py`，弹出时才存在）
+LATER_WAVE_PREFIXES = ("TRUTH_", "DIAG_", "DLG_")
 
 
 def _in_scope(key, value):

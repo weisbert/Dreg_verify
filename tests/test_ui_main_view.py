@@ -22,7 +22,7 @@ from PySide6 import QtCore, QtGui, QtWidgets                       # noqa: E402
 
 from dreg_verify.ui import app as APP                              # noqa: E402
 from dreg_verify.ui import contracts, names, terms, theme          # noqa: E402
-from dreg_verify.ui.main_view import MainView, PENDING_NAMES       # noqa: E402
+from dreg_verify.ui.main_view import MainView                      # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -204,5 +204,5 @@ def test_mainview_placeholder_names_match_app(mv):
         assert w.property("placeholder") is True
     # MAIN_VIEW 仍是那个堆叠（test_ui_app 按 `.currentIndex()` 认页，换真件不能换类型）
     assert isinstance(H.find(view, names.MAIN_VIEW), QtWidgets.QStackedWidget)
-    assert view.objectName() == PENDING_NAMES["MAIN_VIEW_PANEL"]
+    assert view.objectName() == names.MAIN_VIEW_PANEL
     assert os.path.exists(H.shot(host, "mainview_placeholders"))

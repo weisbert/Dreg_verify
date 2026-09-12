@@ -30,14 +30,6 @@ from dreg_verify.ui import names, terms, theme
 from dreg_verify.ui.coverage import CoverageControl
 from dreg_verify.ui.widgets import ProgressBadge, mono_font, ui_font
 
-# ── 本波用到、但 names.py 里还没有的 objectName（C2-int 请并进 names.py）──
-PENDING_NAMES = {
-    "HDR_RESOLVE_BOX": "hdr_resolve_box",            # 解析明细面板外壳（正文 + 直链按钮）
-    "HDR_RESOLVE_DIAG_BTN": "hdr_resolve_diag_btn",  # C-066 末尾三步 → 诊断抽屉的直链
-    "HDR_PENDING": "hdr_pending",                    # 「还在后台展开这个信号……」
-    "HDR_NOT_EDITABLE": "hdr_not_editable",          # C-134「这个信号不可建…」
-}
-
 #: C-066 的直链目标（terms.REASON_TARGETS 的键）
 DIAG_TARGET_CUVUNF = "diag_cuvunf"
 #: 直链按钮文案：复用行内原因块的「去诊断 · {action}」句式（needs-prefix 那条的 action）
@@ -47,18 +39,9 @@ DIAG_BTN_TEXT = terms.REASON_BTN_FMT.format(action=terms.REASON_TEMPLATES["needs
 DASH = "—"
 
 
-def status_key_of(model):
-    """模型行 → `terms.STATUS` 的键。引擎给了 `status_detail` 就用它，否则按四档兜底。
-
-    （与 `ui/signal_list.status_key_of` 同口径；视图之间不互相 import，各带一份 5 行的判定。）"""
-    m = model or {}
-    key = str(m.get("status_detail") or "").strip()
-    if key in terms.STATUS:
-        return key
-    st = str(m.get("status") or "").strip()
-    if st in terms.STATUS_FALLBACK:
-        return terms.STATUS_FALLBACK[st]
-    return st if st in terms.STATUS else "error"
+#: 模型行 → `terms.STATUS` 的键。四档→八档的映射**只写在 `terms.py`**（主控裁决，C2-int）：
+#: 清单 / 筛选行 / 本模块共用同一个函数，否则 `risky-generated` 这类行会三边说法不一。
+status_key_of = terms.status_key_of
 
 
 def _vec_keys(an):
@@ -226,14 +209,14 @@ class DetailHeader(QtWidgets.QWidget):
 
         # ── 状态行（三者互斥、平时都藏着）──
         self.pending_label = QtWidgets.QLabel(self)
-        self.pending_label.setObjectName(PENDING_NAMES["HDR_PENDING"])
+        self.pending_label.setObjectName(names.HDR_PENDING)
         self.pending_label.setFont(ui_font(theme.FS_UI_SMALL))
         self.pending_label.setText(terms.HDR_PENDING)
         self.pending_label.setStyleSheet("color:%s;" % theme.MUTE)
         outer.addWidget(self.pending_label)
 
         self.not_editable_label = QtWidgets.QLabel(self)
-        self.not_editable_label.setObjectName(PENDING_NAMES["HDR_NOT_EDITABLE"])
+        self.not_editable_label.setObjectName(names.HDR_NOT_EDITABLE)
         self.not_editable_label.setFont(ui_font(theme.FS_UI_SMALL))
         self.not_editable_label.setText(terms.HDR_NOT_EDITABLE)
         self.not_editable_label.setStyleSheet("color:%s;" % theme.WARN_FG)
@@ -251,7 +234,7 @@ class DetailHeader(QtWidgets.QWidget):
 
         # ── 解析明细面板（C-064/065/066）──
         self.resolve_box = QtWidgets.QFrame(self)
-        self.resolve_box.setObjectName(PENDING_NAMES["HDR_RESOLVE_BOX"])
+        self.resolve_box.setObjectName(names.HDR_RESOLVE_BOX)
         self.resolve_box.setFrameShape(QtWidgets.QFrame.NoFrame)
         box = QtWidgets.QVBoxLayout(self.resolve_box)
         box.setContentsMargins(0, 4, 0, 0)
@@ -267,7 +250,7 @@ class DetailHeader(QtWidgets.QWidget):
             % (theme.HINT_BG, theme.BORDER_LIGHT, theme.INK))
         box.addWidget(self.resolve_panel)
         self.resolve_diag_btn = QtWidgets.QToolButton(self.resolve_box)
-        self.resolve_diag_btn.setObjectName(PENDING_NAMES["HDR_RESOLVE_DIAG_BTN"])
+        self.resolve_diag_btn.setObjectName(names.HDR_RESOLVE_DIAG_BTN)
         self.resolve_diag_btn.setText(DIAG_BTN_TEXT)
         self.resolve_diag_btn.setFont(ui_font(theme.FS_UI_SMALL))
         self.resolve_diag_btn.setCursor(QtCore.Qt.PointingHandCursor)

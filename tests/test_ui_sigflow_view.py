@@ -403,7 +403,7 @@ def test_c283_hover_register_tooltip_has_address_bits_reason():
     assert ("@0x%x" % reg.meta["address"]) in tip, "缺地址"
     assert ("[%d:%d]" % (reg.meta["reg_msb"], reg.meta["reg_lsb"])) in tip, "缺位段"
     assert str(reg.meta["reg_kind"]) in tip, "缺 RO/RW"
-    assert T.FLOW_LEGEND[0].lstrip("─ ").strip() in tip, "缺「为什么判成 RW」的依据"
+    assert T.FLOW_WHY_REG in tip, "缺「为什么判成 RW」的依据"
     v.close()
 
 
@@ -562,13 +562,13 @@ def test_flow_edge_hit_pen_is_transparent_and_wide():
 def test_flow_empty_states_name_the_reason():
     """三种空态：没选信号 / 后台还在展开 / 构图失败（失败要点名 issue 原文，且过 scrub）。"""
     v, _bus, _an = make_view(sig=None)
-    empty = H.find(v, FV.PENDING_NAMES["FLOW_EMPTY"])
+    empty = H.find(v, N.FLOW_EMPTY)
     assert v.body.currentWidget() is empty and empty.text() == T.FLOW_EMPTY
     for name in (N.FLOW_BTN_FIT, N.FLOW_BTN_100, N.FLOW_BTN_EXPORT_SVG, N.FLOW_BTN_EXPORT_PNG):
         assert H.find(v, name).isEnabled() is False, "没图时 %s 不该可点" % name
 
     v.set_pending()
-    assert empty.text() == T.HDR_PENDING
+    assert empty.text() == T.FLOW_PENDING      # 专门文案（C2-int 前借的是 T.HDR_PENDING）
 
     # 只读回读：引擎压根没给图 → 通用文案
     v.set_signal(analysis(*NOGRAPH), name=NOGRAPH[1])
@@ -578,6 +578,7 @@ def test_flow_empty_states_name_the_reason():
     # 构图失败：把引擎那条 ⚠ 原样点名（C-270），内部术语先过 scrub（I-12）
     v.set_signal({"graph": None,
                   "issues": ["⚠ 信号流图构建失败(不影响验证与产物): ValueError('无 cone')"]})
+    assert empty.text().startswith(T.FLOW_BUILD_FAILED)      # 抬头先说清「图没画出来」
     assert "信号流图构建失败" in empty.text()
     assert not [w for w in T.FORBIDDEN if w in empty.text()], empty.text()
     H.shot(v, "flow_empty_build_failed")
@@ -585,20 +586,18 @@ def test_flow_empty_states_name_the_reason():
 
 
 def test_flow_objectnames_and_terms_come_from_the_registries():
-    """I-14：每个可测控件都有 objectName，且名字只来自 `names.py`（缺的进 PENDING_NAMES）。"""
+    """I-14：每个可测控件都有 objectName，且名字只来自 `names.py`（C2-int 起没有 PENDING 表了）。"""
     v, _bus, _an = make_view(MUX3)
     for key, value in N.all_names().items():
         if key.startswith("FLOW_"):
             assert H.find(v, value) is not None, "names.%s 没落到控件上" % key
-    for key, value in FV.PENDING_NAMES.items():
-        if "%" in value:
-            continue
-        assert H.find(v, value) is not None, "PENDING_NAMES[%r] 没落到控件上" % key
-    assert v.canvas.viewport().objectName() == FV.PENDING_NAMES["FLOW_VIEWPORT"]
+    for i in range(len(T.FLOW_LEGEND)):                     # 四条图例各自可测（fmt_flow_legend_item）
+        assert H.find(v, N.fmt_flow_legend_item(i)) is not None
+    assert v.canvas.viewport().objectName() == N.FLOW_VIEWPORT
 
     # 文案一律来自 terms
     assert H.find(v, N.FLOW_TITLE).text() == T.FLOW_TITLE
-    assert H.find(v, FV.PENDING_NAMES["FLOW_SUBTITLE"]).text() == T.FLOW_SUBTITLE
+    assert H.find(v, N.FLOW_SUBTITLE).text() == T.FLOW_SUBTITLE
     assert H.find(v, N.FLOW_FOOTER).text() == T.FLOW_FOOTER
     assert H.find(v, N.FLOW_BTN_FIT).text() == T.FLOW_BTN_FIT
     assert H.find(v, N.FLOW_BTN_100).text() == T.FLOW_BTN_100

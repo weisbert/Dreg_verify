@@ -19,12 +19,6 @@ from PySide6 import QtCore, QtWidgets
 from dreg_verify.ui import names, terms, theme
 from dreg_verify.ui.widgets import ui_font
 
-# ── 本波用到、但 names.py 里还没有的 objectName（C2-int 请并进 names.py）──
-PENDING_NAMES = {
-    "MAIN_VIEW_PANEL": "main_view_panel",      # 标签条 + 堆叠的外壳（MAIN_VIEW 是里面那个堆叠）
-    "MAIN_PAGE_TRUTH": "main_page_truth",      # 堆叠第 0 页（真值表 + 电路图）
-}
-
 #: 两个标签的键（顺序 = Design tabDef）
 TABS = ("truth", "sv")
 
@@ -65,7 +59,7 @@ class MainView(QtWidgets.QWidget):
 
     def __init__(self, truth_widget=None, flow_widget=None, sv_widget=None, parent=None):
         super(MainView, self).__init__(parent)
-        self.setObjectName(PENDING_NAMES["MAIN_VIEW_PANEL"])
+        self.setObjectName(names.MAIN_VIEW_PANEL)
         self._tab = "truth"
         self._flow_full = False
         self._truth_max = False
@@ -108,7 +102,7 @@ class MainView(QtWidgets.QWidget):
         self.stack.setObjectName(names.MAIN_VIEW)
 
         page = QtWidgets.QWidget(self.stack)
-        page.setObjectName(PENDING_NAMES["MAIN_PAGE_TRUTH"])
+        page.setObjectName(names.MAIN_PAGE_TRUTH)
         pl = QtWidgets.QVBoxLayout(page)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.setSpacing(0)

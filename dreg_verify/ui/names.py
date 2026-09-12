@@ -90,8 +90,12 @@ HDR_PROGRESS_BAR = "hdr_progress_bar"
 HDR_PROGRESS_DIFF = "hdr_progress_diff"    # 「其中 1 条与程序算的不一致」
 HDR_RESOLVE_BTN = "hdr_resolve_btn"        # 「解析明细」C-064
 HDR_RESOLVE_PANEL = "hdr_resolve_panel"    # 解析明细面板（QPlainTextEdit 只读）
+HDR_RESOLVE_BOX = "hdr_resolve_box"        # 解析明细面板外壳（正文 + 直链按钮）
+HDR_RESOLVE_DIAG_BTN = "hdr_resolve_diag_btn"  # C-066 末尾三步 → 诊断抽屉的直链
 HDR_SIDE_TOGGLE = "hdr_side_toggle"        # 「隐藏右栏 ▶」/「◀ 展开链 · 输入信号」
 HDR_ERROR_LABEL = "hdr_error_label"        # 「分析失败（已捕获，未崩）」C-043
+HDR_PENDING = "hdr_pending"                # 「还在后台展开这个信号……」
+HDR_NOT_EDITABLE = "hdr_not_editable"      # C-134「这个信号不可建…」
 
 # ───────── ⑯ 覆盖度弹层 ─────────
 COV_CONTROL = "cov_control"                # 按钮 + 弹层的外壳（CoverageControl 本体）
@@ -122,6 +126,8 @@ TABS_BAR = "tabs_bar"
 TABS_TRUTH = "tabs_truth"                  # 「真值表 + 电路图　25 列 · 手填 7/25」
 TABS_SV = "tabs_sv"                        # 「.sv 预览」Ctrl+P
 MAIN_VIEW = "main_view"                    # QStackedWidget（truth+flow 页 / sv 页）
+MAIN_VIEW_PANEL = "main_view_panel"        # 标签条 + 堆叠的外壳（MAIN_VIEW 是里面那个堆叠）
+MAIN_PAGE_TRUTH = "main_page_truth"        # 堆叠第 0 页（真值表 + 电路图）
 
 # ───────── ⑥ 真值表区 ─────────
 TRUTH_PANEL = "truth_panel"
@@ -153,7 +159,8 @@ TRUTH_SUPPLEMENT_DOT = "truth_supplement_dot"   # RTL 补充琥珀标记（标�
 # ───────── ⑦ 电路图区 ─────────
 FLOW_PANEL = "flow_panel"
 FLOW_TOOLBAR = "flow_toolbar"
-FLOW_TITLE = "flow_title"                  # 「电路图」「源寄存器在左 · 顶层输出在右」
+FLOW_TITLE = "flow_title"                  # 「电路图」
+FLOW_SUBTITLE = "flow_subtitle"            # 工具条副标「源寄存器在左 · 顶层输出在右」
 FLOW_BTN_FULLSCREEN = "flow_btn_fullscreen"  # 全屏 / 退出全屏
 FLOW_BTN_FIT = "flow_btn_fit"              # 适应窗口
 FLOW_BTN_100 = "flow_btn_100"              # 100%
@@ -161,8 +168,19 @@ FLOW_ZOOM_LABEL = "flow_zoom_label"
 FLOW_BTN_EXPORT_SVG = "flow_btn_export_svg"
 FLOW_BTN_EXPORT_PNG = "flow_btn_export_png"
 FLOW_VIEW = "flow_view"                    # QGraphicsView
+FLOW_VIEWPORT = "flow_view_viewport"       # FLOW_VIEW 的 viewport（鼠标事件真正的收件人）
+FLOW_BODY = "flow_body"                    # 画布 / 空态 两页的 QStackedWidget
+FLOW_EMPTY = "flow_empty"                  # 空态文案（无图 / 分析中 / 构图失败）
 FLOW_FOOTER = "flow_footer"                # 底栏操作提示文案
 FLOW_LEGEND = "flow_legend"
+
+#: 前缀带 `_` = 不进 `all_names()`（值里有 `%d`，不是合法 objectName）
+_FLOW_LEGEND_ITEM_FMT = "flow_legend_%d"
+
+
+def fmt_flow_legend_item(i):
+    """第 i 条图例的 objectName（顺序 = `terms.FLOW_LEGEND`）：flow_legend_<i>。"""
+    return _FLOW_LEGEND_ITEM_FMT % int(i)
 
 # ───────── ⑧ .sv 预览 ─────────
 SV_PANEL = "sv_panel"
@@ -310,27 +328,66 @@ ERROR_TEXT = "error_text"
 ERROR_CLOSE = "error_close"
 
 # ───────── 对话框（dialogs.py）─────────
+#: 通用按钮（同一时刻只有一个对话框在，名字不会撞）
+DLG_BUTTON_BOX = "dlg_button_box"
+DLG_BTN_OK = "dlg_btn_ok"
+DLG_BTN_CANCEL = "dlg_btn_cancel"
 DLG_CONFIRM = "dlg_confirm"                # 三处确认（清零 / 删反例 / auto→期望）
 DLG_CONFIRM_TEXT = "dlg_confirm_text"
+DLG_CONFIRM_NAMES = "dlg_confirm_names"    # 会丢掉的反例列：名字 + 原因（I-20 点名在前）
+DLG_CONFIRM_COUNT = "dlg_confirm_count"    # 「共 N 列」（计数在后）
 DLG_RENAME_COL = "dlg_rename_col"
 DLG_RENAME_COL_EDIT = "dlg_rename_col_edit"
 DLG_RENAME_COL_ERROR = "dlg_rename_col_error"
+DLG_RENAME_COL_HINT = "dlg_rename_col_hint"
 DLG_MUX_DATA = "dlg_mux_data"              # mux 数据值整表 C-110
 DLG_MUX_DATA_TABLE = "dlg_mux_data_table"
+DLG_MUX_DATA_HINT = "dlg_mux_data_hint"
+DLG_MUX_DATA_ERROR = "dlg_mux_data_error"
 DLG_COLUMNS = "dlg_columns"                # 列设置
 DLG_COLUMNS_LIST = "dlg_columns_list"
+DLG_COLUMNS_HINT = "dlg_columns_hint"
 DLG_PASTE_NAMES = "dlg_paste_names"        # 粘贴名单勾选
 DLG_PASTE_NAMES_TEXT = "dlg_paste_names_text"
 DLG_PASTE_NAMES_RESULT = "dlg_paste_names_result"
+DLG_PASTE_NAMES_HINT = "dlg_paste_names_hint"
 DLG_PRESETS = "dlg_presets"                # 预设存取
 DLG_PRESETS_LIST = "dlg_presets_list"
 DLG_PRESETS_NAME = "dlg_presets_name"
+DLG_PRESETS_HINT = "dlg_presets_hint"
+DLG_PRESETS_DELETE_BTN = "dlg_presets_delete_btn"
 DLG_DUP_LABELS = "dlg_dup_labels"          # 重复 assert 标号确认 C-164
 DLG_DUP_LABELS_TEXT = "dlg_dup_labels_text"
 DLG_IMPORT_REPORT = "dlg_import_report"    # 导入配置结果（缺段 / 表不一致 / 找不到的信号）
 DLG_IMPORT_REPORT_TEXT = "dlg_import_report_text"
+DLG_IMPORT_REPORT_NOTES = "dlg_import_report_notes"
+DLG_IMPORT_REPORT_HEAD = "dlg_import_report_head"
+DLG_IMPORT_REPORT_LIST = "dlg_import_report_list"
+DLG_IMPORT_REPORT_COUNT = "dlg_import_report_count"
 DLG_BATCH_FILL = "dlg_batch_fill"          # 批量填期望
 DLG_BATCH_FILL_VALUE = "dlg_batch_fill_value"
+DLG_BATCH_FILL_HINT = "dlg_batch_fill_hint"
+DLG_BATCH_FILL_ERROR = "dlg_batch_fill_error"
+DLG_BATCH_FILL_MODE_CONST = "dlg_batch_fill_mode_const"
+DLG_BATCH_FILL_MODE_AUTO = "dlg_batch_fill_mode_auto"
+DLG_BATCH_FILL_MODE_CLEAR = "dlg_batch_fill_mode_clear"
+DLG_BATCH_FILL_SCOPE_SELECTED = "dlg_batch_fill_scope_selected"
+DLG_BATCH_FILL_SCOPE_ALL = "dlg_batch_fill_scope_all"
+DLG_EXPORT_OPTIONS = "dlg_export_options"  # .sv 导出选项弹层 C-159/160/161/163
+DLG_EXPORT_OPT_COMMENTS = "dlg_export_opt_comments"
+DLG_EXPORT_OPT_SV_SUMMARY = "dlg_export_opt_sv_summary"
+DLG_EXPORT_OPT_OWNER_IN_MSG = "dlg_export_opt_owner_in_msg"
+DLG_EXPORT_SCOPE_ALL = "dlg_export_scope_all"
+DLG_EXPORT_SCOPE_POS = "dlg_export_scope_pos"
+DLG_EXPORT_SCOPE_NEG = "dlg_export_scope_neg"
+
+#: 前缀带 `_` = 不进 `all_names()`（值里有 `%s`，不是合法 objectName）
+_DLG_MUX_DATA_EDIT_FMT = "dlg_mux_data_edit_%s"
+
+
+def fmt_mux_data_edit(base):
+    """mux 数据整表里某个数据寄存器的「新值」输入框名：`dlg_mux_data_edit_<物理基名>`。"""
+    return _DLG_MUX_DATA_EDIT_FMT % str(base or "").strip().lower()
 
 
 # ───────── 动态名（组合根）─────────

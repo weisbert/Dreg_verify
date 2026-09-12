@@ -44,14 +44,8 @@ __all__ = ["SignalListModel", "SignalListProxy", "SignalListView", "SignalListDe
 #: 状态排序权重（升序 = 有问题的在前，一眼看见要处理的；降序 = 可建的在前）
 _TONE_ORDER = {"bad": 0, "warn": 1, "note": 2, "ok": 3}
 
-#: 「仅有问题」筛选口径 = 非 ok 档（note 的只读回读 / 裸名不算问题）
-_PROBLEM_TONES = ("warn", "bad")
-
-#: 状态筛选两档的取值。筛选行发的是 `filter_bar.STATUS_VALUES` 的 "ok" / "issues"；
-#: 这里连中文项与 clean/problem 一起认——两个模块各写各的字面量，漏一个就是「筛了等于没筛」，
-#: 而且界面上看不出来（行数不变，用户以为本来就这么多）。
-_STATUS_OK_KEYS = ("ok", "clean", T.STATUS_FILTER_ITEMS[1])
-_STATUS_PROBLEM_KEYS = ("issues", "problem", T.STATUS_FILTER_ITEMS[2])
+#: 「仅有问题」筛选口径 = 非 ok 档（note 的只读回读 / 裸名不算问题）；与筛选行共用一份（terms）
+_PROBLEM_TONES = T.PROBLEM_TONES
 
 #: 原因块正文里「点名的 Excel 行号」——引擎暂未给结构化 meta 时从 issues 文本里取（C-127 / copy_rows）
 _ROW_RE = re.compile(r"第\s*(\d+)\s*行")
@@ -83,22 +77,11 @@ def _scrub_lines(values):
     return [x for x in (_scrub(v) for v in (values or [])) if x]
 
 
-def status_key_of(model):
-    """模型行 → `terms.STATUS` 的键（C-014 / C-016 / C-041）。
-
-    引擎给了 `status_detail`（C0-a §7-2 八档）就用它；只给四档 status 时按 `STATUS_FALLBACK` 映射。"""
-    m = model or {}
-    key = str(m.get("status_detail") or "").strip()
-    if key in T.STATUS:
-        return key
-    st = str(m.get("status") or "").strip()
-    if st in T.STATUS_FALLBACK:
-        return T.STATUS_FALLBACK[st]
-    return st if st in T.STATUS else "error"
-
-
-def _tone_of(model):
-    return T.STATUS[status_key_of(model)][1]
+#: 模型行 → `terms.STATUS` 的键（C-014 / C-016 / C-041）。
+#: 四档→八档的映射**只写在 `terms.py`**（主控裁决，C2-int）：清单、筛选行、详情标题栏共用一份，
+#: 否则 `risky-generated` 这类行会出现「筛选说可建、清单说有问题」的两套数。
+status_key_of = T.status_key_of
+_tone_of = T.tone_of
 
 
 class _Blanks(dict):
@@ -453,7 +436,7 @@ class SignalListModel(QtCore.QAbstractItemModel):
         if col == LC.STATUS:
             label = T.STATUS[key][0]
             if _scrub(m.get("normalized_note")):
-                label += " ⚙"                                            # C-040 嵌套 mux 已折叠
+                label += T.LIST_NORMALIZED_MARK                          # C-040 嵌套 mux 已折叠
             return label
         if col == LC.NTEST:
             n = m.get("n_vectors")
@@ -650,12 +633,8 @@ class SignalListProxy(QtCore.QSortFilterProxyModel):
             return (False, False)
         if self._kind and str(m.get("kind") or "") != self._kind:
             return (False, False)
-        if self._status:
-            tone = _tone_of(m)
-            if self._status in _STATUS_OK_KEYS and tone != "ok":
-                return (False, False)
-            if self._status in _STATUS_PROBLEM_KEYS and tone not in _PROBLEM_TONES:
-                return (False, False)
+        if self._status and not T.match_status(m, self._status):   # C-029，判定在 terms（共用）
+            return (False, False)
         if self._rx is None:
             return (True, False)
         head = " ".join(str(m.get(k) or "") for k in ("name", "disp", "assert_id"))
@@ -1396,7 +1375,7 @@ class SignalListPanel(QtWidgets.QWidget):
         protected = self._protected_neg_names(names)
         if protected:
             text = ("、".join(protected[:TH.IMPORT_MISSING_LIST_MAX]) + "\n"
-                    + T.TRUTH_CONFIRM_DEL_NEG_FMT.format(n=len(protected)))
+                    + T.LIST_CONFIRM_NEG_CLEAR_FMT.format(k=len(names), n=len(protected)))
             ans = QtWidgets.QMessageBox.question(
                 self, T.LIST_BTN_NEG_CLEAR, text,
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)

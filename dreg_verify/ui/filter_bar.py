@@ -76,10 +76,10 @@ def match_row(model, owners=(), kind="", status="", rx=None, raw=""):
         return False, False
     if kind and model.get("kind") != kind:
         return False, False
-    st = model.get("status")
-    if status == "ok" and st != "ok":
-        return False, False
-    if status == "issues" and st == "ok" and not model.get("issues"):
+    # C-029：判据 = 清单状态列上写着的那一档（`terms.match_status`，与清单 proxy 同一份）。
+    # 本行以前按四档 `status` 自己判，`risky-generated`（status 还是 "ok"）会被这里算进
+    # 「仅可建」、被清单算进「有问题」—— 同一块屏幕上两个数（主控裁决：映射只写在 terms）。
+    if status and not terms.match_status(model, status):
         return False, False
     if not raw:
         return True, False

@@ -100,9 +100,9 @@ def test_dlg_confirm_c103_del_neg_names_before_count(mk):
     dlg = _open(mk(D.ConfirmDialog, D.CONFIRM_DEL_NEG, 2, names))
     body = H.find(dlg, N.DLG_CONFIRM_TEXT).text()
     assert body == T.TRUTH_CONFIRM_DEL_NEG_FMT.format(n=2)      # C-103 加强文案（手调过错值会丢）
-    lst = H.find(dlg, D.PENDING_NAMES["DLG_CONFIRM_NAMES"])
+    lst = H.find(dlg, N.DLG_CONFIRM_NAMES)
     assert [lst.item(i).text() for i in range(lst.count())] == names
-    count = H.find(dlg, D.PENDING_NAMES["DLG_CONFIRM_COUNT"])
+    count = H.find(dlg, N.DLG_CONFIRM_COUNT)
     # C-270 / I-20：点名在前、计数在后（版面顺序 + 文本顺序两头都验）
     assert dlg.lay.indexOf(lst) < dlg.lay.indexOf(count)
     detail = dlg.detailedText()
@@ -113,7 +113,7 @@ def test_dlg_confirm_c103_del_neg_names_before_count(mk):
 
 def test_dlg_confirm_c036_del_neg_plain_text_when_nothing_protected(mk):
     dlg = mk(D.ConfirmDialog, D.CONFIRM_DEL_NEG, 0)
-    assert dlg.text() == D.PENDING_TERMS["DLG_CONFIRM_DEL_NEG_PLAIN_FMT"].format(n=0)
+    assert dlg.text() == T.DLG_CONFIRM_DEL_NEG_PLAIN_FMT.format(n=0)
     assert dlg.names_list is None
 
 
@@ -199,7 +199,7 @@ def test_dlg_mux_data_c110_one_row_per_data_base(mk):
     dlg = _open(mk(D.MuxDataDialog, _mux_rows()))
     table = H.find(dlg, N.DLG_MUX_DATA_TABLE)
     assert table.rowCount() == 2 and table.columnCount() == 4
-    assert H.header_texts(table) == list(D.PENDING_TERMS["DLG_MUX_DATA_HEADERS"])
+    assert H.header_texts(table) == list(T.DLG_MUX_DATA_HEADERS)
     rows = H.table_texts(table, cols=(0, 1, 2))
     assert rows[0] == ["reg_lna", "4", "0b0011"]
     assert rows[1] == ["reg_mix", "8", "0x2A"]
@@ -235,7 +235,7 @@ def test_dlg_mux_data_c110_bad_form_marks_red_and_keeps_open(mk):
     H.click(dlg.ok_btn)
     assert _still_open(dlg)
     assert TH.BAD_BG in ed.styleSheet(), "非法写法没有就地标红"
-    err = H.find(dlg, D.PENDING_NAMES["DLG_MUX_DATA_ERROR"])
+    err = H.find(dlg, N.DLG_MUX_DATA_ERROR)
     assert "0b" in err.text()
     assert os.path.exists(H.shot(dlg, "dlg_mux_data_error"))
     # 改成合法写法后红色撤掉、框能关
@@ -357,7 +357,7 @@ def test_dlg_presets_c291_save_shows_overwrite_hint(mk):
     dlg = _open(mk(D.PresetsDialog, D.PRESET_SAVE, ["only_bad", "weekly"]))
     name = H.find(dlg, N.DLG_PRESETS_NAME)
     H.type_text(name, "weekly")
-    hint = H.find(dlg, D.PENDING_NAMES["DLG_PRESETS_HINT"])
+    hint = H.find(dlg, N.DLG_PRESETS_HINT)
     assert "覆盖" in hint.text() and "weekly" in hint.text()
     assert dlg.preset_name() == "weekly"
     assert os.path.exists(H.shot(dlg, "dlg_presets_save"))
@@ -377,10 +377,10 @@ def test_dlg_presets_c291_manage_select_and_delete(mk):
     lst = H.find(dlg, N.DLG_PRESETS_LIST)
     lst.setCurrentRow(1)
     assert dlg.selected() == "本周要交的"
-    H.click(H.find(dlg, D.PENDING_NAMES["DLG_PRESETS_DELETE_BTN"]))
+    H.click(H.find(dlg, N.DLG_PRESETS_DELETE_BTN))
     assert dlg.deleted() == ("本周要交的",)
     assert dlg.remaining() == ("只看有问题", "全量")
-    assert H.find(dlg, D.PENDING_NAMES["DLG_PRESETS_HINT"]).text() == ""
+    assert H.find(dlg, N.DLG_PRESETS_HINT).text() == ""
     assert os.path.exists(H.shot(dlg, "dlg_presets_manage"))
 
 
@@ -398,7 +398,7 @@ def test_dlg_dup_labels_c164_lists_label_and_two_signals(mk):
     for part in ("assert_12_T3", "d_wl_rf_tx_gain", "d_wl_rf_rx_gain", "assert_12_T4"):
         assert part in body
     assert dlg.cancel_btn.isDefault(), "写非法 SV 的默认按钮必须是取消"
-    assert dlg.ok_btn.text() == D.PENDING_TERMS["DLG_DUP_LABELS_CONTINUE"]
+    assert dlg.ok_btn.text() == T.DLG_DUP_LABELS_CONTINUE
     assert os.path.exists(H.shot(dlg, "dlg_dup_labels"))
 
 
@@ -420,9 +420,9 @@ def test_dlg_import_report_c194_names_and_reasons_before_counts(mk):
     missing = [("d_wl_rf_no_such", "当前表里没有这个信号"), ("d_bt_gone", "该页不存在")]
     counts = [T.EXPORT_CONFIG_DONE_FMT.format(k=3, cov="全面", np=2, nf=1, ne=4, nx=12)]
     dlg = _open(mk(D.ImportReportDialog, missing, counts))
-    head = H.find(dlg, D.PENDING_NAMES["DLG_IMPORT_REPORT_HEAD"])
-    lst = H.find(dlg, D.PENDING_NAMES["DLG_IMPORT_REPORT_LIST"])
-    cnt = H.find(dlg, D.PENDING_NAMES["DLG_IMPORT_REPORT_COUNT"])
+    head = H.find(dlg, N.DLG_IMPORT_REPORT_HEAD)
+    lst = H.find(dlg, N.DLG_IMPORT_REPORT_LIST)
+    cnt = H.find(dlg, N.DLG_IMPORT_REPORT_COUNT)
     txt = H.find(dlg, N.DLG_IMPORT_REPORT_TEXT)
     # I-20 / C-270：版面顺序 = 点名块 → 计数 → 逐段报数
     assert dlg.lay.indexOf(head) < dlg.lay.indexOf(lst) < dlg.lay.indexOf(cnt) < dlg.lay.indexOf(txt)
@@ -440,8 +440,8 @@ def test_dlg_import_report_c193_c195_notes_on_top(mk):
     notes = [T.EXPORT_IMPORT_MISMATCH_FMT.format(cfg="别人的表.xlsx", cur="我的表.xlsx"),
              T.EXPORT_IMPORT_BAD_FILE]
     dlg = _open(mk(D.ImportReportDialog, [], ["恢复了 4 个信号"], notes))
-    lab = H.find(dlg, D.PENDING_NAMES["DLG_IMPORT_REPORT_NOTES"])
-    assert dlg.lay.indexOf(lab) < dlg.lay.indexOf(H.find(dlg, D.PENDING_NAMES["DLG_IMPORT_REPORT_HEAD"]))
+    lab = H.find(dlg, N.DLG_IMPORT_REPORT_NOTES)
+    assert dlg.lay.indexOf(lab) < dlg.lay.indexOf(H.find(dlg, N.DLG_IMPORT_REPORT_HEAD))
     assert "别人的表.xlsx" in lab.text() and "dreg_verify_config" in lab.text()
     assert os.path.exists(H.shot(dlg, "dlg_import_report_notes"))
 
@@ -449,41 +449,41 @@ def test_dlg_import_report_c193_c195_notes_on_top(mk):
 def test_dlg_import_report_c194_long_list_is_capped(mk):
     missing = [("sig_%03d" % i, "没有") for i in range(TH.IMPORT_MISSING_LIST_MAX + 5)]
     dlg = mk(D.ImportReportDialog, missing)
-    lst = H.find(dlg, D.PENDING_NAMES["DLG_IMPORT_REPORT_LIST"])
+    lst = H.find(dlg, N.DLG_IMPORT_REPORT_LIST)
     assert lst.count() == TH.IMPORT_MISSING_LIST_MAX + 1        # 末行是「只列前 N 个」
-    cnt = H.find(dlg, D.PENDING_NAMES["DLG_IMPORT_REPORT_COUNT"])
+    cnt = H.find(dlg, N.DLG_IMPORT_REPORT_COUNT)
     assert str(len(missing)) in cnt.text()
 
 
 def test_dlg_import_report_no_missing_says_so(mk):
     dlg = mk(D.ImportReportDialog, [], ["恢复了 4 个信号"])
-    assert H.find(dlg, D.PENDING_NAMES["DLG_IMPORT_REPORT_HEAD"]).text() == \
-        D.PENDING_TERMS["DLG_IMPORT_NONE"]
+    assert H.find(dlg, N.DLG_IMPORT_REPORT_HEAD).text() == \
+        T.DLG_IMPORT_NONE
     assert dlg.cancel_btn is None                               # 只有「知道了」
 
 
 # ═════════════════ ⑨ 批量填期望（C-298）═════════════════
 def test_dlg_batch_fill_c298_three_modes_and_scope(mk):
     dlg = _open(mk(D.BatchFillDialog, 3, 25))
-    const = H.find(dlg, D.PENDING_NAMES["DLG_BATCH_FILL_MODE_CONST"])
-    auto = H.find(dlg, D.PENDING_NAMES["DLG_BATCH_FILL_MODE_AUTO"])
-    clear = H.find(dlg, D.PENDING_NAMES["DLG_BATCH_FILL_MODE_CLEAR"])
+    const = H.find(dlg, N.DLG_BATCH_FILL_MODE_CONST)
+    auto = H.find(dlg, N.DLG_BATCH_FILL_MODE_AUTO)
+    clear = H.find(dlg, N.DLG_BATCH_FILL_MODE_CLEAR)
     assert const.isChecked() and not auto.isChecked() and not clear.isChecked()
     val = H.find(dlg, N.DLG_BATCH_FILL_VALUE)
     assert val.isEnabled()
     _click_check(auto)                              # 真实点击切模式
     assert not val.isEnabled()
     assert dlg.spec() == {"mode": "auto", "value": None, "scope": "selected"}
-    _click_check(H.find(dlg, D.PENDING_NAMES["DLG_BATCH_FILL_SCOPE_ALL"]))
+    _click_check(H.find(dlg, N.DLG_BATCH_FILL_SCOPE_ALL))
     assert dlg.spec()["scope"] == "all"
-    assert "3" in H.find(dlg, D.PENDING_NAMES["DLG_BATCH_FILL_SCOPE_SELECTED"]).text()
-    assert "25" in H.find(dlg, D.PENDING_NAMES["DLG_BATCH_FILL_SCOPE_ALL"]).text()
+    assert "3" in H.find(dlg, N.DLG_BATCH_FILL_SCOPE_SELECTED).text()
+    assert "25" in H.find(dlg, N.DLG_BATCH_FILL_SCOPE_ALL).text()
     assert os.path.exists(H.shot(dlg, "dlg_batch_fill"))
 
 
 def test_dlg_batch_fill_c298_const_value_parses(mk):
     dlg = _open(mk(D.BatchFillDialog, 0, 25))
-    assert not H.find(dlg, D.PENDING_NAMES["DLG_BATCH_FILL_SCOPE_SELECTED"]).isEnabled()
+    assert not H.find(dlg, N.DLG_BATCH_FILL_SCOPE_SELECTED).isEnabled()
     assert dlg.spec()["scope"] == "all"             # 没选中列时自动退到「全部」
     H.type_text(H.find(dlg, N.DLG_BATCH_FILL_VALUE), "16'hA")
     H.click(dlg.ok_btn)
@@ -499,7 +499,7 @@ def test_dlg_batch_fill_c298_bad_value_marks_red_and_keeps_open(mk, bad):
     H.click(dlg.ok_btn)
     assert _still_open(dlg)
     assert TH.BAD_BG in val.styleSheet()
-    assert H.find(dlg, D.PENDING_NAMES["DLG_BATCH_FILL_ERROR"]).text()
+    assert H.find(dlg, N.DLG_BATCH_FILL_ERROR).text()
 
 
 def test_dlg_batch_fill_c298_const_without_value_keeps_open(mk):
@@ -513,16 +513,16 @@ def test_dlg_batch_fill_c298_const_without_value_keeps_open(mk):
 def test_dlg_export_options_c159_c160_c161_three_flags_and_scope(mk):
     dlg = _open(mk(D.ExportOptionsDialog, {"scope": "pos", "comments": True,
                                            "sv_summary": False, "owner_in_msg": False}))
-    cmt = H.find(dlg, D.PENDING_NAMES["DLG_EXPORT_OPT_COMMENTS"])
-    smy = H.find(dlg, D.PENDING_NAMES["DLG_EXPORT_OPT_SV_SUMMARY"])
-    own = H.find(dlg, D.PENDING_NAMES["DLG_EXPORT_OPT_OWNER_IN_MSG"])
+    cmt = H.find(dlg, N.DLG_EXPORT_OPT_COMMENTS)
+    smy = H.find(dlg, N.DLG_EXPORT_OPT_SV_SUMMARY)
+    own = H.find(dlg, N.DLG_EXPORT_OPT_OWNER_IN_MSG)
     assert (cmt.text(), smy.text(), own.text()) == (T.EXPORT_SV_OPTIONS["comments"],
                                                     T.EXPORT_SV_OPTIONS["sv_summary"],
                                                     T.EXPORT_SV_OPTIONS["owner_in_msg"])
     assert cmt.isChecked() and not smy.isChecked()
-    assert H.find(dlg, D.PENDING_NAMES["DLG_EXPORT_SCOPE_POS"]).isChecked()
+    assert H.find(dlg, N.DLG_EXPORT_SCOPE_POS).isChecked()
     _click_check(smy)                                       # C-160 末尾汇总
-    _click_check(H.find(dlg, D.PENDING_NAMES["DLG_EXPORT_SCOPE_NEG"]))
+    _click_check(H.find(dlg, N.DLG_EXPORT_SCOPE_NEG))
     assert dlg.options() == {"scope": "neg", "comments": True,
                              "sv_summary": True, "owner_in_msg": False}
     assert os.path.exists(H.shot(dlg, "dlg_export_options"))
@@ -568,13 +568,16 @@ def _all_dialogs(mk):
     ]
 
 
+#: 动态拼名的 objectName 前缀（`names.fmt_mux_data_edit`；注册表里只有带 `_` 的模板常量）
+DYNAMIC_NAME_PREFIXES = ("dlg_mux_data_edit_",)
+
+
 def test_dlg_all_object_names_registered(mk):
     """I-14：每个对话框及其主要控件的 objectName ∈ names.all_names()。
 
-    还没进 names.py 的走白名单 `dialogs.PENDING_NAMES` / `PENDING_NAME_PREFIXES`
-    —— 这张白名单就是回报给主控要 additive 加进 `ui/names.py` 的清单。"""
+    C2-int 起 `dialogs.PENDING_NAMES` 已整块搬进 `ui/names.py`，白名单只剩动态拼名的前缀
+    —— 冒出任何别的名字就是「视图里写了裸字符串」。"""
     registered = set(N.all_names().values())
-    allowed = set(D.PENDING_NAMES.values())
     seen = set()
     for dlg in _all_dialogs(mk):
         for w in H.find_all(dlg, QtWidgets.QWidget):
@@ -582,19 +585,23 @@ def test_dlg_all_object_names_registered(mk):
             if nm and not nm.startswith("qt_"):          # Qt 内部件（viewport / 滚动条容器）不算
                 seen.add(nm)
     unknown = {nm for nm in seen
-               if nm not in registered and nm not in allowed
-               and not any(nm.startswith(p) for p in D.PENDING_NAME_PREFIXES)}
-    assert not unknown, "既不在 names.py 也不在 dialogs.PENDING_NAMES 的 objectName：%s" % sorted(unknown)
+               if nm not in registered and not any(nm.startswith(p) for p in DYNAMIC_NAME_PREFIXES)}
+    assert not unknown, "不在 names.py 里的 objectName：%s" % sorted(unknown)
     assert seen & registered, "一个 names.py 里的名字都没用上？"
-    # 白名单里的每一条都真用上了（别留没人用的提案给主控）
-    assert set(D.PENDING_NAMES.values()) - seen == set(), \
-        "PENDING_NAMES 里这些没被任何对话框用到：%s" % sorted(set(D.PENDING_NAMES.values()) - seen)
+    # 反过来：names.py 里每个 DLG_* 都真被某个对话框用上（别在注册表里留没人用的死名字）
+    dlg_names = {k: v for k, v in N.all_names().items() if k.startswith("DLG_")}
+    assert len(dlg_names) >= 45, "DLG_* 的名字只剩 %d 个了" % len(dlg_names)
+    unused = sorted(k for k, v in dlg_names.items() if v not in seen)
+    assert not unused, "names.py 里这些 DLG_* 没被任何对话框用到：%s" % unused
 
 
 def test_dlg_object_names_are_dlg_prefixed_snake_case():
-    for key, val in D.PENDING_NAMES.items():
-        assert key.startswith("DLG_") and val.startswith("dlg_")
+    for key, val in N.all_names().items():
+        if not key.startswith("DLG_"):
+            continue
+        assert val.startswith("dlg_"), "%s = %r" % (key, val)
         assert val == val.lower() and " " not in val
+    assert N.fmt_mux_data_edit("REG_A") == "dlg_mux_data_edit_reg_a"
 
 
 def test_dlg_titles_stable_for_harness(monkeypatch, mk):
@@ -668,25 +675,46 @@ def test_dlg_no_static_message_boxes_inside():
 
 
 def test_dlg_i12_i13_copy_has_no_forbidden_terms():
-    """I-12 / I-13：待补文案里不许出现术语红线词（进 terms.py 前先在这里拦一道）。"""
+    """I-12 / I-13：对话框文案里不许出现术语红线词。
+
+    C2-int 起文案都在 `terms.py`，这条按 `DLG_*` 前缀从注册表里取（以前扫的是本模块的 PENDING_TERMS）。"""
     blob = []
-    for val in D.PENDING_TERMS.values():
-        if isinstance(val, dict):
-            blob.extend(str(x) for x in val.values())
-        elif isinstance(val, (tuple, list)):
-            blob.extend(str(x) for x in val)
+
+    def _walk(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                _walk(x)
+        elif isinstance(v, (tuple, list)):
+            for x in v:
+                _walk(x)
         else:
-            blob.append(str(val))
-    text = "\n".join(blob)
-    hits = [w for w in T.FORBIDDEN if w in text]
-    assert not hits, "待补文案里有术语红线词：%s" % hits
+            blob.append(str(v))
+
+    copy = {k: v for k, v in T.all_copy().items() if k.startswith("DLG_")}
+    assert len(copy) >= 35, "DLG_* 的文案只剩 %d 条了" % len(copy)
+    for val in copy.values():
+        _walk(val)
+    # 「假绿」是 terms.py 明说的例外：出现时必须当场把它解释掉（= 驱不动，断言必过）
+    hits = []
+    for line in blob:
+        for w in T.FORBIDDEN:
+            if w not in line:
+                continue
+            if w == "假绿" and "驱不动，断言必过" in line:
+                continue
+            hits.append((w, line))
+    assert not hits, "对话框文案里有术语红线词：%s" % hits
+    text = "\n".join(blob).lower()
     for bad in ("git", "仓库", "traceback"):
-        assert bad not in text.lower()
+        assert bad not in text
 
 
-def test_dlg_pending_tables_are_additive_only():
-    """PENDING_* 只能是 terms/names 里**还没有**的键（有了就该直接用那边的，别留影子定义）。"""
-    dup_t = [k for k in D.PENDING_TERMS if hasattr(T, k)]
-    dup_n = [k for k in D.PENDING_NAMES if hasattr(N, k)]
-    assert not dup_t, "这些文案 terms.py 已经有了，PENDING_TERMS 该删：%s" % dup_t
-    assert not dup_n, "这些名字 names.py 已经有了，PENDING_NAMES 该删：%s" % dup_n
+def test_dlg_no_pending_tables_left():
+    """C2-int 之后 `dialogs.py` 不许再有影子定义表：文案只在 terms.py、名字只在 names.py。"""
+    for attr in ("PENDING_TERMS", "PENDING_NAMES", "PENDING_NAME_PREFIXES"):
+        assert not hasattr(D, attr), "dialogs.%s 还在，说明常量有两份" % attr
+    # `_txt` / `_oname` 只剩「按键拼名」的动态取值，取不到必须立刻炸（不许静默回退）
+    with pytest.raises(KeyError):
+        D._txt("DLG_NO_SUCH_COPY_KEY")
+    with pytest.raises(KeyError):
+        D._oname("DLG_NO_SUCH_NAME_KEY")

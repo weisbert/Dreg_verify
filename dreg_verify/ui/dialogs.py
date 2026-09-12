@@ -22,9 +22,9 @@
     重复标号的行文本由调用方用 `exports.dup_label_text` 渲好传进来（也可直接给三元组，本模块同款渲染）。
     **不 import `contracts`** —— 列设置的列键与顺序取自 `terms.LIST_HEADERS`（与 `contracts.ListCol`
     同序，`tests/test_ui_dialogs.py::test_dlg_columns_keys_match_contracts` 机械锁住）。
-  · 一切用户可见文案取自 `terms`，色值取自 `theme`，objectName 取自 `names`；本模块**不改**这三个文件
-    —— 还没进去的常量暂存在下面的 `PENDING_TERMS` / `PENDING_NAMES` 两张表里（C2-int 整块搬进
-    `terms.py` / `names.py` 即可，搬完本模块自动改读它们，见 `_txt` / `_oname`）。
+  · 一切用户可见文案取自 `terms`，色值取自 `theme`，objectName 取自 `names`
+    （C2-d 暂存的 `PENDING_TERMS` / `PENDING_NAMES` 两张表已由 C2-int 整块搬进 `terms.py` / `names.py`；
+    `_txt` / `_oname` 只剩「按键拼名」的动态取值这一个用处）。
   · 阻塞只有一处：`QDialog.exec()`（`tests/ui_harness.auto_dialogs` 按 `windowTitle` 拦它）。
     每个类同时提供**非模态** `open()`（不阻塞，结果走 `accepted` / `finished` 信号）。
     本模块内部**不调**任何 `QMessageBox` 静态法，也不开嵌套事件循环。
@@ -54,128 +54,27 @@ __all__ = [
     "ConfirmDialog", "RenameColumnDialog", "MuxDataDialog", "ColumnsDialog", "PasteNamesDialog",
     "PresetsDialog", "DupLabelsDialog", "ImportReportDialog", "BatchFillDialog", "ExportOptionsDialog",
     "confirm", "CONFIRM_KINDS", "BATCH_MODES", "BATCH_SCOPES", "EXPORT_SCOPES", "EXPORT_FLAGS",
-    "LIST_COLUMN_KEYS", "TITLES", "PENDING_TERMS", "PENDING_NAMES", "PENDING_NAME_PREFIXES",
-    "fmt_value", "fmt_mux_data_edit",
+    "LIST_COLUMN_KEYS", "TITLES", "fmt_value", "fmt_mux_data_edit",
 ]
 
 
-# ═════════════════════════ 暂存：待搬进 terms.py / names.py 的常量 ═════════════════════════
-# C2-int 把这两张表整块搬进 ui/terms.py / ui/names.py（additive）即可；搬完本模块自动改读那边
-# （`_txt` / `_oname` 都是先 getattr(模块) 再回退本表），这两张表随即变成死数据、可整块删掉。
-
-#: 待补进 `ui/terms.py` 的文案
-PENDING_TERMS = {
-    # ① 三处确认
-    "DLG_CONFIRM_TITLES": {"clear": "清零本信号", "del_neg": "删除全部反例", "auto_fill": "auto→期望"},
-    "DLG_CONFIRM_DEL_NEG_PLAIN_FMT": "将删除本信号全部 {n} 条反例，正向用例保留。确定删除？",
-    "DLG_CONFIRM_NAMES_HEAD": "会丢掉的反例列 —— 名字和原因：",
-    "DLG_CONFIRM_NAMES_COUNT_FMT": "共 {n} 列",
-    "DLG_CONFIRM_REASON_NAMED": "自定义命名",
-    "DLG_CONFIRM_REASON_HAND": "手调过错值",
-    # ② 重命名列
-    "DLG_RENAME_HINT": "只能用字母 / 数字 / 下划线；不能占 T<编号> 这个自动测试保留名；不能与其它列重名。",
-    # ③ mux 数据值整表
-    "DLG_MUX_DATA_HEADERS": ("数据寄存器", "位宽", "当前值", "新值"),
-    "DLG_MUX_DATA_EMPTY": "这个信号没有可手填的数据寄存器行。",
-    # ④ 列设置
-    "DLG_COLUMNS_HINT": "勾选列常驻第一列，不在这里关。",
-    # ⑤ 粘贴名单
-    "DLG_PASTE_NAMES_EMPTY": "一个名字都没填。",
-    # ⑥ 预设
-    "DLG_PRESETS_SAVE_TITLE": "存为预设",
-    "DLG_PRESETS_MANAGE_TITLE": "管理预设",
-    "DLG_PRESETS_NAME_HINT": "给当前的勾选 + 筛选起个名字。",
-    "DLG_PRESETS_OVERWRITE_FMT": "已有同名预设「{name}」，存下去会覆盖它。",
-    "DLG_PRESETS_NAME_REQUIRED": "名字不能为空。",
-    "DLG_PRESETS_DELETE": "删除",
-    "DLG_PRESETS_EMPTY": "还没有存过预设。",
-    # ⑦ 重复标号
-    "DLG_DUP_LABELS_CONTINUE": "仍要写出",
-    "DLG_DUP_LABELS_ROW_FMT": "  {label}  ←  {a} / {b}",
-    # ⑧ 导入结果
-    "DLG_IMPORT_REPORT_TITLE": "导入结果",
-    "DLG_IMPORT_MISSING_HEAD": "配置里有、当前表里找不到的信号 —— 名字和原因：",
-    "DLG_IMPORT_MISSING_COUNT_FMT": "共 {n} 个（这些跳过，其余照常导入）",
-    "DLG_IMPORT_MISSING_MORE_FMT": "…（只列前 {k} 个）",
-    "DLG_IMPORT_ROW_FMT": "{name}　└ {reason}",
-    "DLG_IMPORT_MISSING_REASON": "当前表里没有这个信号（改名？删行？该页不存在？）",
-    "DLG_IMPORT_NONE": "没有找不到的信号。",
-    # ⑨ 批量填期望
-    "DLG_BATCH_FILL_MODES": {"const": "填一个固定值", "auto": "取程序算的值（auto）", "clear": "清空期望"},
-    "DLG_BATCH_FILL_SCOPE_SELECTED_FMT": "只填选中的 {n} 列",
-    "DLG_BATCH_FILL_SCOPE_ALL_FMT": "全部 {n} 列",
-    "DLG_BATCH_FILL_SCOPE_LABEL": "范围",
-    # ⑩ .sv 导出选项
-    "DLG_EXPORT_OPTIONS_TITLE": "导出 .sv 选项",
-    "DLG_EXPORT_SCOPE_LABEL": "范围",
-}
-
-#: 待补进 `ui/names.py` 的 objectName（值 = 小写 snake_case，前缀 dlg_）
-PENDING_NAMES = {
-    # 通用按钮（同一时刻只有一个对话框在，名字不会撞）
-    "DLG_BUTTON_BOX": "dlg_button_box",
-    "DLG_BTN_OK": "dlg_btn_ok",
-    "DLG_BTN_CANCEL": "dlg_btn_cancel",
-    # ① 三处确认
-    "DLG_CONFIRM_NAMES": "dlg_confirm_names",
-    "DLG_CONFIRM_COUNT": "dlg_confirm_count",
-    # ② 重命名列
-    "DLG_RENAME_COL_HINT": "dlg_rename_col_hint",
-    # ③ mux 数据值整表
-    "DLG_MUX_DATA_HINT": "dlg_mux_data_hint",
-    "DLG_MUX_DATA_ERROR": "dlg_mux_data_error",
-    # ④ 列设置
-    "DLG_COLUMNS_HINT": "dlg_columns_hint",
-    # ⑤ 粘贴名单
-    "DLG_PASTE_NAMES_HINT": "dlg_paste_names_hint",
-    # ⑥ 预设
-    "DLG_PRESETS_HINT": "dlg_presets_hint",
-    "DLG_PRESETS_DELETE_BTN": "dlg_presets_delete_btn",
-    # ⑧ 导入结果
-    "DLG_IMPORT_REPORT_NOTES": "dlg_import_report_notes",
-    "DLG_IMPORT_REPORT_HEAD": "dlg_import_report_head",
-    "DLG_IMPORT_REPORT_LIST": "dlg_import_report_list",
-    "DLG_IMPORT_REPORT_COUNT": "dlg_import_report_count",
-    # ⑨ 批量填期望
-    "DLG_BATCH_FILL_HINT": "dlg_batch_fill_hint",
-    "DLG_BATCH_FILL_ERROR": "dlg_batch_fill_error",
-    "DLG_BATCH_FILL_MODE_CONST": "dlg_batch_fill_mode_const",
-    "DLG_BATCH_FILL_MODE_AUTO": "dlg_batch_fill_mode_auto",
-    "DLG_BATCH_FILL_MODE_CLEAR": "dlg_batch_fill_mode_clear",
-    "DLG_BATCH_FILL_SCOPE_SELECTED": "dlg_batch_fill_scope_selected",
-    "DLG_BATCH_FILL_SCOPE_ALL": "dlg_batch_fill_scope_all",
-    # ⑩ .sv 导出选项
-    "DLG_EXPORT_OPTIONS": "dlg_export_options",
-    "DLG_EXPORT_OPT_COMMENTS": "dlg_export_opt_comments",
-    "DLG_EXPORT_OPT_SV_SUMMARY": "dlg_export_opt_sv_summary",
-    "DLG_EXPORT_OPT_OWNER_IN_MSG": "dlg_export_opt_owner_in_msg",
-    "DLG_EXPORT_SCOPE_ALL": "dlg_export_scope_all",
-    "DLG_EXPORT_SCOPE_POS": "dlg_export_scope_pos",
-    "DLG_EXPORT_SCOPE_NEG": "dlg_export_scope_neg",
-}
-
-#: 动态生成的 objectName 前缀（names.py 里对应 `fmt_*` 函数；测试白名单按前缀放行）
-PENDING_NAME_PREFIXES = ("dlg_mux_data_edit_",)
-
-
 def _txt(key):
-    """文案：先 `ui/terms.py`，再本模块 `PENDING_TERMS`。两边都没有 = 编码错误，立刻炸。"""
-    val = getattr(T, key, None)
-    if val is None:
-        val = PENDING_TERMS.get(key)
-    if val is None:
-        raise KeyError("文案 %s 既不在 ui/terms.py 也不在 dialogs.PENDING_TERMS" % key)
-    return val
+    """文案：`ui/terms.py` 里的同名常量。没有 = 编码错误，立刻炸。
+
+    （C2-int 已把本模块原来的 `PENDING_TERMS` 整块搬进 `ui/terms.py`；
+    这两个 helper 留着只为了 `DLG_BATCH_FILL_MODE_%s` 这类**按键拼名**的动态取值。）"""
+    try:
+        return getattr(T, key)
+    except AttributeError:
+        raise KeyError("文案 %s 不在 ui/terms.py 里" % key)
 
 
 def _oname(key):
-    """objectName：先 `ui/names.py`，再本模块 `PENDING_NAMES`。"""
-    val = getattr(N, key, None)
-    if val is None:
-        val = PENDING_NAMES.get(key)
-    if val is None:
-        raise KeyError("objectName %s 既不在 ui/names.py 也不在 dialogs.PENDING_NAMES" % key)
-    return val
+    """objectName：`ui/names.py` 里的同名常量。没有 = 编码错误，立刻炸。"""
+    try:
+        return getattr(N, key)
+    except AttributeError:
+        raise KeyError("objectName %s 不在 ui/names.py 里" % key)
 
 
 # ═════════════════════════ 标题表（harness 按 windowTitle 拦截，必须稳定）═════════════════════════
@@ -219,9 +118,8 @@ def fmt_value(v, width=1):
     return "0x%0*X" % ((w + 3) // 4, val)
 
 
-def fmt_mux_data_edit(base):
-    """mux 数据整表里某个数据寄存器的「新值」输入框名：`dlg_mux_data_edit_<物理基名>`。"""
-    return "dlg_mux_data_edit_%s" % str(base or "").strip().lower()
+#: mux 数据整表里某个数据寄存器的「新值」输入框名（定义在 `ui/names.py`，这里只留个引用）
+fmt_mux_data_edit = N.fmt_mux_data_edit
 
 
 def _small_label(text, parent, object_name=None, mute=True, wrap=True):
