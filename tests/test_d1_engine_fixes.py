@@ -503,6 +503,223 @@ def test_r2_04_mux_data_is_merged_per_signal_too(qapp, iso, wl):
     assert b.lower() in seg
 
 
+# ═══════════════ R2-05：同一个文件的不同路径写法（I-04 / C-233 / C-236）═══════════════
+def _spellings(path):
+    """同一个文件的几种写法：原样 / 正斜杠 / 盘符小写 / 绕一圈的相对写法。"""
+    p = str(path)
+    out = [p, p.replace("\\", "/")]
+    if len(p) > 1 and p[1] == ":":
+        out.append(p[0].swapcase() + p[1:])
+    d, b = os.path.split(p)
+    out.append(os.path.join(d, ".", b))
+    return [x for i, x in enumerate(out) if x not in out[:i]]
+
+
+@pytest.mark.contract("C-236", "C-233")
+def test_r2_05_path_spellings_share_one_bucket(qapp, iso, btlp):
+    """R2-05：同一张表用不同的路径写法打开，手填期望必须是**同一份**。
+
+    用户看到的：从「最近打开」进来手填期望都在；自己在路径框敲一遍同一个文件（正斜杠 /
+    盘符大小写不同）进来就「全没了」—— 其实是被分到了另一个桶里，而界面上什么都不说。
+    """
+    ways = _spellings(btlp)
+    assert len(ways) >= 3, "造不出三种写法，测不到 R2-05：%s" % ways
+
+    st = loaded(ways[0])
+    a, b = _two_editables(st)
+    _edit_one(st, a, 3)
+
+    for way in ways[1:]:                                # 换个写法重开，同一份活要在
+        st2 = loaded(way)
+        ed = st2.edit_of(a)
+        assert ed is not None, "换成 %r 打开，手填期望不见了" % way
+        assert ed["cols"][0]["exp"] == 3
+        _edit_one(st2, b, 5)                            # 在新写法下再改一笔
+        assert len(session.path_bucket_keys(P.load_edits_all(), way)) == 1, \
+            "同一个文件又分出了第二个桶：%s" % sorted(P.load_edits_all())
+        st3 = loaded(ways[0])                           # 回到原写法：两笔都在
+        assert st3.edit_of(a)["cols"][0]["exp"] == 3
+        assert st3.edit_of(b)["cols"][0]["exp"] == 5
+        st3.drop_edit(b)
+
+
+@pytest.mark.contract("C-233")
+def test_r2_05_two_old_buckets_are_merged_by_entry_count(qapp, iso, btlp):
+    """R2-05：盘上**已经**分成两个桶（老文件）时，读的时候合成一份。
+
+    合并规则（报告里写死的那条）：dict 逐键往下合；同一个键两边都有 → **条目多的那份赢**；
+    一样多 → 文件里靠后的那份赢（它是后写进去的）。
+    """
+    p1, p2 = str(btlp), str(btlp).replace("\\", "/")
+    one = {"view_edits": {VID: {"sig_a": {"kind": "logic", "src_out_name": "sig_a",
+                                          "name": "sig_a", "renamed": False,
+                                          "cols": [{"name": "T0"}]}}},
+           "signals_checked": ["sig_a"]}
+    two = {"view_edits": {VID: {"sig_b": {"kind": "logic", "src_out_name": "sig_b",
+                                          "name": "sig_b", "renamed": False,
+                                          "cols": [{"name": "T0"}, {"name": "T1"}]}},
+                          "logic": {"sig_c": {"kind": "logic", "src_out_name": "sig_c",
+                                              "name": "sig_c", "renamed": False, "cols": []}}}}
+    P.save_edits_all({p1: one, p2: two})
+    got = P.load_edits_bucket(p1)
+    assert set(got["view_edits"][VID]) == {"sig_a", "sig_b"}, "两个旧桶没合到一起"
+    assert "logic" in got["view_edits"], "别的 view_id 子桶在合并时掉了"
+    assert got["signals_checked"] == ["sig_a"], "legacy 段在合并时掉了"
+
+    # 冲突：同一个信号两边都有 → 列多的那份赢
+    P.save_edits_all({
+        p1: {"view_edits": {VID: {"sig_x": {"kind": "logic", "src_out_name": "sig_x",
+                                            "name": "sig_x", "renamed": False,
+                                            "cols": [{"name": "T0"}, {"name": "T1"}]}}}},
+        p2: {"view_edits": {VID: {"sig_x": {"kind": "logic", "src_out_name": "sig_x",
+                                            "name": "sig_x", "renamed": False,
+                                            "cols": [{"name": "T0"}]}}}}})
+    assert len(P.load_edits_bucket(p2)["view_edits"][VID]["sig_x"]["cols"]) == 2
+
+
+@pytest.mark.contract("C-233")
+def test_r2_05_settings_path_configs_share_one_bucket(qapp, iso, btlp):
+    """R2-05：settings 里按路径分桶的**三套诊断配置**同口径（探针前缀 / 强制 force / RTL 补充）。"""
+    p1, p2 = str(btlp), str(btlp).replace("\\", "/")
+    st = loaded(p1)
+    st.set_probe_prefixes({"d_mir_a": "U_TOP.U_SUB"})
+    st.set_force_signals(["d_mir_f"])
+
+    st2 = loaded(p2)
+    assert st2.probe_prefixes == {"d_mir_a": "U_TOP.U_SUB"}, "换个路径写法，探针前缀不见了"
+    assert st2.force_signals == {"d_mir_f"}
+    st2.set_probe_prefixes({"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP"})
+    seg = P.load_settings()["probe_prefixes"]
+    assert len(session.path_bucket_keys(seg, p1)) == 1, "同一个文件又分出了第二个桶：%s" % sorted(seg)
+    assert loaded(p1).probe_prefixes == {"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP"}
+
+
+@pytest.mark.contract("C-235")
+def test_r2_05_key_spelling_on_disk_is_not_rewritten(qapp, iso, btlp):
+    """R2-05 的兼容底线：盘上**已有**的键拼法不许被改写。
+
+    『排查(旧)』门面是拿它自己那个拼法去 `.get(path)` 的 —— 把键归一成小写盘符，
+    同事回退旧版本就会发现自己的活「没了」（其实还在文件里，只是键对不上，C-235）。
+    """
+    weird = str(btlp).replace("\\", "/")                 # 盘上先有这个拼法
+    P.save_edits_all({weird: {"edits": {"d_old": []}}})
+    st = loaded(str(btlp))                               # 用另一个拼法打开并存盘
+    a = _two_editables(st)[0]
+    _edit_one(st, a, 3)
+    keys = list(P.load_edits_all())
+    assert keys == [weird], "盘上的键拼法被改写了：%s" % keys
+    assert P.load_edits_all()[weird]["edits"] == {"d_old": []}, "legacy 段没了"
+
+
+# ═══════════════ R2-07：edits 文件写了一半（I-05 / C-235）═══════════════
+def _corrupt_the_file(path, text="{\"a\": {\"view_edits\": {\"topout\": {\"x\": "):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return text
+
+
+@pytest.mark.contract("C-235", "C-300")
+def test_r2_07_corrupt_edits_file_is_backed_up_and_named(qapp, iso, btlp):
+    """R2-07：整份 edits 文件读不出来（写了一半 / 手改坏了）→ 原文件改名另存 + 状态栏点名，
+    **不再静默从空白开始**。
+
+    用户看到的：一个编辑都没恢复，而没有任何一处说为什么；接着他第一次编辑，
+    `write_edits_bucket` 以那份空 `{}` 为基底整份覆盖，**别的表的桶 + legacy 九段**一起没了
+    —— 而原文件里那些字节本来是捞得回来的。
+    """
+    broken = _corrupt_the_file(P.EDITS_PATH)
+    st = ST.WorkbenchState()
+    said = []
+    st.statusMessage.connect(said.append)
+    assert st.load(str(btlp))
+
+    hit = [s for s in said if ".corrupt-" in s]
+    assert hit, "坏文件没点名：%s" % said
+    bak = next(p for p in os.listdir(os.path.dirname(P.EDITS_PATH))
+               if ".corrupt-" in p)
+    bak = os.path.join(os.path.dirname(P.EDITS_PATH), bak)
+    assert bak in hit[0], "点名的路径不是那份备份：%s" % hit[0]
+    with open(bak, encoding="utf-8") as f:
+        assert f.read() == broken, "备份不是原文件的字节"
+    assert not os.path.exists(P.EDITS_PATH), "原文件该被改名走了"
+
+    # 这一趟从空白开始，但**用户还捞得回来**；接着正常编辑照常存盘
+    st.set_models(VID, st.provider(VID).skeleton_models(), partial=True)
+    a = _two_editables(st)[0]
+    _edit_one(st, a, 3)
+    assert P.load_edits_bucket(str(btlp))["view_edits"][VID][a.lower()]["cols"][0]["exp"] == 3
+
+
+@pytest.mark.contract("C-235")
+def test_r2_07_unreadable_and_unbackupable_file_is_not_overwritten(qapp, iso, btlp, monkeypatch):
+    """R2-07 的另一半：读不出来**又改不动名**（占用 / 权限）时，这一趟**不许整份覆盖**。
+
+    整份覆盖以空 `{}` 为基底 —— 写下去就是把同事的 legacy 九段与别的表的桶一起销毁，
+    而他什么提示都收不到。宁可这一次不存盘（编辑还在内存里），也不能销毁文件。
+    """
+    broken = _corrupt_the_file(P.EDITS_PATH)
+    monkeypatch.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("locked")))
+    st = loaded(btlp)
+    a = _two_editables(st)[0]
+    _edit_one(st, a, 3)
+    with open(P.EDITS_PATH, encoding="utf-8") as f:
+        assert f.read() == broken, "读不出来的文件被整份覆盖了"
+    assert P.save_edits_all({"x": {}}) is False, "读不出来时 save_edits_all 该直接拒写"
+
+
+# ═══════════════ R2-08：配置 .txt 带 BOM（C-233 / I-04）═══════════════
+BOM = "﻿"
+
+
+@pytest.mark.contract("C-233")
+def test_r2_08_bom_in_prefix_and_force_files(qapp, tmp_path):
+    """R2-08：记事本 / Excel 存出来的前缀 .txt 带 BOM → U+FEFF 拼进层级路径或信号名。
+
+    用户看到的：前缀编辑器里明明配好了，导出的 .sv 里那个探针还是裸名（前缀**静默不生效**）；
+    赶上 BOM 落在路径那一侧就更糟 —— `\\ufeffU_TOP.U_SUB` 一路带进 .sv 的层级路径。
+    三种写法（扁平 / 合并组头 / 混用）都要过，force 名单同理。
+    """
+    flat = tmp_path / "flat.txt"
+    flat.write_text(BOM + "d_mir_a=U_TOP.U_SUB\nd_mir_b=U_TOP\n", encoding="utf-8")
+    grouped = tmp_path / "grp.txt"
+    grouped.write_text(BOM + "U_TOP.U_SUB:\n    d_mir_a, d_mir_b\n", encoding="utf-8")
+    mixed = tmp_path / "mix.txt"
+    mixed.write_text(BOM + "# 注释\nd_mir_a=U_TOP.U_SUB\nU_TOP:\n    d_mir_b\n", encoding="utf-8")
+
+    assert session.parse_probe_prefix_text(session.read_text_file(str(flat))) == \
+        {"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP"}
+    assert session.parse_probe_prefix_text(session.read_text_file(str(grouped))) == \
+        {"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP.U_SUB"}
+    assert session.parse_probe_prefix_text(session.read_text_file(str(mixed))) == \
+        {"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP"}
+
+    fo = tmp_path / "force.txt"
+    fo.write_text(BOM + "d_mir_f\nd_mir_g\n", encoding="utf-8")
+    assert session.parse_force_signal_text(session.read_text_file(str(fo))) == {"d_mir_f", "d_mir_g"}
+
+    # 文本不经文件直接进来（粘贴 / 剪贴板）也要剥掉 —— 解析器自己兜一道
+    assert G.parse_probe_prefix_lines(BOM + "d_mir_a=U_TOP") == {"d_mir_a": "U_TOP"}
+    assert session.parse_force_signal_text(BOM + "d_mir_f") == {"d_mir_f"}
+    # CRLF + BOM 一起（Windows 记事本的默认存法）
+    fo2 = tmp_path / "crlf.txt"
+    with open(str(fo2), "wb") as f:
+        f.write((BOM + "d_mir_a=U_TOP.U_SUB\r\nd_mir_b=U_TOP\r\n").encode("utf-8"))
+    assert session.parse_probe_prefix_text(session.read_text_file(str(fo2))) == \
+        {"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP"}
+
+
+@pytest.mark.contract("C-233")
+def test_r2_08_no_bom_files_are_byte_for_byte_unchanged(qapp, tmp_path):
+    """R2-08 兼容：**不带** BOM 的老文件解析结果一个字都不变（改的只是「多剥一个字符」）。"""
+    plain = tmp_path / "plain.txt"
+    plain.write_text("d_mir_a=U_TOP.U_SUB\n# 注释\nU_TOP:\n    d_mir_b\n", encoding="utf-8")
+    assert session.parse_probe_prefix_text(session.read_text_file(str(plain))) == \
+        {"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP"}
+    # 往返：渲染回去仍然无损（`render_probe_prefix_grouped` 的既有保证）
+    txt = session.render_probe_prefix_text({"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP"})
+    assert session.parse_probe_prefix_text(txt) == {"d_mir_a": "U_TOP.U_SUB", "d_mir_b": "U_TOP"}
+
+
 # ═══════════════ R2-03：手编列标号（C-091 / C-139）═══════════════
 @pytest.mark.contract("C-091", "C-139")
 def test_r2_03_user_column_label_same_in_header_and_sv(qapp, btlp, wl):

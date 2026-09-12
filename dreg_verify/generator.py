@@ -968,7 +968,10 @@ def parse_probe_prefix_lines(text):
     out = {}
     cur = None                                     # 合并格式当前组头路径（None=还没遇到组头）
     for ln in (text or "").splitlines():
-        ln = ln.strip()
+        # R2-08：BOM 兜底。`session.read_text_file` 已改 utf-8-sig，但这段文本也可能来自
+        # 粘贴 / 剪贴板 / 别处读进来的字符串——U+FEFF 留在行首会让键变成 `﻿d_xxx`，
+        # 前缀静默不生效（界面上看配好了，产物里还是裸名）。
+        ln = ln.lstrip("﻿").strip()
         if not ln or ln.startswith("#"):
             continue
         if "=" in ln:                              # ① 扁平 信号名=路径（不影响当前组头）
