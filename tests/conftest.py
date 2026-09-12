@@ -48,6 +48,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         'contract(*ids): 关联 docs/GUI_v2_能力契约.csv 的能力 ID，如 contract("C-042", "C-043")')
+    config.addinivalue_line(
+        "markers",
+        'legacy_only: 只验 v1 旧门面（legacy_gui）独有行为、契约表无对应能力的测试；随 legacy 删除日一起删')
 
 
 def pytest_runtest_makereport(item, call):

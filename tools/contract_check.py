@@ -118,6 +118,8 @@ def load_contract(csv_path):
             problems.append("第 %d 行：ID %r 认不出（应形如 C-042）" % (lineno, r.id))
             continue
         r.id = cid
+        # 类别允许带括号说明（如「降级(诊断抽屉)」「新增(合并出来)」），判定只看括号前的主类别
+        r.category = re.sub(r"\s*[（(].*$", "", (r.category or "").strip())
         if r.category not in CATEGORIES:
             problems.append("第 %d 行 %s：类别 %r 不在 {%s} 里"
                             % (lineno, cid, r.category, "/".join(CATEGORIES)))
