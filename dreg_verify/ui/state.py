@@ -40,9 +40,10 @@ from . import terms
 __all__ = ["WorkbenchState", "EngineLock", "STATUS_RESTORE_BAD_FMT"]
 
 #: C-240：桶里数值损坏 → 逐条跳过并报个数。
-#: ⚠ 界面文案本该住在 `ui/terms.py`（I-13），但 terms.py 不在 C1-a 的 owner 文件集里
-#: （本波四个 agent 并行，改公共文件必撞车）——C4/C5 收口时连同这条注释一起搬过去。
-STATUS_RESTORE_BAD_FMT = "另有 {n} 个存盘数值读不出来，已逐条跳过（其余编辑不受影响）"
+#: ⚠ C4-int 已按 I-13 把这句搬进 `ui/terms.py`（C1-a 当初写在这里是因为 terms.py 不在它的
+#: owner 文件集里）。这里只留一个**别名**：`ST.STATUS_RESTORE_BAD_FMT` 的既有引用照旧能用，
+#: 但定义只有 terms.py 那一份 —— 两份字面量迟早会漂开。
+STATUS_RESTORE_BAD_FMT = terms.STATUS_RESTORE_BAD_FMT
 
 #: legacy 覆盖度键（C-230）：只在缺 `cov_<view_id>` 时读一次作迁移，**永不回写**
 _LEGACY_COV_KEYS = {"logic": "coverage_logic", "mux": "coverage_mux"}
@@ -591,6 +592,42 @@ class WorkbenchState(QtCore.QObject):
         self.include_risky = bool(on)
         persist.patch_settings({CFG_RISKY: bool(on)})
         self._config_changed(CFG_RISKY)
+
+    def reset_config_state(self):
+        """C-192「先清空再照单恢复」：导入【完整配置】前把可编辑状态清回出厂态。→ True。
+
+        清的正好是「一份完整配置能写进来的全部东西」：三套诊断配置 + 缺前缀开关 +
+        覆盖度三层（全局档 / 用例上限 / 逻辑类型档 / 单点档）+ 各范围的编辑、mux 数据值、勾选。
+        **不碰已载入的 wb / provider / 清单模型** —— 换的是工作状态，不是表。
+
+        为什么非清不可：C-192 的语义是「加载这份工作状态」，不是「往当前状态上叠加」。
+        不清的话，配置文件里**没写**的前缀 / 补充逻辑 / 别的信号的手填期望会原样留着，
+        用户拿到的是两份配置的混合物，而界面上没有任何一处说得清「现在这份到底是谁的」——
+        照它导出的 .sv 也就没人能复现。
+
+        整批包在 `suspend_persist()` 里：一次显式动作只写一次盘（C-244）。
+        `set_*` 四个入口各自发 `configChanged`（I-04：诊断配置只经它们写）。"""
+        with self.suspend_persist():
+            for vid in contracts.VIEW_IDS:
+                # drop_edit 才会发 editsChanged 让清单那一行回到出厂列模型；
+                # 直接 clear 的话，界面上那一行还画着刚被删掉的手填期望。
+                for name in [m["name"] for m in self.models(vid)
+                             if str(m["name"]).lower() in self._edits[vid]]:
+                    self.drop_edit(name, vid)
+                self._edits[vid].clear()            # 清单里没有的名字（换过表）也一并清掉
+                self._mux_data[vid].clear()
+                self.set_checked([m["name"] for m in self.models(vid)], True, vid)
+                cov = self._cov[vid]
+                cov.sig_cov.clear()
+                cov.set_form_cov({})
+                cov.persist_global_label(session.DEFAULT_COV_LABEL)
+                cov.persist_max_tests(session.DEFAULT_MAX_TESTS)
+                self.coverage_touched(vid)
+        self.set_probe_prefixes({})
+        self.set_force_signals(set())
+        self.set_logic_overrides({})
+        self.set_include_risky(True)                # I-11：出厂默认是「是」
+        return True
 
     def _config_changed(self, which):
         """配置变了：分析全作废、指纹翻篇；**勾选一个不动**（C-205）。"""

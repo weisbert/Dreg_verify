@@ -537,6 +537,13 @@ EXPORT_LAST_FMT = "{path}　{when}"
 EXPORT_SUMMARY_FMT = "勾选 {k} 项 · 覆盖 {n} 个信号 · {s} 个信号会被跳过"
 EXPORT_SUMMARY_NO_SKIP_FMT = "勾选 {k} 项 · 覆盖 {n} 个信号"
 EXPORT_SUMMARY_SKIPPED_HEAD = "会被跳过的信号 —— 名字和原因："
+EXPORT_SUMMARY_SKIPPED_MORE = "展开名字和原因"
+EXPORT_SUMMARY_SKIPPED_LESS = "收起"
+#: 摘要算不出来时说实话，不给「0 个信号会被跳过」那种让人放心的假数字（裁决⑯）
+EXPORT_SUMMARY_UNAVAILABLE = ("导出前摘要这次算不出来（{reason}）——仍可导出，"
+                              "跳过了哪些信号会在导出完成后点名")
+EXPORT_SKIPPED_ROW_FMT = "{name}　{reason}"                 # 名字在前（I-20 / C-270）
+EXPORT_OPT_BTN_FMT = "{summary}　▾"
 EXPORT_BTN_RUN_FMT = "导出勾选的 {k} 项"
 EXPORT_BTN_RUN_NONE = "先勾选要导出的交付物"
 EXPORT_BTN_CANCEL = "取消"
@@ -547,6 +554,12 @@ EXPORT_DEFAULT_SV_NEG = "wr_rf_tc_neg.sv"
 EXPORT_DEFAULT_REPORT = "用例表.html"
 EXPORT_DEFAULT_NETS = "nets.txt"
 EXPORT_DEFAULT_CLAIMS = "claims.json"
+EXPORT_DEFAULT_FORTEST_FMT = "{stem}_fortest.xlsx"          # C-181：源表名 + _fortest
+#: 文件对话框过滤器（用户可见；报告那三格式的筛选器在 `exports.REPORT_FILTERS`）
+EXPORT_FILTER_SV = "SystemVerilog (*.sv)"
+EXPORT_FILTER_FORTEST = "Excel 工作簿 (*.xlsx)"
+EXPORT_FILTER_NETS = "信号清单 (*.txt);;全部文件 (*)"
+EXPORT_FILTER_JSON = "JSON (*.json)"
 EXPORT_DUP_LABELS_TITLE = "重复 assert 标号（非法 SV）"
 EXPORT_DUP_LABELS_FMT = "以下 {n} 处 assert 标号重复，同一作用域内重复会让 elaboration 失败。仍要写出？\n{rows}"
 EXPORT_WRITE_FAILED_FMT = "无法写入 {path}：\n{err}\n\n（文件是否正被仿真器 / 编辑器占用？）"        # C-171
@@ -555,6 +568,15 @@ EXPORT_IMPORT_MISMATCH_FMT = "这份配置是为《{cfg}》导出的，当前是
 #: 计数先出现等于先让人看一个数字再去猜是哪些信号 —— 点名永远排在计数前面）
 EXPORT_IMPORT_MISSING_FMT = "配置里有、当前表没有的信号：{names}（共 {n} 个，这些跳过，其余照常导入）"
 EXPORT_IMPORT_BAD_FILE = "这不是本工具的配置文件：缺少 dreg_verify_config 段，也没有 edits / mux_* 段"   # C-195
+EXPORT_IMPORT_KIND_FULL = "完整配置"
+EXPORT_IMPORT_KIND_LEGACY = "测试项编辑"
+EXPORT_IMPORT_DONE_FMT = "已导入{kind}：恢复了 {n} 个信号的手填编辑"
+#: C-192：旧配置里那四项（两项展开模式 + 两项输出引用尾缀）随入口退役 —— 忽略但说一句，不静默。
+#: ⚠ 措辞不提退役前的旧叫法：那些说法连同入口一起没了，再写出来只会让人去找一个不存在的开关。
+EXPORT_IMPORT_IGNORED = ("这份配置里有四项当前版本已不再使用的旧设置（两项展开模式、两项输出引用尾缀），"
+                         "已忽略；覆盖度档、用例上限、缺前缀是否强制生成照常套用")
+EXPORT_IMPORT_APPLIED_FMT = ("已套用：勾选 {k} 个 · 覆盖度档与用例上限 · 前缀 {np} 条 · "
+                             "强制 force {nf} 个 · 补充逻辑 {no} 条")
 EXPORT_CONFIG_DONE_FMT = "配置已导出：勾选 {k} 个 · 全局档 {cov} · 前缀 {np} 条 · 强制 force {nf} 个 · 编辑 {ne} 个信号、手填期望 {nx} 条"   # C-191
 EXPORT_REPORT_DONE_FMT = "范围 {scope} · 用例 {n} 条 · 反例 {neg} 条"                                 # C-177
 EXPORT_FORTEST_DONE_FMT = "回填 {n} 组（含 mux）"                                                      # C-182
@@ -563,7 +585,11 @@ EXPORT_FORTEST_DONE_FMT = "回填 {n} 组（含 mux）"                         
 DONE_TITLE = "导出完成"
 DONE_SKIPPED_HEAD_FMT = "{n} 个信号没有进 .sv —— 名字和原因："
 DONE_SKIPPED_ROW_FMT = "　└ {reason}"
+DONE_SKIPPED_MORE = "展开明细"                                                                      # C-167
+DONE_SKIPPED_LESS = "收起明细"
 DONE_WRITTEN = "已写出"
+DONE_WRITTEN_ROW_FMT = "{path}　{detail}"
+DONE_ERROR_ROW_FMT = "{kind}：{message}"                                                            # C-171
 DONE_BTN_OPEN_DIR = "打开输出目录"
 DONE_BTN_GO_FIX_FMT = "去处理这 {n} 个信号"
 DONE_BTN_OK = "知道了"
@@ -600,10 +626,26 @@ DIAG_OTHER = (
     ("还有网没有前缀，要不要照样生成", "缺前缀是否强制生成　当前：{state}"),
     ("以前在旧版界面填过期望", "从旧版真值表编辑迁进来（一次性，旧数据只读不删）"),
 )
+#: 五条折叠项各自的入口按钮（C4-int 从 diagnostics.PENDING_TERMS 搬进来）
+DIAG_SUPP_OPEN = "补一段等价表达式…"
+DIAG_FORCE_OPEN = "编辑强制 force 名单…"
+DIAG_COVERAGE_OPEN = "打开覆盖度设置…"
+DIAG_LEGACY_OPEN = "看看能迁过来什么…"
 DIAG_RISKY_ON = "是"
 DIAG_RISKY_OFF = "否"
 DIAG_RISKY_OFF_WARNING = "关掉后缺前缀的信号会被跳过、不进 .sv（导出时逐个点名）；.sv 内容会变"
+DIAG_RISKY_OFF_TITLE = "关掉「缺前缀是否强制生成」"            # C-217 二次确认的标题
 DIAG_FOOTER = "这里的每一项都是逃生阀，不是日常主力。日常只用清单 + 详情 + 导出中心。"
+#: 三个编辑器的通用按钮
+DIAG_SAVE = "保存"
+DIAG_CANCEL = "取消"
+DIAG_PREFIX_IMPORT = "导入 .txt…"
+DIAG_PREFIX_EXPORT_SHORT = "导出 .txt…"
+DIAG_FORCE_IMPORT = "导入 .txt…"
+DIAG_FORCE_EXPORT = "导出 .txt…"
+#: 文件读写失败（走编辑器里的错误行，不弹窗）
+DIAG_FILE_READ_FAIL_FMT = "读不进来：{err}"
+DIAG_FILE_WRITE_FAIL_FMT = "写不出去：{err}"
 DIAG_PREFIX_TITLE = "探针前缀映射"
 DIAG_PREFIX_HINT = ("每行 信号名=层级路径；或先写「路径:」再在下面列信号名（逗号 / 换行分隔）；# 开头是注释。"
                     "红区 scan_rtl 生成的 probe_prefixes.txt 可直接导入。")
@@ -617,16 +659,60 @@ DIAG_SUPP_TEMPLATE = "插入模板（当前信号）"
 DIAG_SUPP_IMPORT = "从 .json 导入…"
 DIAG_SUPP_UNKNOWN_FMT = "{name} 不在当前 logic 页：将作为纯新增合成信号生成"                             # C-214
 DIAG_SUPP_INVALID_HEAD = "校验不通过，未保存："                                                       # C-213
+DIAG_SUPP_BAD_JSON_FMT = "不是合法 JSON：{err}"
+DIAG_SUPP_TMPL_BAD_JSON = "当前内容不是合法 JSON，合并不进去；请先修好或清空。"
+DIAG_SUPP_DONE_FMT = "RTL 补充逻辑已更新（共 {n} 条，{n_on} 条启用）"
+DIAG_SUPP_CLEARED = "RTL 补充逻辑已清空"
 DIAG_LEGACY_TITLE = "从旧版真值表编辑迁进来"
 DIAG_LEGACY_PREVIEW_FMT = ("可迁移 {n_ok} 个信号（logic / 直连寄存器根）；不迁 {n_mux} 个 mux 信号：{mux_names}\n"
                            "原因：mux 用的是 case / 数据列坐标（c:A / d:0），与旧版按物理基名存的取值对不上。\n"
                            "迁入后用例数以旧版编辑为准（如 4 → 原自动 12），旧数据只读不删。")
 DIAG_LEGACY_NONE = "这张表没有旧版真值表编辑"
 DIAG_LEGACY_RUN = "开始迁移"
+#: C-302 迁移计划书：**不迁的名字 + 原因在前**（C-270 的形状），能迁的清单与计数在后
+DIAG_LEGACY_SKIP_HEAD = "不迁的名字和原因："
+DIAG_LEGACY_SKIP_MUX = "mux 用的是 case / 数据列坐标（c:A / d:0），与旧版按物理基名存的取值对不上"
+DIAG_LEGACY_SKIP_UNKNOWN = "当前表里找不到这个名字（表改名 / 删行？）"
+DIAG_LEGACY_SKIP_KIND_FMT = "根是「{kind}」，不是 logic / 直连寄存器"
+DIAG_LEGACY_SKIP_EMPTY = "旧版桶里这个名字下没有可迁的行"
+DIAG_LEGACY_ROW_FMT = "{name}　旧版 {n} 行 → 新版 {n} 列"
+DIAG_LEGACY_NOTE_LOST = "旧版行上的备注不迁（新版列模型没有备注这一格）"
+DIAG_LEGACY_DONE_FMT = "已迁入 {n_sig} 个信号、{n_col} 列；旧版数据只读不删，原样还在"
+
+# ⑩ 时间（「上次导出到哪」「最近打开」两处共用；C4-int 从 app.py 与 export_center.py 各一份收成这里一份）
+WHEN_TODAY_FMT = "今天 {hh}:{mm}"
+WHEN_YESTERDAY_FMT = "昨天 {hh}:{mm}"
+WHEN_DATE_FMT = "%Y-%m-%d %H:%M"           # strftime 模板（不是 str.format）
+
+
+def fmt_when(ts):
+    """ISO 时间串 → 「今天 09:14」/「昨天 17:02」/「2026-09-01 17:02」；空串 → ""。
+
+    ⚠ 认不出的串**原样返回**（不吞、也不编一个时间）：`last_export` / `recent` 里存的是什么
+    就让用户看见什么，比显示一个假日期好查。"""
+    import datetime
+    s = str(ts or "").strip()
+    if not s:
+        return ""
+    try:
+        t = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return s
+    today = datetime.date.today()
+    if t.date() == today:
+        return WHEN_TODAY_FMT.format(hh="%02d" % t.hour, mm="%02d" % t.minute)
+    if (today - t.date()).days == 1:
+        return WHEN_YESTERDAY_FMT.format(hh="%02d" % t.hour, mm="%02d" % t.minute)
+    return t.strftime(WHEN_DATE_FMT)
+
+
+# ⑩ 编辑恢复（C4-int 从 state.py 搬进来 —— 界面文案只住 terms.py，I-13）
+STATUS_RESTORE_BAD_FMT = "另有 {n} 个存盘数值读不出来，已逐条跳过（其余编辑不受影响）"   # C-240
 
 # 对话框
-# ① 三处确认
-DLG_CONFIRM_TITLES = {"clear": "清零本信号", "del_neg": "删除全部反例", "auto_fill": "auto→期望"}
+# ① 四处确认（第四种 `risky_off` 由诊断抽屉的「缺前缀是否强制生成」开关用，C-217）
+DLG_CONFIRM_TITLES = {"clear": "清零本信号", "del_neg": "删除全部反例", "auto_fill": "auto→期望",
+                      "risky_off": DIAG_RISKY_OFF_TITLE}
 DLG_CONFIRM_DEL_NEG_PLAIN_FMT = "将删除本信号全部 {n} 条反例，正向用例保留。确定删除？"
 DLG_CONFIRM_NAMES_HEAD = "会丢掉的反例列 —— 名字和原因："
 DLG_CONFIRM_NAMES_COUNT_FMT = "共 {n} 列"

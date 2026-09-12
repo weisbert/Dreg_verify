@@ -235,6 +235,8 @@ EXPORT_DIALOG = "export_dialog"
 EXPORT_TABLE = "export_table"
 EXPORT_SUMMARY = "export_summary"          # 「勾选 3 项 · 覆盖 7 个信号 · 2 个信号会被跳过」
 EXPORT_SUMMARY_SKIPPED = "export_summary_skipped"  # 可点开：名字 + 原因（裁决⑯）
+EXPORT_SUMMARY_SKIPPED_LIST = "export_summary_skipped_list"   # 裁决⑯ 展开后的名字 + 原因
+EXPORT_NETS_MORE_BTN = "export_nets_more_btn"      # nets 选项「更多（按页分类）」C-187
 EXPORT_BTN_CANCEL = "export_btn_cancel"
 EXPORT_BTN_RUN = "export_btn_run"          # 「导出勾选的 N 项」/「先勾选要导出的交付物」
 EXPORT_BTN_IMPORT_CONFIG = "export_btn_import_config"  # 「导入配置…」C-192
@@ -271,31 +273,61 @@ def fmt_export_last(kind):
     return "export_last_%s" % kind
 
 
+#: 前缀带 `_` = 不进 `all_names()`（值里有 `%s`，不是合法 objectName）
+_EXPORT_OPT_FMT = "export_opt_%s_%s"             # export_opt_<kind>_<key>
+_EXPORT_NETS_PAGE_FMT = "export_opt_nets_page_%s"
+
+
+def fmt_export_opt(kind, key):
+    """选项弹层里某个勾选 / 单选的名字：`export_opt_<kind>_<key>`
+    （sv 的三个勾选 C-159/C-160/C-161、report 的三格式 C-173…C-175、nets 三用途 C-186）。"""
+    return _EXPORT_OPT_FMT % (str(kind), str(key))
+
+
+def fmt_export_nets_page(page):
+    """nets「更多（按页分类）」里某一页的勾选名：`export_opt_nets_page_<page>`（C-187）。
+
+    页键里的 `-`（`topout-cone`）换成 `_`：objectName 按 snake_case 的规矩走。"""
+    return _EXPORT_NETS_PAGE_FMT % str(page).replace("-", "_")
+
+
 # ───────── ⑫ 导出完成 ─────────
 DONE_DIALOG = "done_dialog"
 DONE_SKIPPED_BLOCK = "done_skipped_block"  # 琥珀块「N 个信号没有进 .sv —— 名字和原因：」
+DONE_SKIPPED_MORE_BTN = "done_skipped_more_btn"   # C-167 展开 / 收起原因明细
 DONE_WRITTEN_BLOCK = "done_written_block"  # 「已写出」
+DONE_ACCOUNTED = "done_accounted"          # C-166「只记录、不产生断言的信号：…」
+DONE_ERRORS = "done_errors"                # C-171 写失败的红行
 DONE_BTN_OPEN_DIR = "done_btn_open_dir"    # 打开输出目录 N6
 DONE_BTN_GO_FIX = "done_btn_go_fix"        # 去处理这 N 个信号
 DONE_BTN_OK = "done_btn_ok"                # 知道了
 
 # ───────── ⑬ 诊断抽屉 ─────────
+#: C4-int：`DIAG_SCROLL` 及其下 12 条整片从 `diagnostics.py` 的 PENDING_NAMES 搬进来。
 DIAG_DRAWER = "diag_drawer"
+DIAG_SCROLL = "diag_scroll"                # 抽屉滚动区（open_for 按它滚到对应症状）
 DIAG_TITLE = "diag_title"
 DIAG_BTN_CLOSE = "diag_btn_close"
 DIAG_INTRO = "diag_intro"                  # 「按症状选，不是按按钮选。」
 DIAG_CUVUNF_BOX = "diag_cuvunf_box"        # 主症状蓝框
 DIAG_CUVUNF_TITLE = "diag_cuvunf_title"
+DIAG_CUVUNF_BODY = "diag_cuvunf_body"      # 蓝框正文（要带层级前缀的那段解释）
+DIAG_STEP1_TITLE = "diag_step1_title"
 DIAG_STEP1_BTN = "diag_step1_btn"          # 导出 nets.txt…
 DIAG_STEP1_BOX = "diag_step1_box"
+DIAG_STEP2_TITLE = "diag_step2_title"
 DIAG_STEP2_BTN = "diag_step2_btn"          # 复制这行命令
 DIAG_STEP2_BOX = "diag_step2_box"
+DIAG_STEP3_TITLE = "diag_step3_title"
 DIAG_STEP3_BTN = "diag_step3_btn"          # 导入 probe_prefixes.txt…
 DIAG_STEP3_BOX = "diag_step3_box"
 DIAG_PREFIX_EDIT_BTN = "diag_prefix_edit_btn"  # 编辑前缀映射…
 DIAG_SYM_SUPPLEMENT = "diag_sym_supplement"    # otherSymptoms ①
+DIAG_SUPP_OPEN_BTN = "diag_supp_open_btn"      # ① 的入口按钮「补一段等价表达式…」
 DIAG_SYM_FORCE = "diag_sym_force"              # ②
+DIAG_FORCE_OPEN_BTN = "diag_force_open_btn"    # ② 的入口按钮「编辑强制 force 名单…」
 DIAG_SYM_COVERAGE = "diag_sym_coverage"        # ③（跳到覆盖度弹层）
+DIAG_COVERAGE_BTN = "diag_coverage_btn"        # ③ 的入口按钮「打开覆盖度设置…」
 DIAG_SYM_RISKY = "diag_sym_risky"              # ④
 DIAG_SYM_LEGACY = "diag_sym_legacy"            # ⑤ C-302
 DIAG_RISKY_TOGGLE = "diag_risky_toggle"        # 缺前缀是否强制生成 开关（默认 True）C-217
@@ -303,26 +335,33 @@ DIAG_LEGACY_IMPORT_BTN = "diag_legacy_import_btn"
 DIAG_FOOTER = "diag_footer"                # 「这里的每一项都是逃生阀…」
 # 探针前缀编辑器
 DIAG_PREFIX_DIALOG = "diag_prefix_dialog"
+DIAG_PREFIX_HINT = "diag_prefix_hint"      # 文本格式说明（每行 信号名=层级路径…）
 DIAG_PREFIX_TEXT = "diag_prefix_text"
 DIAG_PREFIX_IMPORT_BTN = "diag_prefix_import_btn"
 DIAG_PREFIX_EXPORT_BTN = "diag_prefix_export_btn"
 DIAG_PREFIX_SAVE_BTN = "diag_prefix_save_btn"
+DIAG_PREFIX_ERRORS = "diag_prefix_errors"  # 读写失败逐条列错
 DIAG_PREFIX_IMPACT = "diag_prefix_impact"  # 「共 N 条映射 · 影响 M 个信号」C-204
 # 强制 force 编辑器
 DIAG_FORCE_DIALOG = "diag_force_dialog"
+DIAG_FORCE_HINT = "diag_force_hint"
 DIAG_FORCE_TEXT = "diag_force_text"
 DIAG_FORCE_IMPORT_BTN = "diag_force_import_btn"
 DIAG_FORCE_EXPORT_BTN = "diag_force_export_btn"
 DIAG_FORCE_SAVE_BTN = "diag_force_save_btn"
+DIAG_FORCE_ERRORS = "diag_force_errors"
 # RTL 补充逻辑编辑器
 DIAG_SUPP_DIALOG = "diag_supp_dialog"
+DIAG_SUPP_HINT = "diag_supp_hint"
 DIAG_SUPP_TEXT = "diag_supp_text"
 DIAG_SUPP_TEMPLATE_BTN = "diag_supp_template_btn"
 DIAG_SUPP_IMPORT_BTN = "diag_supp_import_btn"
 DIAG_SUPP_SAVE_BTN = "diag_supp_save_btn"
+DIAG_SUPP_UNKNOWN = "diag_supp_unknown"    # C-214「{name} 不在当前 logic 页…」提示条
 DIAG_SUPP_ERRORS = "diag_supp_errors"
 # 旧版编辑迁移
 DIAG_LEGACY_DIALOG = "diag_legacy_dialog"
+DIAG_LEGACY_SKIPPED = "diag_legacy_skipped"    # C-302 不迁的名字 + 原因（点名在前）
 DIAG_LEGACY_PREVIEW = "diag_legacy_preview"
 DIAG_LEGACY_RUN_BTN = "diag_legacy_run_btn"
 
