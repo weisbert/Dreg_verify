@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """ui_harness 自测（offscreen）。
 
-验的是 harness 本身能用，不动任何现有测试的断言：
+验的是 harness 本身能用：
 起窗 → 载 mirror → 找到信号表 → 表格取值/表头/勾选行 → 截图 → auto_dialogs 拦下
 一次「导出 .sv 选项」并记下文案（这正是 §2 L3「跳过项点名」契约要用的能力）。
+
+C5-c2：**默认工厂已切到 v2**（`test_default_window_factory_is_v2` 钉着）。本文件里那些验
+harness「在 v1 控件上」行为的条目（`topo_table` / `on_topo_export_sv` / `_nets_categories`）
+改用 `win` 夹具**显式**起 v1；验默认工厂本身的用 `v2_win`。
 """
 
 import os
@@ -30,7 +34,25 @@ def _isolate(monkeypatch, tmp_path):
 
 @pytest.fixture()
 def win(gui_app):
+    """**v1** 主窗（`legacy_gui`）—— 下面那几条验的是 harness 在 v1 控件上的行为
+    （`topo_table` / `on_topo_export_sv` / `_nets_categories` 都是 v1 独有的面）。
+
+    C5-c2 起 harness 的默认工厂是 v2，所以这里**显式**传 `legacy_window_factory`：
+    以前这些测试靠「默认值碰巧是 v1」，默认一换就会静默换成另一台窗、
+    断言还照着旧控件名写 —— 红了也看不出是为什么。"""
+    w = H.make_window(factory=H.legacy_window_factory)
+    yield w
+    w.close()
+
+
+@pytest.fixture()
+def v2_win(gui_app):
+    """默认工厂起出来的窗（C5-c2 起 = v2 组合根），载表后等整表分析跑完。"""
     w = H.make_window()
+    ended = []
+    w.analysisEnded.connect(lambda vid, ok: ended.append((vid, ok)))
+    if not ended:                       # 载表是 make_window 里做的，worker 可能还在跑
+        H.wait_for(lambda: bool(ended) or bool(w.state.models()), timeout_ms=60000)
     yield w
     w.close()
 
@@ -50,9 +72,34 @@ def test_mirror_fixtures_exist():
         assert os.path.dirname(p) == os.path.dirname(os.path.abspath(__file__))
 
 
-def test_make_window_loads_mirror(win):
-    assert win.wb is not None
-    assert win.topo_table.rowCount() > 0
+def test_default_window_factory_is_v2(gui_app):
+    """C5-c2：默认工厂**已经是 v2**（`ui.app.MainWindow`）。
+
+    这是整个迁移的开关。钉在这里的理由：默认值悄悄退回 v1 的话，所有靠默认起窗的测试
+    会集体换一台窗去跑，而它们大多数照样绿（两代窗口的 `path_edit` / `on_load` 同名）——
+    等发现时已经是「v2 根本没被测过」。"""
+    from dreg_verify.ui.app import MainWindow
+    assert H.WINDOW_FACTORY is H.v2_window_factory
+    assert H._default_window_factory is H.v2_window_factory      # 旧名仍是同一个
+    w = H.make_window(load=False)
+    try:
+        assert isinstance(w, MainWindow)
+    finally:
+        w.close()
+    # v1 还起得出来（v1/v2 逐字节对照那几条要用），但必须**显式**要
+    from dreg_verify import legacy_gui as G
+    w1 = H.make_window(load=False, factory=H.legacy_window_factory)
+    try:
+        assert isinstance(w1, G.MainWindow)
+    finally:
+        w1.close()
+
+
+def test_make_window_loads_mirror(v2_win):
+    """默认工厂起窗 + 载 mirror：v2 的清单真的有行（骨架也算 —— 载进来了就该看得见）。"""
+    assert v2_win.state.wb is not None
+    assert v2_win.state.models(), "载完一条信号都没有"
+    assert v2_win.list_panel.proxy.rowCount() > 0
 
 
 def test_make_window_without_load(gui_app):
@@ -60,13 +107,13 @@ def test_make_window_without_load(gui_app):
     w = H.make_window(excel_path=H.mirror_path("btlp"), load=False)
     try:
         assert w.path_edit.text().endswith(".xlsx")
-        assert w.topo_table.rowCount() == 0
+        assert w.state.wb is None and not w.state.models()
     finally:
         w.close()
 
 
 def test_window_factory_is_replaceable(gui_app):
-    """v2 上线只需换工厂 —— 这里证明换得掉、还得回来。"""
+    """换得掉、还得回来（C5-c2 之后这条仍然要：v1 对照那几条就是靠它 / `factory=`）。"""
     from PySide6 import QtWidgets
     old = H.set_window_factory(lambda: QtWidgets.QMainWindow())
     try:
@@ -75,7 +122,7 @@ def test_window_factory_is_replaceable(gui_app):
         w.close()
     finally:
         H.set_window_factory(old)
-    assert H.WINDOW_FACTORY is old
+    assert H.WINDOW_FACTORY is old is H.v2_window_factory
 
 
 # ───────────── find / find_all ─────────────

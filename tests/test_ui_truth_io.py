@@ -532,7 +532,7 @@ def test_c136_c137_c138_signal_csv_matches_v1(monkeypatch, tmp_path):
     v1_path, v2_path = str(tmp_path / "v1.csv"), str(tmp_path / "v2.csv")
     kinds, n_sig, diffs = set(), 0, []
     for kind in ("btlp", "wl"):
-        w = H.make_window(kind=kind)
+        w = H.make_window(kind=kind, factory=H.legacy_window_factory)  # v1 对照
         try:
             prov = _prov(w.wb)
             sv = w.topout_view

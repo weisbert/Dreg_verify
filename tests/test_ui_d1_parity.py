@@ -26,8 +26,10 @@ from dreg_verify import exports as X                      # noqa: E402
 
 # ─────────────────────────── 两代窗口的公共起法 ───────────────────────────
 def _v1_window(path):
-    """v1 主窗（`ui_harness` 的默认工厂就是它）+ 它的 Topout 视图。"""
-    w = H.make_window(path)
+    """v1 主窗 + 它的 Topout 视图。
+
+    C5-c2 起 harness 的默认工厂是 v2，所以这里**显式**要 v1（以前靠默认值碰巧是它）。"""
+    w = H.make_window(path, factory=H.legacy_window_factory)
     return w, w.topout_view
 
 

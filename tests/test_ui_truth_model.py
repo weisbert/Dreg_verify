@@ -816,7 +816,7 @@ def test_e_inputs_matches_v1_signalview(monkeypatch, tmp_path):
     H.isolate_settings(monkeypatch, tmp_path)
     n_sig, diffs = 0, []
     for kind in ("btlp", "wl"):
-        w = H.make_window(kind=kind)
+        w = H.make_window(kind=kind, factory=H.legacy_window_factory)  # v1 对照
         try:
             views = [w.topout_view] + [w.page_views[p] for p in ("logic", "mux", "dft", "iddq")
                                        if p in w.page_views]
@@ -1779,7 +1779,7 @@ def test_c132_edit_roundtrip_matches_v1(monkeypatch, tmp_path):
     H.auto_dialogs(monkeypatch)
     diffs, n_run = [], 0
     for kind in ("btlp", "wl"):
-        w = H.make_window(kind=kind)
+        w = H.make_window(kind=kind, factory=H.legacy_window_factory)  # v1 对照
         try:
             sv = w.topout_view
             for k, name, script in _ROUNDTRIP:

@@ -10,8 +10,8 @@
   ④ 模态拦截  —— 一次性 patch 掉所有会在 offscreen 下阻塞的入口，并【记录】弹了什么框、
                  文案是什么 —— 「跳过项必须点名」这类契约就是靠 recorder 验的
 
-v2 上线后只需改一处：`set_window_factory(...)` 换成 `dreg_verify.ui.app` 的入口，
-其余 API 与测试都不用动。
+C5-c2 已经改完那一处：**默认工厂就是 v2**（`ui.app.MainWindow`）。还要 v1 窗口的地方
+显式传 `factory=H.legacy_window_factory`（v1/v2 逐字节对照那几条就是这么写的）。
 
 用法：
 
@@ -65,27 +65,31 @@ def app():
     return inst
 
 
-def _default_window_factory():
-    """v1 的主窗口（C5-c1 起模块名是 `legacy_gui`，行为一字未改）。
+def legacy_window_factory():
+    """**v1** 的主窗口（C5-c1 起模块名是 `legacy_gui`，行为一字未改）。
 
-    **默认工厂仍是 v1**：老测试还没迁完，现在切 v2 它们会整片红。
-    切换是 C5-c2 的活——那一步把这里换成 `v2_window_factory`。"""
+    C5-c2 起它**不再是默认工厂**。还要 v1 窗口的地方（v1/v2 逐字节对照那几条、
+    `legacy_only` 标记的那几条）请显式传：`H.make_window(path, factory=H.legacy_window_factory)`，
+    或 `old = H.set_window_factory(H.legacy_window_factory)` … 用完还原。
+    显式传比「靠默认值碰巧是 v1」结实：默认工厂一换，靠默认的那些会静默换成另一台窗，
+    断言还照着旧控件名写 —— 红了也看不出是为什么。"""
     from dreg_verify import legacy_gui as G
     return G.MainWindow()
 
 
 def v2_window_factory():
-    """v2 组合根（`dreg_verify.ui.app`）。**默认工厂还不是它**——C5 才整体切（拍板 #1）。
+    """v2 组合根（`dreg_verify.ui.app`）。**C5-c2 起这就是默认工厂**（拍板 #1）。
 
-    想让某条测试走 v2 窗口：`old = H.set_window_factory(H.v2_window_factory)` … 用完还原。
-    `make_window` 的 `_set_excel_path` / `_do_load` 在 v2 窗口上照样能用
-    （`path_edit` + `on_load`，`test_harness_can_drive_v2_window` 盯着这条）。"""
+    `make_window` 的 `_set_excel_path` / `_do_load` 在两台窗上都能用
+    （`path_edit` + `on_load`）。v2 的载表是**异步**的：`on_load` 只起 worker 就返回，
+    要等整表分析跑完请自己 `H.wait_for(...)`（`make_window` 不替调用方决定等不等）。"""
     from dreg_verify.ui.app import MainWindow
     return MainWindow()
 
 
-#: 可替换的窗口工厂 —— v2 切换点。
-WINDOW_FACTORY = _default_window_factory
+#: C5-c2：默认工厂已切到 v2（旧名 `_default_window_factory` 留作别名，老引用照旧能用）。
+WINDOW_FACTORY = v2_window_factory
+_default_window_factory = v2_window_factory
 
 
 def set_window_factory(fn):
@@ -116,14 +120,15 @@ def mirror_path(kind="btlp", force=False):
     return path
 
 
-def make_window(excel_path=None, load=True, size=(1320, 840), kind="btlp"):
-    """起主窗口。
+def make_window(excel_path=None, load=True, size=(1320, 840), kind="btlp", factory=None):
+    """起主窗口（**默认是 v2**，C5-c2）。
 
     excel_path=None 且 load=True → 用 mirror 夹具（kind 选 btlp/wl）。
     excel_path 给了但 load=False → 只把路径填进去不载，用来测「未载表」态。
+    `factory` 显式指定这一次用哪台窗（`H.legacy_window_factory` = v1），不动全局默认。
     返回窗口对象；测试结束请自行 `w.close()`（或用 pytest fixture 收尾）。"""
     app()
-    w = WINDOW_FACTORY()
+    w = (factory or WINDOW_FACTORY)()
     if size:
         w.resize(*size)
     if excel_path is None and load:
@@ -158,7 +163,9 @@ def isolate_settings(monkeypatch, tmp_path):
     不隔离的话 `_load_settings` 会读用户真实 ~/.dreg_verify_gui.json（级联偏好等），
     使默认值断言非确定性地失败。
 
-    两套门面**同名同义**的两个模块级常量一起 patch（v1 `legacy_gui` 与 v2 `ui.persist`）：
+**主 patch 的是 v2 的 `ui.persist.SETTINGS_PATH` / `EDITS_PATH`**（C5-c2 起默认工厂
+    就是 v2）；v1 `legacy_gui` 那两个同名同义的常量一并 patch，留给 v1/v2 对照那几条测试
+    —— 它们起的是真 v1 窗，不 patch 就会去读用户真机的配置。
     v2 的落盘策略是「路径还是出厂默认值时 pytest 下 no-op」，所以不 patch 也不会污染真机，
     但那样一来持久化本身就测不到了（写了等于没写）——指到 tmp 之后写入照常生效。
 
@@ -170,7 +177,7 @@ def isolate_settings(monkeypatch, tmp_path):
     pytest.importorskip("PySide6")
     from dreg_verify import legacy_gui as G
     from dreg_verify.ui import persist as P
-    for mod, prefix in ((G, "legacy"), (P, "ui")):
+    for mod, prefix in ((P, "ui"), (G, "legacy")):      # v2 在前：C5-c2 起它才是主路径
         for attr, fname in (("SETTINGS_PATH", "settings.json"), ("EDITS_PATH", "edits.json")):
             if hasattr(mod, attr):
                 monkeypatch.setattr(mod, attr, str(tmp_path / ("%s_%s" % (prefix, fname))))

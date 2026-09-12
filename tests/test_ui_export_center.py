@@ -896,7 +896,7 @@ def test_shots_export_center_and_done(st, qapp, tmp_path):
 def _v1_window(monkeypatch, tmp_path, btlp):
     """一台真 v1 `MainWindow`（`legacy_gui.py`），载同一张 mirror 表。"""
     H.isolate_settings(monkeypatch, tmp_path)
-    w = H.make_window(btlp)
+    w = H.make_window(btlp, factory=H.legacy_window_factory)     # C5-c2：默认工厂已是 v2
     assert w.wb is not None and getattr(w, "topout_view", None) is not None
     return w
 
