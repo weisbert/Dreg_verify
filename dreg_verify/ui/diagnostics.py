@@ -595,7 +595,7 @@ class PrefixEditorDialog(_EditorDialog):
         try:
             new = S.read_text_file(path)
         except OSError as ex:
-            self.show_errors([_t("DIAG_FILE_READ_FAIL_FMT", err=ex)])
+            self.show_errors([_t("DIAG_FILE_READ_FAIL_FMT", err=T.exc_text(ex, path))])
             return ""
         merged = S.merge_probe_prefix_text(self.text(), new)
         self.edit.setPlainText(merged)      # ⚠ 不用 type_text：非 ASCII / 换行会崩进程
@@ -610,7 +610,7 @@ class PrefixEditorDialog(_EditorDialog):
         try:
             S.write_mapping_text(path, S.render_probe_prefix_text(self.mapping()))
         except OSError as ex:
-            self.show_errors([_t("DIAG_FILE_WRITE_FAIL_FMT", err=ex)])
+            self.show_errors([_t("DIAG_FILE_WRITE_FAIL_FMT", err=T.exc_text(ex, path))])
             return ""
         self.show_errors([])
         return path
@@ -670,7 +670,7 @@ class ForceEditorDialog(_EditorDialog):
         try:
             new = S.read_text_file(path)
         except OSError as ex:
-            self.show_errors([_t("DIAG_FILE_READ_FAIL_FMT", err=ex)])
+            self.show_errors([_t("DIAG_FILE_READ_FAIL_FMT", err=T.exc_text(ex, path))])
             return ""
         merged = S.render_force_signal_text(
             S.parse_force_signal_text(self.text()) | S.parse_force_signal_text(new))
@@ -685,7 +685,7 @@ class ForceEditorDialog(_EditorDialog):
         try:
             S.write_mapping_text(path, S.render_force_signal_text(self.names()))
         except OSError as ex:
-            self.show_errors([_t("DIAG_FILE_WRITE_FAIL_FMT", err=ex)])
+            self.show_errors([_t("DIAG_FILE_WRITE_FAIL_FMT", err=T.exc_text(ex, path))])
             return ""
         self.show_errors([])
         return path
@@ -757,7 +757,7 @@ class SupplementEditorDialog(_EditorDialog):
         try:
             text = S.read_text_file(path)
         except OSError as ex:
-            self.show_errors([_t("DIAG_FILE_READ_FAIL_FMT", err=ex)])
+            self.show_errors([_t("DIAG_FILE_READ_FAIL_FMT", err=T.exc_text(ex, path))])
             return ""
         self.edit.setPlainText(text)
         self.show_errors([])
@@ -793,7 +793,9 @@ class SupplementEditorDialog(_EditorDialog):
         try:
             data = S.parse_supplements_json(txt)
         except ValueError as ex:
-            self.show_errors([_t("DIAG_SUPP_BAD_JSON_FMT", err=ex)], _t("DIAG_SUPP_INVALID_HEAD"))
+            # R3-03：`json` 的英文异常原文（`Expecting value: line 1 column 3 …`）不上屏
+            self.show_errors([_t("DIAG_SUPP_BAD_JSON_FMT", err=T.json_pos_text(ex))],
+                             _t("DIAG_SUPP_INVALID_HEAD"))
             return None
         norm, errs = S.validate_supplements(data)
         if errs:
@@ -1161,7 +1163,7 @@ class DiagnosticsDrawer(QtWidgets.QFrame):
         try:
             text = S.read_text_file(path)
         except OSError as ex:
-            self.statusMessage.emit(T.scrub(_t("DIAG_FILE_READ_FAIL_FMT", err=ex)))
+            self.statusMessage.emit(T.scrub(_t("DIAG_FILE_READ_FAIL_FMT", err=T.exc_text(ex, path))))
             return None
         cur = S.render_probe_prefix_text(dict(getattr(self.state, "probe_prefixes", {}) or {}))
         merged = S.merge_probe_prefix_text(cur, text)

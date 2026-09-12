@@ -287,7 +287,7 @@ class SvPreview(QtWidgets.QWidget):
                                       exhaustive=exh, edited=edited, options=None,
                                       sig_cov=sig_cov, form_cov=form_cov)
         except Exception as ex:                                    # noqa: BLE001
-            return (terms.scrub(str(ex)), {})
+            return (terms.exc_text(ex), {})
         return (text or "", build or {})
 
     def _report_counts(self, build):

@@ -558,16 +558,25 @@ def test_c005_c272_bad_excel_shows_error_bar_not_dialog(qapp, monkeypatch, tmp_p
 
 
 def test_load_exception_does_not_crash(qapp, monkeypatch, tmp_path):
-    """载表抛异常也只写错误条（C-005 的另一半：state.load 直接抛）。"""
+    """载表抛异常也只写错误条（C-005 的另一半：state.load 直接抛）。
+
+    R3-03 改口径：错误条上写的是**本工具的话**，不是异常原文 —— 以前这里断言的是
+    「异常的 message 原样出现在错误条上」，等于把 `[Errno 2] No such file or directory:
+    'C:\\\\…\\\\x.xlsx'` 钉成了规范（真机上就是这么显示的）。现在断言反过来：
+    异常原文一个字都不进界面，界面上是 `terms.exc_text` 那一句 + 是哪个文件。"""
     rec = H.auto_dialogs(monkeypatch)
     st = FakeState()
 
     def boom(_p):
-        raise ValueError("openpyxl 打不开这个文件")
+        raise ValueError("openpyxl can't open this file [Errno 2]")
     monkeypatch.setattr(st, "load", boom)
     w = make_win(qapp, state=st)
-    assert not w.load_path(touch_xlsx(tmp_path, "boom.xlsx"))
-    assert "openpyxl 打不开这个文件" in H.find(w, names.ERROR_TEXT).text()
+    p = touch_xlsx(tmp_path, "boom.xlsx")
+    assert not w.load_path(p)
+    text = H.find(w, names.ERROR_TEXT).text()
+    assert "openpyxl" not in text and "Errno" not in text        # R3-03：不贴异常原文
+    assert terms.EXC_TEXT["ValueError"] in text
+    assert "boom.xlsx" in text and str(p) not in text            # 只给文件名，不给本机全路径
     assert rec.count("critical") == 0
     w.close()
 

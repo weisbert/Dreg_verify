@@ -177,8 +177,10 @@ class WorkbenchState(QtCore.QObject):
         try:
             wb = excel_model.load_workbook(path)
         except Exception as exc:        # noqa: BLE001  坏表/占用中/根本不是 xlsx 都走这条
+            # R3-03：`scrub` 只换中文术语 —— 英文异常原文（`[Errno 2] …` + repr 的本机全路径）
+            # 会一字不改地贴到错误条上。错误路径一律走 `terms.exc_text`。
             self.loadFailed.emit(terms.STATUS_LOAD_FAILED_FMT.format(
-                reason=terms.scrub(str(exc).strip() or exc.__class__.__name__)))
+                reason=terms.exc_text(exc, path)))
             return False
         self.wb = wb
         self.loaded_path = path

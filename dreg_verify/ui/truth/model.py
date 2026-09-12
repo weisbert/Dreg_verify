@@ -971,7 +971,7 @@ class TruthModel(QAbstractTableModel):
         try:
             got = read(path)
         except OSError as ex:              # 不存在 / 没权限 / 被 Excel 占用 —— 照实说，别崩
-            msg = terms.TRUTH_IMPORT_READ_FAILED_FMT.format(err=ex)
+            msg = terms.TRUTH_IMPORT_READ_FAILED_FMT.format(err=terms.exc_text(ex, path))
             self.parseFailed.emit(msg)
             return 0, [], msg
         # io 回的是 `(by_name, notes)`：by_name 已经是**解析好的 int**（表里写的是 8 种写法，

@@ -832,7 +832,7 @@ class TruthPanel(QtWidgets.QWidget):
         try:
             by_name, notes = TIO.read_expectations(path)
         except Exception as ex:                    # noqa: BLE001 —— 坏文件 / 占用中，绝不崩
-            self._say(T.TRUTH_IMPORT_READ_FAILED_FMT.format(err=T.scrub(str(ex))))
+            self._say(T.TRUTH_IMPORT_READ_FAILED_FMT.format(err=T.exc_text(ex, path)))
             return
         with self._bulk():
             n, missing = self.model.apply_expectations(by_name)
@@ -924,7 +924,7 @@ class TruthPanel(QtWidgets.QWidget):
             TIO.export_signal_csv(path, self.model, self._an, self._name,
                                   provider=provider, edited=edited, cov=cov, cols=cols)
         except Exception as ex:                    # noqa: BLE001 —— 盘满 / 文件被占用，绝不崩
-            self._say(T.TRUTH_EXPORT_FAILED_FMT.format(err=T.scrub(str(ex))))
+            self._say(T.TRUTH_EXPORT_FAILED_FMT.format(err=T.exc_text(ex, path)))
             return
         note = ""
         if self.model.editable_kind() == "mux" and self._is_editor_table(cols):

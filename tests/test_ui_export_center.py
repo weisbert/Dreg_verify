@@ -729,12 +729,16 @@ def test_toggling_a_row_does_not_rerender(st, qapp, monkeypatch):
 
 
 def test_summary_says_so_when_it_cannot_be_computed(st, qapp, monkeypatch):
-    """摘要算不出来时说实话 —— **绝不**退化成「0 个信号会被跳过」那种让人放心的假数字。"""
+    """摘要算不出来时说实话 —— **绝不**退化成「0 个信号会被跳过」那种让人放心的假数字。
+
+    R3-03 改口径：说实话 ≠ 把异常原文贴上去。这句以前断言的是「异常的 message 原样出现」，
+    真机上那就是一串英文 traceback 摘要；现在断言的是 `terms.exc_text` 的定版句。"""
     monkeypatch.setattr(X, "render_sv",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("引擎炸了")))
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("engine boom")))
     d = _dlg(st)
     txt = d.summary.text()
-    assert "引擎炸了" in txt
+    assert "engine boom" not in txt and "RuntimeError" not in txt
+    assert terms.EXC_FALLBACK in txt
     assert terms.EXPORT_SUMMARY_NO_SKIP_FMT.format(k=3, n=len(st.models())) not in txt
     assert d.run_btn.isEnabled(), "摘要算不出来不该把导出按钮也锁死"
     d.close()

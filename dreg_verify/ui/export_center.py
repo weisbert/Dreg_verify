@@ -336,7 +336,7 @@ def build_plan(state, rows):
     except Exception as ex:                  # noqa: BLE001  摘要算不出来不该挡住导出本身
         # ⚠ 但也**不能装作「没有信号会被跳过」**——那是在没算出来的时候给一个让人放心的假数字。
         #   记一句真话，`summary_text` 据此改文案；真正的点名在完成弹层（那时是真跑过一趟）。
-        plan.summary_error = terms.scrub(str(ex) or ex.__class__.__name__)
+        plan.summary_error = terms.exc_text(ex)            # R3-03：不贴异常原文
         return plan
     plan.will_skip = _dedup(X.build_skipped(build))
     plan.dup_labels = [tuple(d) for d in (build.get("dup_labels") or ())]
@@ -451,7 +451,7 @@ def run_plan(state, plan, ask_path):
             res.errors.append((row.kind, terms.scrub(str(ex))))
             continue
         except Exception as ex:               # noqa: BLE001  任何一行炸了都不连累别的行
-            res.errors.append((row.kind, terms.scrub(str(ex) or ex.__class__.__name__)))
+            res.errors.append((row.kind, terms.exc_text(ex, path)))     # R3-03
             continue
         for out in outs:
             res.outcomes.append(out)
@@ -693,7 +693,9 @@ def import_config(state, path):
     try:
         payload = session.read_config_file(path)
     except (OSError, ValueError) as ex:
-        rep.error = terms.scrub(str(ex))
+        # R3-03 / R2-13 / P-24：坏 JSON / 文件不在 → 以前整条是 Python 的英文异常原文
+        # （含本机全路径）。一律走 `terms.exc_text`。
+        rep.error = terms.exc_text(ex, path)
         rep.notes.append(rep.error)
         return rep
     plan = session.apply_config(payload, current_excel=state.loaded_path or state.excel_path or "")

@@ -435,7 +435,7 @@ class DetailHeader(QtWidgets.QWidget):
         try:
             return st.analyze(name)
         except Exception as ex:                                    # noqa: BLE001  C-043
-            self.set_error("%s\n%s" % (terms.HDR_ANALYSIS_FAILED, ex))
+            self.set_error("%s\n%s" % (terms.HDR_ANALYSIS_FAILED, terms.exc_text(ex)))   # R3-03
             return None
 
     def _cols(self):

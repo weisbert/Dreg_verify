@@ -735,6 +735,84 @@ def fmt_when(ts):
     return t.strftime(WHEN_DATE_FMT)
 
 
+# ═════════ 五、异常 → 人话（R3-03 / R2-13 / P-24）═════════
+#: `scrub` 只换中文术语，英文异常一字不动 —— 于是错误条上直接是
+#: `[Errno 2] No such file or directory: 'C:\\...\\x.xlsx'`（repr 的双反斜杠 + 本机全路径）。
+#: 错误路径一律先查这张表；查不到退 `EXC_FALLBACK`，**永远不贴 `str(exc)`**。
+#: 键 = 异常类名（按 `__mro__` 逐级找，所以 `JSONDecodeError` 找不到时会落到 `ValueError`）。
+EXC_TEXT = {
+    "FileNotFoundError": "找不到这个文件（被移走或改名了？）",
+    "PermissionError": "这个文件读写不了：多半正被仿真器 / Excel 占着，或者它是只读的",
+    "IsADirectoryError": "这是一个文件夹，不是文件",
+    "NotADirectoryError": "路径里有一截不是文件夹",
+    "FileExistsError": "这个名字已经被别的东西占了",
+    "BadZipFile": "这个文件打不开：不是完整的 Excel 工作簿（拷贝 / 下载到一半？）",
+    "JSONDecodeError": "这个文件的内容不是合法的 JSON，读不下去",
+    "UnicodeDecodeError": "这个文件的编码认不出来（要 UTF-8 纯文本）",
+    "TimeoutError": "等这个文件等超时了（网络盘？）",
+    "OSError": "这个文件读写失败",
+    "ValueError": "这个文件的内容格式不对，读不下去",
+}
+#: 查不到对应说法时的定版句 —— 说清「哪里出事、别的没事」，不把类名 / traceback 送上屏。
+EXC_FALLBACK = "工具内部出错（其余不受影响）"
+#: 一句话 + 是哪个文件（路径只给「上级目录 / 文件名」，见 `short_path`）
+EXC_WHAT_FMT = "{text}：{what}"
+#: JSON 解析失败时补一句坐标（工程师拿它去文本编辑器里跳行）
+EXC_JSON_AT_FMT = "{text}（第 {line} 行第 {col} 列起）"
+#: 只要坐标那一截（前半句由调用方的模板给，如「不是合法 JSON：…」）
+EXC_JSON_POS_FMT = "第 {line} 行第 {col} 列起读不下去"
+EXC_JSON_POS_NONE = "读不下去（写法不对）"
+
+
+def json_pos_text(exc):
+    """JSON 解析失败 → 只给「第几行第几列」那一截。取不到坐标就说「写法不对」。
+
+    要的是让工程师在编辑器里跳到那一行，不是把 `Expecting value: line 1 column 3 (char 2)`
+    这句英文原文摆上去。"""
+    line, col = getattr(exc, "lineno", None), getattr(exc, "colno", None)
+    if line and col:
+        return EXC_JSON_POS_FMT.format(line=int(line), col=int(col))
+    return EXC_JSON_POS_NONE
+
+
+def short_path(path):
+    """路径 → 「上级目录/文件名」。
+
+    界面上要回答的是「哪个文件」，不是「它在这台机器的哪个角落」：全路径既是红线① 禁的
+    盘符路径，又常常长到把那句人话挤出可视区；`repr` 出来的双反斜杠更是没人认得。"""
+    p = str(path or "").strip().strip('"').strip("'").replace("\\", "/").rstrip("/")
+    if not p:
+        return ""
+    parts = [x for x in p.split("/") if x and not x.endswith(":")]
+    if not parts:
+        return ""
+    return "/".join(parts[-2:])
+
+
+def exc_text(exc, path=None):
+    """异常（或异常类名）→ 一句给 IC 工程师看的人话。**所有错误路径的唯一出口。**
+
+    `path` 给了就把「上级目录/文件名」缀在后面；没给就试 `exc.filename`（OSError 一族自带）。
+    查不到对应说法 → `EXC_FALLBACK`：宁可说「工具内部出错（其余不受影响）」，
+    也不把 Python 的英文异常原文摆到界面上。"""
+    tpl = None
+    if isinstance(exc, BaseException):
+        for cls in type(exc).__mro__:
+            tpl = EXC_TEXT.get(cls.__name__)
+            if tpl:
+                break
+        what = short_path(path if path is not None else (getattr(exc, "filename", "") or ""))
+    else:
+        tpl = EXC_TEXT.get(str(exc or "").strip())
+        what = short_path(path)
+    if not tpl:
+        return EXC_FALLBACK
+    line, col = getattr(exc, "lineno", None), getattr(exc, "colno", None)
+    if line and col:
+        tpl = EXC_JSON_AT_FMT.format(text=tpl, line=int(line), col=int(col))
+    return EXC_WHAT_FMT.format(text=tpl, what=what) if what else tpl
+
+
 # ⑩ 编辑恢复（C4-int 从 state.py 搬进来 —— 界面文案只住 terms.py，I-13）
 STATUS_RESTORE_BAD_FMT = "另有 {n} 个存盘数值读不出来，已逐条跳过（其余编辑不受影响）"   # C-240
 #: R2-07：整份编辑文件读不出来（写了一半 / 手改坏了）。原文件已改名另存，这一趟从空白开始。

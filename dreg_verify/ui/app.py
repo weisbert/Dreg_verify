@@ -708,9 +708,11 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:                      # noqa: BLE001  载表异常不许崩窗
             ok = False
             if not self._load_error:
-                self._on_load_failed(terms.STATUS_LOAD_FAILED_FMT.format(reason=exc))
+                self._on_load_failed(terms.STATUS_LOAD_FAILED_FMT.format(
+                    reason=terms.exc_text(exc, path)))
         if not ok and not self._load_error:
-            self._on_load_failed(terms.STATUS_LOAD_FAILED_FMT.format(reason=path))
+            self._on_load_failed(terms.STATUS_LOAD_FAILED_FMT.format(
+                reason=terms.exc_text("OSError", path)))
         return ok
 
     def apply_startup(self, argv=()):
@@ -946,7 +948,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             skeleton = list(provider.skeleton_models() or [])
         except Exception as exc:                      # noqa: BLE001
-            self._on_worker_failed(vid, str(exc))
+            self._on_worker_failed(vid, terms.exc_text(exc))     # R3-03：不贴异常原文
             return False
         self._state.set_models(vid, skeleton, True)
         total = len(skeleton)

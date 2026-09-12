@@ -873,7 +873,9 @@ class SidePanel(QtWidgets.QWidget):
         try:
             an = state.analyze(name)
         except Exception as ex:                # noqa: BLE001 —— C-043：失败也只是一行字
-            self.show_message("%s\n%s" % (T.HDR_ANALYSIS_FAILED, T.scrub(str(ex))))
+            # R3-03：`scrub` 换不掉英文异常（这里出过 `'NoneType' object has no attribute
+            # 'bindings'`）—— 错误路径一律走 `terms.exc_text`。
+            self.show_message("%s\n%s" % (T.HDR_ANALYSIS_FAILED, T.exc_text(ex)))
             return
         if not an:
             self.show_message(T.HDR_ANALYSIS_FAILED)
