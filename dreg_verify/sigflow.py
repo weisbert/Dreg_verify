@@ -19,6 +19,8 @@ render_png 才惰性 import QtSvg）。GUI / HTML 报告 / ppt 三处复用同�
 不做（本轮 MVP 分界，见可行性调研 §6）：交叉最小化、ANSI 门形、交互高亮、自动分页。
 """
 
+from dataclasses import dataclass, field
+
 from . import cone
 from . import expr as E
 from . import mux_gen
@@ -855,16 +857,37 @@ def _box_size(node):
     return w, h
 
 
-def render_svg(graph, title=None):
-    """Graph → SVG 文本（源在左、Topout 在右）。三处复用：GUI / HTML 报告内联 / ppt 转 PNG。
+@dataclass
+class Layout:
+    """`layout_graph` 的产出：Qt-free 纯数据，坐标与 `render_svg` 画出来的 SVG **完全一致**。
 
-    布局：最长路径分层 → 列内 DFS 到达序 → 跨 ≥2 列的长边插 dummy、折点走列间隙 → 三段正交折线。
-    标注：每条线的 net 名 + [msb:lsb]（1bit 不标）；宽总线粗线；REG 盒两行；不可信 PIN 虚线 + 角标。
-    每个图元和每条线都挂 data-net（二期点选高亮同名网直接用）。
+    GUI（架构 §1.3② 路线 C）拿它铺命中层：每条 `edges` 一个透明 `QGraphicsPathItem`、每个
+    `pos` 一个透明 `QGraphicsRectItem`，所以这里的坐标一旦与 SVG 漂了，点选就会点空。
+
+    pos    — {nid: (x, y, w, h)}，只含图里的真节点（长边的 dummy 折点已经烘进 edges 的点列）
+    edges  — [(edge, [(x, y)…], side)]，side ∈ {"left","top"} = 这条线从哪一侧进目标口
+    size   — (总宽, 总高) = SVG 的 width/height/viewBox
+    gapw   — {列号: 列缝宽}，net 名就写在源框右缘的这条缝里（截断按它算）
+    rank   — {nid: 列号}
+    ports  — {(nid, port): (x, y)} 输入口锚点；输出口记在 (nid, "Y")
     """
-    title = title or graph.title
+
+    pos: dict = field(default_factory=dict)
+    edges: list = field(default_factory=list)
+    size: tuple = (0, 0)
+    gapw: dict = field(default_factory=dict)
+    rank: dict = field(default_factory=dict)
+    ports: dict = field(default_factory=dict)
+
+
+def layout_graph(graph):
+    """Graph → Layout（分层 / 列序 / dummy / 坐标 / 通道 / 锚点 / 折线点列）。
+
+    纯函数、无 Qt、无字符串拼接：`render_svg` 与 GUI 命中层共用同一份坐标，绝不各算各的。
+    最长路径分层 → 列内 DFS 到达序 → 跨 ≥2 列的长边插 dummy、折点走列间隙 → 三段正交折线。
+    """
     if not graph.nodes:
-        return _empty_svg(title)
+        return Layout(size=(420, 70))
 
     nodes = graph.nodes
     idx = {n.id: n for n in nodes}
@@ -995,14 +1018,16 @@ def render_svg(graph, title=None):
             return (x0, _left_port_y(n, y0, h, left.index(port), len(left)), "left")
         return (x0, y0 + h / 2.0, "left")
 
-    out = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" '
-           'font-family="%s" font-size="11">' % (total_w, total_h, total_w, total_h, _FONT),
-           '<rect x="0" y="0" width="%d" height="%d" fill="#ffffff"/>' % (total_w, total_h),
-           '<text x="16" y="24" font-size="14" font-weight="bold" font-family="%s" '
-           'fill="#0f172a">%s</text>' % (_SANS, _esc(title or "")),
-           '<g id="wires">']
+    ports_xy = {}
+    for n in nodes:
+        bx, by, bw, bh = pos[n.id]
+        ports_xy[(n.id, "Y")] = (bx + bw, by + bh / 2.0)
+        for p in n.ports:
+            ax, ay, _s = anchor_in(n.id, p["name"])
+            ports_xy[(n.id, p["name"])] = (ax, ay)
 
-    # ⑥ 连线
+    # ⑥ 连线折点（横段走 dummy 自己占的那一行、竖段走列缝通道 → 长线不横穿图元）
+    lay_edges = []
     for e in graph.edges:
         pts = []
         x1, y1 = anchor_out(e.src)
@@ -1023,6 +1048,41 @@ def render_svg(graph, title=None):
             pts += [(xm, y1), (xm, yup), (px, yup), (px, py)]
         else:
             pts += [(xm, y1), (xm, py), (px, py)]
+        ports_xy.setdefault((e.dst, e.dst_port), (px, py))
+        lay_edges.append((e, pts, side))
+
+    return Layout(pos={n.id: pos[n.id] for n in nodes}, edges=lay_edges,
+                  size=(total_w, total_h), gapw=gapw,
+                  rank={n.id: rank[n.id] for n in nodes}, ports=ports_xy)
+
+
+def render_svg(graph, title=None, layout=None):
+    """Graph → SVG 文本（源在左、Topout 在右）。三处复用：GUI / HTML 报告内联 / ppt 转 PNG。
+
+    布局全部来自 `layout_graph`（传 layout 可复用已算好的一份，GUI 的命中层就靠它对齐）。
+    标注：每条线的 net 名 + [msb:lsb]（1bit 不标）；宽总线粗线；REG 盒两行；不可信 PIN 虚线 + 角标。
+    每个图元和每条线都挂 data-net（二期点选高亮同名网直接用）。
+    """
+    title = title or graph.title
+    if not graph.nodes:
+        return _empty_svg(title)
+
+    lay = layout if layout is not None else layout_graph(graph)
+    pos, gapw, rank = lay.pos, lay.gapw, lay.rank
+    total_w, total_h = lay.size
+    idx = {n.id: n for n in graph.nodes}
+
+    out = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" '
+           'font-family="%s" font-size="11">' % (total_w, total_h, total_w, total_h, _FONT),
+           '<rect x="0" y="0" width="%d" height="%d" fill="#ffffff"/>' % (total_w, total_h),
+           '<text x="16" y="24" font-size="14" font-weight="bold" font-family="%s" '
+           'fill="#0f172a">%s</text>' % (_SANS, _esc(title or "")),
+           '<g id="wires">']
+
+    # ⑥ 连线
+    for e, pts, side in lay.edges:
+        x1, y1 = pts[0]
+        px, py = pts[-1]
         sw = 2.6 if (e.width or 1) > 1 else 1.2
         dash = ' stroke-dasharray="5,3"' if not e.trusted else ""
         color = "#b45309" if not e.trusted else _WIRE
@@ -1061,7 +1121,7 @@ def render_svg(graph, title=None):
     out.append("</g><g id=\"cells\">")
 
     # ⑦ 图元
-    for n in nodes:
+    for n in graph.nodes:
         x0, y0, w, h = pos[n.id]
         fill = _FILL.get(n.kind, "#f8fafc")
         untrusted = (n.meta.get("trusted") is False)
