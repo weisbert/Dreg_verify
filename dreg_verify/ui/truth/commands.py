@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""truth/commands.py —— 真值表的四个 `QUndoCommand`（I-15 / C-299）。
+"""truth/commands.py —— 真值表的六个 `QUndoCommand`（I-15 / C-299）。
 
-**这四个是 `TruthModel` 改数据的唯一途径**：model 对外的写入口（`setData` 与各列操作方法）
+**这六个是 `TruthModel` 改数据的唯一途径**：model 对外的写入口（`setData` 与各列操作方法）
 一律只造命令 `push` 进 `undo_stack()`，自己不直接改 `cols`。`redo/undo` 两边都调 model 的
 内部写函数（`_apply_cells` / `_insert_cols` / `_take_cols` / `_set_col_name`），所以「做」和
 「撤销」走的是同一条代码路径——不会出现「撤销撤了个半拉」。
@@ -18,7 +18,7 @@
 
 from PySide6.QtGui import QUndoCommand
 
-__all__ = ["SetCells", "AddCols", "RemoveCols", "RenameCol"]
+__all__ = ["SetCells", "AddCols", "RemoveCols", "RenameCol", "MuxData", "Regenerate"]
 
 
 class SetCells(QUndoCommand):
@@ -85,3 +85,47 @@ class RenameCol(QUndoCommand):
 
     def undo(self):
         self._m._set_col_name(self._c, self._old)
+
+
+class MuxData(QUndoCommand):
+    """整表 mux 数据值同步（C-110/C-112）：一次动作 = 写 state 桶 + 重分析 + 整表换列，一步撤销。
+
+    **做和撤销都只记『那一格该填什么文本』**（`old`/`new`，空串 = 恢复自动分配），两边都调
+    `model._apply_mux_data` 经同一个 reanalyzer 走一遍——所以 undo 之后 `state.mux_data` 里
+    存的值与表上显示的值不会各说各话（只把列 dict 塞回去的话，state 还留着新值 = 屏幕 0x3 /
+    导出 9 的老毛病，正是 C-112「所见即所得」要堵的那个洞）。
+    """
+
+    def __init__(self, model, base_low, old, new, text="设置 mux 数据值"):
+        QUndoCommand.__init__(self, text)
+        self._m = model
+        self._base = str(base_low)
+        self._old = str(old or "")
+        self._new = str(new or "")
+
+    def redo(self):
+        self._m._apply_mux_data(self._base, self._new)
+
+    def undo(self):
+        self._m._apply_mux_data(self._base, self._old)
+
+
+class Regenerate(QUndoCommand):
+    """重新生成（C-085/C-119）：`an` + 输入行 + 整个列集一起换，一步撤销。
+
+    撤销必须连 `an` 一起还原——`cell_state` / `col_state` / `column_drives` / auto_out 重算
+    全看 `an`，只把列 dict 塞回去的话，撤销后的表会拿【新 an】去解释【旧列】（DFT 拍列认不出、
+    驱动明细算错），静默不一致。行数变了不走这里（那要 reset，是 `load()` 的活，I-15）。
+    """
+
+    def __init__(self, model, old, new, text="重新生成"):
+        QUndoCommand.__init__(self, text)
+        self._m = model
+        self._old = old          # (an, e_inputs, cols)
+        self._new = new
+
+    def redo(self):
+        self._m._apply_shape(*self._new)
+
+    def undo(self):
+        self._m._apply_shape(*self._old)

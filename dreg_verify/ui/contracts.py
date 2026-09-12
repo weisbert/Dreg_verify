@@ -342,16 +342,22 @@ class HighlightBusProto(Protocol):
 
 # ═════════ 真值表 model（A5 §5 + 补 mux / 反例 / DFT 拍 / 进度）═════════
 class TruthRowKind:
+    """行语义（`TruthModelProto.row_kind` 的取值）。视图/delegate 一律按它判，不按行下标硬算。"""
     INPUT = "input"
     AUTO = "auto"
     EXP = "exp"
+    #: 全部取值（测试/视图遍历用；顺序 = 表上从上到下的行序）
+    ALL = (INPUT, AUTO, EXP)
 
 
 class TruthColState:
+    """列状态（`TruthModelProto.col_state` 的取值）。判定优先级 = DFT > NEG > USER > AUTO。"""
     AUTO = "auto"      # 自动生成 T<n>
     USER = "user"      # 手编列 U<n>/自定义名（列头标记，不占底色，裁决⑮）
     NEG = "neg"        # 反例列
     DFT = "dft"        # iddq 自检拍列
+    #: 全部取值（测试/视图遍历用；顺序 = 判定优先级从低到高）
+    ALL = (AUTO, USER, NEG, DFT)
 
 
 class TruthRole(IntEnum):
@@ -402,8 +408,19 @@ class TruthModelProto(Protocol):
     def fill_expected(self) -> int: ...
     def clear_all(self) -> None: ...
     def regenerate(self, an: dict, e_inputs: List[dict]) -> None: ...
-    def set_mux_data_value(self, base_low: str, text: str) -> None:
-        """整表 by_base 同步（C-110 / C-112，经 state.mux_data + provider 重分析 + edits.mux_resync_cols）。"""
+    def set_mux_data_value(self, base_low: str, text: str) -> bool:
+        """整表 by_base 同步（C-110 / C-112，经 state.mux_data + provider 重分析 + edits.mux_resync_cols）。
+
+        model 手上没有 state，这条外部回路由 `set_reanalyzer` 接进来；没接上时返回 False 不动表。"""
+        ...
+    def set_reanalyzer(self, fn: Optional[Callable[[str, str], Optional[dict]]]) -> None:
+        """接上「改 mux 数据值 → 写 state.mux_data 桶 → 重分析本信号」这条外部回路（C-110/C-112）。
+
+        `fn(base_low, text) -> an | None`：把 text 按【物理基名】写进 `state.mux_data()`
+        （**空串 = 清掉该基名、恢复自动分配**），再 `state.analyze(name)` 返回新的 an。
+        text 已由 model 按该数据行的位宽校验 + 掩码 + 规范化（`truth/model.fmt_cell` 的写法，
+        `truth_edit.parse_int` 原样读得回），所以 fn 不必再自己校验。撤销/重做也走同一个 fn
+        （传旧文本），state 与表因此永远同步。"""
         ...
     def set_mux_user_data(self, c: int, key: str, text: str) -> bool: ...
     def set_current_col(self, c: int) -> None: ...
@@ -412,6 +429,12 @@ class TruthModelProto(Protocol):
     def copy_tsv(self, indexes) -> str: ...
     def paste_tsv(self, text: str, r0: int, c0: int) -> Tuple[bool, str]: ...
     def import_expectations(self, path: str) -> Tuple[int, List[str], str]: ...
+    def apply_expectations(self, by_name: Dict[str, int]) -> Tuple[int, List[str]]:
+        """按【列名】回填期望（C-298 的内部形式）：返回 (落了几列, 没对上的列名)，一步撤销。
+
+        `import_expectations` 读完文件、批量填对话框算完值，都汇到这里——model 不碰文件，
+        `truth/io.py` 不碰撤销栈。列名大小写无关，按【最终标号】（负向带 _NEG）对位。"""
+        ...
     def batch_fill(self, cs: Sequence[int], text: str) -> Tuple[int, str]: ...
     def fill_progress(self) -> Tuple[int, int, int]:
         """(手填 n, 正向 m, 不一致 k)。"""

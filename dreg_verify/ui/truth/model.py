@@ -33,10 +33,10 @@ from ... import inputs_table as IT
 from ... import truth_edit as TE
 from .. import contracts
 from .. import terms
-from .commands import AddCols, RemoveCols, RenameCol, SetCells
+from .commands import AddCols, MuxData, Regenerate, RemoveCols, RenameCol, SetCells
 from .rows import e_inputs_from_an
 
-__all__ = ["TruthModel", "fmt_cell", "PENDING_TERMS"]
+__all__ = ["TruthModel", "fmt_cell", "norm_col", "COL_SCHEMA", "PENDING_TERMS"]
 
 
 #: `ui/terms.py` 里还没有、但本模块要用的文案（C2-int 正在并行改 terms.py，这波不碰它）。
@@ -51,10 +51,17 @@ PENDING_TERMS = {
     "TRUTH_APPLY_EXP_MISSING_FMT": "这些列名在本信号里没有：{names}",
     # 列下标越界（按钮/右键菜单在没选中列时也可能点进来，不许崩）
     "TRUTH_COL_OUT_OF_RANGE": "没有选中的测试列",
-    # mux 自动生成列的数据值要整表一起改（C-110），不能只改这一格
-    "TRUTH_MUX_DATA_WHOLE_TABLE_ONLY":
-        "自动生成列的 mux 数据值要整表一起改：用工具条的「设置 mux 数据值」；"
-        "只改这一列请先「复制列」得到一条手编列",
+    # 粘贴里没认出写法的格子要【点名】（行标签×列名），不能只报个数（C-083 的粘贴面）
+    "TRUTH_PASTE_BAD_FMT": "，{n} 格没认出写法：{names}",
+    "TRUTH_PASTE_BAD_CELL_FMT": "{row}×{col}",
+    # 整表 mux 数据值同步的结果（C-110）
+    "TRUTH_MUX_DATA_DONE_FMT": "已按物理寄存器 {base} 同步整表数据值（清空该格可恢复自动分配）",
+    "TRUTH_MUX_DATA_NO_BASE_FMT": "本信号没有物理寄存器 {base} 的 mux 数据行",
+    # 没接 reanalyzer 就调整表同步（面板漏接线；宁可说清也不做个只改一格的假同步）
+    "TRUTH_MUX_DATA_NO_REANALYZER":
+        "整表 mux 数据值同步还没接上会话状态（面板未调 set_reanalyzer），这一格已还原",
+    # 导入期望的结果说明（C-298；读文件那半边在 C3-d 的 truth/io.py）
+    "TRUTH_IMPORT_EXP_REPORT_FMT": "按列名回填了 {n} 列的期望{missing}",
 }
 
 
@@ -90,6 +97,24 @@ def fmt_cell(val, width):
     return "0x%X" % v
 
 
+#: 列 dict 的 schema（键 → 缺省值）。`edits.cols_from_vectors` 九个键全给，但 `edits.add_col`
+#: 与 `edits.copy_cols` **不给 `dft`**（它们造的列本来就不是 iddq 自检拍）——两种来源的列混在
+#: 一张表里，`cols() == cols()` 这种逐字段比较、`state.put_edit` 存下来再读回就会各差一个键。
+#: 进 model 的列一律先 `norm_col` 补齐（就地补，不换对象：`AddCols.undo` 靠的是同一批 dict 的身份）。
+COL_SCHEMA = {"name": "", "neg": False, "vals": None, "exp": None, "auto": 0,
+              "auto_w": 1, "user": False, "vec": None, "dft": False}
+
+
+def norm_col(col):
+    """就地补齐一个列 dict 的 schema 键并返回它本身（不拷贝、不换对象）。"""
+    for k, v in COL_SCHEMA.items():
+        if k not in col:
+            col[k] = {} if (k == "vals" and v is None) else v
+    if col["vals"] is None:
+        col["vals"] = {}
+    return col
+
+
 class TruthModel(QAbstractTableModel):
     """真值表 model。信号见 `contracts.TRUTH_SIGNALS`（五个全在，名字/签名一字不差）。"""
 
@@ -106,23 +131,37 @@ class TruthModel(QAbstractTableModel):
         self._e_inputs = []
         self._cur_col = -1
         self._undo = QUndoStack(self)
+        self._reanalyze = None      # set_reanalyzer 接进来的「写 state + 重分析」回路（C-110）
+        self._mux_text = {}         # (信号名低, 物理基名) → 本会话最后填进去的规范化文本（撤销要）
+        self._vecs = None           # column_drives 的向量快照缓存（每次写后作废，C-063）
 
     # ═════════════════ 形状 ═════════════════
     def load(self, an, cols, e_inputs):
         """换信号 / 重新生成：**唯一允许 reset 的地方**（I-15）。
 
         `cols` 按引用收下（列 dict 与其中的 `vec` 与调用方共享，与 v1 `SignalView` 同——
-        `state.put_edit` 存的就是这份），只把外层 list 拷一份，免得改列顺序反噬调用方。
+        `state.put_edit` 存的就是这份），只把外层 list 拷一份，免得改列顺序反噬调用方；
+        列 dict 就地补齐 `COL_SCHEMA`（见那张表的注释）。
         """
         self.beginResetModel()
         self._an = an or {}
         self._e_inputs = list(e_inputs or [])
-        self._cols = list(cols or [])
+        self._cols = [norm_col(c) for c in (cols or [])]
         self._cur_col = -1
+        self._vecs = None
         self._undo.clear()          # 本类唯一的 .clear()：撤销栈，不是表格（I-15 说的是后者）
         self.endResetModel()
         self.colsChanged.emit()
         self._emit_progress()
+
+    def set_reanalyzer(self, fn):
+        """接上「改 mux 数据值 → 写 `state.mux_data` 桶 → 重分析本信号」这条回路（C-110/C-112）。
+
+        契约见 `contracts.TruthModelProto.set_reanalyzer`：`fn(base_low, text) -> an | None`，
+        空 text = 恢复自动分配；text 已按该数据行位宽校验+掩码+`fmt_cell` 规范化过。
+        没接（`None`）时 `set_mux_data_value` 只发一条 `parseFailed` 说明并返回 False，不动表。
+        """
+        self._reanalyze = fn
 
     def rowCount(self, parent=QModelIndex()):
         if parent.isValid():
@@ -220,8 +259,51 @@ class TruthModel(QAbstractTableModel):
         return n, m, k
 
     def column_drives(self, c):
-        """该列实际下的每条 force / RF_WRITE（C-063 列头 tooltip / 常驻面板）。"""
-        return IT.column_drives(self._an, c)
+        """该列实际下的每条 force / RF_WRITE（C-063 列头 tooltip / 常驻面板）。
+
+        **不能用 `inputs_table.column_drives(an, c)`**：它按 `an["vectors"][c]` 取向量，
+        而 `an["vectors"]` 是【出厂】那一批；加列 / 删列 / 复制列之后第 c 列早就不是第 c 条
+        向量了，tooltip 会串号说别的列的 force（C3-a0 报告 #1）。这里按【当前列】现算。
+        """
+        if not (0 <= c < len(self._cols)):
+            return []
+        bindings, used = IT.drive_ctx(self._an)
+        if used is None:
+            return []
+        vec = self._col_vectors()[c]
+        if vec is None:
+            return []
+        return IT.vector_drives(vec, bindings, used)
+
+    def _col_vectors(self):
+        """与【当前列】一一对应的测试向量（`column_drives` 的原料，写操作后作废重算）。
+
+        logic 根按当前取值重建（`edits.cols_to_vectors` —— 与 `edits.compute_edited` 同一条
+        路，所以 tooltip 说的驱动就是真会写进 .sv 的那几条）；mux 根与只读信号直接用列自己的
+        `vec`（mux 的取值归 `vec.assignments` 管，重建反而丢 case 身份）。
+
+        `vectors.make_vector_from_base_values` 不建模 iddq 门，重建出来的向量没有门那条
+        `extra_forces`；门行只读、值只能来自原向量，所以从原列的 `vec` 上原样搬过来。
+        新加的列没有出厂向量，但门值就在它自己的 `vals` 里（门行只读，加列时按 0 起），
+        照它补一条——不补的话 tooltip 会少说一条 force，而生成器 `pin_dft_gate` 出片时是会补的。
+        """
+        if self._vecs is not None:
+            return self._vecs
+        if self.editable_kind() == "logic":
+            gate = self._an.get("dft_gate")
+            vecs = ED.cols_to_vectors(self._an, self._cols)
+            for col, v in zip(self._cols, vecs):
+                ef = list(getattr(col.get("vec"), "extra_forces", None) or [])
+                if not ef and gate:
+                    ef = [(gate["wire_lhs"],
+                           int((col.get("vals") or {}).get(gate["key"], gate["transp"])),
+                           int(gate.get("width") or 1))]
+                if ef:
+                    v.extra_forces = ef
+        else:
+            vecs = [c.get("vec") for c in self._cols]
+        self._vecs = vecs
+        return vecs
 
     def protected_negatives(self):
         """"值得保护"的反例列（自定义命名或手填过错值）——删反例前要先问一声（C-103）。"""
@@ -361,6 +443,7 @@ class TruthModel(QAbstractTableModel):
             touched.add(c)
         if not touched:
             return
+        self._vecs = None
         last = self.rowCount() - 1
         for c in sorted(touched):
             # 整列重发：改一个输入格会连带 auto_out 行、期望格的兜底显示与状态色一起变
@@ -374,8 +457,9 @@ class TruthModel(QAbstractTableModel):
         if n <= 0:
             return
         self.beginInsertColumns(QModelIndex(), at, at + n - 1)
-        self._cols[at:at] = list(cols)
+        self._cols[at:at] = [norm_col(c) for c in cols]
         self.endInsertColumns()
+        self._vecs = None
         self.colsChanged.emit()
         self._emit_progress()
 
@@ -389,6 +473,7 @@ class TruthModel(QAbstractTableModel):
             self.beginRemoveColumns(QModelIndex(), i, i)
             del self._cols[i]
             self.endRemoveColumns()
+        self._vecs = None
         self.colsChanged.emit()
         self._emit_progress()
         return taken
@@ -397,8 +482,36 @@ class TruthModel(QAbstractTableModel):
         if not (0 <= c < len(self._cols)):
             return
         self._cols[c]["name"] = name
+        self._vecs = None                      # 列名进 vec.name → 驱动明细的原料也变了
         self.headerDataChanged.emit(Qt.Horizontal, c, c)
         self.colsChanged.emit()
+        self._emit_progress()
+
+    def _apply_shape(self, an, e_inputs, cols):
+        """整体换 `an` + 输入行 + 列集（`Regenerate` / `MuxData` 的落地口）。**行数必须不变**。
+
+        I-15：不 reset。列数差多少就发多少条 insert / remove，剩下的靠整表 `dataChanged`。
+        """
+        self._an = an or {}
+        self._e_inputs = list(e_inputs or [])
+        old_n, new_n = len(self._cols), len(cols)
+        if new_n < old_n:
+            self.beginRemoveColumns(QModelIndex(), new_n, old_n - 1)
+            self._cols = [norm_col(c) for c in cols]
+            self.endRemoveColumns()
+        elif new_n > old_n:
+            self.beginInsertColumns(QModelIndex(), old_n, new_n - 1)
+            self._cols = [norm_col(c) for c in cols]
+            self.endInsertColumns()
+        else:
+            self._cols = [norm_col(c) for c in cols]
+        self._vecs = None
+        if new_n:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(self.rowCount() - 1, new_n - 1))
+            self.headerDataChanged.emit(Qt.Horizontal, 0, new_n - 1)
+        self.colsChanged.emit()
+        self._emit_progress()
 
     def _emit_progress(self):
         n, m, k = self.fill_progress()
@@ -443,14 +556,9 @@ class TruthModel(QAbstractTableModel):
         e = self._e_inputs[r]
         if self.editable_kind() == "mux" and e["mux_data_base"] and not col.get("user"):
             # C-110：自动生成列的数据值是【整表 by_base】的事，不能只改这一格（改了会与
-            # 内部/导出值不一致 = 假的所见即所得）。本波 set_mux_data_value 还没接 state，
-            # 走到这里就照实说一句并还原。
-            try:
-                self.set_mux_data_value(e["mux_data_base"], text)
-            except NotImplementedError:
-                self.parseFailed.emit(_t("TRUTH_MUX_DATA_WHOLE_TABLE_ONLY"))
-                return False
-            return True
+            # 内部/导出值不一致 = 假的所见即所得）。与 v1 `_on_truth_item` 同：这一格的编辑
+            # 直接触发整表同步；回路没接上时 set_mux_data_value 自己会说明并返回 False。
+            return self.set_mux_data_value(e["mux_data_base"], text)
         try:
             val = TE.parse_int(text)             # 输入格空 = 0（没有「未填」这一档）
         except ValueError:
@@ -523,7 +631,15 @@ class TruthModel(QAbstractTableModel):
         return True, info
 
     def add_negatives(self, cs, all_positive=False):
-        """加反例（C-096…C-101）。挑列与去重全在 `truth_edit.plan_negatives`。返回 (造了几条, 跳过几条)。"""
+        """加反例（C-096…C-101 / mux 的 C-121·C-122）。返回 (造了几条, 跳过几条)。一步撤销。
+
+        挑列与去重全在 `truth_edit.plan_negatives`（只对正向列造、同一组输入取值不叠第二条、
+        列名对全集唯一），错值防撞在 `edits.add_negatives`（同时避开 auto_out 与手填期望，
+        C-100）——logic 与 mux 走的是**同一条**路：mux 的「逐 case 加反例」（C-121）就是
+        「逐正向列加反例」，因为 mux 的一列 = 一条 case；`all_positive=True` 即清单底部的
+        「全部加反例」（C-122）。造出来的反例列 `user=True` 且 `vec` 是 case 的克隆，
+        `edits.mux_derive` 会把它们收成带 `is_negative` 的 user_vecs。
+        """
         if not self.editable_kind():
             return 0, 0
         new, skipped = ED.add_negatives(self._cols, list(cs or ()), bool(all_positive))
@@ -532,7 +648,12 @@ class TruthModel(QAbstractTableModel):
         return len(new), skipped
 
     def del_negatives(self):
-        """删掉全部反例、保留正向（C-102）。返回删了几条。"""
+        """删掉全部反例、保留正向（C-102 / mux 的 C-123）。返回删了几条。一步撤销。
+
+        mux 的「手编反例列 + 整信号反例标记一起清」（C-123）在本层就是「把所有 `neg` 列删掉」：
+        v2 没有第二份「整信号反例标记」——`state._sync_negs` 是从 `any(c["neg"] for c in cols)`
+        推出来的，删空了它自然就落下去（这正是 v1 两份标记会不同步的那个洞被堵上的地方）。
+        """
         items = [(i, c) for i, c in enumerate(self._cols) if c.get("neg")]
         if not items:
             return 0
@@ -571,24 +692,68 @@ class TruthModel(QAbstractTableModel):
         if len(e_inputs) != len(self._e_inputs):
             self.load(an, new_cols, e_inputs)
             return
-        self._an = an or {}
-        self._e_inputs = e_inputs
-        self._undo.beginMacro("重新生成")
-        if self._cols:
-            self._undo.push(RemoveCols(self, list(enumerate(self._cols)), "清空旧列"))
-        if new_cols:
-            self._undo.push(AddCols(self, 0, new_cols, "按覆盖度重出"))
-        self._undo.endMacro()
+        self._undo.push(Regenerate(self,
+                                   (self._an, self._e_inputs, list(self._cols)),
+                                   (an or {}, e_inputs, new_cols)))
 
     # ═════════════════ mux 专用写入口 ═════════════════
     def set_mux_data_value(self, base_low, text):
-        """整表 by_base 同步 mux 数据值（C-110/C-112）。
+        """整表 by_base 同步 mux 数据值（C-110/C-112/C-113/C-114）。一步撤销。返回是否落下去了。
 
-        **C3-a 收尾实现**：它要经 `state.mux_data` 存会话档 → `provider.analyze` 重分析 →
-        `edits.mux_resync_cols` 把冻结的编辑列贴回新分析，model 手上没有 state/provider，
-        这一波接不上（接上之前宁可不做，也不做个只改一格的假同步）。
+        路径：按该数据行的位宽 `parse_int` 校验（空串 = 恢复自动分配）→ `set_reanalyzer` 接进来的
+        回路写 `state.mux_data` 桶 + 重分析 → `edits.mux_resync_cols` 把【冻结的编辑列】贴回新
+        分析（手填期望 / 反例标记按列名保住 = C-114；用户删过的自动列不复活；手编列原样留着）。
+        撞值（`an["status_detail"] == "false-green"`）时补发一条 `muxCollision`（C-113）。
+
+        只改一格是做不到「所见即所得」的（C-112）：数据值按【物理寄存器】整表分配，改一格而
+        别的列不动，屏幕值与内部/导出值就会各说各话——所以这里要么整表同步，要么原样不动。
         """
-        raise NotImplementedError("C3-a：整表 mux 数据值同步要 state.mux_data + provider 重分析")
+        base_low = str(base_low or "").lower()
+        if self.editable_kind() != "mux":
+            return False
+        e = next((x for x in self._e_inputs
+                  if (x["mux_data_base"] or "") == base_low), None)
+        if e is None:
+            self.parseFailed.emit(_t("TRUTH_MUX_DATA_NO_BASE_FMT", base=base_low))
+            return False
+        txt = "" if text is None else str(text).strip()
+        if txt == "":
+            norm = ""                             # 空 = 清掉该基名、恢复引擎的自动互异分配
+        else:
+            try:
+                norm = fmt_cell(TE.parse_int(txt), e["width"])
+            except ValueError:
+                self.parseFailed.emit(_t("TRUTH_PARSE_FAILED_FMT", text=txt))
+                return False
+        if self._reanalyze is None:
+            self.parseFailed.emit(_t("TRUTH_MUX_DATA_NO_REANALYZER"))
+            return False
+        old = self._mux_text.get(self._mux_key(base_low), "")
+        if old == norm:
+            return True                           # 没变 → 不占一步撤销，也不白重分析一遍
+        self._undo.push(MuxData(self, base_low, old, norm))
+        return True
+
+    def _mux_key(self, base_low):
+        return (str(self._an.get("name") or "").lower(), str(base_low or "").lower())
+
+    def _apply_mux_data(self, base_low, text):
+        """`MuxData` 的落地：经 reanalyzer 拿新 an → 贴回编辑列 → 换表（做和撤销同一条路）。"""
+        if self._reanalyze is None:
+            return
+        an = self._reanalyze(base_low, text)
+        if an is None:                            # 重分析失败：state 已由回路自己兜底，表不动
+            return
+        cols = ED.mux_resync_cols(an, self._cols, self._e_inputs)
+        self._mux_text[self._mux_key(base_low)] = text
+        self._apply_shape(an, self._e_inputs, cols)
+        if text:
+            self.pasteReport.emit(_t("TRUTH_MUX_DATA_DONE_FMT", base=base_low))
+        # C-113：≥2 条数据路取到相同值 = 选错路也测不出。撞值判据在引擎的 meta
+        # （`mux_gen` 的 value_collision / override_collision），`an` 里它已经归到
+        # `status_detail == "false-green"` 这一档（见「引擎层发现」：an 不带 expansion["meta"]）。
+        if an.get("status_detail") == "false-green":
+            self.muxCollision.emit(terms.TRUTH_MUX_COLLISION)
 
     def set_mux_user_data(self, c, key, text):
         """mux【手编列】数据值：只改本列该数据源 + 按路由 case 重算 auto_out（C-111）。一步撤销。"""
@@ -647,44 +812,73 @@ class TruthModel(QAbstractTableModel):
 
         超行为什么拒绝而不是追加：真值表的行是【输入信号】，凭空加一行等于凭空多一根输入，
         那是 Excel 表的事，不是这里能补的。只读格（auto 行 / 只读输入行 / DFT 拍列）跳过不写。
+
+        「规划」（`_paste_plan`，纯函数、不改表）与「落格」（`_paste_land`）刻意拆开：
+        C3-d 会在 `truth/io.paste_plan` 写一份同规则的纯函数给视图预览用，C3-int 去重时
+        直接把 `_paste_plan` 换成它就行，落格这半边不用动。
+        """
+        plan = self._paste_plan(text, r0, c0)
+        if not plan["ok"]:
+            self.pasteReport.emit(plan["report"])
+            return False, plan["report"]
+        if plan["rows"] is None:                       # 空剪贴板：照实报一句，不占撤销步
+            self.pasteReport.emit(plan["report"])
+            return True, plan["report"]
+        msg = self._paste_land(plan)
+        self.pasteReport.emit(msg)
+        return True, msg
+
+    def _paste_plan(self, text, r0, c0):
+        """TSV + 落点 → 规划（**只读，不改任何东西**）。
+
+        返回 `{"ok", "report", "rows", "r0", "c0", "need"}`：`ok=False` 时 `report` 就是拒绝
+        原因（目前只有超行一种）；`rows is None` = 剪贴板是空的。`need` = 还差几列要追加。
         """
         rows = [ln.split("\t") for ln in str(text or "").replace("\r\n", "\n")
                 .replace("\r", "\n").split("\n")]
         while rows and rows[-1] == [""]:
             rows.pop()
-        empty = _t("TRUTH_PASTE_REPORT_FMT", n=0, added="", skipped="")
-        if not rows:
-            self.pasteReport.emit(empty)
-            return True, empty
         r0, c0 = max(0, int(r0)), max(0, int(c0))
+        if not rows:
+            return {"ok": True, "rows": None, "r0": r0, "c0": c0, "need": 0,
+                    "report": _t("TRUTH_PASTE_REPORT_FMT", n=0, added="", skipped="")}
         if r0 + len(rows) > self.rowCount():
-            msg = _t("TRUTH_PASTE_OVERFLOW_ROWS_FMT", rows=len(rows), max=self.rowCount())
-            self.pasteReport.emit(msg)
-            return False, msg
+            return {"ok": False, "rows": rows, "r0": r0, "c0": c0, "need": 0,
+                    "report": _t("TRUTH_PASTE_OVERFLOW_ROWS_FMT",
+                                 rows=len(rows), max=self.rowCount())}
+        need = max(0, c0 + max(len(x) for x in rows) - len(self._cols))
+        return {"ok": True, "rows": rows, "r0": r0, "c0": c0, "need": need, "report": ""}
 
-        need = c0 + max(len(x) for x in rows) - len(self._cols)
+    def _paste_land(self, plan):
+        """把规划落进表里（追加列 + 一批格子），整次一步撤销（C-294）。返回结果说明。"""
+        rows, r0, c0, need = plan["rows"], plan["r0"], plan["c0"], plan["need"]
         if need > 0:                       # 追加列 + 落值 = 两个命令 → 必须裹成一步（C-294）
             self._undo.beginMacro("粘贴")
             added = self.append_test_column(int(need))
-            n_ok, n_skip, cells = self._paste_cells(rows, r0, c0)
+            n_ok, n_skip, bad, cells = self._paste_cells(rows, r0, c0)
             if cells:
                 self._undo.push(SetCells(self, cells, "粘贴取值"))
             self._undo.endMacro()
         else:                              # 只落值 = 本来就一个命令，不用空宏占一步撤销
             added = []
-            n_ok, n_skip, cells = self._paste_cells(rows, r0, c0)
+            n_ok, n_skip, bad, cells = self._paste_cells(rows, r0, c0)
             if cells:
                 self._undo.push(SetCells(self, cells, "粘贴取值"))
-
-        msg = _t("TRUTH_PASTE_REPORT_FMT", n=n_ok,
-                 added=(_t("TRUTH_PASTE_ADDED_FMT", names=", ".join(added)) if added else ""),
-                 skipped=(_t("TRUTH_PASTE_SKIPPED_FMT", n=n_skip) if n_skip else ""))
-        self.pasteReport.emit(msg)
-        return True, msg
+        return _t("TRUTH_PASTE_REPORT_FMT", n=n_ok,
+                  added=(_t("TRUTH_PASTE_ADDED_FMT", names=", ".join(added)) if added else ""),
+                  skipped=((_t("TRUTH_PASTE_SKIPPED_FMT", n=n_skip) if n_skip else "")
+                           + (_t("TRUTH_PASTE_BAD_FMT", n=len(bad),
+                                 names="、".join(bad[:_BAD_NAMES_MAX])
+                                 + ("…" if len(bad) > _BAD_NAMES_MAX else ""))
+                              if bad else "")))
 
     def _paste_cells(self, rows, r0, c0):
-        """把 TSV 二维表折算成 `SetCells` 的清单。返回 (落了几格, 跳过几格, cells)。"""
-        n_ok, n_skip, cells = 0, 0, []
+        """把 TSV 二维表折算成 `SetCells` 的清单。返回 (落了几格, 跳过几格, 认不出的格名, cells)。
+
+        C-083 的粘贴面：认不出写法的格子要【点名】（行标签×列名），不是只报个数——
+        一次粘 150 格、报「跳过 3 格」等于让人自己去找那三格在哪。
+        """
+        n_ok, n_skip, bad, cells = 0, 0, [], []
         for dr, line in enumerate(rows):
             for dc, txt in enumerate(line):
                 r, c = r0 + dr, c0 + dc
@@ -693,13 +887,14 @@ class TruthModel(QAbstractTableModel):
                     continue
                 v = self._parse_for_cell(r, c, txt)
                 if v is _BAD:
-                    n_skip += 1
+                    bad.append(_t("TRUTH_PASTE_BAD_CELL_FMT", row=self.row_label(r),
+                                  col=self.all_names()[c]))
                     continue
                 old = self._get_cell(r, c)
                 if old != v:
                     cells.append((r, c, old, v))
                 n_ok += 1
-        return n_ok, n_skip, cells
+        return n_ok, n_skip, bad, cells
 
     def _parse_for_cell(self, r, c, txt):
         """粘贴用的单格解析：认不出来 → `_BAD`（那一格跳过，整次粘贴照常落别的格）。"""
@@ -747,9 +942,25 @@ class TruthModel(QAbstractTableModel):
         return len(cells), missing
 
     def import_expectations(self, path):
-        """从 CSV / xlsx 按列名导入期望（C-298）。**C3-d 的 `truth/io.py` 实现**：
-        读文件要 openpyxl 惰性加载 + 列名模糊匹配提示，那是 io 的事；读完调 `apply_expectations`。"""
-        raise NotImplementedError("C3-d io：读 CSV/xlsx 在 truth/io.py，读完调 apply_expectations")
+        """从 CSV / xlsx 按列名导入期望（C-298）。返回 `(落了几列, 没对上的列名, 结果说明)`。
+
+        读文件那半边在 `truth/io.py`（C3-d：openpyxl 惰性加载 + 列名模糊匹配提示）——**惰性
+        import**，io 还没落地时抛 `NotImplementedError` 而不是 `ImportError`（面板据此置灰按钮，
+        也免得 model 在 C3-d 之前就 import 不动）。model 只负责把结果交给 `apply_expectations`。
+        """
+        try:
+            from . import io as TIO           # noqa: PLC0415  惰性：C3-d 还没落地时也不炸
+        except ImportError:
+            TIO = None
+        read = getattr(TIO, "read_expectations", None) if TIO is not None else None
+        if read is None:
+            raise NotImplementedError(
+                "C3-d io：读 CSV/xlsx 在 truth/io.py，读完调 apply_expectations")
+        n, missing = self.apply_expectations(read(path))
+        msg = _t("TRUTH_IMPORT_EXP_REPORT_FMT", n=n,
+                 missing=("；" + _t("TRUTH_APPLY_EXP_MISSING_FMT", names=", ".join(missing))
+                          if missing else ""))
+        return n, missing, msg
 
     def batch_fill(self, cs, text):
         """把同一个值批量填进选中列的期望格（C-298 的「批量填…」）。返回 (落了几列, 提示文本)。"""
@@ -782,3 +993,6 @@ class _Bad(object):
 
 
 _BAD = _Bad()
+
+#: 粘贴结果说明里最多点名几个「没认出写法」的格子（再多就 …，一行提示条塞不下）
+_BAD_NAMES_MAX = 6
