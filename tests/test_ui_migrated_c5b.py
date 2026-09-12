@@ -606,3 +606,38 @@ def test_c205_changing_a_prefix_keeps_both_checks_and_negatives(st):
     assert st.probe_prefixes == {"d_probe_demo": "U_OTHER"}
     assert set(st.checked("topout")) == checks0
     assert set(st.negs("topout")) == negs0
+
+
+# ═══════════ C-043 / C-272：整表分析炸了 —— v2 缺陷，钉成 xfail(strict) ═══════════
+@pytest.mark.contract("C-043", "C-272")
+@pytest.mark.xfail(strict=True, reason=(
+    "C5-b 发现的 v2 缺陷（不改 v2）：整表分析抛异常时，① 详情区**不显示**"
+    "terms.HDR_ANALYSIS_FAILED 那一行（C-043 要求『分析失败（已捕获，未崩）』+ 原因全文）；"
+    "② 状态栏直接裸露后端异常的原文（本条里是『regmap 页缺 addr 列』；真表上会是"
+    "KeyError/AttributeError 的原文），没经 terms.scrub、也没有人话前缀（I-12 / C-272）。"
+    "v2 现有的 test_c043_worker_failure_can_be_pushed_in 只证明了 `hdr.set_error()` 能用，"
+    "没人证明**真的 worker 失败**会去调它 —— 所以这条路一直是空的。"
+    "v1 `test_topout_refresh_failure_clears_stale_panels` 断言过 '失败' in topo_detail.text()。"))
+def test_c043_whole_table_analysis_failure_shows_a_human_message(win, qapp, monkeypatch):
+    """整表分析炸了 → 详情区一行「分析失败（已捕获，未崩）」+ 原因全文，界面不裸露后端原文。"""
+    import dreg_verify.topout as T
+    from dreg_verify.ui import terms
+    w = win
+
+    def boom(*a, **k):
+        raise RuntimeError("regmap 页缺 addr 列")
+
+    monkeypatch.setattr(T, "topout_view_models", boom)
+    monkeypatch.setattr(T, "resolve_root", boom)
+    ended = []
+    w.analysisEnded.connect(lambda vid, ok: ended.append((vid, ok)))
+    w.load_path(H.mirror_path("btlp"))
+    assert H.wait_for(lambda: bool(ended))
+    qapp.processEvents()
+    assert ended == [("topout", False)], "这一趟本该失败：%s" % (ended,)
+    assert w.isVisible(), "不许崩"
+
+    err = H.find(w, names.HDR_ERROR_LABEL)
+    assert err.isVisible(), "分析整表炸了，详情区没有『分析失败』那一行"
+    assert err.text().startswith(terms.HDR_ANALYSIS_FAILED)
+    assert "addr" in err.text(), "原因全文要留住"
