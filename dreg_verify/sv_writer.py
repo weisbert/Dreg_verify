@@ -291,6 +291,12 @@ def render_signal_block(sig, bindings, vectors, meta, comments=False, node=None,
 
     stats = {
         "out_name": sig.out_name, "rtl_name": rtl_name, "assert_id": aid, "owner": sig.owner,
+        # 本块【实际渲染进 .sv 的】那几条向量（additive，2026-09-12）。
+        # 谁要：单信号 CSV 要与 .sv 一条不差（C-139：整信号负向 / 负向去重 / T 编号重排 /
+        # iddq 自检拍都只发生在 build 里，编辑器手上那份列模型看不到）。此前 build 只透出
+        # 计数，调用方要么二次 build（可能得到不同结果）要么照编辑器导出（与产物对不上）。
+        # 只是把已有对象放进结果 dict，不参与渲染 —— .sv 逐字节不变（byte-gate 6/6）。
+        "vectors": list(vectors),
         "n_vectors": len(vectors), "n_negative": n_neg,
         # designer 手填期望的用例数（其余正向 = auto_out 兜底）——GUI 完成弹窗/汇总用
         "n_designer": n_designer,

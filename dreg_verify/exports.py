@@ -826,13 +826,47 @@ def signal_csv_text(columns, input_rows, out_width=1, drive_fn=None):
     return buf.getvalue()
 
 
-def write_signal_csv(path, columns, input_rows, out_width=1, drive_fn=None, name=""):
-    """写单信号真值表 CSV（utf-8-sig，Excel 双击不乱码）。返回 outcome。"""
-    text = signal_csv_text(columns, input_rows, out_width=out_width, drive_fn=drive_fn)
+def write_signal_csv(path, columns, input_rows, out_width=1, drive_fn=None, name="", text=None):
+    """写单信号真值表 CSV（utf-8-sig，Excel 双击不乱码）。返回 outcome。
+
+    text：已经渲染好的一份就传进来复用（与 `export_sv(text=…, build=…)` 同一个理由——
+    调用方要先拿文本做别的事时，别让驱动串算两遍/两份文本有出入的可能）。"""
+    if text is None:
+        text = signal_csv_text(columns, input_rows, out_width=out_width, drive_fn=drive_fn)
     write_text(path, text, encoding="utf-8-sig", newline="")
     counts = {"n_columns": len(list(columns or [])), "n_inputs": len(list(input_rows or []))}
     return ExportOutcome(kind="signal_csv", path=path, counts=counts,
                          note=("信号 %s" % name) if name else "")
+
+
+def _strip_width_suffix(s):
+    """`d_bt_lp_lna_itrim[3:0]` → `d_bt_lp_lna_itrim`（块的 out_name 带位宽、Topout 名不带）。"""
+    return re.sub(r"\[[^\]]*\]\s*$", "", str(s or "")).strip()
+
+
+def signal_build_vectors(build, name):
+    """一次 build 里【该信号那一块实际渲染进 .sv 的】向量（`sv_writer.render_signal_block`
+    记在 block stats 的 `vectors` 里）。
+
+    给「CSV / 报告要与 .sv 一条不差」的调用方用（C-139）：整信号负向、负向去重、T 编号
+    重排、iddq 自检拍都只发生在 build 里，拿分析结果或编辑器的列模型二次推都会漂。
+
+    名字三种写法都认：Topout 名（`topout_name`）、源对象名（`out_name`，可能带位宽）、
+    RTL 网名（`rtl_name`）。该信号这次没产出块（被跳过 / 只记账 / 不在 only 里）→ **None**
+    （不是空列表——调用方要分得清「产物里零用例」和「产物里根本没有这个块」）。
+    """
+    low = str(name or "").strip().lower()
+    if not low or not build:
+        return None
+    low_base = _strip_width_suffix(low)
+    for _lines, st in (build.get("blocks") or []):
+        for key in (st.get("topout_name"), st.get("out_name"), st.get("rtl_name")):
+            k = str(key or "").strip().lower()
+            if not k:
+                continue
+            if k == low or _strip_width_suffix(k) in (low, low_base):
+                return list(st.get("vectors") or [])
+    return None
 
 
 # ── 两个 legacy 数据模型 → 统一列模型的适配器（『排查(旧)』的真值表用 rowdict / TestVector）──

@@ -21,6 +21,7 @@ import make_mirror_btlp                              # 仓库根夹具脚本（c
 from dreg_verify import cli                          # noqa: E402
 from dreg_verify import excel_model as M             # noqa: E402
 from dreg_verify import exports as X                 # noqa: E402
+from dreg_verify import sv_writer as W               # noqa: E402
 from dreg_verify import topout as T                  # noqa: E402
 from dreg_verify import vectors as V                 # noqa: E402
 
@@ -511,6 +512,58 @@ def test_write_signal_csv_is_utf8_sig(tmp_path):
     assert p.read_bytes().startswith(b"\xef\xbb\xbf")      # Excel 双击不乱码
     assert out.kind == "signal_csv" and out.counts["n_columns"] == 2
     assert "d_x" in out.summary_text()
+
+
+def test_write_signal_csv_reuses_given_text(tmp_path):
+    """`text=` 复用已渲染的一份（与 `export_sv(text=…, build=…)` 同一个理由）——
+    给了就原样落盘、不再算一遍驱动串；没给还是自己渲染（老调用点逐字节不变）。"""
+    p = tmp_path / "reuse.csv"
+    calls = []
+
+    def _drive(col):
+        calls.append(col)
+        return ("", "")
+
+    same = X.signal_csv_text(_cols(), [], out_width=1, drive_fn=_drive)
+    n_after_render = len(calls)
+    X.write_signal_csv(str(p), _cols(), [], out_width=1, drive_fn=_drive, text=same)
+    assert len(calls) == n_after_render, "传了 text 还去重算驱动串"
+    assert p.read_text(encoding="utf-8-sig", newline="") == same
+    # 不传 text 时照旧自己渲染，落盘内容一字不差
+    p2 = tmp_path / "noreuse.csv"
+    X.write_signal_csv(str(p2), _cols(), [], out_width=1, drive_fn=_drive)
+    assert p2.read_bytes() == p.read_bytes()
+
+
+def test_signal_build_vectors_finds_the_rendered_block(mirror_wb):
+    """`build` 里该信号那一块**实际渲染进 .sv 的**向量（C-139 的原料）。
+
+    Topout 名 / 源对象名（可能带位宽）/ RTL 网名三种写法都认；没产出块 → None
+    （不是空列表——「产物里零用例」和「产物里根本没这一块」是两回事）。
+    """
+    text, build = T.render_topout_sv(mirror_wb, max_tests=256)
+    blocks = [st for _l, st in build["blocks"] if st.get("n_vectors", 0) > 0]
+    assert blocks, "mirror 上一条都没产出，验不到"
+    n_checked = 0
+    for st in blocks:
+        for key in (st.get("topout_name"), st.get("out_name")):
+            if not key:
+                continue
+            vecs = X.signal_build_vectors(build, key)
+            assert vecs is not None and len(vecs) == st["n_vectors"], key
+            # 向量的测试名 = .sv 里该块的断言标号后缀（真的是渲染进去的那几条）
+            for v in vecs:
+                assert "assert_%s_%s:" % (st["assert_id"], W.test_label(v)) in text, key
+            n_checked += 1
+    assert n_checked >= 4, "只比了 %d 块，覆盖太窄" % n_checked
+    # 带位宽的源名与不带位宽的基名都认（mux 块的 out_name 带 [3:0]）
+    wide = next((st["out_name"] for st in blocks if "[" in str(st.get("out_name"))), None)
+    if wide:
+        assert X.signal_build_vectors(build, wide.split("[")[0]) is not None
+    assert X.signal_build_vectors(build, "没有这个信号") is None
+    assert X.signal_build_vectors(build, "") is None
+    assert X.signal_build_vectors(None, "d_x") is None
+    assert X.signal_build_vectors({}, "d_x") is None
 
 
 def test_drive_strings_never_raises():
