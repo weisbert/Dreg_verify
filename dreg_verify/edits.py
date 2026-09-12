@@ -335,6 +335,9 @@ def restore_cols(an, specs):
             vec.dft_pitch = bool(col["dft"])
             vec.extra_forces = _restore_forces(cs)
             vec.release_nets = [str(x) for x in (cs.get("release") or [])]
+            # 手填期望也贴回向量上：本会话那份是 `cols_from_vectors` 直接拿引擎向量来的
+            # （iddq 自检拍带着 `designer_expected=0`），重建的这份不补就与它差一位。
+            vec.designer_expected = None if col["neg"] else col["exp"]
             col["vec"] = vec
         cols.append(col)
     return cols
@@ -485,9 +488,18 @@ def mux_derive(an, cols):
             # 的话，屏幕 25 列 / .sv 9 块，而两边都不吭声。标号沿用屏幕上那个，产物里找得到。
             uv = V.clone_vector(vec)
             uv.name = c["name"]                  # R2-03：标号以【列名】为准（自动列 name=None）
+            # 【列模型是唯一真相】：期望 / 负向一律按这一列现在的样子写死，**不留克隆继承来的
+            # 旧值**。`clone_vector` 复制的是源向量的 `designer_expected` —— 复制 iddq 自检拍
+            # 得到的那条手编列会带着源的 `designer_expected=0`，而存盘重开后重建出来的向量
+            # 没有这一位，两边的 .sv 就差一行 designer-filled 注释（模糊测试 seed=2 抓到）。
+            uv.is_negative = bool(c["neg"])
             if c["neg"]:
-                uv.is_negative = True; uv.neg_value = c["exp"]; uv.neg_mode = "value"
-            elif c["exp"] is not None and not is_dft_pitch_col(an, c):
+                uv.neg_value = c["exp"]
+                uv.neg_mode = "value"
+                uv.designer_expected = None
+            else:
+                uv.neg_value = None
+                uv.neg_mode = None
                 uv.designer_expected = c["exp"]
             user_vecs.append(uv)
         else:

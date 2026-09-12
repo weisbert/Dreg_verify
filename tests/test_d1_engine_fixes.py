@@ -250,6 +250,159 @@ def test_r2_02_old_edits_file_without_assign_still_loads(qapp, wl):
     assert len(back2[nm.lower()]["cols"]) == len(cols)
 
 
+# ═══════════════ 验收：随机编辑序列的三方一致 + 撤销全程 ═══════════════
+#: 步数 / 种子数可用环境变量调（跑长的那一轮：`D1_FUZZ_STEPS=200 D1_FUZZ_SEEDS=5`）。
+FUZZ_STEPS = int(os.environ.get("D1_FUZZ_STEPS") or 60)
+FUZZ_SEEDS = int(os.environ.get("D1_FUZZ_SEEDS") or 3)
+#: 每隔这么多步对一次「产物」（渲染 .sv 比逐格断言贵得多，不必每步都跑）
+FUZZ_SV_EVERY = 20
+
+
+class _FuzzRean(object):
+    """`TruthModel.set_reanalyzer` 的那条回路（照抄 `truth/panel._reanalyze_mux`）。"""
+
+    def __init__(self, st, name, e_inputs, vid=VID):
+        self.st, self.name, self.e_inputs, self.vid = st, name, list(e_inputs), vid
+
+    def __call__(self, base_low, text):
+        an = self.st.analyze(self.name, self.vid)
+        if an is None:
+            return None
+        width = next((e["width"] for e in self.e_inputs
+                      if (e.get("mux_data_base") or "") == str(base_low or "").lower()), 1)
+        try:
+            ED.set_mux_data_value(self.st.mux_data(self.vid), self.name.lower(),
+                                  str(an["src_out_name"]).lower(), str(an["name"]),
+                                  str(base_low or "").lower(), int(width or 1), text)
+        except ValueError:
+            return None
+        self.st.mux_data_touched(self.name, self.vid)
+        return self.st.analyze(self.name, self.vid)
+
+
+def _fuzz_step(rnd, m, ei):
+    """随机走一步（一律走 model 的公开写入口 = 一次用户动作 = 一步撤销）。走了 → True。"""
+    n = m.columnCount()
+    exp_r = m.rowCount() - 1
+    bases = [e["mux_data_base"] for e in ei if e.get("mux_data_base")]
+    what = rnd.randrange(11)
+    if what == 0 and n:                                      # 手填一格期望
+        c = rnd.randrange(n)
+        return bool(m.setData(m.index(exp_r, c), str(rnd.randrange(0, 16))))
+    if what == 1 and n:                                      # 清空一格期望
+        c = rnd.randrange(n)
+        return bool(m.setData(m.index(exp_r, c), ""))
+    if what == 2:                                            # 加列 / 克隆 case
+        return bool(m.append_test_column(1, src_idx=(rnd.randrange(n) if n else None)))
+    if what == 3 and n:                                      # 复制列
+        return m.duplicate_column(rnd.randrange(n))[0] >= 0
+    if what == 4 and n > 1:                                  # 删列
+        m.remove_columns([rnd.randrange(n)])
+        return True
+    if what == 5 and n:                                      # 加反例
+        return bool(m.add_negatives([rnd.randrange(n)])[0])
+    if what == 6 and any(c["neg"] for c in m.cols()):        # 删全部反例
+        return bool(m.del_negatives())
+    if what == 7 and n:                                      # 改列名（只有手编列改得动）
+        c = next((i for i, col in enumerate(m.cols()) if col["user"]), -1)
+        return c >= 0 and m.rename_column(c, "FZ_%d" % rnd.randrange(1000))[0]
+    if what == 8:                                            # auto → 期望
+        return bool(m.fill_expected())
+    if what == 9 and bases:                                  # 整表 mux 数据值
+        return bool(m.set_mux_data_value(rnd.choice(bases),
+                                         "" if rnd.random() < 0.3 else str(rnd.randrange(16))))
+    if what == 10 and bases and n:                           # 手编列的 mux 数据值
+        c = next((i for i, col in enumerate(m.cols()) if col["user"]), -1)
+        if c < 0:
+            return False
+        key = next((e["key"] for e in ei if e.get("mux_data_base") == bases[0]), None)
+        return key is not None and m.set_mux_user_data(c, key, str(rnd.randrange(16)))
+    return False
+
+
+def _snap(m):
+    """屏幕这一份的可比快照（名字 / 期望 / 反例 / 取值）。"""
+    return [(c["name"], c["exp"], bool(c["neg"]), sorted((c["vals"] or {}).items()))
+            for c in m.cols()]
+
+
+@pytest.mark.contract("C-112", "C-299", "C-300")
+def test_r2_fuzz_three_way_consistency(qapp, iso, btlp, wl):
+    """**验收**：随机编辑序列走下来，显示 / 会话 / 产物三方始终一致，撤销全程走得回去。
+
+    三方是什么：
+      · 显示 = `TruthModel.cols()`（用户眼睛看到的那张表）；
+      · 会话 = `state.edit_of(name)`（面板 `_persist` 写进去的那份，也是导出吃的那份）；
+      · 产物 = `exports.render_sv` 出来的 .sv 正文 —— 再经「序列化 → JSON 往返 → 恢复」
+        走一遍（= 关掉工具重开），两份 .sv 必须**逐字节**相同。
+    R2 的模糊测试当初就是这么抓到 mux 路全线破的（logic 路 ~3400 步零破口）。
+
+    默认 60 步 × 3 种子 × 6 信号；`D1_FUZZ_STEPS=200 D1_FUZZ_SEEDS=5` 跑长的那一轮。
+    """
+    from dreg_verify.ui.truth import TruthModel
+    picked = []
+    for path in (btlp, wl):
+        st = loaded(path)
+        muxes = [n for n in mux_signals(st)][:2]
+        logics = [m["name"] for m in st.models(VID)
+                  if (st.analyze(m["name"], VID) or {}).get("editable") == "logic"]
+        picked.append((st, muxes + logics[:max(1, 3 - len(muxes))]))   # 每张镜像三条
+    assert sum(len(x[1]) for x in picked) >= 6, "只挑到 %d 条信号，覆盖太窄" % \
+        sum(len(x[1]) for x in picked)
+
+    n_run = n_sv = 0
+    for st, names in picked:
+        for nm in names:
+            for seed in range(FUZZ_SEEDS):
+                rnd = random.Random(1000 + seed)
+                an = st.analyze(nm, VID)
+                ei = e_inputs_from_an(an)
+                m = TruthModel()
+                m.load(an, ED.cols_from_vectors(an, ei), ei)
+                m.set_reanalyzer(_FuzzRean(st, nm, ei))
+                start = _snap(m)
+                st.drop_edit(nm, VID)
+                st.mux_data(VID).pop(nm.lower(), None)
+
+                done = 0
+                for step in range(FUZZ_STEPS):
+                    if not _fuzz_step(rnd, m, ei):
+                        continue
+                    done += 1
+                    # ① 显示 == 会话（面板 `_persist` 干的那一步）
+                    st.put_edit(nm, {"kind": m._an["kind"],
+                                     "src_out_name": m._an["src_out_name"],
+                                     "name": m._an["name"],
+                                     "renamed": m._an.get("renamed", False),
+                                     "cols": m.cols(), "an": m._an}, VID)
+                    ed = st.edit_of(nm, VID)
+                    assert ed is not None
+                    assert [(c["name"], c["exp"], bool(c["neg"])) for c in ed["cols"]] == \
+                        [(a, b, c) for (a, b, c, _v) in _snap(m)], \
+                        "%s seed=%d step=%d：屏幕与会话对不上" % (nm, seed, step)
+                    # ② 会话 == 产物（存盘往返后逐字节比 .sv）
+                    if done % FUZZ_SV_EVERY == 0:
+                        n_sv += 1
+                        live = st.compute_edited(VID)
+                        back = reload_edits(st, {nm.lower(): ed})
+                        relo = ED.compute_edited(back, st.mux_data(VID))
+                        assert sv_of(st, nm, live) == sv_of(st, nm, relo), \
+                            "%s seed=%d step=%d：重开后 .sv 变了" % (nm, seed, step)
+                end = _snap(m)
+                # ③ 撤销全程：整条撤回去回到出发点，整条重做回来回到终点
+                k = m.undo_stack().count()
+                for _ in range(k):
+                    m.undo_stack().undo()
+                assert _snap(m) == start, "%s seed=%d：%d 步整条撤销没回到出发点" % (nm, seed, k)
+                for _ in range(k):
+                    m.undo_stack().redo()
+                assert _snap(m) == end, "%s seed=%d：整条重做没回到终点" % (nm, seed)
+                st.drop_edit(nm, VID)
+                n_run += 1
+    assert n_run >= 6 * FUZZ_SEEDS, "只跑了 %d 轮" % n_run
+    assert n_sv >= 6, "只对了 %d 次产物，覆盖太窄" % n_sv
+
+
 # ═══════════════ R2-01：mux 数据值手填要落盘（C-110 / C-112）═══════════════
 def _data_row(an):
     """这个 mux 信号的第一条【数据角色】输入行（可手填的那种）。"""
