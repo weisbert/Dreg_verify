@@ -692,6 +692,52 @@ def test_e_addneg_avoids_designer_expected_collision(topo_win):
     assert neg["exp"] != col["auto"]                  # 也避开 auto(correct)
 
 
+def test_e_addneg_batch_gives_unique_names_and_skips_negatives(topo_win):
+    """轨0-① 批量加负向：全选所有列点一次 →
+      · 每条负向列名互不相同（此前 _new_col_name 只查 U<n>、查不到 U0_NEG → 全叫 U0_NEG，.sv 标号全撞）；
+      · 只对【正向】列造负向（此前给负向列再造负向 → 再点一次 12→24→48）；
+      · 同一组输入取值已有负向的跳过（对齐『排查(旧)』on_ti_add_neg_selected 的去重语义）。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_dcoc_i")
+    v._e_regen()
+    n0 = len(v.cur_cols)
+    assert n0 >= 2
+    v.truth.selectAll()                                  # 全选所有列
+    v._e_addneg()
+    negs = [c for c in v.cur_cols if c["neg"]]
+    assert len(negs) == n0                               # 每条正向各一条负向
+    assert len({c["name"] for c in v.cur_cols}) == len(v.cur_cols)     # ⭐列名两两不同
+    # 再点一次：负向列不做源 + 取值已有负向 → 一条都不加（此前会翻倍）
+    n1 = len(v.cur_cols)
+    v.truth.selectAll()
+    v._e_addneg()
+    assert len(v.cur_cols) == n1
+    assert "已有负向" in topo_win.status.currentMessage()
+
+
+def test_e_addneg_all_covers_every_positive_case(topo_win):
+    """轨0-①：补上『全部用例加负向』（legacy 有、新门面没有）——只挑正向列，列名唯一。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    v._e_regen()
+    n0 = len(v.cur_cols)
+    v.truth.clearSelection()                             # 不依赖选中
+    v._e_addneg_all()
+    assert len(v.cur_cols) == 2 * n0
+    assert sum(1 for c in v.cur_cols if c["neg"]) == n0
+    assert len({c["name"] for c in v.cur_cols}) == len(v.cur_cols)
+    v._e_addneg_all()                                    # 幂等：都已有负向
+    assert len(v.cur_cols) == 2 * n0
+
+
+def test_e_addneg_names_survive_export(topo_win):
+    """轨0-①：批量负向的唯一列名要一路带到 .sv 断言标号（撞名就是 .sv 里两块同名）。"""
+    v = _sel(topo_win, "d_logic_bt_lp_rx_en")
+    v._e_regen()
+    v._e_addneg_all()
+    vecs = v._cols_to_vectors(v.cur_an, v.cur_cols)
+    names = [x.name for x in vecs if x.is_negative]
+    assert len(names) == len(set(names)) and all(names)
+
+
 def test_truth_cell_accepts_verilog_notations(topo_win):
     """轨0-③：数值格接管 IC 工程师常写的 8 种写法(16'h3 / 'b1010 / hA / 'd9 / 0x7f)——
     此前新门面只认 0x/'h/0b/十进制，16'h3 之类静默吞成 0（输入格）或未填（期望格）。"""

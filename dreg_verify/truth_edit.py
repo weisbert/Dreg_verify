@@ -11,7 +11,9 @@
 
 import re
 
-__all__ = ["parse_int", "parse_cell"]
+__all__ = ["parse_int", "parse_cell", "uniq_col_name", "sanitize_name",
+           "is_reserved_test_name", "final_col_name", "check_col_name",
+           "vals_key", "plan_negatives"]
 
 
 # ───────────────────────── ① 数值写法 ─────────────────────────
@@ -66,3 +68,102 @@ def parse_cell(s):
     if str(s or "").strip() == "":
         return None
     return parse_int(s)
+
+
+# ───────────────────────── ② 列名 ─────────────────────────
+_RE_AUTO_NAME = re.compile(r"(?i)^t\d+(_neg)?$")
+
+
+def uniq_col_name(existing, prefix="U", suffix="", start=0):
+    """造一个不与 existing 里任何列名冲突的 <prefix><n><suffix>。
+
+    唯一性查【全集】（大小写无关，含 _NEG 后缀的负向列名）——只查 "U%d" 是此前批量加负向
+    全撞成同一个 U0_NEG 的根因。
+    """
+    taken = {str(x).strip().upper() for x in (existing or ())}
+    n = int(start)
+    while True:
+        cand = "%s%d%s" % (prefix, n, suffix)
+        if cand.upper() not in taken:
+            return cand
+        n += 1
+
+
+def sanitize_name(s):
+    """把用户输入清成合法的 SV 标号片段（只留字母/数字/下划线）。"""
+    return re.sub(r"[^0-9A-Za-z_]", "_", str(s).strip())
+
+
+def is_reserved_test_name(nm):
+    """T<编号> / T<编号>_NEG 是自动测试的保留命名——手填会在列位移后撞名，禁止。"""
+    return bool(_RE_AUTO_NAME.match(str(nm or "")))
+
+
+def final_col_name(nm, negative=False):
+    """列的最终标号：负向列自动带 _NEG（用户已经自己写了 NEG 结尾则不重复加）。"""
+    nm = str(nm or "")
+    if negative and not nm.upper().endswith("NEG"):
+        return nm + "_NEG"
+    return nm
+
+
+def check_col_name(new_name, others, negative=False):
+    """校验用户填的新列名。others = 其它列的【最终标号】集合（不含本列）。
+
+    返回 (True, 最终名) 或 (False, 给用户看的失败原因)。三道关（与『排查(旧)』同一套）：
+      空/全非法字符 → 拒；T<编号> 保留名 → 拒；与其它列最终标号重名（会撞 .sv 标号）→ 拒。
+    """
+    nm = sanitize_name(new_name)
+    if not nm:
+        return False, "名字为空或全是非法字符（只能用字母/数字/下划线）"
+    if is_reserved_test_name(nm):
+        return False, "名字 %s 与自动测试命名(T<编号>)冲突，请换个名字" % nm
+    final = final_col_name(nm, negative)
+    taken = {str(x).strip().upper() for x in (others or ())}
+    if final.upper() in taken:
+        return False, "名字与列 %s 重复(会造成 .sv 标号冲突)" % final
+    return True, final
+
+
+# ───────────────────────── ③ 加负向的挑列 / 去重 ─────────────────────────
+def vals_key(vals):
+    """一列的"输入取值"指纹——判定"这组取值是不是已经有负向了"用。"""
+    out = []
+    for k, v in (vals or {}).items():
+        try:
+            out.append((str(k), int(v)))
+        except (TypeError, ValueError):
+            out.append((str(k), v))
+    return tuple(sorted(out, key=lambda x: x[0]))
+
+
+def plan_negatives(cols, sel=None, all_positive=False):
+    """挑出真正要造负向的【源列下标】，语义与『排查(旧)』的"加负向(选中)"一致：
+
+      · 只对【正向】列造负向——负向列不再套娃（此前全选一次 12→24→48 的根因）；
+      · 选中列里一条正向都没有 → 退回本信号首条正向（一条正向都没有 → 空）；
+      · 同一组输入取值已经有负向 → 跳过，不给同一条用例叠重复断言。
+
+    cols: [{'neg': bool, 'vals': {...}}, …]（多余字段忽略）。
+    sel:  选中的列下标（None/空 = 未选中）。all_positive=True 时忽略 sel，取全部正向列。
+    返回 (要造负向的下标列表, 被跳过的条数)。
+    """
+    cols = list(cols or [])
+    pos_idx = [i for i, c in enumerate(cols) if not c.get("neg")]
+    if all_positive:
+        want = list(pos_idx)
+    else:
+        sel = [i for i in (sel or []) if 0 <= i < len(cols)]
+        want = [i for i in sel if not cols[i].get("neg")]
+        if not want:
+            want = pos_idx[:1]
+    existing = {vals_key(c.get("vals")) for c in cols if c.get("neg")}
+    targets, skipped = [], 0
+    for i in want:
+        key = vals_key(cols[i].get("vals"))
+        if key in existing:
+            skipped += 1
+            continue
+        existing.add(key)
+        targets.append(i)
+    return targets, skipped

@@ -960,7 +960,11 @@ class SignalView(QtWidgets.QWidget):
                 ("清零", self._e_clear, "清空本信号所有测试列=零用例(导出时本信号只记账不产断言)；点『重新生成』可恢复"),
                 ("重命名列", self._e_rename, "给用户新增的列改名(双击列头亦可)"),
                 ("auto→期望", self._e_fill, "把 auto_out 填进未填的期望列(已填的不动)"),
-                ("加负向", self._e_addneg, "给选中列加一条负向(故意填错期望)；未选则取首列"),
+                ("加负向", self._e_addneg,
+                 "给选中的正向列各加一条负向(故意填错期望)；未选则取首条正向。\n"
+                 "同一组输入取值已有负向的会跳过，不重复叠断言。"),
+                ("全部用例加负向", self._e_addneg_all,
+                 "每条正向用例各追加一条负向(全覆盖；用例数翻倍，按需用)。负向列不会再套负向。"),
                 ("删负向", self._e_delneg, "删除本信号所有负向列")]:
             b = QtWidgets.QPushButton(text); b.setToolTip(tip); b.clicked.connect(slot)
             self._edit_btns[text] = b
@@ -1634,12 +1638,13 @@ class SignalView(QtWidgets.QWidget):
         self._populate_truth()
         self._persist()                      # 丢弃自定义也要落盘（否则下次又恢复旧自定义）
 
-    def _new_col_name(self):
-        n = 0
-        existing = {c["name"] for c in self.cur_cols}
-        while ("U%d" % n) in existing:
-            n += 1
-        return "U%d" % n
+    def _col_names(self):
+        return {c["name"] for c in (self.cur_cols or [])}
+
+    def _new_col_name(self, suffix=""):
+        """新列名：唯一性查【全集】（含 T<n> 自动列与 _NEG 负向列，大小写无关）。
+        此前只查 "U%d"、查不到已存在的 U0_NEG → 批量加负向时每条都拿到同一个 U0_NEG。"""
+        return TE.uniq_col_name(self._col_names(), suffix=suffix)
 
     def _e_add(self):
         if self.cur_an is None or not self.cur_an["editable"]:
@@ -1692,25 +1697,44 @@ class SignalView(QtWidgets.QWidget):
                 c["exp"] = c["auto"]
         self._commit(); self._populate_truth()
 
-    def _e_addneg(self):
+    def _e_addneg(self, *_):
+        self._add_negatives(False)
+
+    def _e_addneg_all(self, *_):
+        self._add_negatives(True)
+
+    def _add_negatives(self, all_positive):
+        """加负向（选中列 / 全部正向用例）。三条语义与『排查(旧)』一致：
+          · 只对【正向】列造负向（此前会给负向列再造负向：全选一次 12→24→48）；
+          · 同一组输入取值已经有负向 → 跳过，不叠重复断言；
+          · 列名对全集唯一（此前每条都叫 U0_NEG，.sv 标号全撞）。"""
         if self.cur_an is None or not self.cur_cols:
             return
-        sel = self._sel_cols() or [0]
-        for j in sel:
-            if j >= len(self.cur_cols):
-                continue
+        sel = None if all_positive else self._sel_cols()
+        targets, skipped = TE.plan_negatives(self.cur_cols, sel, all_positive=all_positive)
+        if not targets:
+            if skipped:
+                self.main.status.showMessage("选中的用例都已有负向，未重复添加")
+            else:
+                QtWidgets.QMessageBox.information(self, "加负向", "本信号没有可作负向来源的正向用例。")
+            return
+        for j in targets:
             src = self.cur_cols[j]
             # m6：错值防撞——避开 auto_out(=src['auto']) 与 designer 手填期望(=src['exp'])两个『正确值』，
             # 否则 ~auto 恰=designer 期望时反例会 PASS=NEG-BROKEN(静默)。复用 vectors.make_negative 的防撞
             # 逻辑(避 correct + designer)，不再裸 ~auto。src['exp']=None(无手填)时退化成 ~auto、行为不变。
             _tmpv = V.TestVector(0, {}, src["auto"], src["auto_w"], designer_expected=src["exp"])
             wrong = V.make_negative(_tmpv, mode="invert").neg_value
-            new = {"name": self._new_col_name() + "_NEG", "neg": True,
+            new = {"name": self._new_col_name("_NEG"), "neg": True,
                    "vals": dict(src["vals"]), "exp": wrong,
                    "auto": src["auto"], "auto_w": src["auto_w"], "user": True,
                    "vec": (V.clone_vector(src["vec"]) if src["vec"] is not None else None)}
             self.cur_cols.append(new)
         self._commit(); self._populate_truth()
+        msg = "已加 %d 条负向用例（故意填错期望，自检 checker）" % len(targets)
+        if skipped:
+            msg += "；%d 条用例已有负向，已跳过" % skipped
+        self.main.status.showMessage(msg)
 
     def _e_delneg(self):
         if self.cur_an is None or not self.cur_cols:
