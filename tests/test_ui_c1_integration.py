@@ -156,12 +156,16 @@ LATER_WAVE_NAMES = {
     "LIST_REASON_RISKY_BTN",      # 只在 needs-prefix 且主按钮不是 diag_risky 的行上出现
     "HARNESS_EXCEL_PATH_EDIT",    # v1 的名字，harness 的退回路径用
 }
-#: 真值表 / 诊断抽屉整片（C3 / C4-b）+ 对话框整片（`ui/dialogs.py`，弹出时才存在）
-LATER_WAVE_PREFIXES = ("TRUTH_", "DIAG_", "DLG_")
+#: 诊断抽屉整片（C4-b）+ 对话框整片（`ui/dialogs.py`，弹出时才存在）。
+#: ⚠ C3-int 把 `TRUTH_` 整片从这里**删掉**了：真值表面板已经接进组合根，起窗就该找得到。
+LATER_WAVE_PREFIXES = ("DIAG_", "DLG_")
 
 
 def _in_scope(key, value):
-    """这个名字本波该不该找得到。占位区（TRUTH_PANEL 等）虽在后面几波的前缀里，但**现在就有**。"""
+    """这个名字本波该不该找得到。
+
+    `PLACEHOLDER_AREAS` 那一档 C3-int 之后已经空了（占位块一块不剩），留着是为了
+    「哪天又冒出占位块，它也得找得到」—— 白名单只减不增。"""
     if value in A.PLACEHOLDER_AREAS:
         return True
     return not (key in LATER_WAVE_NAMES or key.startswith(LATER_WAVE_PREFIXES))
@@ -186,10 +190,20 @@ def test_ui_names_all_present(win, qapp):
     assert row is not None and panel.view.reason_widget is not None
     w.coverage.open_popover()                       # 覆盖度弹层（COV_* 那一批）
     qapp.processEvents()
+    # ⑥ 真值表：右键菜单与单元格编辑器**只在交互中存在** —— 这里真把它们造出来，
+    #   而不是往白名单里塞两条「找不到很正常」（C3-int：TRUTH_ 整片进覆盖范围）。
+    assert panel.select_first_visible()             # 选一个信号，真值表才有表
+    qapp.processEvents()
+    tp = w.truth_panel
+    assert tp.model.columnCount() > 0, "真值表一列都没有，下面两步造不出来"
+    tp.build_context_menu(0, 0)                     # TRUTH_CONTEXT_MENU + truth_menu_*
+    tp.grid.edit(tp.model.index(tp.model.rowCount() - 1, 0))   # TRUTH_CELL_EDITOR
+    qapp.processEvents()
 
     want = {k: v for k, v in names.all_names().items() if _in_scope(k, v)}
-    # C2-int 把详情区四件接进来之后这个数只增不减（C1-int 收尾时是 95）
-    assert len(want) >= 130, "本波该覆盖的名字只剩 %d 个了，白名单是不是放太宽" % len(want)
+    # C2-int 把详情区四件、C3-int 把真值表接进来之后这个数只增不减（C1-int 收尾时是 95）
+    assert len(want) >= 170, "本波该覆盖的名字只剩 %d 个了，白名单是不是放太宽" % len(want)
+    assert {"TRUTH_GRID_VIEW", "TRUTH_CELL_EDITOR", "TRUTH_CONTEXT_MENU"} <= set(want)
     assert not _find_any(w, "no_such_object_name_xyz")     # 先证明这条查找能判「没有」
     missing = [("%s=%s" % (k, v)) for k, v in want.items() if not _find_any(w, v)]
     assert not missing, "这些 objectName 在起窗后找不到：%s" % missing

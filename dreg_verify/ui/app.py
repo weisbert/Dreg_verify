@@ -15,7 +15,7 @@
       │                          （⑯ `coverage.CoverageControl` 内嵌其中）
       │                          + WIN_SPLIT_SIDE（⑤ `main_view.MainView` | ⑨ `side_panel.SidePanel`）
       │                            MainView = 标签条 + MAIN_VIEW 堆叠：
-      │                              页 0 = ⑥ TRUTH_PANEL（仍占位，C3）/ ⑦ `sigflow_view.SigflowView`
+      │                              页 0 = ⑥ `truth.panel.TruthPanel` / ⑦ `sigflow_view.SigflowView`
       │                              页 1 = ⑧ `sv_preview.SvPreview`
       └ ⑩ 状态栏 STATUS_BAR（STATUS_LEFT / STATUS_RIGHT / STATUS_AUTOSAVE）
 
@@ -35,7 +35,7 @@
     MainWindow(state=None, worker_factory=None, providers_factory=None)
 真实 `ui.state.WorkbenchState` / `ui.worker.AnalysisWorker` **只在默认工厂里惰性 import**。
 
-占位区（见 `PLACEHOLDER_AREAS`）：C2-int 之后**只剩 TRUTH_PANEL**（C3 接手）。
+占位区（见 `PLACEHOLDER_AREAS`）：C3-int 之后**一块不剩**（最后一块 TRUTH_PANEL 已换真件）。
 
 「当前信号」这一下的分工（C2-int 定版）：
     ④ 标题栏 / ⑧ .sv 预览 / ⑨ 右栏 自己订阅 `state.currentChanged`（各自 `set_state` 干的）；
@@ -59,14 +59,21 @@ from .side_panel import SidePanel
 from .sigflow_view import SigflowView
 from .signal_list import SignalListPanel, build_reason_block
 from .sv_preview import SvPreview
+from .truth.panel import TruthPanel
 from .widgets import ErrorBar, ProgressBadge, mono_font, ui_font
 
 #: 还没换成真件的区（objectName → 哪个波接手）。测试断言它们都带 property("placeholder")。
-PLACEHOLDER_AREAS = {
-    names.TRUTH_PANEL: "C3-c ui/truth/panel.py",
-}
+#: ⚠ C3-int 起**空了**：最后一块 TRUTH_PANEL 已换成 `ui/truth/panel.TruthPanel`。
+#: 常量保留（不删）是因为 `test_ui_app` / `test_ui_c2_integration` / `test_ui_main_view`
+#: 都按它断言「窗口里一块占位都不剩」—— 留一个空 dict 比删掉更说明问题。
+PLACEHOLDER_AREAS = {}
 
-#: 组合根在窗口级绑的快捷键（copy_col / undo / redo / paste 是真值表的 WidgetShortcut，C3 绑）
+#: 组合根在**窗口级**绑的快捷键。
+#: ⚠ copy_col(Ctrl+D) / undo(Ctrl+Z) / redo(Ctrl+Y) / paste(Ctrl+V) 故意**不在这里**：
+#: 它们是真值表网格的**视图级**键位（`truth/view.TruthTableView.keyPressEvent`），
+#: 网格有焦点时才生效——绑成 WindowShortcut 的话，在清单里按 Ctrl+D 会去复制真值表的列，
+#: 在 .sv 预览页按 Ctrl+V 会往看不见的表里粘贴。C-109 还要求「单元格正在编辑时不触发 Ctrl+D」，
+#: 那个条件只有在 `keyPressEvent` 里看得到（`QShortcut` 拿不到 `state() == EditingState`）。
 APP_SHORTCUTS = ("open", "load", "sv_preview", "export_report", "export_center", "diagnostics")
 
 #: settings 里记分割尺寸的键（Design §1.1 state 键同名）
@@ -495,9 +502,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_main_view(self, parent):
         """⑤⑥⑦⑧ 主视图：标签条 + 堆叠（真值表+电路图 页 / .sv 预览 页）。
 
-        真值表仍是占位（C3 接手），电路图与 .sv 预览换成真件。`MainView` 是架构 §1.2 里
-        唯一允许组合别的视图的容器，三块一律**注入**进去。"""
-        self.truth_panel = _placeholder(names.TRUTH_PANEL, None, min_h=theme.CLAMP_TRUTH[0])
+        三块现在全是真件（C3-int 换掉最后一块占位）。`MainView` 是架构 §1.2 里唯一允许
+        组合别的视图的容器，三块一律**注入**进去。
+
+        ⚠ `TruthPanel` 这里传 `state=None`，到 `_attach_detail_state` 才 `set_state` ——
+        与详情区另外四件同一个理由（见 `__init__` 里的顺序注释）：面板的 `set_state` 会
+        订阅 `currentChanged`，先订阅就先跑它那次不带图的 `analyze(name)`，组合根随后那次
+        `analyze(name, want_graph=True)` 缓存没命中，一次点选跑两遍引擎。"""
+        self.truth_panel = TruthPanel(state=None, bus=self.bus)        # ⑥ C3-c 的真件
         self.flow_view = SigflowView(bus=self.bus)                     # ⑦ C2-b 的真件
         self.sv_preview = SvPreview(None)                              # ⑧ C2-c 的真件（state 稍后挂）
         mv = MainView(truth_widget=self.truth_panel, flow_widget=self.flow_view,
@@ -603,15 +615,25 @@ class MainWindow(QtWidgets.QMainWindow):
         mv.flowFullscreenChanged.connect(self.on_flow_fullscreen)        # C-280
         mv.truthMaximizedChanged.connect(self.on_truth_maximized)        # C-297
 
+        tp = self.truth_panel                                    # ⑥ C3-c 的真件
+        tp.progressChanged.connect(self._on_truth_progress)      # C-106（标签条 + 标题栏两处）
+        tp.maximizeRequested.connect(mv.set_truth_maximized)     # C-297 放大按钮 → 容器
+        mv.truthMaximizedChanged.connect(tp.set_maximized)       # C-297 反向（Esc / 电路图全屏）
+        tp.statusMessage.connect(self.set_status)                # C-269
+
         self.flow_view.fullscreenToggled.connect(mv.set_flow_fullscreen)  # ⑦ 按钮 → 容器
         self.flow_view.exported.connect(self._on_flow_exported)           # C-284
         self.sv_preview.statusMessage.connect(self.set_status)            # ⑧ C-172
 
     def _attach_detail_state(self):
-        """把会话状态挂给详情区四件（构造时都传的 `None`，见 `__init__` 里的顺序注释）。"""
+        """把会话状态挂给详情区五件（构造时都传的 `None`，见 `__init__` 里的顺序注释）。"""
         self.detail_header.set_state(self._state)     # 内含覆盖度控件的 set_state
         self.sv_preview.set_state(self._state)
         self.side_panel.set_state(self._state)
+        # ⑥ 真值表：`set_state` 订阅 currentChanged / coverageChanged / configChanged /
+        # scopeChanged / workbookChanged 五条，自己按当前信号装表（空态 / 换表 / 切范围都自理）。
+        # 组合根只保证这一句在 `_connect_state` **之后**、在任何 `workbookChanged` 之前跑。
+        self.truth_panel.set_state(self._state)
         # 电路图**不认 state**（HOST_REQUIREMENTS）：图从 `state.analyze(..., want_graph=True)`
         # 来，由组合根的 `_on_current_changed` 喂给它。
         self.flow_view.set_bus(self.bus)
@@ -1098,6 +1120,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flow_view.set_fullscreen(on)             # 同步按钮文案（值没变不重复 emit）
         self._sync_fullscreen()
         return on
+
+    @QtCore.Slot(int, int, int)
+    def _on_truth_progress(self, n, m, k):
+        """C-106 手填进度：真值表 model 一处算，**标签条与标题栏两处一起刷**。
+
+        `TruthModel.progressChanged(n, m, k)` = (手填几条, 正向几条, 其中与 auto 不一致几条)；
+        列数从 model 现问（`set_truth_counts` 的第一个数是「25 列」那一截，不在信号里）。
+        两处都喂同一组数，界面上不会出现「标签说 7/25、标题栏说 6/25」这种自相矛盾。
+        """
+        self.main_view.set_truth_counts(self.truth_panel.model.columnCount(), n, m)
+        self.detail_header.set_progress(n, m, k)
 
     @QtCore.Slot(bool)
     def on_truth_maximized(self, on):

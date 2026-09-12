@@ -410,8 +410,10 @@ def test_c2_areas_are_real_widgets_now(win, qapp):
     assert w.coverage is w.detail_header.cov, "window.coverage 没指向标题栏里那一个"
     assert H.find(w, names.HDR_COV_BTN) is w.coverage.button
 
-    assert set(A.PLACEHOLDER_AREAS) == {names.TRUTH_PANEL}, A.PLACEHOLDER_AREAS
+    # C3-int 之后 `PLACEHOLDER_AREAS` 空了（真值表也换成真件）——本条只守 C2 那四块
+    assert names.TRUTH_PANEL not in A.PLACEHOLDER_AREAS
     placeholders = {x.objectName() for x in w.findChildren(QtWidgets.QWidget)
                     if x.property("placeholder")}
-    assert placeholders == {names.TRUTH_PANEL}, "还有别的占位块没换：%s" % sorted(placeholders)
+    assert not (placeholders & {names.HDR_BAR, names.FLOW_PANEL, names.SV_PANEL,
+                                names.SIDE_PANEL, names.MAIN_VIEW_PANEL}),         "C2 的四块里还有占位没换：%s" % sorted(placeholders)
     assert os.path.exists(H.shot(w, "c2_wired_workbench"))
