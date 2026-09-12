@@ -14,15 +14,19 @@ Design 对照：区号 = docs/GUI_v2_Design对齐_20260912.md §1.2 的 ①–�
 # ───────── 窗口 / 容器 ─────────
 WIN_MAIN = "win_main"                      # QMainWindow（标题「Dreg_verify · 版本 <短HEAD>」C-259）
 WIN_WORKBENCH = "win_workbench"            # 载入后的工作台根 QWidget（顶栏以下、状态栏以上）
-WIN_STACK = "win_stack"                    # QStackedWidget：empty / loading / workbench 三页
+WIN_STACK = "win_stack"                    # QStackedWidget：空态⑭ / 工作台 **两页**
+#   ⚠ B3 阶段这里写的是「三页」。实现定版为两页：载入态⑮不是独立一页，而是工作台详情列顶部的
+#     卡片——C-276 / 场景⑧ 要求「分析进行中清单仍然可点」，独占一页就做不到（见 app.py 模块头）。
 WIN_SPLIT_MAIN = "win_split_main"          # 清单 | 详情 水平分割（list 320–900）
 WIN_SPLIT_SIDE = "win_split_side"          # 主视图 | 右栏 水平分割（side 280–900）
 WIN_SPLIT_TRUTH_FLOW = "win_split_truth_flow"   # 真值表 / 电路图 垂直分割（truth 160–820）
 WIN_SPLIT_CHAIN_INPUTS = "win_split_chain_inputs"  # 逐层展开 / 输入信号 垂直分割（chain 120–620）
+DETAIL_COLUMN = "detail_column"            # 详情列容器（载入态⑮ + 标题栏④ + WIN_SPLIT_SIDE）
 
 # ───────── ① 顶栏 ─────────
 TOP_BAR = "top_bar"
 TOP_BRAND = "top_brand"                    # 「Dreg_verify」
+TOP_TABLE_TAG = "top_table_tag"            # 路径框前的「真表」标签
 TOP_EXCEL_PATH = "top_excel_path"          # 只读路径框（未载入「尚未选择文件」）；harness 兼容名见下
 TOP_BROWSE_BTN = "top_browse_btn"          # 「浏览… Ctrl+O」C-001
 TOP_LOAD_BTN = "top_load_btn"              # 「载入 / 重新载入 Ctrl+L」C-002
@@ -47,6 +51,7 @@ FILTER_KIND_COMBO = "filter_kind_combo"    # 「全部分类 ▾」C-028
 FILTER_STATUS_COMBO = "filter_status_combo"  # 「全部状态 ▾」C-029
 FILTER_SEARCH = "filter_search"            # 正则搜索 C-030 / C-047
 FILTER_PRESETS_BTN = "filter_presets_btn"  # 「预设 ▾」C-291
+FILTER_PASTE_NAMES_BTN = "filter_paste_names_btn"  # 预设菜单里的「粘贴名单勾选…」QAction（C-290）
 
 
 def fmt_scope_btn(view_id):
@@ -59,6 +64,7 @@ LIST_PANEL = "list_panel"
 LIST_HEADER_COUNTS = "list_header_counts"  # 「要验信号 10 · 已勾选 7 · 有问题 3」
 LIST_COLUMNS_BTN = "list_columns_btn"      # 「列设置…」C-008/C-046
 LIST_SORT_BTN = "list_sort_btn"            # 「排序」入口 C-037
+LIST_SORT_MENU = "list_sort_menu"          # 排序下拉 QMenu（按状态 / 用例 / owner / 信号名）
 LIST_VIEW = "list_view"                    # QTreeView（两级：信号行 + 原因子行）
 LIST_REASON = "list_reason"                # 行内原因块 QWidget（setIndexWidget 到子行）
 LIST_REASON_TITLE = "list_reason_title"
@@ -88,6 +94,7 @@ HDR_SIDE_TOGGLE = "hdr_side_toggle"        # 「隐藏右栏 ▶」/「◀ 展�
 HDR_ERROR_LABEL = "hdr_error_label"        # 「分析失败（已捕获，未崩）」C-043
 
 # ───────── ⑯ 覆盖度弹层 ─────────
+COV_CONTROL = "cov_control"                # 按钮 + 弹层的外壳（CoverageControl 本体）
 COV_POPOVER = "cov_popover"
 COV_TITLE = "cov_title"                    # 「覆盖度：本信号生效档 = 全面」
 COV_CHAIN_BAR = "cov_chain_bar"            # 蓝条：生效来源链 C-150
@@ -101,6 +108,7 @@ COV_SIG_COMBO = "cov_sig_combo"            # 本信号 C-147
 COV_MAXT_SPIN = "cov_maxt_spin"            # 用例数上限 C-143
 COV_COUNT_LABEL = "cov_count_label"        # 「本信号当前 25 条」C-133
 COV_HELP_BTN = "cov_help_btn"              # 「档位怎么算的？」C-144
+COV_HELP_TEXT = "cov_help_text"            # 展开后的内联帮助正文（terms.COV_HELP_TEXT）
 COV_CLOSE_BTN = "cov_close_btn"
 
 
@@ -277,15 +285,19 @@ DIAG_LEGACY_RUN_BTN = "diag_legacy_run_btn"
 
 # ───────── ⑭ 空态 ─────────
 EMPTY_PANEL = "empty_panel"
+EMPTY_CARD = "empty_card"                  # 620px 居中卡片
+EMPTY_ICON = "empty_icon"                  # 88px「xlsx」虚线方块
 EMPTY_TITLE = "empty_title"                # 「先载入 Dreg 核心 Excel」
 EMPTY_DESC = "empty_desc"
 EMPTY_BTN_OPEN = "empty_btn_open"          # 「选择 Excel… Ctrl+O」
 EMPTY_BTN_IMPORT_CONFIG = "empty_btn_import_config"
+EMPTY_RECENT_TITLE = "empty_recent_title"  # 「最近打开」小标题
 EMPTY_RECENT_LIST = "empty_recent_list"    # 最近打开 C-003 / N4
 EMPTY_RECENT_NONE = "empty_recent_none"    # 「还没有最近打开的表」（裁决⑫）
 
 # ───────── ⑮ 载入态 ─────────
 LOADING_PANEL = "loading_panel"
+LOADING_CARD = "loading_card"              # 520px 居中卡片（LOADING_PANEL 是它的外壳）
 LOADING_TITLE = "loading_title"            # 「正在展开 Topout 信号 137 / 211」
 LOADING_BAR = "loading_bar"
 LOADING_CURRENT = "loading_current"        # 「当前：xxx　15 路 mux」
@@ -319,6 +331,22 @@ DLG_IMPORT_REPORT = "dlg_import_report"    # 导入配置结果（缺段 / 表�
 DLG_IMPORT_REPORT_TEXT = "dlg_import_report_text"
 DLG_BATCH_FILL = "dlg_batch_fill"          # 批量填期望
 DLG_BATCH_FILL_VALUE = "dlg_batch_fill_value"
+
+
+# ───────── 动态名（组合根）─────────
+#: 前缀带 `_` = 不进 `all_names()`（值里有 `%s` / `%d`，不是合法 objectName）
+_SHORTCUT_FMT = "shortcut_%s"
+_RECENT_ROW_FMT = "empty_recent_row_%d"
+
+
+def fmt_shortcut(key):
+    """窗口级 QShortcut 的名字：shortcut_<contracts.SHORTCUTS 的键>。"""
+    return _SHORTCUT_FMT % key
+
+
+def fmt_recent_row(i):
+    """空态「最近打开」第 i 行：empty_recent_row_<i>。"""
+    return _RECENT_ROW_FMT % int(i)
 
 
 def all_names():

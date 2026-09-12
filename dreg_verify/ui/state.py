@@ -155,6 +155,7 @@ class WorkbenchState(QtCore.QObject):
         self._owned = set()             # 本会话管着的范围 → 只有它们才回写（见 persist_edits）
         self._persist_suspended = 0
         self._persist_pending = False
+        self._code_version = None       # 懒算一次，见 code_version()
 
     # ═════════════ ① 载表 ═════════════
     def load(self, path):
@@ -412,6 +413,20 @@ class WorkbenchState(QtCore.QObject):
             return [{"key": k} for k in ((an.get("expansion") or {}).get("used_vars") or [])]
         return []
 
+    def protected_negatives(self, names, view_id=None):
+        """这批信号里，反例「值得保护」的那些（C-036：清除反例前先点名再计数）。
+
+        值得保护 = 自定义命名过 或 手填过错值 —— 口径只有一份，在 `edits.protected_negatives`
+        （清单视图不 import edits，只问这里）。没有编辑记录 = 没有反例 = 不在名单里。
+        返回**原样**信号名（界面要拿去点名给用户看，不能给小写键）。"""
+        vid = self._vid(view_id)
+        out = []
+        for n in (names or ()):
+            ed = self._edits[vid].get(str(n).lower())
+            if ed and ED.protected_negatives(ed.get("cols") or []):
+                out.append(str(n))
+        return out
+
     def _sync_negs(self, vid):
         self._negs[vid] = {low for low, ed in self._edits[vid].items()
                            if any(c["neg"] for c in (ed.get("cols") or []))}
@@ -566,6 +581,15 @@ class WorkbenchState(QtCore.QObject):
         """状态栏逐操作反馈（C-269）——本层自己产的消息也走它，视图不必重复拼。"""
         if text:
             self.statusMessage.emit(str(text))
+
+    def code_version(self):
+        """工具代码版本（短 HEAD；拿不到给空串）→ 窗口标题（C-259 / 裁决⑬：界面不写 git 字样）。
+
+        **一个进程只问一次**：`session.code_version()` 起的是 `git rev-parse` 子进程，
+        而标题每次载表都刷一遍——每张表付一次子进程的钱没道理，版本在进程生命期内也不会变。"""
+        if self._code_version is None:
+            self._code_version = str(session.code_version() or "")
+        return self._code_version
 
     # ═════════════ ⑨ 编辑存盘（C-244 / C-300）═════════════
     @contextlib.contextmanager
