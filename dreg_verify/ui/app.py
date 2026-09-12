@@ -1117,6 +1117,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._flow_full = on
         if on:
             self._truth_max = False
+            # C-297 两种独占互斥：`MainView.set_flow_fullscreen` 自己把 `_truth_max` 清了，
+            # 但它**不发** `truthMaximizedChanged`（那是“真值表放大”这件事的信号）。
+            # 不在这里把面板的放大按钮弹回来，退出电路图全屏之后真值表回来了、
+            # 按钮却还按着 —— 再点一下变成“取消放大”，用户看到的是按钮反了。
+            self.truth_panel.set_maximized(False)
         self.flow_view.set_fullscreen(on)             # 同步按钮文案（值没变不重复 emit）
         self._sync_fullscreen()
         return on
