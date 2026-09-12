@@ -39,12 +39,12 @@ COLUMNS = ["id", "area", "capability", "category", "old_entry", "backend_api",
            "v2_location", "test_ids", "status", "source", "note"]
 
 #: 类别取值。「删除」= 这条能力 v2 不再有 → 不要求测试。
-CATEGORIES = ("保留", "合并", "降级", "删除", "新增")
-EXEMPT_CATEGORY = "删除"
+CATEGORIES = ("保留", "合并", "降级", "删除", "新增", "延期")
+EXEMPT_CATEGORIES = ("删除", "延期")   # 延期 = 已拍板排到 v2 之后单开任务（B3 §8-1）
 
 _ID_RE = re.compile(r"[Cc][-_ ]?(\d{3,})")
 
-COVERED, FAILING, UNCOVERED, EXEMPT = "覆盖通过", "覆盖但失败", "未覆盖", "删除(免检)"
+COVERED, FAILING, UNCOVERED, EXEMPT = "覆盖通过", "覆盖但失败", "未覆盖", "免检(删除/延期)"
 
 
 class ContractError(Exception):
@@ -238,7 +238,7 @@ def evaluate(rows, results, known_ids=None):
     for r in rows:
         known.add(r.id)
         tests = by_id.get(r.id, [])
-        if r.category == EXEMPT_CATEGORY:
+        if r.category in EXEMPT_CATEGORIES:
             state = EXEMPT
         elif any(t.passed for t in tests):
             state = COVERED

@@ -1,0 +1,504 @@
+# -*- coding: utf-8 -*-
+"""terms.py —— 术语替换表 + 状态档文案 + 行内原因块模板 + 全部界面静态文案（唯一定义）。
+
+来源：
+  · V2Spec §6 术语表 T 数组 11 行（原文照抄）+「可以直接用的词」+ 文案红线 4 条；
+  · Design 主画板 D 数组的 4 条行内原因实例（模板句式照抄）；
+  · Design 各区文案（顶栏 / 空态 / 载入态 / 清单 / 标题栏 / 真值表 / 电路图 / .sv / 右栏 / 状态栏 /
+    导出中心 / 完成弹层 / 诊断抽屉 / 覆盖度弹层），主控裁决①（快捷键）、⑪（步骤 2 措辞）、⑫（不写示例路径）、
+    ⑬（「版本」不写 git）、⑯（导出前点名）已落进文案。
+
+规则：
+  · 视图模块里**不写任何用户可见的裸字符串**，全部从本模块取；
+  · 一切显示后端文本（an.note / issues / 解析明细 / 跳过原因）的地方先过 `inputs_table.scrub_terms`
+    （本模块 `scrub` 只是它的别名，方便 ui 内统一 import）；
+  · 术语 FORBIDDEN 里的词不得裸出现在界面上（tests/test_ui_terms_scan.py（C5）扫 ui/*.py 字面量）。
+"""
+
+from dreg_verify.inputs_table import scrub_terms as scrub    # noqa: F401  统一入口别名
+from dreg_verify.inputs_table import STATUS_HELP, AN_STATUS_TEXT, FOUND_IN_TEXT, CUVUNF_FIRST  # noqa: F401
+
+# ═════════ 一、术语替换表（V2Spec §6 T 数组，原文）═════════
+#: (禁止裸用, 界面上写成, 首次出现时的完整说法)
+TERMS = (
+    ("cone / cone 展开", "逐层展开 · 展开链", "从顶层输出往回展开到源寄存器"),
+    ("F0–F4", "逻辑类型：直连寄存器 / 布尔·位运算 / 选路 / 门控 iddq", "覆盖度控件里直接写中文类型名，不出现 F 编号"),
+    ("缝", "跨页边界（logic ↔ mux）", "这个信号的输入来自另一页"),
+    ("prefixed-wire", "需要层级前缀的网", "这根网不在 DUT 顶层，force 时要带层级前缀"),
+    ("wire 兜底", "表里查不到，按线网处理", "表里没查到这个名字，按线网 force；名字对不对要扫一次"),
+    ("记账", "只记录、不产生断言", "这条只记录驱动，不生成断言"),
+    ("claims", "探针清单（claims.json）", "每根探针探哪根网、force/写哪些网、名字是查到的还是猜的"),
+    ("tmm", "地址表（total_memory_map 页）", "Excel 的 total_memory_map 页"),
+    ("regmap", "寄存器表（regmap 页）", "Excel 的 regmap 页"),
+    ("CUVUNF", "仿真器找不到这根网", "仿真报错 CUVUNF：仿真器找不到这根网（elaboration 失败）"),
+    ("假绿", "驱不动，断言必过", "寄存器字段比输出窄，高位永远驱不动，断言过了也不说明逻辑对"),
+)
+#: 禁用词的机器可读形式（扫描字面量用；「假绿」允许出现在状态标签里但必须带 tooltip 解释，见 STATUS）
+FORBIDDEN = ("cone", "F0", "F1", "F2", "F3", "F4", "缝", "prefixed-wire", "wire 兜底", "wire兜底",
+             "记账", "claims", "tmm", "regmap", "CUVUNF", "假绿")
+#: 可以直接用的词（V2Spec §6）
+ALLOWED = ("ENV_RF", "force", "RF_WRITE", "断言", "RO/RW", "地址", "位段", "iddq", "DFT", "mux", "case",
+           "探针", "层级前缀", "for_test", "nets.txt")
+#: 文案红线（V2Spec §6；第 1 条按裁决⑪加例外注脚）
+REDLINES = (
+    "不出现仓库路径、git、本工具的 CLI 命令、「请把下面发给维护者」（例外：红区仿真服务器上必须亲手敲的 scan_rtl.py）",
+    "跳过/过滤的东西一律先点名字和原因，计数放后面",
+    "给真实层级路径示例，不给抽象描述",
+    "表格行表头直接用真实信号名，字母对照放输入信号表和 tooltip",
+)
+
+# ═════════ 二、状态档（清单状态列 + 详情徽标）═════════
+#: 状态键（an["status_detail"]，C0 §7 缺口 #2 补齐后由引擎给；引擎只给 status 四档时按 STATUS_FALLBACK 映射）
+STATUS_KEYS = ("clean", "wire-fallback", "needs-prefix", "risky-generated", "bare-probe", "false-green",
+               "spec-collision", "parse-err", "unresolved", "skip", "error", "pending")
+#: 键 → (清单状态列标签, 色档 ok/warn/bad/note, 悬停解释)。8 档解释 = C-016（clean/wire兜底/未解析/解析错/
+#: 规格冲突/输入缺前缀·跳过/输出裸名·已生成/字段太窄·假绿）+ C-041 第 6 档「缺前缀·已强制生成」+ RO/pending。
+STATUS = {
+    "clean": ("可建", "ok", STATUS_HELP["clean"]),
+    "wire-fallback": ("⚠ 名字是猜的·已生成", "warn",
+                      "有输入表里没查到，按命名约定当线网 force 了——名字对不对要用 nets.txt 扫一次才知道。"),
+    "needs-prefix": ("⚠ 缺前缀·跳过", "warn",
+                     "要 force 的某根输入网埋在子模块里，没配层级前缀 force 必然找不到这根网，所以整组跳过。"
+                     "先跑 scan_rtl 配好探针前缀，这组才会生成。"),
+    "risky-generated": ("⚠ 缺前缀·已强制生成", "warn",
+                        "「缺前缀是否强制生成」开着：这组照样进了 .sv，裸名 force 交给仿真验证；"
+                        "仿真过 = 此设计不需前缀，报找不到网则跑 scan_rtl 配前缀重生成。"),
+    "bare-probe": ("输出裸名·已生成", "note",
+                   "输出名在寄存器表里没查到，按命名约定直接用了裸名探针；断言能生成，"
+                   "只有仿真真报找不到这根网时再配前缀（不是错误）。"),
+    "false-green": ("⚠ 字段太窄·假绿", "warn",
+                    "结构全解析通了，只是数据寄存器字段太窄、装不下每条 case 的互异值——硬生成会变成"
+                    "「接错路也 PASS」的假测试（假绿 = 驱不动，断言必过）。工具保护性跳过；要验得加宽字段或拆组。"),
+    "spec-collision": ("✗ 规格冲突·待核对", "bad",
+                       "mux 页有两行控制选择值相同却选不同数据源——同一选择值 RTL 只能输出一个，已整组跳过。"
+                       "行内原因块点名了撞车的 Excel 行号，请对应 designer 核对改表；工具不猜。"),
+    "parse-err": ("✗ 解析出错", "bad", "表达式或输入名有问题，看行内原因块的告警全文。"),
+    "unresolved": ("✗ 未解析", "bad", "有输入没解析出网名——照这样生成，仿真器会报找不到这根网。"),
+    "skip": ("↷ 只读回读·跳过", "note", "这是只读回读信号，写不进去也就没什么好验的；只记录、不产生断言。"),
+    "error": ("✗ 解析异常", "bad", "分析这一个信号时出错（已捕获，其余信号不受影响）；行内原因块留有全文。"),
+    "pending": ("分析中", "note", "还在后台展开；清单已可点，展开完会自动更新。"),
+}
+#: 引擎只给 status 四档（ok/skip/unresolved/error）时的兜底映射
+STATUS_FALLBACK = {"ok": "clean", "skip": "skip", "unresolved": "unresolved", "error": "error"}
+#: 「全部状态」筛选下拉的三项（C-029）
+STATUS_FILTER_ITEMS = ("全部状态", "仅可建", "仅有问题")
+
+# ═════════ 三、行内原因块模板（Design D 数组 4 条实例的句式）═════════
+#: 键 = 状态键；值 = (标题, 正文模板, 按钮文案「去诊断 · {action}」的 action, 跳转目标)
+#: 正文模板占位符：{signal} {input} {net} {prefix} {reg} {reg_w} {out_w} {rows} {group} {n_ctrl} {sel_w} {n_case}
+#: {detail}（引擎 issues/note 经 scrub 后的全文）。跳转目标见 REASON_TARGETS。
+REASON_TEMPLATES = {
+    "false-green": (
+        "为什么标「假绿」",
+        "寄存器字段 {reg} 只有 {reg_w} bit（{addr}），输出是 {out_w} bit。\n"
+        "高 {gap} 位永远驱不动，断言只会验到低 {reg_w} 位，仿真必过 —— 过了也不代表逻辑对。",
+        "让 designer 核对字段宽度", "copy_detail"),
+    "spec-collision": (
+        "{n_bad} 条 case 规格矛盾，这次不生成",
+        "{group} 的 {n_ctrl} 个控制拼成 {sel_w} bit select、共 {n_case} 条 case。\n"
+        "下列 {n_bad} 条同一个 select 值指到了不同数据源：Excel mux 页 行 {rows}。\n"
+        "工具不猜哪条对。",
+        "导出这 {n_bad} 行给 designer", "copy_rows"),
+    "needs-prefix": (
+        "输入缺层级前缀，这次不生成",
+        "输入 {input} 在 ENV_RF 层探不到，需要层级前缀。\n"
+        "信号实际在 ENV_RF.{prefix}.{net} → 前缀应填 {prefix}。\n"
+        "不填就 force 一根不存在的网，仿真 elaboration 直接失败。",
+        "找不到网 三步流程", "diag_cuvunf"),
+    "bare-probe": (
+        "输出名在表里查不到，按裸名生成",
+        "{group} 的输出网 {signal} 在寄存器表 / 地址表都没查到，按命名约定直接用了裸名。\n"
+        "断言能生成，但名字对不对要用 nets.txt 扫一次才知道。",
+        "导出 nets.txt 扫一次", "export_nets"),
+    "wire-fallback": (
+        "有输入名字是猜的，已按线网 force",
+        "输入 {input} 在寄存器表 / 地址表都没查到，按命名约定当线网 force 了。\n"
+        "名字对不对要用 nets.txt 扫一次；扫不到就跑 scan_rtl 配层级前缀。",
+        "导出 nets.txt 扫一次", "export_nets"),
+    "risky-generated": (
+        "输入缺层级前缀，但按开关强制生成了",
+        "输入 {input} 在 ENV_RF 层探不到；「缺前缀是否强制生成」当前是开着的，所以裸名 force 照样进了 .sv。\n"
+        "仿真过 = 此设计不需前缀；报找不到网则按三步流程配前缀重生成。",
+        "缺前缀是否强制生成", "diag_risky"),
+    "unresolved": (
+        "有输入解析不出网名，这次不生成",
+        "{detail}",
+        "找不到网 三步流程", "diag_cuvunf"),
+    "parse-err": (
+        "表达式或输入名解析出错",
+        "{detail}",
+        "解析明细", "resolve_detail"),
+    "error": (
+        "分析这个信号时出错（已捕获，未崩）",
+        "{detail}",
+        "解析明细", "resolve_detail"),
+    "skip": (
+        "只读回读信号，不产生断言",
+        "{detail}",
+        "解析明细", "resolve_detail"),
+}
+#: 跳转目标 → 谁处理（app.py 的 route_reason_action）
+REASON_TARGETS = {
+    "diag_cuvunf": "打开诊断抽屉并滚到「找不到网」三步",
+    "diag_risky": "打开诊断抽屉并滚到「缺前缀是否强制生成」开关（裁决③：不做逐信号白名单）",
+    "export_nets": "打开导出中心并预勾 nets.txt 行",
+    "copy_rows": "把点名的 Excel 行号 + 信号名复制到剪贴板（状态栏报「已复制」）",
+    "copy_detail": "把原因全文复制到剪贴板",
+    "resolve_detail": "打开详情标题栏「解析明细」面板",
+}
+REASON_BTN_FMT = "去诊断 · {action}"
+REASON_RISKY_BTN = "去诊断 · 缺前缀是否强制生成"      # 替代 Design 的「仍然生成（风险自负）」（裁决③）
+
+# ═════════ 四、界面静态文案 ═════════
+# ① 顶栏
+TOP_BRAND = "Dreg_verify"
+TOP_TABLE_TAG = "真表"
+TOP_PATH_EMPTY = "尚未选择文件"
+TOP_BROWSE = "浏览…"
+TOP_LOAD = "载入"
+TOP_RELOAD = "重新载入"
+TOP_DIAG = "诊断"
+TOP_EXPORT = "导出中心"
+WINDOW_TITLE_FMT = "Dreg_verify · 版本 {version}"     # C-259（裁决⑬：不写 git）
+WINDOW_TITLE_NOVER = "Dreg_verify"
+
+# ② 筛选行
+SCOPE_LABELS = {"topout": "Topout 全", "logic": "只看 logic", "mux": "只看 mux", "dft": "dft", "iddq": "iddq"}
+SCOPE_HINT = "Topout = 全链展到源寄存器；其余 = 只看本页输入输出，不跨页"
+SCOPE_MISSING_FMT = "本表无 {page} 页"                 # C-042 置灰标注
+OWNER_ALL = "全部 owner"
+OWNER_NONE = "（无 owner）"
+OWNER_N_FMT = "owner：{n} 个"
+KIND_ALL = "全部分类"
+SEARCH_PLACEHOLDER = "搜索：信号名 / 表达式 / 输入信号名（支持正则）"
+PRESETS = "预设"
+PRESET_SAVE = "存为预设…"
+PRESET_MANAGE = "管理预设…"
+
+# ③ 清单区
+LIST_COUNTS_FMT = "要验信号 {n} · 已勾选 {k} · 有问题 {p}"
+LIST_COLUMNS = "列设置…"
+LIST_SORT = "排序"
+LIST_HEADERS = {"check": "", "neg": "反例", "name": "信号", "status": "状态", "ntest": "用例", "owner": "owner",
+                "assert_id": "断言号", "kind": "分类", "form": "逻辑类型", "prefix": "探针前缀", "expr": "表达式"}
+LIST_BTN_CHECK_ALL = "全选"
+LIST_BTN_UNCHECK_ALL = "清空勾选"
+LIST_BTN_CHECK_SELECTED = "勾选选中行"
+LIST_BTN_NEG_ALL = "全部加反例"
+LIST_BTN_NEG_CLEAR = "清除反例"
+LIST_BTN_PASTE_NAMES = "粘贴名单勾选…"
+LIST_ASSERT_TIP = "仿真 log 报 assert_{aid}_T<n> 时按它回查本信号"           # C-010
+LIST_PREFIX_TIP_SET_FMT = "探针网 {net}\n断言完整路径 ENV_RF.{prefix}.{net}"   # C-018
+LIST_PREFIX_TIP_UNSET_FMT = "探针网 {net}\n断言完整路径 ENV_RF.{net}（没配层级前缀）"
+LIST_PREFIX_LEVEL_SHIFT_FMT = "探针口={net} (level_shift)"                  # C-019
+LIST_PREFIX_INPUT_HIT_FMT = "{input}→{prefix}"                             # C-020
+LIST_SUPPLEMENT_TIP = "用了 RTL 补充逻辑：{note}"                             # C-039 / C-215
+LIST_NORMALIZED_TIP = "嵌套 mux 已自动折叠：{note}"                           # C-040
+LIST_STATUS_ERROR_FMT = "解析异常：{error}"                                  # C-007
+KIND_LABELS = {"logic": "选路/logic", "mux": "选路/mux", "register": "直连寄存器/logic",
+               "ro-readback": "RO回读(跳过)", "unresolved": "未解析"}          # C-012
+FORM_LABELS = {"register": "直连寄存器", "boolean": "布尔/位运算", "select": "选路", "gated": "门控 iddq"}
+
+# ④ 详情标题栏
+HDR_META_FMT = "owner {owner} · {kind} · 用例 {n}"
+HDR_COV_FMT = "覆盖度 {label} （来自：{source}） ▾"
+HDR_PROGRESS_FMT = "手填期望 {n}/{m}"
+HDR_PROGRESS_DIFF_FMT = "其中 {k} 条与程序算的不一致"
+HDR_RESOLVE = "解析明细"
+HDR_SIDE_HIDE = "隐藏右栏 ▶"
+HDR_SIDE_SHOW = "◀ 展开链 · 输入信号"
+HDR_ANALYSIS_FAILED = "分析失败（已捕获，未崩）"                              # C-043
+HDR_PENDING = "还在后台展开这个信号……"
+HDR_NOT_EDITABLE = "这个信号不可建（见状态），真值表不可编辑"                   # C-134
+
+# ⑤ 主视图标签
+TAB_TRUTH_FMT = "真值表 + 电路图　{ncols} 列 · 手填 {n}/{m}"
+TAB_TRUTH_PLAIN = "真值表 + 电路图"
+TAB_SV = ".sv 预览"
+
+# ⑥ 真值表区
+TRUTH_BTN = {
+    "regen": "重新生成", "add_col": "加列", "copy_col": "复制列", "del_col": "删列", "rename_col": "重命名列…",
+    "clear": "清零…", "add_neg": "加反例（选中列）", "del_neg": "删反例…", "import_exp": "导入期望…",
+    "batch_fill": "批量填…", "auto_fill": "auto→期望…", "mux_data": "mux 数据值…", "export_csv": "导出 CSV",
+    "maximize": "放大", "restore": "还原",
+}
+TRUTH_BTN_TIPS_LOGIC = {
+    "regen": "丢弃本信号自定义，按当前覆盖度重出真值表",
+    "add_col": "加一条正向测试列（输入全 0、auto_out 自动算、期望留空）",
+    "copy_col": "复制选中的测试列（Ctrl+D）",
+    "del_col": "删除选中的测试列（可多选）",
+    "rename_col": "给用户新增的列改名（自动生成的 T 列不可改）",
+    "clear": "清零本信号 = 零用例（导出时只记录、不产生断言）",
+    "add_neg": "给选中的正向列各加一条反例（未选则取首条正向）",
+    "del_neg": "删除本信号全部反例、保留正向",
+    "auto_fill": "把 auto_out 一次填进所有未填的期望格（已填的不动）——等于放弃 designer 独立核对",
+}
+TRUTH_BTN_TIPS_MUX = {                                                       # C-135 _MUX_BTN_TIPS
+    "add_col": "mux：克隆选中列的 case 成一条可改名、可改本列数据值的手编列",
+    "copy_col": "mux：复制列（数据值与期望一并带走，自动换新名避免标号冲突）",
+    "del_col": "mux：自动列按签名记下（可重新生成恢复），手编列按对象删，全局反例列删 = 清整信号反例标记",
+    "rename_col": "mux：只有手编列能改名（自动生成列与反例自检列拒绝改名）",
+    "add_neg": "mux：逐 case 加反例（已有相同反例的跳过）",
+    "clear": "mux：清空 = 零用例（与覆盖度无关）",
+    "regen": "mux：丢弃清空/删列/手填期望/数据值/手编列/反例，回出厂态",
+}
+TRUTH_HINT_SELECTION_FMT = "已选 {col} 整列（{n} 格）"
+TRUTH_HINT_SELECTION_NONE = "点一格或一列开始编辑"
+TRUTH_HINT_PASTE = "Ctrl+V 从 Excel 粘贴 TSV，落在活动格；超出列数自动追加列，整次粘贴算一步撤销"
+TRUTH_HINT_CONTEXT = "右键行/列：插入 · 删除 · 复制 · 设为反例"
+TRUTH_FROZEN_HEADER = "信号（行 = 真实信号名）"
+TRUTH_ROW_LABEL_FMT = "{name}　({role} · {port})"
+TRUTH_ROW_AUTO = "auto_out　（程序按表达式算的，只读参考）"
+TRUTH_ROW_EXP = "期望　（designer 手填，进 .sv 断言）"
+TRUTH_AUTO_TIP = "它来自表达式本身，拿它当期望有自证嫌疑"                       # C-077
+TRUTH_DIFF_TIP = "仿真该断言 FAIL 恰恰说明表达式与 designer 意图不符，这正是要抓的 bug"   # V2Spec §3 六
+TRUTH_UNFILLED_TIP = "待手填：生成 .sv 时用程序算的值兜底"
+TRUTH_NEG_TIP = "反例（故意填错）：自检 checker 抓不抓得到"
+TRUTH_DFT_TIP = "iddq=1 漏电态自检拍：工具自动加的，不是反例"                      # C-129
+TRUTH_LEGEND = (("match", "手填 · 与 auto 一致"), ("diff", "手填 · 与 auto 不一致"), ("unfilled", "待手填"),
+                ("neg", "反例（故意填错）"), ("dft", "iddq=1 漏电态自检拍"))
+TRUTH_PARSE_FAILED_FMT = "数值写法没认出来：{text}（已还原）。认的写法：16'h3 / 'b101 / 'd9 / hA / 0x3 / 0b101 / 9 / A"
+TRUTH_PASTE_OVERFLOW_ROWS_FMT = "粘贴的行数（{rows}）超过真值表行数（{max}），已拒绝：真值表的行是输入信号，不能凭空加"
+TRUTH_PASTE_REPORT_FMT = "粘贴落了 {n} 格{added}{skipped}"
+TRUTH_CONTEXT_MENU = {"insert": "插入列", "delete": "删除列", "copy": "复制列", "set_neg": "设为反例",
+                      "mux_data_col": "设置本列 mux 数据值…", "rename": "重命名列…"}
+TRUTH_MUX_HEADER_FMT = "{case_desc} · 生效档 {cov}：{how} · 手填 {n}/{m}"    # C-124
+TRUTH_MUX_SHADOWED_FMT = "被跳过的死分支：{cases}"                            # C-125
+TRUTH_MUX_GATED_FMT = "受 dft 页 iddq 门控（{gate}，{forceable}）"           # C-126
+TRUTH_MUX_COLLISION = "≥2 条数据路取到相同值 = 选错路也测不出（假绿 = 驱不动，断言必过）"   # C-113
+TRUTH_CONFIRM_CLEAR = "清零本信号 = 零用例：导出时本信号只记录、不产生断言。确定清零？"
+TRUTH_CONFIRM_DEL_NEG_FMT = "有 {n} 条反例是你自定义命名或手填过错值的，删了就是丢你的活。确定删除全部反例？"
+TRUTH_CONFIRM_AUTO_FILL = "把程序算的值填进期望 = 放弃 designer 独立核对（断言会自证）。确定填入？"
+TRUTH_RENAME_AUTO_REFUSED = "自动生成的 T 列不能改名；要改名请先「复制列」得到一条手编列"     # C-093
+TRUTH_USER_COL_PREFIX = "U"
+
+# ⑦ 电路图区
+FLOW_TITLE = "电路图"
+FLOW_SUBTITLE = "源寄存器在左 · 顶层输出在右"
+FLOW_BTN_FULLSCREEN = "全屏"
+FLOW_BTN_EXIT_FULLSCREEN = "退出全屏"
+FLOW_BTN_FIT = "适应窗口"
+FLOW_BTN_100 = "100%"
+FLOW_BTN_EXPORT_SVG = "导出 SVG"
+FLOW_BTN_EXPORT_PNG = "导出 PNG"
+FLOW_FOOTER = ("右键按住拖动平移 · Ctrl + 滚轮缩放 · 双击复位。"
+               "点一根线 → 真值表同名行与展开链同步高亮；hover 寄存器盒看地址 / 位段 / 为什么判成 RO 或 RW。")
+FLOW_LEGEND = ("── 寄存器（表里查到地址）", "┈ 名字来自命名约定，表里未查到", "── 当前选中线网", "┈ 规格冲突的 case 支")
+FLOW_BROKEN = "展不下去"                                                      # 未解析断点红色端子
+FLOW_EMPTY = "这个信号没有可画的电路（只读回读 / 未解析），看左侧状态"
+FLOW_ZOOM_FMT = "{pct}%"
+
+# ⑧ .sv 预览
+SV_TITLE_SIGNAL = "本信号 .sv 片段（不落盘）"
+SV_TITLE_CHECKED = "勾选集 .sv（不落盘）"
+SV_BTN_TO_CHECKED = "改看勾选集"
+SV_BTN_TO_SIGNAL = "改看本信号"
+SV_BTN_COPY = "复制"
+SV_TRUNCATED_FMT = "\n…（已截断：共 {total} 行，只显示前 {shown} 行；导出 .sv 是完整的）"     # C-069
+SV_SKIPPED_TAIL_HEAD = "本次会跳过的信号（各缺哪根输入）："                        # C-070
+SV_PREVIEW_STATUS_FMT = "预览：{counts}"                                      # C-172
+
+# ⑨ 右侧常驻栏
+SIDE_CHAIN_TITLE = "逐层展开"
+SIDE_CHAIN_HELP = "从顶层输出往回到源寄存器 · 每层：Excel 原式 = 代入真实信号名"   # C-222
+CHAIN_PAGE_TAGS = {"dft": "dft 页门控", "logic": "logic 页", "mux": "mux 页 · {group}", "iddq": "iddq 页",
+                   "level_shift": "level_shift 页", "register": "寄存器"}
+CHAIN_REGISTER_DIRECT = "顶层口 == 该寄存器字段写值，无展开"                     # C-053
+CHAIN_LEAF_NOTE = "输入均为直连叶子（本级无上游）"                               # C-051
+SIDE_INPUTS_TITLE_FMT = "输入信号 {n} 个"
+SIDE_INPUTS_GUESS_BADGE = "名字来自命名约定，表里未查到"
+SIDE_INPUTS_HEADERS = ("字母", "信号(位宽)", "角色", "类型")
+SIDE_NEEDS_PREFIX_MARK = "⚠需探针前缀（内部衔接网，跑 scan_rtl 配前缀否则跳过）"    # C-058
+SIDE_UNRESOLVED_MARK = "✗未解析"
+
+# ⑩ 状态栏
+STATUS_LOADED_FMT = "已载入 {n} 个信号（logic {nl} + mux {nm}）· Topout 要验 {nt} 个 · 有问题 {np} 个"
+STATUS_LOADED_DETAIL_FMT = "非 clean {nbad} · 寄存器定义表字段 {ntmm} · 寄存器地址映射表字段 {nreg}"   # C-006
+STATUS_VISIBLE_FMT = "可见 {v} / 共 {m}（其中 {k} 个按输入信号名命中）"            # C-031
+STATUS_MISSING_PAGES_FMT = "本表无 {pages} 页，门控层跳过"                        # C-042
+STATUS_LAST_EXPORT_FMT = "上次导出 {kind}：{when} → {path}"
+STATUS_AUTOSAVE_FMT = "编辑自动存盘 · 上次 {when}"
+STATUS_RESTORED_FMT = "恢复了 {n} 个信号的手填编辑"                               # C-241
+STATUS_RESTORE_MISSING_FMT = "有 {n} 个信号的编辑在当前表找不到：{names}"           # C-239
+STATUS_SUPPLEMENT_FMT = "RTL 补充逻辑生效：{names}"                              # C-215
+STATUS_COPIED = "已复制到剪贴板"
+STATUS_NEG_ADDED_FMT = "已加 {n} 条反例，跳过 {skipped} 条（同输入取值已有反例）"    # C-097
+STATUS_NEG_NONE = "选中的用例都已有反例，未重复添加"
+STATUS_MUX_FLIPPED_FMT = "反例错值撞上正确值，已自动翻一位：{name}"                  # C-105
+STATUS_LOAD_FAILED_FMT = "表读不进来：{reason}"                                  # C-005
+STATUS_NO_ROWS_SELECTED = "先在清单里选中若干行（鼠标框选 / Ctrl·Shift 点），再点「勾选选中行」"
+
+# ⑭ 空态 / ⑮ 载入态
+EMPTY_TITLE = "先载入 Dreg 核心 Excel"
+EMPTY_DESC = ("工具会读 logic / mux / dft / iddq / regmap / total_memory_map / Topout 这几页，"
+              "对 Topout 页每个顶层信号从输出往回展开到源寄存器，再生成测试向量与断言。")
+EMPTY_BTN_OPEN = "选择 Excel…"
+EMPTY_BTN_IMPORT_CONFIG = "导入配置…"
+EMPTY_RECENT_TITLE = "最近打开"
+EMPTY_RECENT_NONE = "还没有最近打开的表"                                          # 裁决⑫
+EMPTY_RECENT_ROW_FMT = "{when} · {n} 信号"
+LOADING_TITLE_FMT = "正在展开 Topout 信号 {done} / {total}"
+LOADING_TITLE_PAGE_FMT = "正在分析 {page} 页 {done} / {total}"
+LOADING_CURRENT_FMT = "当前：{name}　{hint}"
+LOADING_HINT = "清单已可点，展开完的信号先出现；未完成的显示「分析中」。"
+LOADING_BTN_STOP = "停止分析"
+LOADING_STOPPED_FMT = "已停止：展开完 {done} / {total}，其余显示「分析中」（重新载入可继续）"
+
+# ⑯ 覆盖度弹层
+COV_TITLE_FMT = "覆盖度：本信号生效档 = {label}"
+COV_CLOSE = "收起"
+COV_CHAIN_FMT = "生效来源：本信号「{sig}」→ 逻辑类型「{form}」= {form_label} → 全局默认 = {global_label}"
+COV_LEVEL_GLOBAL = "全局默认"
+COV_LEVEL_GLOBAL_DESC = "整张表的兜底档"
+COV_LEVEL_FORM_FMT = "逻辑类型 · {form}"
+COV_LEVEL_SIG = "本信号"
+COV_FOLLOW_GLOBAL = "跟随全局"
+COV_FOLLOW_UP = "跟随上级"
+COV_THIS_FORM_MARK = "　← 本信号属这类"
+COV_MAXT = "用例数上限"
+COV_COUNT_FMT = "本信号当前 {n} 条"
+COV_COUNT_CUSTOM_FMT = "本信号当前 {n} 条，含 {neg} 反例（已自定义）"                   # C-133
+COV_HELP = "档位怎么算的？"
+COV_HELP_TEXT = (
+    "【logic / 直连寄存器】\n"
+    "  精简 = 每种「控制位组合」各取 1 组代表数据（最少用例）\n"
+    "  全面 = 每种控制位组合再扫多组数据（全0 / 全1 / 反码 / 走步，区分坏位）\n"
+    "  穷举 = 所有输入位的全部组合（仅当总输入位 ≤ 10，否则自动退化为「全面」）\n\n"
+    "【mux 选路信号】\n"
+    "  精简 = 每个 case 1 条（don't-care 位取 0）\n"
+    "  全面 = 精简 + case 的 x 位展开 + 每 case 一轮反码数据（抓数据通路坏位）\n"
+    "  穷举 = 全面 + 另一条物理控制路径（line / local）全扫每 case\n\n"
+    "三层优先级：本信号 > 逻辑类型 > 全局默认；改档即时重算清单用例数与真值表。")
+
+# ⑪ 导出中心
+EXPORT_TITLE = "导出中心"
+EXPORT_HEADERS = ("", "交付物", "范围", "选项", "上次导出到哪")
+#: 六行：kind → (交付物名, 选项摘要默认文案, 备注)
+EXPORT_ROWS = {
+    "sv": (".sv 断言文件", "无注释 · 不写末尾汇总 · 不写 owner", ""),
+    "report": ("报告（给人看）", "HTML（含电路图）· 也可 CSV / Excel", ""),
+    "fortest": ("回填 for_test 页", "写副本，不覆盖源表", ""),
+    "nets": ("nets.txt（红区扫网名）", "类别：顶层输出 · force 目标 · 猜名的网", ""),
+    "claims": ("claims.json（红区比对）", "每根探针：探哪根网 · 名字是查到的还是猜的", "随 .sv 进红区，诊断脚本的唯一输入"),
+    "config": ("整份配置", "探针前缀 · 强制 force · 补充逻辑 · 覆盖度 · 手填期望", ""),
+}
+EXPORT_SCOPE_CHECKED_FMT = "勾选的 {n} 个"
+EXPORT_SCOPE_ALL_FMT = "全部 {n} 个"
+EXPORT_SCOPE_NA = "—"
+EXPORT_SV_SCOPES = {"all": "全部（正向+反例）", "pos": "仅正向", "neg": "仅反例", "split": "正向+反例分文件"}
+EXPORT_SV_OPTIONS = {"comments": "加注释", "sv_summary": "末尾汇总", "owner_in_msg": "写 owner"}
+EXPORT_REPORT_FORMATS = {"html": "HTML（含电路图）", "csv": "CSV", "xlsx": "Excel"}
+EXPORT_NETS_MORE = "更多（按页分类）"
+EXPORT_NETS_PURPOSE = {"topout_out": "顶层输出", "force_target": "force 目标", "guessed": "猜名的网"}
+EXPORT_NETS_PAGES = {"topout-cone": "Topout + 展开输入", "topout": "仅 Topout 探针", "logic": "logic",
+                     "mux": "mux", "dft": "dft", "iddq": "iddq"}
+EXPORT_LAST_NEVER = "从未导出"
+EXPORT_LAST_FMT = "{path}　{when}"
+EXPORT_SUMMARY_FMT = "勾选 {k} 项 · 覆盖 {n} 个信号 · {s} 个信号会被跳过"
+EXPORT_SUMMARY_NO_SKIP_FMT = "勾选 {k} 项 · 覆盖 {n} 个信号"
+EXPORT_SUMMARY_SKIPPED_HEAD = "会被跳过的信号 —— 名字和原因："
+EXPORT_BTN_RUN_FMT = "导出勾选的 {k} 项"
+EXPORT_BTN_RUN_NONE = "先勾选要导出的交付物"
+EXPORT_BTN_CANCEL = "取消"
+EXPORT_BTN_IMPORT_CONFIG = "导入配置…"
+EXPORT_DEFAULT_SV = "wr_rf_tc.sv"
+EXPORT_DEFAULT_SV_POS = "wr_rf_tc_pos.sv"
+EXPORT_DEFAULT_SV_NEG = "wr_rf_tc_neg.sv"
+EXPORT_DEFAULT_REPORT = "用例表.html"
+EXPORT_DEFAULT_NETS = "nets.txt"
+EXPORT_DEFAULT_CLAIMS = "claims.json"
+EXPORT_DUP_LABELS_TITLE = "重复 assert 标号（非法 SV）"
+EXPORT_DUP_LABELS_FMT = "以下 {n} 处 assert 标号重复，同一作用域内重复会让 elaboration 失败。仍要写出？\n{rows}"
+EXPORT_WRITE_FAILED_FMT = "无法写入 {path}：\n{err}\n\n（文件是否正被仿真器 / 编辑器占用？）"        # C-171
+EXPORT_IMPORT_MISMATCH_FMT = "这份配置是为《{cfg}》导出的，当前是《{cur}》"                          # C-193
+EXPORT_IMPORT_MISSING_FMT = "配置里有、当前表没有的信号（{n} 个）：{names}"                          # C-194
+EXPORT_IMPORT_BAD_FILE = "这不是本工具的配置文件：缺少 dreg_verify_config 段，也没有 edits / mux_* 段"   # C-195
+EXPORT_CONFIG_DONE_FMT = "配置已导出：勾选 {k} 个 · 全局档 {cov} · 前缀 {np} 条 · 强制 force {nf} 个 · 编辑 {ne} 个信号、手填期望 {nx} 条"   # C-191
+EXPORT_REPORT_DONE_FMT = "范围 {scope} · 用例 {n} 条 · 反例 {neg} 条"                                 # C-177
+EXPORT_FORTEST_DONE_FMT = "回填 {n} 组（含 mux）"                                                      # C-182
+
+# ⑫ 导出完成
+DONE_TITLE = "导出完成"
+DONE_SKIPPED_HEAD_FMT = "{n} 个信号没有进 .sv —— 名字和原因："
+DONE_SKIPPED_ROW_FMT = "　└ {reason}"
+DONE_WRITTEN = "已写出"
+DONE_BTN_OPEN_DIR = "打开输出目录"
+DONE_BTN_GO_FIX_FMT = "去处理这 {n} 个信号"
+DONE_BTN_OK = "知道了"
+DONE_ACCOUNTED_FMT = "只记录、不产生断言的信号：{names}"                                            # C-166
+
+# ⑬ 诊断抽屉
+DIAG_TITLE = "诊断"
+DIAG_CLOSE = "收起"
+DIAG_INTRO = "按症状选，不是按按钮选。"
+DIAG_CUVUNF_TITLE = "仿真报「找不到这根网」（CUVUNF）"
+DIAG_CUVUNF_BODY = ("．sv 里 force / assert 的网不在 DUT 顶层，要带层级前缀，"
+                    "例如信号实际在 ENV_RF.U_BT_LP_PLL_DIG.pll_n → 前缀填 U_BT_LP_PLL_DIG。")
+#: 三步：(编号, 标题, 正文, 结果框模板, 主按钮)。第 2 步措辞按裁决⑪。
+DIAG_STEPS = (
+    ("1", "从工具导出 nets.txt",
+     "把这张表里所有要定位的网名写成一个清单。按类别勾：顶层输出 / force 目标 / 名字是猜的。",
+     "{path}　{n_sig} 个信号 · {n_net} 根网 · 其中 {n_guess} 根名字是猜的", "导出 nets.txt…"),
+    ("2", "在红区跑 scan_rtl.py",
+     "把 scan_rtl.py 和 nets.txt 一起传到仿真服务器，在仿真服务器上跑（不带参数），"
+     "它静态扫 RTL 一次找全层级，生成 probe_prefixes.txt。",
+     "python3 scan_rtl.py", "复制这行命令"),
+    ("3", "把 probe_prefixes.txt 导回来",
+     "导入后清单里的探针前缀列会填上，重新导出 .sv 即可。例：信号实际在 ENV_RF.U_BT_LP_PLL_DIG.pll_n → 前缀 U_BT_LP_PLL_DIG。",
+     "当前已有前缀映射 {n_map} 条 · 还差 {n_missing} 根网没有前缀", "导入 probe_prefixes.txt…"),
+)
+DIAG_STEP1_NEVER = "还没导出过 nets.txt"
+DIAG_PREFIX_EDIT = "编辑前缀映射…"
+DIAG_PREFIX_EXPORT = "导出前缀映射 .txt…"
+#: 其它症状（Design 4 条 + 第 5 条 C-302）：(标题, 提示)
+DIAG_OTHER = (
+    ("规格缺了一级逻辑，工具展不下去", "手工补一段等价表达式（RTL 补充逻辑）"),
+    ("两个东西撞名，展开走错了路", "强制直接 force 顶层网，跳过逐层展开"),
+    ("覆盖度不够 / 用例太多跑不动", "调档位与上限"),
+    ("还有网没有前缀，要不要照样生成", "缺前缀是否强制生成　当前：{state}"),
+    ("以前在旧版界面填过期望", "从旧版真值表编辑迁进来（一次性，旧数据只读不删）"),
+)
+DIAG_RISKY_ON = "是"
+DIAG_RISKY_OFF = "否"
+DIAG_RISKY_OFF_WARNING = "关掉后缺前缀的信号会被跳过、不进 .sv（导出时逐个点名）；.sv 内容会变"
+DIAG_FOOTER = "这里的每一项都是逃生阀，不是日常主力。日常只用清单 + 详情 + 导出中心。"
+DIAG_PREFIX_TITLE = "探针前缀映射"
+DIAG_PREFIX_HINT = ("每行 信号名=层级路径；或先写「路径:」再在下面列信号名（逗号 / 换行分隔）；# 开头是注释。"
+                    "红区 scan_rtl 生成的 probe_prefixes.txt 可直接导入。")
+DIAG_PREFIX_IMPACT_FMT = "共 {n} 条映射 · 影响 {m} 个信号"                                             # C-204
+DIAG_FORCE_TITLE = "强制 force 信号"
+DIAG_FORCE_HINT = "每行一个基名（去 _to_logic / _to_mux 尾缀、去位宽）；行尾 # 之后是注释；留空 = 清除。"
+DIAG_FORCE_DONE_FMT = "强制 force 名单已更新（共 {n} 个）——这些信号跳过逐层展开、直接 force 顶层基名网"
+DIAG_SUPP_TITLE = "RTL 补充逻辑"
+DIAG_SUPP_HINT = "JSON：{信号基名: {enabled, expr, inputs:[{var, raw}], note}}；var = 表达式里的变量名，raw = 真实网名（可带 [msb:lsb]）。"
+DIAG_SUPP_TEMPLATE = "插入模板（当前信号）"
+DIAG_SUPP_IMPORT = "从 .json 导入…"
+DIAG_SUPP_UNKNOWN_FMT = "{name} 不在当前 logic 页：将作为纯新增合成信号生成"                             # C-214
+DIAG_SUPP_INVALID_HEAD = "校验不通过，未保存："                                                       # C-213
+DIAG_LEGACY_TITLE = "从旧版真值表编辑迁进来"
+DIAG_LEGACY_PREVIEW_FMT = ("可迁移 {n_ok} 个信号（logic / 直连寄存器根）；不迁 {n_mux} 个 mux 信号：{mux_names}\n"
+                           "原因：mux 用的是 case / 数据列坐标（c:A / d:0），与旧版按物理基名存的取值对不上。\n"
+                           "迁入后用例数以旧版编辑为准（如 4 → 原自动 12），旧数据只读不删。")
+DIAG_LEGACY_NONE = "这张表没有旧版真值表编辑"
+DIAG_LEGACY_RUN = "开始迁移"
+
+# 对话框
+DLG_RENAME_TITLE = "重命名列"
+DLG_MUX_DATA_TITLE = "mux 数据值（整表，按物理寄存器同步）"
+DLG_MUX_DATA_HINT = "清空 = 恢复自动分配。两条数据路取到相同值时会提示假绿（驱不动，断言必过）。"
+DLG_COLUMNS_TITLE = "列设置"
+DLG_PASTE_NAMES_TITLE = "粘贴名单勾选"
+DLG_PASTE_NAMES_HINT = "每行一个信号名（可带位宽切片，大小写无关）。"
+DLG_PASTE_NAMES_RESULT_FMT = "勾上 {n} 个；找不到 {m} 个：{names}"
+DLG_PRESETS_TITLE = "预设"
+DLG_BATCH_FILL_TITLE = "批量填期望"
+DLG_BATCH_FILL_HINT = "把这个值填进所有选中列的期望格（未选则全部未填的正向列）。"
+DLG_YES = "确定"
+DLG_NO = "取消"
+
+
+def all_copy():
+    """{常量名: 文案}——测试扫描用（含 dict/tuple 里的字符串会被 test 展开）。"""
+    return {k: v for k, v in globals().items()
+            if k.isupper() and not k.startswith("_") and isinstance(v, (str, tuple, dict))}
