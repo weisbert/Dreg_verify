@@ -213,6 +213,50 @@ FORBIDDEN_MODULES = ("gui", "legacy_gui")
 #: 唯一例外（架构 §1.2 写明）：电路图视图可以调 sigflow 的**渲染**三个函数，不做分析
 LAYERING_EXCEPTIONS = {"sigflow_view.py": ("sigflow",)}
 
+#: Qt-free 层（架构 §1.2 第三层 + `excel_model`）。这一层 `ui/` **可以**依赖，
+#: 但不是随便依赖 —— 逐文件按下面的白名单准入（架构 §8 决策 9，C2-int 主控裁决）。
+QTFREE_MODULES = ("session", "edits", "inputs_table", "analysis_norm", "exports",
+                  "providers", "truth_edit", "excel_model")
+#: {ui 文件: {Qt-free 模块: 为什么这一条准入}}。白名单以**实际 import** 为准：
+#: 多一条要写清理由、少一条（有 import 没登记）直接报红。
+QTFREE_ALLOWED = {
+    "terms.py": {
+        "inputs_table": "scrub_terms / STATUS_HELP / FOUND_IN_TEXT —— 术语替换表只有那一份（§1.1 明写）",
+    },
+    "persist.py": {
+        "session": "settings 的格式、默认路径与 recent / last_export 的结构",
+        "edits": "edits 文件的桶结构与默认路径（I-05 桶合并写按它的段名走）",
+        "exports": "导出选项的默认值与 load/store（I-03：四个 export_* 键不另写一套）",
+    },
+    "state.py": {
+        "session": "CoverageState（三层覆盖度）/ code_version / MRU —— 会话格式的唯一定义",
+        "edits": "编辑桶读写与 protected_negatives 的口径",
+        "providers": "载表后按范围建 TopoutProvider / PageProvider（I-21 的引擎锁在 state 手上）",
+        "excel_model": "load_workbook：把 Excel 读成 wb（state 是全窗唯一持有 wb 的地方）",
+    },
+    "bus.py": {
+        "excel_model": "`_strip_width`：当前线网的比对键剥位宽 —— 与图 / 真值表同一把钥匙",
+    },
+    "coverage.py": {
+        "session": "FORM_COV_ROWS / effective_chain —— 三层覆盖度的判据只此一份（§6.5；主控裁决允许）",
+    },
+    "detail_header.py": {
+        "edits": "fill_progress / expected_cell_state / cols_from_vectors（C-106 的三个数）",
+        "inputs_table": "resolve_detail —— 解析明细全文（C-064 / C-065 / C-066）",
+    },
+    "side_panel.py": {
+        "inputs_table": "input_rows —— 输入表的全部内容（角色细分 / 收拢 / 三个布尔，主控裁决允许）",
+        "analysis_norm": "subst_expr —— 单级 logic 的「= 代入真名」（不在视图里自己写正则）",
+    },
+    "sv_preview.py": {
+        "exports": "render_sv / build_skipped / sv_outcome —— 预览与导出同源（§6.8 一条路径原则）",
+    },
+    "dialogs.py": {
+        "edits": "反例列的保护性判定（哪些是自定义命名 / 手调过错值的）",
+        "truth_edit": "check_col_name / parse_int —— 重命名列与 mux 数据值的三道校验",
+    },
+}
+
 
 def _imported_modules(path):
     """这个文件 import 了哪些 `dreg_verify.X` 的顶层模块名。"""
@@ -241,6 +285,12 @@ def _ui_sources():
 
 
 def test_ui_layering():
+    """I-19：① 引擎模块与旧门面一律禁；② Qt-free 层按 `QTFREE_ALLOWED` 显式准入。
+
+    ② 是 C2-int 的主控裁决（架构 §8 决策 9）：分层线的真正含义是「views 不 import 引擎 / gui」，
+    Qt-free 层（session / edits / inputs_table / analysis_norm / exports / providers / truth_edit
+    / excel_model）本来就该给 ui 用 —— 但**谁用哪一个、为什么**要写下来，否则「允许 Qt-free」
+    会一路滑成「什么都能 import」。"""
     bad = []
     for fn, path in _ui_sources():
         mods = _imported_modules(path)
@@ -251,7 +301,28 @@ def test_ui_layering():
         for m in FORBIDDEN_MODULES:
             if m in mods:
                 bad.append("%s import 了 %s（ui/ 不许依赖旧门面）" % (fn, m))
+        known = QTFREE_ALLOWED.get(fn, {})
+        for m in sorted(set(mods) & set(QTFREE_MODULES)):
+            if m not in known:
+                bad.append("%s import 了 Qt-free 模块 %s，但 QTFREE_ALLOWED 里没登记"
+                           "（要么别 import，要么在白名单里写一句为什么）" % (fn, m))
     assert not bad, "\n".join(bad)
+
+
+def test_ui_layering_whitelist_has_no_dead_entries():
+    """白名单以**实际 import** 为准：登记了却没人 import 的条目要删掉（别留过期的许可）。"""
+    actual = {fn: _imported_modules(path) for fn, path in _ui_sources()}
+    dead = []
+    for fn, entries in QTFREE_ALLOWED.items():
+        mods = actual.get(fn)
+        if mods is None:
+            dead.append("%s 这个文件已经没了" % fn)
+            continue
+        for m, why in entries.items():
+            if m not in mods:
+                dead.append("%s 已经不 import %s 了" % (fn, m))
+            assert str(why).strip(), "%s → %s 少了「为什么」" % (fn, m)
+    assert not dead, "\n".join(dead)
 
 
 def test_ui_layering_catches_a_known_target():
