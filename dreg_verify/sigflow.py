@@ -358,17 +358,11 @@ class _Builder:
         if isinstance(node, E.Var):
             b = (binds or {}).get(node.name)
             base = getattr(b, "base", None) or node.name.lower()
-            if self._mode == "struct":
-                # 结构路线：叶子若是别的 logic 行 / mux 组的输出，继续往上游递归（这样每一级
-                # 中间网的真名都留在图上——AST 路线靠 origin_net 标回来的那批信息，这里天然就有）
-                lg = cone._find_logic(self.wb, base)
-                if lg is not None:
-                    return self._maybe_tap(self._logic_row(lg, _d + 1), node.msb, node.lsb,
-                                           lg.out_width)
-                mx = cone._find_mux(self.wb, base)
-                if mx is not None:
-                    return self._maybe_tap(self._mux_group(mx, None, _d + 1), node.msb, node.lsb,
-                                           mx.out_width)
+            # ⚠ 这里【不】顺着 Excel 往上游钻（M1）。结构路线只在引擎自己递归的两处递归：
+            # ctrl driver source=='mux'（按 recipe 展上游组）与 source=='logic'（展那一行的
+            # 表达式，一层）。一个 logic 行【自己的输入】引擎是 resolve_signal_inputs 停在
+            # binding 上的（discover_ctrl_paths 选 line/local 透传），我们也必须停在这儿，
+            # 否则图上写的 force 目标就不是 .sv 里那根网。
             return self._leaf_node(base, b, w, node.msb, node.lsb)
         if isinstance(node, E.Const):
             lab = ("%d'b%s" % (node.width, format(node.value, "0%db" % max(node.width, 1)))
@@ -541,8 +535,10 @@ class _Builder:
         return left, cv, E.mask(width), width
 
     # ───────── 结构路线（mux 根；不依赖 synthesize_mux_expr） ─────────
-    def _mux_group(self, group, expansion=None, depth=0):
-        gkey = ("mux", str(group.group_no))
+    def _mux_group(self, group, expansion=None, depth=0, recipe=None):
+        """recipe：本组是【上游 mux】时 mux_gen.resolve_upstream_recipe 给的配方
+        （只驱动载体/备用载体 case）。None = 本组是根 mux 组，expansion 的每个 case 都被驱动。"""
+        gkey = ("mux", str(group.group_no), (recipe or {}).get("prefix") or "")
         if gkey in self._memo:
             return self.g.node(self._memo[gkey])
         stack_key = "mux:" + str(group.out_base).lower()
@@ -551,20 +547,32 @@ class _Builder:
                                     "级联成环/超深，回退 force 衔接网")
         self._stack.append(stack_key)
         try:
-            n = self._mux_group_new(group, expansion, depth)
+            n = self._mux_group_new(group, expansion, depth, recipe, gkey)
         finally:
             self._stack.pop()
         self._memo[gkey] = n.id
         return n
 
-    def _mux_group_new(self, group, expansion, depth):
+    def _mux_group_new(self, group, expansion, depth, recipe, gkey):
         if expansion is None:
             try:
                 expansion = mux_gen.expand_mux_group(self.wb, self.resolver, group)
             except Exception:      # noqa: BLE001 —— 拿不到 expansion 也要画得出结构
                 expansion = {}
-        drivers = expansion.get("ctrl_drivers") or []
-        ebinds = expansion.get("bindings") or {}
+        # ⭐ 谁来定「这个输入停在哪根网上」：一律以【引擎自己解析出来的 binding】为准，绝不自己
+        # 顺着 Excel 往上游钻（M1）。mux 数据输入 expand_mux_group 根本不递归——它 force 衔接网；
+        # 我们要是看见 base 撞上了同名 logic 行就钻进去，图上就会写一根 .sv 里【根本不 force】的网
+        # （实证：linectrl_band_sel 撞名 logic 行 → 图写 band_sel_line、.sv force linectrl_band_sel；
+        #  rx5g_en_line 同理 → 图写 rx5g_en_pin）。图必须与 res.bindings 逐个叶子对得上。
+        if recipe is not None:
+            # 上游 mux：只有载体(carrier)/备用载体(carrier_alt)那几支真被驱动，其余支本轮不驱动
+            drivers = recipe.get("ctrl_drivers") or []
+            pfx = recipe.get("prefix") or ""
+            dbinds = recipe.get("bindings") or {}
+        else:
+            drivers = expansion.get("ctrl_drivers") or []
+            pfx = ""
+            dbinds = expansion.get("bindings") or {}
         shadowed = set(expansion.get("shadowed") or ())
         conflict_rows = set()
         for sc in (expansion.get("spec_conflicts") or []):
@@ -573,6 +581,8 @@ class _Builder:
 
         ctrls = list(getattr(group, "ctrls", None) or [])
         cases = list(getattr(group, "cases", None) or [])
+        driven = {i: dbinds.get(pfx + (mux_gen.DATA_KEY % i)) for i in range(len(cases))}
+        undriven = [i for i in range(len(cases)) if driven[i] is None]
         ports = []
         for i, c in enumerate(ctrls):
             ports.append({"name": "S%d" % i, "side": "top", "label": c.label})
@@ -582,36 +592,50 @@ class _Builder:
                 lab += " ✗死分支"
             if cs.row in conflict_rows:
                 lab += " ⚠conflict"
+            if i in undriven:
+                lab += " ·本轮不驱动"
             ports.append({"name": "D%d" % i, "side": "left", "label": lab})
         sel = ("{%s}" % ",".join(c.label for c in ctrls)) if len(ctrls) > 1 else \
               (ctrls[0].label if ctrls else "?")
+        sub = "case(%s)" % sel
+        if undriven:
+            sub += "　级联载体：%s" % "、".join(cases[i].case_raw for i in range(len(cases))
+                                             if i not in undriven)
         n = self.g.add_node(
             "MUXN", "MUX %d:1  (mux%s)" % (len(cases), group.group_no),
-            sub="case(%s)" % sel, ports=ports,
+            sub=sub, ports=ports,
             meta={"group": group.group_no, "out_base": group.out_base,
                   "cases": [c.case_raw for c in cases],
                   "case_rows": [c.row for c in cases],
                   "shadowed": sorted(shadowed), "conflict_rows": sorted(conflict_rows),
+                  "undriven_cases": undriven, "is_upstream": recipe is not None,
                   "ctrl_total_width": group.ctrl_total_width})
-        self._memo[("mux", str(group.group_no))] = n.id     # 先登记，容忍自引用扇入
+        self._memo[gkey] = n.id                     # 先登记，容忍自引用扇入
 
         for i, c in enumerate(ctrls):
             drv = drivers[i] if i < len(drivers) else None
             src = self._ctrl_source(c, drv, depth)
             self._link(src.id, n, "S%d" % i, label=c.label)
         for i, cs in enumerate(cases):
-            b = ebinds.get(mux_gen.DATA_KEY % i)
-            src = self._data_source(cs, b, depth)
+            if i in undriven:
+                # 本轮没有任何激励走这一支（上游 mux 只经载体 case 驱动）→ 端口留着让 mux 的
+                # 真实路数/case 值完整可读，但不画一个 .sv 根本不碰的叶子（那才是骗人）
+                continue
+            src = self._leaf_node(cs.input_base, driven[i], cs.input_width,
+                                  cs.input_msb, cs.input_lsb)
             self._link(src.id, n, "D%d" % i, label=ports[len(ctrls) + i]["label"])
 
         return self._emit(n, net=(getattr(group, "rtl_base", None) or group.out_base),
                           width=group.out_width)
 
     def _ctrl_source(self, ctrl, driver, depth):
-        """一个 mux 控制信号 → 上游图元。三来源（mux_gen._resolve_ctrl_driver 的口径）。"""
+        """一个 mux 控制信号 → 上游图元。三来源，与 mux_gen._resolve_ctrl_driver 逐条对齐：
+        source='mux' → 按【它自己的 recipe】递归上游组；source='logic' → 展开那一行的表达式
+        （只展一层，引擎也只展一层）；其余 → 停在引擎解析出的 binding 上画叶子。"""
         source = (driver or {}).get("source")
         if source == "mux" and (driver or {}).get("upstream") is not None:
-            up = self._mux_group(driver["upstream"], None, depth + 1)
+            up = self._mux_group(driver["upstream"], None, depth + 1,
+                                 recipe=(driver or {}).get("recipe"))
             return self._maybe_tap(up, ctrl.msb, ctrl.lsb, driver["upstream"].out_width)
         if source == "logic" and (driver or {}).get("ctrl_sig") is not None:
             lg = self._logic_row(driver["ctrl_sig"], depth + 1)
@@ -621,23 +645,6 @@ class _Builder:
         if b is None:
             b = self._resolve_leaf(ctrl.raw, ctrl.base, ctrl.width, ctrl.msb, ctrl.lsb)
         return self._leaf_node(ctrl.base, b, ctrl.width, ctrl.msb, ctrl.lsb)
-
-    def _data_source(self, case, binding, depth):
-        """一个 mux 数据输入 → 上游图元（可能是 logic 行 / 另一个 mux 组 / 寄存器叶子）。"""
-        base = case.input_base
-        lg = cone._find_logic(self.wb, base)
-        if lg is not None:
-            n = self._logic_row(lg, depth + 1)
-            return self._maybe_tap(n, case.input_msb, case.input_lsb, lg.out_width)
-        mx = cone._find_mux(self.wb, base)
-        if mx is not None:
-            n = self._mux_group(mx, None, depth + 1)
-            return self._maybe_tap(n, case.input_msb, case.input_lsb, mx.out_width)
-        if binding is None:
-            binding = self._resolve_leaf(case.input_raw, base, case.input_width,
-                                         case.input_msb, case.input_lsb)
-        return self._leaf_node(base, binding, case.input_width,
-                               case.input_msb, case.input_lsb)
 
     def _logic_row(self, sig, depth):
         """一个 logic 行 → 它自己表达式的门图（Var 叶子继续按结构递归到 logic/mux/寄存器）。

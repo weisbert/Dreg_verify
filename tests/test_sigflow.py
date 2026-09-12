@@ -119,6 +119,66 @@ def test_all_topout_build_graph_and_render(btlp, wl, qt_app):
     assert drawn == 20
 
 
+def _binding_leaf_bases(r):
+    """这个信号的 .sv 真正驱动/force 的那批物理网（含 dft 门网）。"""
+    want = {str(b.base).lower() for b in (r.bindings or {}).values()
+            if b is not None and getattr(b, "base", None)}
+    if r.dft_gate is not None:
+        want.add(str(r.dft_gate[0].base).lower())
+    return want
+
+
+def test_graph_leaves_equal_bindings_leaves(btlp, wl):
+    """M1 回归（对抗 review 抓到的那条）：**每张图的 REG/PIN 叶子集合必须逐个等于
+    res.bindings 的叶子集合**——图上画的每一个源，都得是 .sv 真的会 RF_WRITE / force 的那根网。
+
+    以前结构路线会无条件 `cone._find_logic(base)` 往上游钻，可 expand_mux_group 对 mux 数据
+    输入根本不递归（它 force 衔接网）→ 4 张图写了 .sv 里不存在的 force 目标：
+      linectrl_band_sel 撞名 logic 行 → 图写 band_sel_line，.sv force linectrl_band_sel；
+      rx5g_en_line 同理 → 图写 rx5g_en_pin；lpf_corner1 是上游 mux 的非载体支、.sv 压根不碰。
+    这类错最毒——图看着专业、名字却是错的，人照着它去 debug 会被带沟里。
+    """
+    bad = []
+    for wb, res in (btlp, wl):
+        for topo in wb.topout:
+            r = T.analyze_signal(wb, res, topo, mode="min", max_tests=32, want_graph=True)
+            if r.graph is None:
+                continue
+            got = {str(n.meta.get("base", "")).lower() for n in r.graph.nodes
+                   if n.kind in ("REG", "PIN")}
+            want = _binding_leaf_bases(r)
+            if got != want:
+                bad.append("%s: 图多出 %s / 图缺少 %s"
+                           % (topo.name, sorted(got - want), sorted(want - got)))
+    assert not bad, "\n".join(bad)
+
+
+def test_upstream_mux_undriven_cases_kept_as_ports(wl):
+    """M1 的另一半：上游 mux 只经【载体 case】驱动，非载体支不画叶子（.sv 不碰它），
+    但端口和 case 值要留着——mux 的真实路数不能被悄悄画少，还顺带告诉人「这支本轮没激励」。"""
+    r = _analyze(*wl, name="d_wl_rf_lpf_cmain", want_graph=True)
+    up = next(n for n in r.graph.nodes if str(n.meta.get("group")) == "58")
+    assert up.meta["is_upstream"] is True
+    assert len(up.meta["cases"]) == 2                       # 两支都在，路数没被画少
+    assert up.meta["undriven_cases"] == [1]                 # 载体是 case0(lpf_corner0)
+    labels = [p["label"] for p in up.ports if p["side"] == "left"]
+    assert any("本轮不驱动" in x for x in labels), labels
+    assert "级联载体" in up.sub
+    # 非载体那支不许有入边（画了就等于宣称 .sv 会驱动 lpf_corner1）
+    assert not any(e.dst == up.id and e.dst_port == "D1" for e in r.graph.edges)
+    assert "d_wl_rf_lpf_corner1" not in {n.meta.get("base") for n in r.graph.nodes}
+
+
+def test_upstream_mux_carrier_and_alt_both_drawn(wl):
+    """载体 + 备用载体（item④ mode=1 RW / mode=0 RO 线控）两支都被驱动时，两支都要画叶子。"""
+    r = _analyze(*wl, name="d_wl_rf_lp5g_gm_itrim", want_graph=True)
+    up = next(n for n in r.graph.nodes if str(n.meta.get("group")) == "32")
+    assert up.meta["undriven_cases"] == []                  # carrier_ci=1 + alt_ci=0 全驱动
+    bases = {n.meta.get("base") for n in r.graph.nodes if n.kind in ("REG", "PIN")}
+    assert "d_wl_rf_rx5g_en_line" in bases                  # .sv force 的就是它
+    assert "d_wl_rf_rx5g_en_pin" not in bases               # 别再顺着同名 logic 行钻上去
+
+
 def test_render_svg_shape_is_wellformed(btlp, qt_app):
     """SVG 骨架：viewBox 与 width/height 一致、根标签闭合、元素挂了 data-net（二期点选高亮用）。"""
     r = _analyze(*btlp, name="d_logic_bt_lp_rx_en", want_graph=True)
