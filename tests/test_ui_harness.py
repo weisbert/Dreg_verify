@@ -190,6 +190,31 @@ def test_auto_dialogs_patches_every_known_modal(monkeypatch, gui_app):
         assert full in rec.patched, "没拦到 %s（剩余 missing=%s）" % (full, rec.missing)
 
 
+def test_auto_dialogs_patches_v2_dialog_ask_entrypoints(monkeypatch, gui_app):
+    """C2-int：`ui/dialogs.py` 的 11 个 `ask*` 入口也在拦截范围里，且能按名字 / 标题给答案。"""
+    from dreg_verify.ui import dialogs as D
+    rec = H.auto_dialogs(monkeypatch)
+    wanted = ["%s.%s" % (cls, meth) for mod, cls, meth, _fn in H.CUSTOM_MODALS
+              if mod == "dreg_verify.ui.dialogs"]
+    assert len(wanted) == 11, wanted
+    for full in wanted:
+        assert full in rec.patched, "没拦到 %s（剩余 missing=%s）" % (full, rec.missing)
+    # 默认答案 = 「确定、一个默认值都没改」
+    assert D.ConfirmDialog.ask(D.CONFIRM_CLEAR) is True
+    assert D.RenameColumnDialog.ask("U0", ["T1"]) == "U0"
+    assert D.PresetsDialog.ask_save(["x"]) == ""
+    assert rec.count("ConfirmDialog.ask") == 1
+
+    # 按入口全名给答案
+    rec2 = H.auto_dialogs(monkeypatch, answers={"ConfirmDialog.ask": False})
+    assert D.ConfirmDialog.ask(D.CONFIRM_CLEAR) is False
+    assert rec2.count("ConfirmDialog.ask") == 1
+    # 按标题给答案（标题取自 dialogs.TITLES）
+    rec3 = H.auto_dialogs(monkeypatch, answers={D.TITLES["presets_save"]: "weekly"})
+    assert D.PresetsDialog.ask_save(["x"]) == "weekly"
+    assert rec3.saw(D.TITLES["presets_save"])
+
+
 def test_auto_dialogs_defaults_are_affirmative(monkeypatch, gui_app):
     """默认答案按实际给的按钮挑「肯定」：Yes|No → Yes（固定 Ok 会把导出静默取消掉）。"""
     from PySide6 import QtWidgets

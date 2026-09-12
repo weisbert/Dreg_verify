@@ -51,8 +51,12 @@ def save_settings(d, path=None, skip_under_pytest=True):
     if skip_under_pytest and "pytest" in sys.modules:
         return False
     try:
+        # ⚠ 先序列化成字符串再开文件：`open(..., "w")` 一执行原文件就被截断了，
+        #   序列化中途抛异常（settings 里混进了 set / 自定义对象）就等于**把用户的
+        #   全部偏好清空**，而异常还被下面吞掉，界面上一点动静都没有。
+        blob = json.dumps(d)
         with open(path or DEFAULT_SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(d, f)
+            f.write(blob)
         return True
     except Exception:  # noqa: BLE001
         return False

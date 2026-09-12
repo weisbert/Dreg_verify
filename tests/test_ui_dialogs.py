@@ -304,13 +304,15 @@ def test_dlg_columns_keys_match_contracts():
     assert set(CT.LIST_COL_KEYS[c] for c in CT.LIST_OPTIONAL) <= set(D.LIST_COLUMN_KEYS)
 
 
-def test_dlg_columns_same_object_names_as_signal_list_version(mk):
-    """C2-int 会把 signal_list 那一份删掉换成 import 这里：objectName / 标题 / 返回形状必须一致。"""
+def test_dlg_columns_is_the_one_signal_list_uses(mk):
+    """C2-int 已把 signal_list 那一份删掉改成 import 这里 —— 全仓只剩这一个列设置框。"""
+    assert not hasattr(SL, "ColumnsDialog"), "signal_list 里又长出了一份列设置框"
     mine = mk(D.ColumnsDialog, [CT.ListCol.NAME, CT.ListCol.STATUS])
-    theirs = mk(SL.ColumnsDialog, {CT.ListCol.NAME, CT.ListCol.STATUS})
-    assert mine.objectName() == theirs.objectName() == N.DLG_COLUMNS
-    assert mine.windowTitle() == theirs.windowTitle() == T.DLG_COLUMNS_TITLE
-    assert mine.selection() == theirs.selection()
+    assert mine.objectName() == N.DLG_COLUMNS
+    assert mine.windowTitle() == T.DLG_COLUMNS_TITLE
+    sel = mine.selection()
+    assert set(sel) == set(D.LIST_COLUMN_KEYS)
+    assert sorted(k for k, on in sel.items() if on) == ["name", "status"]
 
 
 # ═════════════════ ⑤ 粘贴名单勾选（C-290）═════════════════
@@ -342,13 +344,13 @@ def test_dlg_paste_names_empty_keeps_dialog_open(mk):
     assert H.find(dlg, N.DLG_PASTE_NAMES_RESULT).text()
 
 
-def test_dlg_paste_names_same_parse_as_signal_list_version(mk):
-    mine, theirs = mk(D.PasteNamesDialog), mk(SL.PasteNamesDialog)
-    text = "A_B[7:0]\n#x\nc_d\n"
-    mine.editor.setPlainText(text)
-    theirs.editor.setPlainText(text)
-    assert mine.names() == theirs.names()
-    assert mine.objectName() == theirs.objectName() == N.DLG_PASTE_NAMES
+def test_dlg_paste_names_is_the_one_signal_list_uses(mk):
+    """同上：signal_list 里那一份已删，解析口径只剩这一份。"""
+    assert not hasattr(SL, "PasteNamesDialog"), "signal_list 里又长出了一份粘贴名单框"
+    mine = mk(D.PasteNamesDialog)
+    mine.editor.setPlainText("A_B[7:0]\n#x\nc_d\n")
+    assert mine.names() == ["a_b", "c_d"]
+    assert mine.objectName() == N.DLG_PASTE_NAMES
 
 
 # ═════════════════ ⑥ 预设（C-291）═════════════════
@@ -622,7 +624,10 @@ def test_dlg_titles_stable_for_harness(monkeypatch, mk):
 
 def test_dlg_answers_hit_by_title_exact_and_substring(monkeypatch, mk):
     """answers 的键既能写全标题，也能写子串（harness `_lookup` 的两条路）。"""
+    # `ask` 那一层要的是「领域值」、`exec` 这一层要的是「结果码」；本条验的是后者，
+    # 所以把 harness 的 ask 快车道关掉（REAL），让真对话框一路走到 exec。
     rec = H.auto_dialogs(monkeypatch, answers={
+        "ask": H.REAL,
         D.TITLES["confirm_clear"]: QtWidgets.QDialog.Rejected,       # 全标题
         "导出 .sv": QtWidgets.QDialog.Rejected,                       # 子串
     })
@@ -633,8 +638,11 @@ def test_dlg_answers_hit_by_title_exact_and_substring(monkeypatch, mk):
 
 
 def test_dlg_ask_entrypoints_return_shapes_under_harness(monkeypatch):
-    """十个入口在 harness 下都不阻塞，且返回形状固定（C2-int 接线时照这个写）。"""
-    H.auto_dialogs(monkeypatch)
+    """十个入口在 harness 下都不阻塞，且返回形状固定（C2-int 接线时照这个写）。
+
+    验的是**真对话框**，所以把 harness 的 `类.ask` 快车道关掉（REAL）：那一层的默认答案是
+    「确定、一个默认值都没改」的观察结果，不是对话框本人。"""
+    H.auto_dialogs(monkeypatch, answers={"ask": H.REAL, "ask_save": H.REAL, "ask_manage": H.REAL})
     assert D.confirm(D.CONFIRM_CLEAR) is True
     assert D.RenameColumnDialog.ask("U0", ["T1"]) == "U0"
     assert D.MuxDataDialog.ask(_mux_rows()) == {"reg_lna": None, "reg_mix": 16}

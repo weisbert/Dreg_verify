@@ -299,9 +299,14 @@ def test_c291_presets_roundtrip(bar):
     H.find(bar, names.FILTER_STATUS_COMBO).setCurrentIndex(1)
     H.find(bar, names.FILTER_SEARCH).setText("sig_a")
     bar.flush_search()
+    # C2-int 定版三键 `{scope, checks, filters}`（`persist.preset_spec`）：本行给不出勾选 → checks=None，
+    # 由组合根填；owners 落成排序后的 list（settings 是 JSON，set 存不进去）
     payload = bar.preset_payload()
-    assert payload == {"scope": "topout",
-                       "filters": {"owners": set(), "kind": "", "status": "ok", "regex": "sig_a"}}
+    assert payload == {"scope": "topout", "checks": None,
+                       "filters": {"owners": [], "kind": "", "status": "ok", "regex": "sig_a"}}
+    bar._owner_sel = {"wang", "li"}
+    assert bar.preset_payload()["filters"]["owners"] == ["li", "wang"]
+    bar._owner_sel = set()
 
     # 已存预设进菜单，点一条 → presetLoadRequested(name)
     bar.state().settings()["presets"] = {"我的常用": payload, "夜班": payload}
@@ -316,7 +321,9 @@ def test_c291_presets_roundtrip(bar):
     got = _catch(bar.filterChanged)
     bar.set_filters(payload["filters"])
     assert len(got) == 1
-    assert bar.filters() == payload["filters"]
+    # 回填是等价的：owners 存下去是 list、读回来的运行态是 set（`set_filters` 本来就这么收）
+    assert bar.filters() == dict(payload["filters"], owners=set(payload["filters"]["owners"]))
+    assert bar.preset_payload() == payload
 
     # C-290 入口（粘贴名单勾选）只发信号，对话框在 C2-d
     paste = [a for a in menu.actions() if a.objectName() == FB.PASTE_NAMES_OBJECT_NAME][0]

@@ -54,7 +54,7 @@ LEGACY_SEGMENTS = ("edits", "neg_only", "mux_expected", "mux_neg", "mux_data",
 V2_SEGMENTS = ("view_edits", "view_checks")
 
 #: settings 里 v2 新增的两个键（清单列设置 / 筛选预设），其余键名一律沿用 A3 §3.1 的旧名
-PRESETS_KEY = "presets"
+PRESETS_KEY = contracts.SETTINGS_PRESETS
 INCLUDE_RISKY_KEY = "include_risky"
 
 
@@ -117,20 +117,46 @@ def list_columns_set(mapping):
                            {str(k): bool(v) for k, v in (mapping or {}).items()}})
 
 
+#: 一条预设的定版结构（C-291；C2-int 主控裁决：**三键**，写的人读的人都按这一份）
+PRESET_KEYS = ("scope", "checks", "filters")
+
+
+def preset_spec(scope="", checks=None, filters=None):
+    """一条预设的定版形状 `{scope, checks, filters}` —— `filter_bar` / `dialogs` / 本模块共用。
+
+    · `checks=None` = 「这条预设没记勾选」（取回时不动勾选）；给了序列就是那一批名字。
+    · `filters["owners"]` 收进来可能是 **set**（筛选行的口径），这里一律转成**排序后的列表**：
+      settings 是 JSON，`json.dump` 遇到 set 会抛 —— 而 `session.save_settings` 是先开文件
+      再序列化、抛了还把异常吞掉，结果是**整份 settings 被清空**（存一次预设，用户的全部偏好
+      连同诊断配置一起没）。已用 mirror wl 端到端复现过：选中 5 个 owner 存预设 →
+      settings.json 变成 `{}`。取回时 `filter_bar.set_filters` 本来就 `set(...)` 收，不受影响。
+    · 旧的两键文件（`{checks, filters}`，没有 scope）照常读：缺的键补默认，不报错。
+    """
+    f = dict(filters or {})
+    if "owners" in f:
+        f["owners"] = sorted(str(x) for x in (f.get("owners") or ()))
+    return {"scope": str(scope or ""),
+            "checks": (None if checks is None else [str(x) for x in checks]),
+            "filters": f}
+
+
 def presets_get():
-    """筛选/勾选预设 `{名字: {"checks": [...], "filters": {...}}}`（脏数据丢掉，不抛）。"""
+    """筛选/勾选预设 `{名字: {"scope", "checks", "filters"}}`（脏数据丢掉，不抛）。"""
     raw = load_settings().get(PRESETS_KEY)
     out = {}
     for name, spec in (raw if isinstance(raw, dict) else {}).items():
         if isinstance(spec, dict):
-            out[str(name)] = {"checks": list(spec.get("checks") or []),
-                              "filters": dict(spec.get("filters") or {})}
+            out[str(name)] = preset_spec(spec.get("scope"), spec.get("checks"), spec.get("filters"))
     return out
 
 
 def presets_set(presets):
-    """整体替换预设段。"""
-    return patch_settings({PRESETS_KEY: {str(k): v for k, v in (presets or {}).items()}})
+    """整体替换预设段（逐条过 `preset_spec`，落盘的一律是定版三键 + 可 JSON 化的值）。"""
+    got = {}
+    for name, spec in (presets or {}).items():
+        spec = spec if isinstance(spec, dict) else {}
+        got[str(name)] = preset_spec(spec.get("scope"), spec.get("checks"), spec.get("filters"))
+    return patch_settings({PRESETS_KEY: got})
 
 
 # ── N4 / N5 / 按路径分桶的诊断配置：薄包一层 session，统一把本模块的 load/save 注进去 ──

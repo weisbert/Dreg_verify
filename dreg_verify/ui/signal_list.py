@@ -31,6 +31,7 @@ from . import contracts as CT
 from . import names as N
 from . import terms as T
 from . import theme as TH
+from . import dialogs as DLG
 from .widgets import FlowLayout, mono_font as _mono_font, ui_font as _ui_font
 
 Qt = QtCore.Qt
@@ -38,7 +39,7 @@ LC = CT.ListCol
 LR = CT.ListRole
 
 __all__ = ["SignalListModel", "SignalListProxy", "SignalListView", "SignalListDelegate",
-           "ReasonWidget", "SignalListPanel", "ColumnsDialog", "PasteNamesDialog",
+           "ReasonWidget", "SignalListPanel",
            "build_reason_block", "status_key_of", "STATE_REQUIREMENTS"]
 
 #: 状态排序权重（升序 = 有问题的在前，一眼看见要处理的；降序 = 可建的在前）
@@ -1006,86 +1007,6 @@ class SignalListView(QtWidgets.QTreeView):
                 src.set_reason_height(self._reason_height(self._reason))   # 变窄 = 正文多几行
 
 
-# ═════════════════════════════ 两个小对话框 ═════════════════════════════
-class ColumnsDialog(QtWidgets.QDialog):
-    """「列设置…」（C-008 / C-046）。勾选列常驻第一列、不进本对话框（用户标注截图 c22c965c）。
-
-    ⏳ 暂住在这里：C2-d 正在写 `ui/dialogs.py`，C2-int 把本类与 `PasteNamesDialog` 一起搬过去
-    （objectName / 文案已按 names / terms 对齐，搬家时不用改调用方）。"""
-
-    def __init__(self, visible, parent=None):
-        super().__init__(parent)
-        self.setObjectName(N.DLG_COLUMNS)
-        self.setWindowTitle(T.DLG_COLUMNS_TITLE)
-        lay = QtWidgets.QVBoxLayout(self)
-        self.list = QtWidgets.QListWidget(self)
-        self.list.setObjectName(N.DLG_COLUMNS_LIST)
-        self.list.setFont(_ui_font())
-        for col in LC:
-            if col == LC.CHECK:
-                continue                                                 # 勾选列不进列设置
-            key = CT.LIST_COL_KEYS[col]
-            item = QtWidgets.QListWidgetItem(T.LIST_HEADERS.get(key) or key, self.list)
-            item.setData(Qt.UserRole, key)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if col in visible else Qt.Unchecked)
-        lay.addWidget(self.list)
-        box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, self)
-        box.button(QtWidgets.QDialogButtonBox.Ok).setText(T.DLG_YES)
-        box.button(QtWidgets.QDialogButtonBox.Cancel).setText(T.DLG_NO)
-        box.accepted.connect(self.accept)
-        box.rejected.connect(self.reject)
-        lay.addWidget(box)
-
-    def selection(self):
-        """→ {列键: 是否可见}（不含常驻的勾选列）。"""
-        out = {}
-        for i in range(self.list.count()):
-            it = self.list.item(i)
-            out[str(it.data(Qt.UserRole))] = it.checkState() == Qt.Checked
-        return out
-
-
-class PasteNamesDialog(QtWidgets.QDialog):
-    """「粘贴名单勾选…」（C-290）。每行一个信号名，可带位宽切片、大小写无关。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName(N.DLG_PASTE_NAMES)
-        self.setWindowTitle(T.DLG_PASTE_NAMES_TITLE)
-        lay = QtWidgets.QVBoxLayout(self)
-        hint = QtWidgets.QLabel(T.DLG_PASTE_NAMES_HINT, self)
-        hint.setWordWrap(True)
-        hint.setFont(_ui_font(TH.FS_UI_SMALL))
-        hint.setStyleSheet("color:%s;" % TH.MUTE)
-        lay.addWidget(hint)
-        # 属性名避开 text / result —— QDialog 的这两个名字被 Qt 与测试夹具当方法调（会炸在夹具里）
-        self.editor = QtWidgets.QPlainTextEdit(self)
-        self.editor.setObjectName(N.DLG_PASTE_NAMES_TEXT)
-        self.editor.setFont(_mono_font())
-        lay.addWidget(self.editor)
-        self.result_label = QtWidgets.QLabel("", self)
-        self.result_label.setObjectName(N.DLG_PASTE_NAMES_RESULT)
-        self.result_label.setWordWrap(True)
-        self.result_label.setFont(_ui_font(TH.FS_UI_SMALL))
-        lay.addWidget(self.result_label)
-        box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, self)
-        box.button(QtWidgets.QDialogButtonBox.Ok).setText(T.DLG_YES)
-        box.button(QtWidgets.QDialogButtonBox.Cancel).setText(T.DLG_NO)
-        box.accepted.connect(self.accept)
-        box.rejected.connect(self.reject)
-        lay.addWidget(box)
-
-    def names(self):
-        out = []
-        for line in self.editor.toPlainText().splitlines():
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            out.append(re.sub(r"\[[^\]]*\]\s*$", "", s).strip().lower())
-        return out
-
-
 # ═════════════════════════════ 清单区面板 ═════════════════════════════
 class SignalListPanel(QtWidgets.QWidget):
     """③ 清单区整块：头部计数 / 列设置 / 排序 + 两级视图 + 底部工具条 6 键。
@@ -1268,7 +1189,7 @@ class SignalListPanel(QtWidgets.QWidget):
         self.set_visible_columns(cols)
 
     def open_columns_dialog(self):
-        dlg = ColumnsDialog(self.visible_columns(), self)
+        dlg = DLG.ColumnsDialog(self.visible_columns(), self)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return {}
         sel = dlg.selection()
@@ -1387,7 +1308,7 @@ class SignalListPanel(QtWidgets.QWidget):
 
     def open_paste_names_dialog(self):
         """C-290 粘贴一份信号名单，一次勾上对应的信号。"""
-        dlg = PasteNamesDialog(self)
+        dlg = DLG.PasteNamesDialog(self)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return ([], [])
         wanted = dlg.names()
@@ -1395,9 +1316,8 @@ class SignalListPanel(QtWidgets.QWidget):
         hit = [by_low[w] for w in wanted if w in by_low]
         miss = [w for w in wanted if w not in by_low]
         self._set_checked(hit, True)
-        text = T.DLG_PASTE_NAMES_RESULT_FMT.format(
-            n=len(hit), m=len(miss), names="、".join(miss[:TH.IMPORT_MISSING_LIST_MAX]))
-        dlg.result_label.setText(text)
+        # 结果行的拼法在对话框里（C-290 / C-270 点名在前），这里不另写一份
+        text = dlg.set_result(len(hit), miss[:TH.IMPORT_MISSING_LIST_MAX])
         self.statusMessage.emit(text)
         return (hit, miss)
 

@@ -59,6 +59,8 @@ LIST_COL_KEYS = {ListCol.CHECK: "check", ListCol.NEG: "neg", ListCol.NAME: "name
                  ListCol.KIND: "kind", ListCol.FORM: "form", ListCol.PREFIX: "prefix", ListCol.EXPR: "expr"}
 #: settings 键：列可见性 {列键: bool} 与列序
 SETTINGS_LIST_COLUMNS = "list_columns"
+#: settings 键：筛选 / 勾选预设 `{名字: {scope, checks, filters}}`（C-291；形状见 `persist.preset_spec`）
+SETTINGS_PRESETS = "presets"
 
 _USER_ROLE = 0x0100     # Qt.UserRole
 

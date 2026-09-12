@@ -545,30 +545,115 @@ def _def_confirm_dup(self, *a, **k):
     return True
 
 
+# ── v2 `ui/dialogs.py` 的十个对话框：`类.ask` / `ask_save` / `ask_manage` 共 11 个入口 ──
+# 默认答案 = 「用户按了确定、一个默认值都没改」的**观察结果**（不是把 dialogs.py 的逻辑抄一遍）。
+# 加这一层不是为了防阻塞（`QDialog.exec` 那条已经把框拦下了），而是为了让调用方的测试能直接写
+# `answers={"ConfirmDialog.ask": False}` 给一个**领域值**，不必去构造那一框的内部状态。
+# ⚠ 反过来：测 dialogs.py 本身的用例要的是真对话框，那边写 `answers={"ask": ui_harness.REAL}` 跳过本层。
+def _def_dlg_true(self, *a, **k):
+    """确认类：确定 / 仍要写出 / 知道了。"""
+    return True
+
+
+def _def_dlg_rename(self, *a, **k):
+    """重命名列：确定但没改名 → 原样返回当前列名（`ask(current, …)`，self = current）。"""
+    return str(self or "")
+
+
+def _def_dlg_no_change_map(self, *a, **k):
+    """mux 数据值 / 列设置：确定但一个都没改 → 空补丁（调用方「给了哪个键改哪个」）。"""
+    return {}
+
+
+def _def_dlg_no_names(self, *a, **k):
+    """粘贴名单：一个名字都没粘。"""
+    return []
+
+
+def _def_dlg_preset_save(self, *a, **k):
+    """存预设：没起名（真框此时 validate 不放行，等同于用户没存成）。"""
+    return ""
+
+
+def _def_dlg_preset_manage(self, *a, **k):
+    """管理预设：没选、没删。"""
+    return ("", ())
+
+
+def _def_dlg_batch_fill(self, *a, **k):
+    """批量填：三选一停在「填一个固定值」、范围停在「只填选中的」、值没填。"""
+    return {"mode": "const", "value": None, "scope": "selected"}
+
+
+def _def_dlg_export_options(self, *a, **k):
+    """.sv 导出选项：原样返回调用方传进来的默认选项（`ask(defaults, …)`，self = defaults）。"""
+    return dict(self or {})
+
+
 CUSTOM_MODALS = [
     ("dreg_verify.gui", "SignalView", "_ask_export_options", _def_export_options),
     ("dreg_verify.gui", "MainWindow", "_ask_export_options", _def_export_options),
     ("dreg_verify.gui", "MainWindow", "_ask_nets_pages", _def_nets_pages),
     ("dreg_verify.gui", "MainWindow", "_confirm_dup_labels", _def_confirm_dup),
+    ("dreg_verify.ui.dialogs", "ConfirmDialog", "ask", _def_dlg_true),
+    ("dreg_verify.ui.dialogs", "RenameColumnDialog", "ask", _def_dlg_rename),
+    ("dreg_verify.ui.dialogs", "MuxDataDialog", "ask", _def_dlg_no_change_map),
+    ("dreg_verify.ui.dialogs", "ColumnsDialog", "ask", _def_dlg_no_change_map),
+    ("dreg_verify.ui.dialogs", "PasteNamesDialog", "ask", _def_dlg_no_names),
+    ("dreg_verify.ui.dialogs", "PresetsDialog", "ask_save", _def_dlg_preset_save),
+    ("dreg_verify.ui.dialogs", "PresetsDialog", "ask_manage", _def_dlg_preset_manage),
+    ("dreg_verify.ui.dialogs", "DupLabelsDialog", "ask", _def_dlg_true),
+    ("dreg_verify.ui.dialogs", "ImportReportDialog", "ask", _def_dlg_true),
+    ("dreg_verify.ui.dialogs", "BatchFillDialog", "ask", _def_dlg_batch_fill),
+    ("dreg_verify.ui.dialogs", "ExportOptionsDialog", "ask", _def_dlg_export_options),
 ]
 
 #: v2 自建对话框（模块, 类名）。`QDialog.exec` 那条已经把它们拦下了，这里**额外按类名**
 #: 再记一条：调用记成 `ColumnsDialog.exec`，于是测试可以写
 #: `answers={"ColumnsDialog.exec": QDialog.Rejected}`、`rec.of("PasteNamesDialog")`，
 #: 不必去猜窗口标题。模块还没落地的条目记进 `rec.missing`，不报错。
-#: ⏳ C2-d 的 `ui/dialogs.py` 到位后，这两条的模块名改成 `dreg_verify.ui.dialogs` 并把其余对话框补上。
 V2_DIALOGS = [
-    ("dreg_verify.ui.signal_list", "ColumnsDialog"),      # 列设置 C-008 / C-046
-    ("dreg_verify.ui.signal_list", "PasteNamesDialog"),   # 粘贴名单勾选 C-290
+    ("dreg_verify.ui.dialogs", "ConfirmDialog"),          # 三处确认 C-089/C-102/C-094
+    ("dreg_verify.ui.dialogs", "RenameColumnDialog"),     # 重命名列 C-091
+    ("dreg_verify.ui.dialogs", "MuxDataDialog"),          # mux 数据值整表 C-110
+    ("dreg_verify.ui.dialogs", "ColumnsDialog"),          # 列设置 C-008 / C-046
+    ("dreg_verify.ui.dialogs", "PasteNamesDialog"),       # 粘贴名单勾选 C-290
+    ("dreg_verify.ui.dialogs", "PresetsDialog"),          # 预设 C-291
+    ("dreg_verify.ui.dialogs", "DupLabelsDialog"),        # 重复 assert 标号 C-164
+    ("dreg_verify.ui.dialogs", "ImportReportDialog"),     # 导入结果 C-194
+    ("dreg_verify.ui.dialogs", "BatchFillDialog"),        # 批量填期望 C-298
+    ("dreg_verify.ui.dialogs", "ExportOptionsDialog"),    # .sv 导出选项 C-159..C-161
 ]
 
-#: 自建对话框方法 → 它弹出的窗口标题（这样 `answers` 也能按标题写，与 exec 拦截口径一致）
+
+def _v2_dialog_titles():
+    """v2 对话框入口 → 窗口标题，**取自 `dialogs.TITLES`**（别在这里另抄一份字面量）。
+
+    `ConfirmDialog.ask` 一个入口对三个标题（清零 / 删反例 / auto→期望），给不出唯一标题，
+    所以不进这张表 —— 它的标题仍由 `QDialog.exec` 那一层记（答案也按那一层的结果码写）。"""
+    try:
+        from dreg_verify.ui import dialogs as _D
+    except ImportError:                      # 还没落地（或没装 PySide6）：不记标题，不报错
+        return {}
+    t = _D.TITLES
+    return {"RenameColumnDialog.ask": t["rename_col"], "MuxDataDialog.ask": t["mux_data"],
+            "ColumnsDialog.ask": t["columns"], "PasteNamesDialog.ask": t["paste_names"],
+            "PresetsDialog.ask_save": t["presets_save"], "PresetsDialog.ask_manage": t["presets_manage"],
+            "DupLabelsDialog.ask": t["dup_labels"], "ImportReportDialog.ask": t["import_report"],
+            "BatchFillDialog.ask": t["batch_fill"], "ExportOptionsDialog.ask": t["export_options"]}
+
+
+#: 自建对话框方法 → 它弹出的窗口标题（这样 `answers` 也能按标题写，与 exec 拦截口径一致）。
+#: ⚠ 按标题给答案时，落点是**哪一层**取决于这张表：v2 的 `类.ask` 在表里 → 命中的是 ask 这一层，
+#: 答案要写**领域值**（`False` / `None` / dict），不是 `QDialog.Rejected` 那种结果码。
+#: 想按结果码答（= 走真对话框）就写 `answers={"ask": ui_harness.REAL, ...}` 跳过 ask 这一层。
 CUSTOM_TITLES = {
     "SignalView._ask_export_options": "导出 .sv 选项",
     "MainWindow._ask_export_options": "生成 .sv — 导出选项",
     "MainWindow._ask_nets_pages": "导出 nets.txt — 选类别",
     "MainWindow._confirm_dup_labels": "重复 assert 标号（非法 SV）",
 }
+CUSTOM_TITLES.update(_v2_dialog_titles())
 
 #: 会阻塞 offscreen 的标准模态入口全名（auto_dialogs 全拦）。
 STATIC_MODALS = [

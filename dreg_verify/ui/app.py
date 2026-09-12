@@ -40,7 +40,7 @@ import sys
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from . import contracts, names, terms, theme
+from . import contracts, dialogs, names, persist, terms, theme
 from .bus import HighlightBus
 from .coverage import CoverageControl
 from .filter_bar import FilterBar
@@ -742,31 +742,50 @@ class MainWindow(QtWidgets.QMainWindow):
         px = self.list_panel.proxy
         self.filter_bar.set_counts(px.n_visible(), px.n_total(), px.n_by_input())
 
-    def save_preset(self):
-        """C-291 存预设：勾选集由 state 出、筛选由②出，落 settings["presets"]。
+    def _presets(self):
+        """settings 里那一段预设，逐条按定版三键规整（旧的两键文件缺 scope 补空串）。"""
+        raw = (self._state.settings() or {}).get(contracts.SETTINGS_PRESETS)
+        out = {}
+        for nm, spec in (raw if isinstance(raw, dict) else {}).items():
+            spec = spec if isinstance(spec, dict) else {}
+            out[str(nm)] = persist.preset_spec(spec.get("scope"), spec.get("checks"),
+                                               spec.get("filters"))
+        return out
 
-        ⏳ 取名用的是标准 `QInputDialog`；C2-d 的 `DLG_PRESETS` 到位后换成它（本处三行）。"""
-        name, ok = QtWidgets.QInputDialog.getText(self, terms.PRESETS, terms.PRESET_SAVE)
+    def save_preset(self):
+        """C-291 存预设：勾选集由 state 出、筛选由②出，落 settings["presets"]。"""
+        presets = self._presets()
+        name = dialogs.PresetsDialog.ask_save(sorted(presets), self)
         name = str(name or "").strip()
-        if not ok or not name:
+        if not name:
             return ""
-        presets = dict((self._state.settings() or {}).get("presets") or {})
-        spec = dict(self.filter_bar.preset_payload())
+        spec = self.filter_bar.preset_payload()       # {scope, checks=None, filters}
         spec["checks"] = list(self._state.checked_names(self._scope()))
         presets[name] = spec
-        self._state.save_settings({"presets": presets})
+        self._state.save_settings({contracts.SETTINGS_PRESETS: presets})
         self.filter_bar.rebuild_presets_menu()
         self.set_status("%s · %s" % (terms.PRESETS, name))
         return name
 
     @QtCore.Slot(str)
     def load_preset(self, name):
-        """C-291 取预设：范围 → 筛选 → 勾选，三样一起回到当时的样子。"""
+        """C-291 取预设：范围 → 筛选 → 勾选，三样一起回到当时的样子。
+
+        名字为空 = 走「管理预设」（选一条取回 / 删掉几条），C2-d 的 `DLG_PRESETS` 一框两用。"""
+        presets = self._presets()
         nm = str(name or "")
         if not nm:
-            self.set_status(terms.PRESET_MANAGE)
-            return ""
-        spec = ((self._state.settings() or {}).get("presets") or {}).get(nm)
+            nm, deleted = dialogs.PresetsDialog.ask_manage(sorted(presets), self)
+            if deleted:
+                for d in deleted:
+                    presets.pop(str(d), None)
+                self._state.save_settings({contracts.SETTINGS_PRESETS: presets})
+                self.filter_bar.rebuild_presets_menu()
+            nm = str(nm or "")
+            if not nm:
+                self.set_status(terms.PRESET_MANAGE)
+                return ""
+        spec = presets.get(nm)
         if not isinstance(spec, dict):
             return ""
         if spec.get("scope"):

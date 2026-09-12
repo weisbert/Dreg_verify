@@ -22,7 +22,7 @@ import re
 
 from PySide6 import QtCore, QtWidgets
 
-from dreg_verify.ui import contracts, names, terms, theme
+from dreg_verify.ui import contracts, names, persist, terms, theme
 from dreg_verify.ui.widgets import CheckableMenu, SegmentedControl, ui_font as _ui_font
 
 #: 搜索框去抖（ms）——键入不逐字符重筛（C-030）。
@@ -347,7 +347,7 @@ class FilterBar(QtWidgets.QWidget):
     def preset_names(self):
         st = self._state
         try:
-            data = st.settings().get("presets") or {} if st is not None else {}
+            data = st.settings().get(contracts.SETTINGS_PRESETS) or {} if st is not None else {}
         except Exception:                                          # noqa: BLE001
             data = {}
         return sorted(data) if isinstance(data, dict) else []
@@ -370,8 +370,12 @@ class FilterBar(QtWidgets.QWidget):
         return self.presets_menu
 
     def preset_payload(self):
-        """存预设时交给 dialogs/persist 的载荷（C-291：勾选由 state 出，筛选由本行出）。"""
-        return {"scope": self.scope(), "filters": self.filters()}
+        """存预设时交给 dialogs/persist 的载荷（C-291：勾选由 state 出，筛选由本行出）。
+
+        形状是定版的三键 `{scope, checks, filters}`（`persist.preset_spec`，C2-int 主控裁决）：
+        本行给得出 scope 与 filters，`checks` 留 None 由组合根填 —— 三处各拼一份的时候，
+        「存的时候两键、读的时候三键」这种事在界面上只表现为「取回预设后勾选没回来」。"""
+        return persist.preset_spec(scope=self.scope(), filters=self.filters())
 
     # ───────── 筛选值 ─────────
     def filters(self):
