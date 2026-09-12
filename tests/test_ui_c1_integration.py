@@ -261,6 +261,11 @@ QTFREE_ALLOWED = {
     "truth/delegate.py": {
         "truth_edit": "parse_int —— 编辑器即时校验红框（C-083，不阻止提交）",
     },
+    "truth/io.py": {
+        "exports": "signal_csv_text / write_signal_csv / render_sv / signal_build_vectors —— 单信号 CSV 与 .sv 同源（§6.15，C-139 忠于产物）",
+        "truth_edit": "parse_int —— 导入期望文件时八种数值写法只此一份",
+        "inputs_table": "input_rows / drive_ctx —— CSV 的行标签与 force / RF_WRITE 行",
+    },
 }
 
 
