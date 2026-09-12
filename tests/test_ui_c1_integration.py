@@ -242,6 +242,14 @@ QTFREE_ALLOWED = {
     "sv_preview.py": {
         "exports": "render_sv / build_skipped / sv_outcome —— 预览与导出同源（§6.8 一条路径原则）",
     },
+    "diagnostics.py": {
+        "session": "探针前缀 / 强制 force / RTL 补充逻辑三套文本的 parse/render/merge/校验 —— "
+                   "C-248/C-249 的「文件格式不变」就靠这一份，界面一个字节都不自己拼",
+        "edits": "deserialize_rows / restore_cols —— C-302 把旧版行模型迁成 v2 列模型，auto 由 "
+                 "restore_cols 权威重算（迁移的口径不在视图里另写一套）",
+        "inputs_table": "input_rows 的 needs_prefix / guessed / found_in —— 「还差几根网没前缀」"
+                        "与探针前缀影响面（C-204）都按这三项数，不在视图里猜",
+    },
     "dialogs.py": {
         "edits": "反例列的保护性判定（哪些是自定义命名 / 手调过错值的）",
         "truth_edit": "check_col_name / parse_int —— 重命名列与 mux 数据值的三道校验",

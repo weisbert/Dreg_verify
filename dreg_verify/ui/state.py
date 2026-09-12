@@ -253,6 +253,38 @@ class WorkbenchState(QtCore.QObject):
         p = self.provider(view_id)
         return bool(p is not None and p.has_page())
 
+    def resolve_root(self, name, view_id=None):
+        """一个名字 → 它在这个范围里的根：`{"name", "kind", "matched_name"}`；映不到 → None。
+
+        `name` 既可以是清单上的**顶层名**，也可以是引擎实际命中的**源名**（`matched_name`）。
+        两个域要分开认，是因为旧版 edits 桶按【源 out_name】键、v2 按【Topout 顶层名】键，
+        dft 改名根两者**不同名**（`d_vco_en_faston_ls` ←(level_shift) `d_vco_en_faston`）——
+        这一跳只有 `topout.resolve_root` 知道怎么走，而视图不直接 import 引擎（I-19），
+        所以从状态层借（诊断抽屉的 C-302 旧版编辑迁移是唯一用户）。
+
+        走的是 provider 的**骨架**清单（只 resolve_root、不出向量），比 `models()` 便宜，
+        也不要求清单已经分析完；结果按 (范围, 配置版本, wb) 缓存一份，一次迁移只算一趟。"""
+        vid = self._vid(view_id)
+        key = (vid, self._cfg_ver, id(self.wb))
+        cache = getattr(self, "_root_idx", None)
+        if cache is None or cache[0] != key:
+            idx = {}
+            prov = self.provider(vid)
+            if self.wb is not None and prov is not None:
+                try:
+                    for m in (prov.skeleton_models() or []):
+                        ent = {"name": m.get("name"), "kind": m.get("kind"),
+                               "matched_name": m.get("matched_name")}
+                        for k in (m.get("name"), m.get("matched_name")):
+                            low = str(k or "").strip().lower()
+                            if low:
+                                idx.setdefault(low, ent)
+                except Exception:       # noqa: BLE001  解析不了整张表也不该把调用方拖崩
+                    idx = {}
+            cache = (key, idx)
+            self._root_idx = cache
+        return cache[1].get(str(name or "").strip().lower())
+
     # ═════════════ ③ 清单模型 ═════════════
     def models(self, view_id=None):
         return self._models.get(self._vid(view_id), [])
