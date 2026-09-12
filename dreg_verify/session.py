@@ -193,31 +193,121 @@ def record_last_export(kind, path, load=None, save=None):
     return item
 
 
+# ───────────── 按 Excel 路径分桶的键：一个文件只能有一个桶（R2-05） ─────────────
+def norm_path_key(path):
+    """按路径分桶时的**比较键**：`os.path.normcase(os.path.abspath(path))`。
+
+    同一个文件被写成 `C:\\x\\t.xlsx` / `C:/x/t.xlsx` / 相对路径 / 大小写不同时，
+    此前会分成两个桶 —— 用户从「最近打开」进来看到手填期望都在，自己敲一遍路径进来
+    就「全没了」（其实在另一个桶里）。edits 桶与 settings 的三套按路径分桶配置共用这一条。
+    """
+    p = str(path or "")
+    if not p:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(p))
+    except (OSError, ValueError):                 # 非法盘符 / 超长路径：退回只归一大小写
+        return os.path.normcase(p)
+
+
+def path_bucket_keys(mapping, path):
+    """`mapping` 里所有指向**同一个文件**的键（按文件里的出现顺序）。"""
+    nk = norm_path_key(path)
+    return [k for k in (mapping or {}) if norm_path_key(k) == nk]
+
+
+def canonical_path_key(mapping, path):
+    """这张表该写进哪个键（R2-05）。
+
+    盘上已经有桶 → **沿用盘上那个拼法**（条目最多的那份；一样多取文件里靠前的 =
+    先写进去的那份）；一个都没有 → 用调用方给的拼法。
+
+    ⚠ 刻意**不**把键改写成 `norm_path_key` 的形式：`normcase` 在 Windows 上会把盘符和
+    整条路径小写，而『排查(旧)』门面是拿**它自己那个拼法**去 `.get(path)` 的 —— 改了键，
+    同事回退旧版本就会发现自己的活「没了」（其实还在文件里，只是键对不上，C-235）。
+    """
+    keys = path_bucket_keys(mapping, path)
+    if not keys:
+        return path
+    return max(keys, key=lambda k: (_bucket_size((mapping or {}).get(k)), -keys.index(k)))
+
+
+def _bucket_size(v):
+    """一个桶「有多少条目」——合并冲突时按它比大小（R2-05）。"""
+    if isinstance(v, dict):
+        return sum(_bucket_size(x) for x in v.values()) or len(v)
+    if isinstance(v, (list, tuple, set)):
+        return len(v)
+    return 1 if v not in (None, "", 0, False) else 0
+
+
+def merge_buckets(a, b):
+    """两份指向同一个文件的桶合成一份（R2-05）。**不改入参**。
+
+    规则（两个拼法各存了一半时用得上）：
+      · dict → 逐键往下合；两边都有同一个键就比「条目数」，**多的那份赢**，
+        一样多时 `b` 赢（`b` 是文件里靠后的那份 = 后写进去的）；
+      · list / tuple → 并集（去重后排序，元素不可比时保 `b`）；
+      · 其余 → `b` 赢。
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = dict(a)
+        for k, v in b.items():
+            out[k] = merge_buckets(a[k], v) if k in a else v
+        return out
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        try:
+            return sorted(set(a) | set(b))
+        except TypeError:
+            return list(b) if len(b) >= len(a) else list(a)
+    if _bucket_size(a) > _bucket_size(b):
+        return a
+    return b
+
+
+def merge_path_buckets(mapping, path):
+    """`mapping` 里所有指向同一个文件的桶合成一份（R2-05）。没有 → `{}`。"""
+    out = None
+    for k in path_bucket_keys(mapping, path):
+        v = (mapping or {}).get(k)
+        out = v if out is None else merge_buckets(out, v)
+    return out if isinstance(out, dict) else (out if out is not None else {})
+
+
 def save_path_map(key, excel_path, value, load=None, save=None, skip_under_pytest=False):
     """把【按 Excel 路径分桶】的配置段写进 settings：settings[key][excel_path] = value。
     value 为空 → 删掉这张表的条目(= 清除配置)。探针前缀/强制force/RTL 补充三套共用。
 
     load/save 可注入（gui.py 传自己的模块级 _load_settings/_save_settings，测试 monkeypatch 它们
     时仍然生效——绑定发生在调用时刻，不是构造时刻）。
+
+    R2-05：同一个文件的**别的拼法**在这里一并收拢——写进 `canonical_path_key` 挑出来的
+    那一个键，其余同指一个文件的旧键删掉（内容已由 `path_map_of` 合并读出）。
     """
     if skip_under_pytest and "pytest" in sys.modules:
         return False
     st = (load or load_settings)()
     all_maps = st.get(key, {})
+    if not isinstance(all_maps, dict):
+        all_maps = {}
+    dup = path_bucket_keys(all_maps, excel_path)
+    canon = canonical_path_key(all_maps, excel_path)
+    for k in dup:
+        all_maps.pop(k, None)
     if value:
-        all_maps[excel_path] = value
-    else:
-        all_maps.pop(excel_path, None)
+        all_maps[canon] = value
     st[key] = all_maps
     (save or save_settings)(st)
     return True
 
 
 def path_map_of(key, excel_path, load=None):
-    """读回 settings[key][excel_path]（缺省 {}）——与 save_path_map 对称。"""
+    """读回 settings[key][excel_path]（缺省 {}）——与 save_path_map 对称。
+
+    R2-05：同一个文件的几种拼法合并读出（见 `merge_path_buckets` 的规则）。"""
     st = (load or load_settings)()
     seg = st.get(key, {})
-    return seg.get(excel_path, {}) if isinstance(seg, dict) else {}
+    return merge_path_buckets(seg, excel_path) if isinstance(seg, dict) else {}
 
 
 def code_version(root=None):
@@ -644,8 +734,13 @@ def apply_config(payload, current_excel=""):
 
 # ───────────────────────── 诊断配置：探针前缀 / 强制 force / RTL 补充逻辑 ─────────────────────────
 def read_text_file(path):
-    """读一个纯文本配置文件(探针前缀映射 .txt / 补充逻辑 .json)。IO 失败抛 OSError。"""
-    with open(path, "r", encoding="utf-8") as f:
+    """读一个纯文本配置文件(探针前缀映射 .txt / 补充逻辑 .json)。IO 失败抛 OSError。
+
+    R2-08：用 `utf-8-sig` —— Windows 记事本 / Excel 存出来的 .txt 带 BOM，按 `utf-8` 读
+    会把 U+FEFF 留在第一行开头。那一行是 `信号名=层级路径` 或组头 `路径:`，于是前缀被存成
+    `\\ufeffU_TOP.U_SUB`，拼进 .sv 的层级路径里一路带到仿真；更常见的是第一行是信号名，
+    键变成 `\\ufeffd_xxx`，**前缀静默不生效**（界面上看前缀配好了，产物里却还是裸名）。"""
+    with open(path, "r", encoding="utf-8-sig") as f:
         return f.read()
 
 
@@ -673,10 +768,13 @@ def merge_probe_prefix_text(cur_text, new_text):
 
 
 def parse_force_signal_text(text):
-    """强制 force 编辑框文本 → {基名低}。每行一个基名；# 开头/行尾 = 注释；空行忽略。"""
+    """强制 force 编辑框文本 → {基名低}。每行一个基名；# 开头/行尾 = 注释；空行忽略。
+
+    R2-08：行首 BOM 一并剥掉 —— 留着的话第一个名字变成 `\\ufeffd_xxx`，对不上任何输入基名，
+    那一条 force 静默不生效（名单里明明写着）。"""
     names = set()
     for line in (text or "").splitlines():
-        s = line.split("#", 1)[0].strip().lower()
+        s = line.lstrip("﻿").split("#", 1)[0].strip().lower()
         if s:
             names.add(s)
     return names

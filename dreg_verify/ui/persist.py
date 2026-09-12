@@ -31,6 +31,7 @@ __all__ = [
     "is_isolated", "may_read_machine_settings",
     "load_settings", "save_settings", "patch_settings",
     "load_edits_all", "save_edits_all", "load_edits_bucket", "write_edits_bucket",
+    "take_corrupt_backup",
     "load_legacy_bucket", "legacy_bucket_counts",
     "list_columns_get", "list_columns_set", "presets_get", "presets_set",
     "push_recent", "recent_excels", "update_recent_count",
@@ -213,19 +214,48 @@ def store_export_options(opt):
 
 
 # ═════════════════════ ② edits 文件（劳动成果）═════════════════════
+#: R2-07：上一次读 edits 文件时发现【内容坏了】并另存出来的备份路径（`take_corrupt_backup`
+#: 取走就清空）。放模块级而不改 `load_edits_all` 的签名：它有五个调用点，而「坏文件」
+#: 一张表只发生一次（原文件已被改名，下一次读就是干净的空文件了）。
+_corrupt_backup = ""
+
+
 def load_edits_all():
-    """整份 edits 文件 `{Excel 全路径: 桶}`（坏文件 → `{}`，每次载表都跑、绝不能崩）。"""
-    return ED.load_edits_file(EDITS_PATH)
+    """整份 edits 文件 `{Excel 全路径: 桶}`（每次载表都跑、绝不能崩）。
+
+    R2-07：内容坏掉的文件会被 `edits.load_edits_file` 改名另存，备份路径记在
+    `_corrupt_backup` 里等 `take_corrupt_backup()` 取走点名（此前是静默 `{}`）。"""
+    def _on_corrupt(bak):
+        global _corrupt_backup
+        _corrupt_backup = str(bak or "")
+    return ED.load_edits_file(EDITS_PATH, on_corrupt=_on_corrupt)
+
+
+def take_corrupt_backup():
+    """取走并清掉「上一次读到坏文件」的备份路径（`state.load` 拿去报给用户）。没有 → `""`。"""
+    global _corrupt_backup
+    bak, _corrupt_backup = _corrupt_backup, ""
+    return bak
 
 
 def save_edits_all(d):
-    """整份写回。I-08 / C-246 的 no-op 规则与 settings 同（由 `edits.save_edits_file` 判）。"""
+    """整份写回。I-08 / C-246 的 no-op 规则与 settings 同（由 `edits.save_edits_file` 判）。
+
+    R2-07：文件**在**、却还读不出来（占用 / 权限 / 备份也改名失败）时**不写**。
+    整份覆盖以一份空 `{}` 为基底，写下去就是把别的表的桶与 legacy 九段一起销毁。"""
+    if ED.edits_file_unreadable(EDITS_PATH):
+        return False
     return ED.save_edits_file(EDITS_PATH, d, _EDITS_DEFAULT)
 
 
 def load_edits_bucket(excel_path):
-    """这张表的桶（不存在 → `{}`）。legacy 段与 v2 段都在里面，各读各的（A3 §3.2 C）。"""
-    b = load_edits_all().get(excel_path)
+    """这张表的桶（不存在 → `{}`）。legacy 段与 v2 段都在里面，各读各的（A3 §3.2 C）。
+
+    R2-05：同一个文件被写成 `C:\\x\\t.xlsx` / `C:/x/t.xlsx` / 相对路径 / 大小写不同时
+    分成了两个桶 —— 用户从「最近打开」进来看到手填期望都在，自己敲一遍路径进来就「全没了」。
+    这里按 `session.norm_path_key` 把同指一个文件的几个桶**合并读出**（规则见
+    `session.merge_buckets`：dict 逐键往下合、条目多的赢、一样多取靠后的）。"""
+    b = session.merge_path_buckets(load_edits_all(), excel_path)
     return dict(b) if isinstance(b, dict) else {}
 
 
@@ -262,7 +292,16 @@ def write_edits_bucket(excel_path, patch):
         下次开工具会变回全勾，他一导出就是整表都出来了。`None` 才是「全勾 = 默认态」（C-243）。
     """
     allb = load_edits_all()
-    bucket = dict(allb.get(excel_path) or {})
+    # R2-05：同一个文件的几种拼法先合成一个桶，写回**盘上那个拼法**（`canonical_path_key`），
+    # 其余同指一个文件的旧键删掉。刻意不把键改写成归一形式：那会让『排查(旧)』门面按它
+    # 自己的拼法 `.get(path)` 时找不到桶（C-235）。
+    dup = session.path_bucket_keys(allb, excel_path)
+    key = session.canonical_path_key(allb, excel_path)
+    bucket = session.merge_path_buckets(allb, excel_path)
+    bucket = dict(bucket) if isinstance(bucket, dict) else {}
+    for k in dup:
+        allb.pop(k, None)
+    excel_path = key
     for seg in V2_SEGMENTS:
         if seg not in (patch or {}):
             continue                                  # 没提这一段 → 一个字节都不碰

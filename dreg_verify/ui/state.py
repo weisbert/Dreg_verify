@@ -185,6 +185,9 @@ class WorkbenchState(QtCore.QObject):
         self._restore_coverage(st)
         self._restore_config(path)
         self._bucket = persist.load_edits_bucket(path)      # C-236：按【已载入】路径分桶
+        bak = persist.take_corrupt_backup()                 # R2-07：整份编辑文件读不出来
+        if bak:
+            self.status(terms.EDITS_CORRUPT_BACKED_UP_FMT.format(path=bak))
         self._cfg_ver += 1
         persist.push_recent(path)                           # 顺带照写 last_excel（C-003 / C-228）
         self.workbookChanged.emit()

@@ -61,6 +61,7 @@ bucket["view_mux_data"] = {view_id: {信号名low: {物理基名low: int}}}—�
 import json
 import os
 import sys
+import time
 
 from dreg_verify import expr as E
 from dreg_verify import generator
@@ -97,15 +98,68 @@ ROW_PERSIST_KEYS = ("kind", "wrong_value", "name", "user_added", "note", "design
 
 
 # ═══════════════════════ ① edits 文件 IO 与序列化 ═══════════════════════
-def load_edits_file(path):
+#: 坏文件备份的后缀（`<原名>.corrupt-<YYYYmmdd-HHMMSS>`）——R2-07
+CORRUPT_SUFFIX_FMT = ".corrupt-%Y%m%d-%H%M%S"
+
+
+def load_edits_file(path, on_corrupt=None):
     """读取测试项编辑持久化文件。返回 {excel_path: {"edits": {...}, "neg_only": {...}}}。
-    文件不存在/损坏 → {}（每次加载 Excel 都跑，绝不能崩）。"""
+    文件不存在 → {}（每次加载 Excel 都跑，绝不能崩）。
+
+    R2-07：**内容坏了不再静默 `{}`**。写了一半（磁盘满 / 强杀进程）或被手改坏的文件，
+    此前读出来是空的——用户看到「一个编辑都没恢复」而没人说为什么，接着他第一次编辑，
+    `write_edits_bucket` 就以这份空 `{}` 为基底把**别的表的桶 + legacy 九段**一起覆盖没了。
+    现在：先把原文件改名成 `<原名>.corrupt-<YYYYmmdd-HHMMSS>` 存着（用户还能自己捞回去），
+    再返回 `{}`，并回调 `on_corrupt(备份路径)` 让上层点名报出来。
+
+    `on_corrupt(path_or_empty)`：备份成功给备份路径；**打不开**（占用/权限，不是内容坏）
+    或改名失败给 `""` —— 那种情况**文件还在原地**，`edits_file_unreadable` 会挡住这一趟写回。
+    """
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
-            return d if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001
+        if isinstance(d, dict):
+            return d
+    except FileNotFoundError:
         return {}
+    except OSError:                                  # 打不开：占用 / 权限 —— 别动它
+        if on_corrupt is not None:
+            on_corrupt("")
+        return {}
+    except Exception:                                # noqa: BLE001  坏 JSON / 截断
+        pass
+    bak = backup_corrupt_file(path)                  # 顶层不是 dict 也走这条（同样不可用）
+    if on_corrupt is not None:
+        on_corrupt(bak)
+    return {}
+
+
+def backup_corrupt_file(path):
+    """把读不出来的文件改名另存。返回备份路径；改不动（占用/权限）→ `""`（原文件留在原地）。"""
+    bak = path + time.strftime(CORRUPT_SUFFIX_FMT)
+    n = 0
+    while os.path.exists(bak):                       # 同一秒坏两回也不互相覆盖
+        n += 1
+        bak = "%s%s.%d" % (path, time.strftime(CORRUPT_SUFFIX_FMT), n)
+    try:
+        os.replace(path, bak)
+        return bak
+    except OSError:
+        return ""
+
+
+def edits_file_unreadable(path):
+    """文件**在**、却读不出来（占用 / 权限 / 内容坏且备份也没改动）→ True。
+
+    这一趟就别整份写回了（R2-07）：`save_edits_file` 是整份覆盖，以一份空 `{}` 为基底写下去
+    等于把别的表的桶与 legacy 九段全销毁，而用户什么提示都收不到。"""
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            return not isinstance(json.load(f), dict)
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def save_edits_file(path, d, default_path=DEFAULT_EDITS_PATH):
