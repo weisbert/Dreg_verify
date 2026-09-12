@@ -18,6 +18,7 @@ pytest.importorskip("PySide6")
 from dreg_verify import edits as ED                       # noqa: E402
 from dreg_verify import session                           # noqa: E402
 from dreg_verify.ui import persist as P                   # noqa: E402
+from dreg_verify.ui import terms as T                     # noqa: E402
 
 
 # ═════════════════════ P-22：pytest 外起窗的脚本别写用户真机 ═════════════════════
@@ -217,3 +218,102 @@ def test_p10_global_block_round_trips_without_drifting(tmp_path, monkeypatch):
     # Topout 的上限不在 `global` 段里（P-11 已登记 backlog）：导入时它走 C-192 的「先清空」
     # 回出厂 256，而**不是**被配置里那个 777 顶掉 —— 后者才是 P-10 那 26003 字节的来处
     assert int(st.coverage("topout").max_tests) == session.DEFAULT_MAX_TESTS
+
+
+# ═════════════════════ P-13：状态筛的 note 档归属按 v1 ═════════════════════
+#: (status_detail, 这一档在 v1 四档 `status` 里是什么) —— v1 `SignalView._apply_filter` 判的就是它
+_V1_STATUS_OF = (
+    ("clean", "ok"), ("wire-fallback", "ok"), ("needs-prefix", "ok"), ("risky-generated", "ok"),
+    ("bare-probe", "ok"), ("false-green", "ok"), ("spec-collision", "ok"),
+    ("unresolved", "unresolved"), ("parse-err", "error"), ("error", "error"), ("skip", "skip"),
+)
+
+
+@pytest.mark.parametrize("key,v1_status", _V1_STATUS_OF)
+def test_p13_note_rows_land_in_the_same_filter_bucket_as_v1(key, v1_status):
+    """「仅可建 / 仅有问题」以前只按色档判（ok / warn·bad），note 档两边都不进：
+
+      · `bare-probe`（输出裸名·已生成）v1 是 status=ok → v1「仅可建」里有它，v2 里没有；
+      · `skip`（只读回读）v1 是 status=skip → v1「仅有问题」里有它，v2 里也没有
+        —— btlp 镜像上「仅有问题」因此筛出 **0 条**（P-13）。
+
+    裁决：note 档按 v1 的 status 归位。warn / bad 两档 v2 本来就比 v1 严（`false-green` /
+    `spec-collision` 这些在 v1 里 status 还是 ok），那是 C-029 有意的改进，不回退。
+    """
+    m = {"name": "x", "status_detail": key, "status": v1_status}
+    ok = T.match_status(m, T.STATUS_FILTER_ITEMS[1])          # 仅可建
+    bad = T.match_status(m, T.STATUS_FILTER_ITEMS[2])         # 仅有问题
+    if key in T.NOTE_AS_OK_KEYS:
+        assert (ok, bad) == (True, False)
+    elif key in T.NOTE_AS_PROBLEM_KEYS:
+        assert (ok, bad) == (False, True)
+    else:
+        assert (ok, bad) == (T.tone_of(m) == "ok", T.tone_of(m) in T.PROBLEM_TONES)
+    assert T.match_status(m, "") is True                       # 「全部状态」谁都不筛
+
+
+def test_p13_pending_rows_are_in_neither_bucket():
+    """`pending`（还在后台展开）v1 里根本没有这一档：两边都不进，别让「分析中」的行
+    在筛选下闪进闪出。"""
+    m = {"name": "x", "status_detail": "pending", "status": "pending"}
+    assert T.match_status(m, T.STATUS_FILTER_ITEMS[1]) is False
+    assert T.match_status(m, T.STATUS_FILTER_ITEMS[2]) is False
+
+
+def test_p13_status_filter_on_the_btlp_mirror_matches_v1():
+    """镜像实证（不起窗，直接问引擎要清单）：两档筛出来的名单与 v1 `_apply_filter` 逐名相同。"""
+    from dreg_verify import excel_model, topout            # noqa: PLC0415
+    wb = excel_model.load_workbook(H.mirror_path("btlp"))
+    models = topout.topout_view_models(wb, mode="min", max_tests=256, exhaustive=False)
+    v1_ok = [m["name"] for m in models if m["status"] == "ok"]
+    v1_bad = [m["name"] for m in models if not (m["status"] == "ok" and not m["issues"])]
+    v2_ok = [m["name"] for m in models if T.match_status(m, T.STATUS_FILTER_ITEMS[1])]
+    v2_bad = [m["name"] for m in models if T.match_status(m, T.STATUS_FILTER_ITEMS[2])]
+    assert v2_ok == v1_ok
+    assert v2_bad == v1_bad
+    assert len(v2_bad) == 1, "「仅有问题」在这张表上应当筛出那个只读回读根，不是 0 条"
+    assert any(m["status_detail"] == "bare-probe" for m in models
+               if m["name"] in v2_ok), "「仅可建」里应当有那个 bare-probe 信号"
+
+
+# ═════════════════════ P-14：C-047 的 type / suffix 并进正则搜索 ═════════════════════
+def test_p14_list_models_carry_the_excel_type_and_destination_suffix():
+    """C-047 的落点是「Excel type 筛并入筛选行正则搜索」，可清单模型里压根没有这两个字段
+    —— 搜 `to_dft` 恒 0 条，而 v1 的 type 下拉能筛出 7 个（P-14）。"""
+    from dreg_verify import excel_model, topout            # noqa: PLC0415
+    from dreg_verify.ui import contracts                   # noqa: PLC0415
+    wb = excel_model.load_workbook(H.mirror_path("btlp"))
+    assert "type" in contracts.LITE_MODEL_KEYS and "suffix" in contracts.LITE_MODEL_KEYS
+
+    # v1 的「全部 type」下拉列的就是 `sig.suffix` 的取值集合
+    v1_types = sorted({s.suffix for s in wb.logic if s.suffix})
+    assert "to_dft" in v1_types
+
+    for models in (topout.topout_view_models(wb, mode="min", max_tests=256, exhaustive=False),
+                   topout.topout_view_models(wb, mode="min", max_tests=256, exhaustive=False,
+                                             lite=True),
+                   topout.topout_skeleton_models(wb)):
+        by_name = {m["name"]: m for m in models}
+        assert by_name["d_logic_bt_lp_rx_en"]["type"] == "to_dft"
+        assert by_name["d_logic_bt_lp_tsensor"]["suffix"] == "_to_mux"
+        assert by_name["pll_lock_indicator"]["type"] == ""     # RO 回读根没有源对象 → 空串，不崩
+
+
+def test_p14_regex_search_hits_the_excel_type(monkeypatch, tmp_path):
+    """搜 `to_dft` 要能命中 —— 两处草堆（清单 proxy 与筛选行的计数）必须是同一批字段，
+    否则「可见 N / 共 M」与清单行数对不上。"""
+    from dreg_verify import excel_model, topout            # noqa: PLC0415
+    from dreg_verify.ui import filter_bar as FB            # noqa: PLC0415
+    wb = excel_model.load_workbook(H.mirror_path("btlp"))
+    models = topout.topout_view_models(wb, mode="min", max_tests=256, exhaustive=False)
+
+    hit = [m["name"] for m in models
+           if FB.match_row(m, rx=FB.compile_regex("to_dft"), raw="to_dft")[0]]
+    assert len(hit) >= 7, "搜 to_dft 只命中 %d 条：%s" % (len(hit), hit)
+    vis, total, _by_in = FB.count_visible(models, {"regex": "to_dft"})
+    assert (vis, total) == (len(hit), len(models))
+
+    # 第二次、且不同：搜目的地尾缀 `_to_mux` —— 只该命中真配了这个尾缀的那一个
+    hit2 = [m["name"] for m in models
+            if FB.match_row(m, rx=FB.compile_regex("_to_mux"), raw="_to_mux")[0]]
+    assert hit2 == ["d_logic_bt_lp_tsensor"], hit2

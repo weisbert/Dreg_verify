@@ -638,7 +638,9 @@ class SignalListProxy(QtCore.QSortFilterProxyModel):
             return (False, False)
         if self._rx is None:
             return (True, False)
-        head = " ".join(str(m.get(k) or "") for k in ("name", "disp", "assert_id"))
+        # C-047：Excel 的 type 筛并进正则搜索 —— `type`（M 列原文，`to_dft` 这种）与 `suffix`
+        # （真贴在网名后的目的地尾缀）都得在草堆里，否则搜 `to_dft` 恒 0 条（P-14）。
+        head = " ".join(str(m.get(k) or "") for k in ("name", "disp", "assert_id", "type", "suffix"))
         head += " " + _scrub(m.get("expr"))
         hit_head = bool(self._rx.search(head))
         hit_input = any(self._rx.search(str(x)) for x in (m.get("input_names") or []))

@@ -86,7 +86,8 @@ class ListRole(IntEnum):
 #: 后台 worker 逐信号发出的 lite 视图模型键（topout_view_models 的模型去掉 chain/inputs/tests）
 LITE_MODEL_KEYS = ("name", "disp", "owner", "width", "kind", "status", "status_detail", "note", "issues",
                    "matched_name", "n_leaves", "n_vectors", "form", "form_label", "probe_net", "prefix",
-                   "assert_id", "expr", "input_names", "supplement", "normalized_note", "out_net")
+                   "assert_id", "expr", "input_names", "supplement", "normalized_note", "out_net",
+                   "type", "suffix")
 
 
 @dataclass

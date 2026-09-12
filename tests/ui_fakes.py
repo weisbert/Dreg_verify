@@ -48,7 +48,8 @@ def lite_model(name, i=0, **over):
          "n_vectors": 2 + i, "form": "boolean", "form_label": "布尔 (F1)",
          "probe_net": name, "prefix": "", "assert_id": str(i + 1), "expr": "A & B",
          "input_names": ["d_fake_in_a", "d_fake_in_b"], "supplement": False,
-         "normalized_note": "", "out_net": name}
+         "normalized_note": "", "out_net": name,
+         "type": "to_dft", "suffix": ""}          # C-047：Excel M 列 + 目的地尾缀（搜索用）
     m.update(over)
     return m
 

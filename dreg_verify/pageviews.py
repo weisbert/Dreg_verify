@@ -253,6 +253,9 @@ def result_to_model(res):
          "n_leaves": res.n_leaves, "n_vectors": len(res.vectors),
          "expr": getattr(res.sig, "expr", ""), "page": res.page,
          "form": (_shape.kind if _shape else ""), "form_label": FORMS.form_label(_shape),
+         # C-047：Excel M 列（v1 的「type 筛」）+ 真贴在网名后的目的地尾缀，v2 并进清单正则搜索
+         "type": str(getattr(res.sig, "suffix", "") or ""),
+         "suffix": str(getattr(res.sig, "ref_suffix", "") or ""),
          "chain": [], "inputs": [], "tests": [], "auto_label": "", "exp_label": ""}
     if res.status == "ok":
         tbl = _mux_table(res) if res.kind == "mux" else _logic_table(res)

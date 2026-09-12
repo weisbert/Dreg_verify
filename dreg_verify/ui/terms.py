@@ -82,8 +82,15 @@ STATUS = {
 STATUS_FALLBACK = {"ok": "clean", "skip": "skip", "unresolved": "unresolved", "error": "error"}
 #: 「全部状态」筛选下拉的三项（C-029）
 STATUS_FILTER_ITEMS = ("全部状态", "仅可建", "仅有问题")
-#: 色档里算「有问题」的两档（清单状态列橙 / 红；note 的只读回读 / 输出裸名不算问题）
+#: 色档里算「有问题」的两档（清单状态列橙 / 红）
 PROBLEM_TONES = ("warn", "bad")
+#: note 色档不是一档而是三样东西，按 **v1 的四档 status** 分家（D1 对抗 review P-13）：
+#:   · `bare-probe` 在 v1 里 status=ok  → 算「可建」（输出名按命名约定猜的，断言照样生成）
+#:   · `skip`       在 v1 里 status=skip → 算「有问题」（只读回读根，不产断言）
+#:   · `pending`    v1 根本没有这一档   → 两边都不进（还在后台展开，别让它在筛选下闪进闪出）
+#: 只按色档判的话，btlp 上「仅有问题」筛出 0 条、「仅可建」漏掉 bare-probe 那个信号。
+NOTE_AS_OK_KEYS = ("bare-probe",)
+NOTE_AS_PROBLEM_KEYS = ("skip",)
 #: 状态筛选下拉的取值（第 0 项 = 不筛）；筛选行发的 `filters["status"]` 就是这两个键之一或 ""。
 #: 中文项也一并认：两处各写各的字面量时，漏一个就是「筛了等于没筛」，而且界面上看不出来
 #: （行数不变，用户只会以为本来就这么多）。
@@ -119,12 +126,16 @@ def match_status(model, status_filter):
     判据就是清单状态列上写着的那一档：可建 = 色档 ok，有问题 = 色档 warn/bad。
     空串（或任何别的值）= 不筛。筛选行与清单 proxy 共用本函数 —— 以前筛选行按四档
     `status` 判、清单按八档 tone 判，`risky-generated`（status 仍是 "ok"）这类行
-    会被筛选行算进「仅可建」、被清单算进「有问题」，同一块屏幕上两个数。"""
+    会被筛选行算进「仅可建」、被清单算进「有问题」，同一块屏幕上两个数。
+
+    note 色档（`bare-probe` / `skip` / `pending`）按 v1 的四档 status 分家，见
+    `NOTE_AS_OK_KEYS` / `NOTE_AS_PROBLEM_KEYS`：只按色档判的话这三档两边都不进，
+    btlp 上「仅有问题」筛出 0 条、「仅可建」少一个信号（P-13）。"""
     s = str(status_filter or "")
     if s in STATUS_FILTER_OK_KEYS:
-        return tone_of(model) == "ok"
+        return tone_of(model) == "ok" or status_key_of(model) in NOTE_AS_OK_KEYS
     if s in STATUS_FILTER_PROBLEM_KEYS:
-        return tone_of(model) in PROBLEM_TONES
+        return tone_of(model) in PROBLEM_TONES or status_key_of(model) in NOTE_AS_PROBLEM_KEYS
     return True
 
 # ═════════ 三、行内原因块模板（Design D 数组 4 条实例的句式）═════════

@@ -1657,6 +1657,10 @@ def lite_model(wb, r, row_aid=None, aid_override=None, probe_prefixes=None, incl
         "supplement": bool(getattr(obj, "_is_supplement", False)),   # RTL 补充逻辑（C-039）
         "normalized_note": str(getattr(obj, "normalized_note", "") or ""),   # 嵌套 mux 折叠（C-040）
         "out_net": pnet,          # = an["out_net"]（§7-1 同口径：Topout 视图里就是探针网本身）
+        # C-047：v1【排查(旧)】的「type 筛」筛的是 Excel M 列（`to_dft` / `to_mux` 这种目的地
+        # 后缀），v2 把它并进清单的正则搜索 —— 模型里没有这两个字段就等于搜 `to_dft` 恒 0 条。
+        "type": str(getattr(obj, "suffix", "") or ""),            # Excel M 列原文
+        "suffix": str(getattr(obj, "ref_suffix", "") or ""),      # 真贴在网名后的目的地尾缀
     }
 
 
@@ -1690,6 +1694,8 @@ def topout_skeleton_models(wb, probe_prefixes=None, force_overrides=None, logic_
                 "supplement": bool(getattr(obj, "_is_supplement", False)),
                 "normalized_note": str(getattr(obj, "normalized_note", "") or ""),
                 "out_net": pnet,
+                "type": str(getattr(obj, "suffix", "") or ""),        # C-047：Excel M 列
+                "suffix": str(getattr(obj, "ref_suffix", "") or ""),  # 目的地尾缀
             })
         return out
 
@@ -1780,7 +1786,7 @@ def _topout_view_models_core(wb, mode="min", max_tests=256, exhaustive=False, pr
         m["assert_id"] = lm["assert_id"]
         # full 模型也补齐 LITE_MODEL_KEYS 的其余键——清单不论拿到 lite 还是 full 都只读那一套
         for _k in ("status_detail", "expr", "input_names", "supplement", "normalized_note",
-                   "out_net"):
+                   "out_net", "type", "suffix"):
             m[_k] = lm[_k]
         t = tbl_by_topout.get(r.topo.name.lower())
         if t is not None:

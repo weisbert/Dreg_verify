@@ -83,7 +83,8 @@ def match_row(model, owners=(), kind="", status="", rx=None, raw=""):
         return False, False
     if not raw:
         return True, False
-    own_fields = [model.get(k) for k in ("name", "disp", "assert_id", "expr")]
+    # C-047：`type`（Excel M 列原文）与 `suffix`（真贴在网名后的目的地尾缀）与清单 proxy 同一批
+    own_fields = [model.get(k) for k in ("name", "disp", "assert_id", "expr", "type", "suffix")]
     in_fields = list(model.get("input_names") or [])
     own_ok = _hit(rx, raw, own_fields)
     in_ok = _hit(rx, raw, in_fields) if in_fields else False
