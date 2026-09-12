@@ -696,6 +696,14 @@ def test_report_html_inlines_sigflow(wl, tmp_path):
     data = json.loads(m.group(1).replace(r"<\/", "</"))
     assert len(data) == 9 and all("<svg" in d["h"] for d in data)
     assert all('class="sigflowbox"' in d["h"] for d in data)
+    # 报告里贴的就是 GUI 那一份 render_svg（C0-c 第3步重写后的样式层）——不是另一套画法。
+    # 没有字节基线可对（图随 Excel 内容变），所以按结构认：图例行 + 五色 + 三个数据钩子都在，
+    # 17 种糖果色底一个都不许再出现。漂了的话这条会红。
+    for d in data:
+        assert 'data-legend="reg"' in d["h"] and "当前选中线网" in d["h"]
+        assert SF.FLOW_INK in d["h"] and "data-shape=" in d["h"]
+        assert 'data-net="' in d["h"] and 'data-kind="' in d["h"] and 'data-box="' in d["h"]
+        assert "#eef2ff" not in d["h"] and "#111827" not in d["h"]
 
 
 def test_report_html_without_sigflow(wl, tmp_path):
