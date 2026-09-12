@@ -158,6 +158,8 @@ def test_scene_08_loading_in_progress(qapp, isolated):
     w = MainWindow(state=st)             # ← 默认 worker 工厂 = 真 AnalysisWorker
     w.resize(1600, 900)
     w.show()
+    ended = []
+    w.analysisEnded.connect(lambda vid, ok: ended.append((vid, ok)))
     st.workbookChanged.emit()            # = 载表成功（真表路径由 load_path 走，这里只给假 provider）
 
     bar = H.find(w, names.LOADING_BAR)
@@ -188,8 +190,12 @@ def test_scene_08_loading_in_progress(qapp, isolated):
     assert shot.endswith("scene_08.png")
 
     # —— 停止分析：已完成行保留，其余仍 pending；状态栏点名 done/total ——
+    # ⚠ 等的是 `analysisEnded`，不是 `not is_running()`：线程先结束、`cancelled` 才排队回主线程，
+    #   盯着 is_running 会在「线程停了但收尾还没跑」的那一瞬间就往下走（全量跑时偶发红）。
     H.find(w, names.LOADING_BTN_STOP).click()
-    assert H.wait_for(lambda: not w.worker.is_running())
+    assert H.wait_for(lambda: bool(ended)), "没收到 cancelled 收尾"
+    assert ended == [(st.scope, False)]
+    assert not w.worker.is_running()
     assert not lp.isVisibleTo(w)
     rows = st.models()
     kept = sum(1 for r in rows if r["status"] != "pending")

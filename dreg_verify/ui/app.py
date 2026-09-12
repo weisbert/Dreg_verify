@@ -41,6 +41,7 @@ import sys
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import contracts, names, terms, theme
+from .bus import HighlightBus
 from .coverage import CoverageControl
 from .filter_bar import FilterBar
 from .signal_list import SignalListPanel, build_reason_block
@@ -172,6 +173,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setObjectName(names.WIN_MAIN)
         self._providers_factory = providers_factory
         self._state = state if state is not None else default_state_factory(providers_factory)
+        # I-18 / C-282：「当前线网」总线全窗口**一个**，由组合根持有。
+        # C1 还没有订阅方（电路图⑦ / 展开链⑨ / 输入表⑨ / 真值表⑥ 分别是 C2-b / C2-a / C3），
+        # 但它是组合根的物件——现在就建好，C2 起各视图只管 `window.bus.netSelected.connect(...)`。
+        self.bus = HighlightBus(self)
         self._worker_factory = worker_factory or default_worker_factory
         self._worker = None
         self._retired = []             # 已经作废、但线程还没停下来的旧 worker（见 _retire_worker）
@@ -923,11 +928,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if not on:
             self.loading_panel.setVisible(False)
             return
-        self.loading_title.setText(terms.LOADING_TITLE_FMT.format(done=int(done), total=int(total)))
+        self.loading_title.setText(self._loading_title(int(done), int(total)))
         self.loading_bar.set_value(done, total)
         self.loading_current.setText(terms.LOADING_CURRENT_FMT.format(name=name, hint="") if name else "")
         self.loading_panel.setVisible(True)
         self._relayout_loading(bool(getattr(self._state, "current_name", "")))
+
+    def _loading_title(self, done, total):
+        """⑮ 的标题按范围说话：Topout 是「展开」（要一路展到源寄存器），子页是「分析本页」。
+
+        不分的话，在 mux 页上会写「正在展开 Topout 信号」——用户看着就是工具在干别的事。"""
+        vid = self._analysis_vid or self._scope()
+        if vid == contracts.DEFAULT_VIEW_ID:
+            return terms.LOADING_TITLE_FMT.format(done=done, total=total)
+        return terms.LOADING_TITLE_PAGE_FMT.format(page=vid, done=done, total=total)
 
     def _relayout_loading(self, compact):
         """有当前信号时把载入卡片压成一行条（架构 §6.1）。"""

@@ -690,6 +690,18 @@ def test_c266_c267_single_workbench_no_tabs(qapp, tmp_path):
     w.close()
 
 
+def test_c282_window_owns_one_highlight_bus(qapp):
+    """I-18：「当前线网」总线全窗口一个、由组合根持有（C2/C3 的四个订阅方连它，不互相 import）。"""
+    from dreg_verify.ui.bus import HighlightBus
+    w = make_win(qapp)
+    assert isinstance(w.bus, HighlightBus)
+    got = []
+    w.bus.netSelected.connect(lambda net, origin: got.append((net, origin)))
+    w.bus.select("D_RF_EN[3:0]", "list")
+    assert got == [("d_rf_en", "list")] and w.bus.current_net == "d_rf_en"
+    w.close()
+
+
 def test_c251_module_entry_provides_main(qapp):
     assert callable(A.main) and callable(A.build_window)
     assert A.main.__module__ == "dreg_verify.ui.app"
@@ -747,6 +759,18 @@ def test_worker_wiring_skeleton_then_upgrade(qapp, tmp_path):
     assert not w.worker.is_running()                       # 同步 FakeWorker：一趟跑完
     assert [m["status"] for m in st.models()] == ["ok"] * 3 + ["unresolved"] * 2
     assert not H.find(w, names.LOADING_PANEL).isVisibleTo(w)
+
+
+def test_loading_title_names_the_page_not_topout(qapp, tmp_path):
+    """⑮ 的标题按范围说话：Topout 是「展开」，子页是「正在分析 <页> 页」（terms 两条模板都在用）。"""
+    st = FakeState(models=make_models(5))
+    w = make_win(qapp, state=st, worker_factory=lambda: FakeWorker(stop_after=1))
+    w.load_path(touch_xlsx(tmp_path))
+    assert H.find(w, names.LOADING_TITLE).text() == terms.LOADING_TITLE_FMT.format(done=1, total=5)
+    st.set_scope("mux")                                 # 换范围 → 新的一趟，仍卡在第 2 个
+    assert H.find(w, names.LOADING_TITLE).text() == terms.LOADING_TITLE_PAGE_FMT.format(
+        page="mux", done=1, total=5)
+    w.close()
 
 
 def test_worker_failed_goes_to_error_bar(qapp, monkeypatch, tmp_path):
