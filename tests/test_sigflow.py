@@ -495,6 +495,34 @@ def test_muxn_folding_of_compare_chain():
     assert [p["side"] for p in mux.ports if p["name"] == "S"] == ["top"]
 
 
+def test_cse_does_not_merge_isomorphic_different_nets():
+    """M2：结构一样但【来源网不同】的两棵子树绝不能被 CSE 合并。
+
+    两个 logic 行写着同样的表达式（真表里常见：xx_2g / xx_5g 一对孪生行），只看结构会合并成
+    一个图元 → 第二处的线被标成第一处的网名，图上凭空多一根【不存在的网】。
+    """
+    def _mk(net):
+        t = E.Ternary(E.Var("S"), E.Var("A"), E.Var("B"))
+        t.origin_net, t.origin_kind, t.origin_width = net, "logic", 1
+        return t
+
+    a, b = _mk("net_alpha"), _mk("net_beta")
+    g = _graph_of_ast(E.Binary("&", a, b))
+    muxes = [n for n in g.nodes if n.kind == "MUX2"]
+    assert len(muxes) == 2, "同构但不同网的子树被合并了"
+    nets = {e.net for e in g.edges if e.net}
+    assert {"net_alpha", "net_beta"} <= nets
+
+    # 反面：同一根网(origin_net 相同)的同构子树仍然要合并成一个源 + 扇出（CSE 不能白做）
+    same = _mk("net_same")
+    g2 = _graph_of_ast(E.Binary("&", same, _mk("net_same")))
+    assert len([n for n in g2.nodes if n.kind == "MUX2"]) == 1
+    # 完全没有 origin_net 的匿名子树也照旧合并（那本来就是同一根线）
+    g3 = _graph_of_ast(E.Binary("&", E.Binary("|", E.Var("A"), E.Var("B")),
+                                E.Binary("|", E.Var("A"), E.Var("B"))))
+    assert len([n for n in g3.nodes if n.kind == "OR"]) == 1
+
+
 def test_nand_nor_fusion():
     """~(A&B) / ~(A|B) 合成带气泡的 NAND / NOR，不画成 NOT+AND 两个盒。"""
     for op, kind in (("&", "NAND"), ("|", "NOR")):

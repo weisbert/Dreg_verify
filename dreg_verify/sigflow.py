@@ -310,7 +310,19 @@ class _Builder:
 
     # ───────── AST 路线（logic 根 / 结构路线里的 logic 行） ─────────
     def _key(self, n):
-        """结构哈希：同构子树共用一个图元（tx_epa 的 freq_sel mux 子树出现两次 → 只画一个）。"""
+        """CSE 键 = 结构哈希 + **这棵子树的来源网名**。
+
+        只看结构会把「长得一样但根本是两根不同网」的子树合并掉（M2）：两个 logic 行写着同样的
+        表达式、或同一个表达式被两个不同的 mux 组合成出来——合并后第二处的线会被标成第一处的
+        网名，图上就出现一根【不存在的网】。origin_net 由改动点 A 挂在子树根上，正是区分它们的
+        唯一依据；没有标签(None)的匿名内部节点仍按纯结构合并（那本来就是同一根线）。
+        """
+        struct = self._key_struct(n)
+        onet = getattr(n, "origin_net", None)
+        return struct if onet is None else (onet, getattr(n, "origin_group", None), struct)
+
+    def _key_struct(self, n):
+        """纯结构哈希（子节点递归走 _key，所以子树的 origin_net 也参与区分）。"""
         if isinstance(n, E.Const):
             return ("C", n.value, n.width)
         if isinstance(n, E.Var):
