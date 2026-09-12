@@ -31,9 +31,6 @@ import ui_harness as H
 
 pytest.importorskip("PySide6")
 
-from PySide6 import QtCore, QtWidgets                          # noqa: E402
-
-from dreg_verify import exports as X                           # noqa: E402
 from dreg_verify import session as S                           # noqa: E402
 from dreg_verify.ui import app as A                            # noqa: E402
 from dreg_verify.ui import contracts, names, terms             # noqa: E402

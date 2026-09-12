@@ -239,7 +239,7 @@ def test_ui_names_all_present(win, qapp):
     missing = [("%s=%s" % (k, v)) for k, v in want.items() if not _find_any(w, v)]
     assert not missing, "这些 objectName 在起窗后找不到：%s" % missing
     for dlg in alive:
-        dlg.close() if hasattr(dlg, "close") else None
+        dlg.close()
 
 
 # ═══════════════ I-19：分层 ═══════════════
