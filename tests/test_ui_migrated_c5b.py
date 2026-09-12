@@ -478,3 +478,106 @@ def test_c042_workbook_without_topout_page_falls_back_instead_of_blank(win, qapp
     assert H.find(w.filter_bar, names.fmt_scope_btn("topout")).isEnabled()
     assert "topout" not in w.filter_bar.missing_pages()
     assert LOGIC_SIG in w.list_panel.visible_names()
+
+
+# ═══════════ C-038：范围 = 页本地（老 test_pageviews_gui.py 的四页子视图）═══════════
+def _set_scope(w, vid):
+    """真点范围段（不直调 state.set_scope），并等这一趟分析跑完。"""
+    ended = []
+    w.analysisEnded.connect(lambda v, ok: ended.append((v, ok)))
+    need = w.state.needs_analysis(vid)
+    H.click(H.find(w.filter_bar, names.fmt_scope_btn(vid)))
+    H.app().processEvents()
+    if need:
+        assert H.wait_for(lambda: bool(ended)), "切到 %s 之后 worker 没跑完" % vid
+    H.app().processEvents()
+    assert w.state.scope == vid
+    return w.state.models(vid)
+
+
+@pytest.mark.contract("C-038", "C-042")
+def test_c038_page_scopes_list_their_own_rows_and_do_not_cone(win, qapp):
+    """范围切到 logic / mux / dft → 清单就是**本页**那几行，真值表是**页本地**的（不展到源寄存器）。
+
+    这是 v1 四个子视图（`test_pageviews_gui.py`）的全部意义，v2 把它们合成了筛选行的「范围」。
+    v2 现有的 `test_c038_scope_switch_changes_state_scope` 只验了「点一下 state.scope 变了」，
+    `test_c276_c265_load_skeleton_then_worker_upgrade` 只验了「切范围会跑一趟」——
+    **换出来的行到底是不是那一页的**，以及**页本地不 cone**，此前没人验。
+    接反了的表现是：在 logic 视图里看到的是全链展开的真值表，designer 照着它核对就是核对了别的东西。
+    """
+    w = win
+    _load_win(w)
+    wb = w.state.wb
+
+    # ① 全链（topout）：rx_en 的真值表展到**源寄存器**叶子
+    _click_row(w, LOGIC_SIG)
+    top_inputs = [r["name"] for r in w.side_panel.inputs_view.model().rows()]
+    assert "d_bt_lp_rx_en_local" in top_inputs, "Topout 范围本该展到源寄存器叶子"
+
+    # ② logic 页：行数 = 本页条数；同一个信号的输入是**本行声明的那几个**，不展上游
+    rows = _set_scope(w, "logic")
+    assert len(rows) == len(wb.logic) > 0
+    assert w.list_panel.proxy.rowCount() == len(wb.logic)
+    _click_row(w, LOGIC_SIG)
+    an = w.state.analyze(LOGIC_SIG, "logic")
+    assert an["kind"] == "logic"
+    page_inputs = [r["name"] for r in w.side_panel.inputs_view.model().rows()]
+    assert len(page_inputs) == 4, "logic 页本地输入应当就是本行声明的 A/B/C/D：%s" % page_inputs
+    assert w.truth_panel.model.rowCount() == len(page_inputs) + 2   # 输入 + auto_out + 期望
+    assert w.truth_panel.model.columnCount() > 0
+
+    # ③ mux 页：行数 = mux 页条数，选中的是 mux 根
+    rows = _set_scope(w, "mux")
+    assert len(rows) == len(wb.mux) >= 1
+    assert w.state.analyze(rows[0]["name"], "mux")["kind"] == "mux"
+
+    # ④ dft 页：单输入透传（1 输入 + auto + 期望 = 3 行）
+    rows = _set_scope(w, "dft")
+    assert len(rows) == len(wb.dft_rows) > 0
+    _click_row(w, REG_SIG)
+    assert len(w.side_panel.inputs_view.model().rows()) == 1
+    assert w.truth_panel.model.rowCount() == 3
+
+    # ⑤ iddq 页：本表该页是空的 → 那一段置灰并写明原因（不是一张空白表）
+    assert "iddq" in w.filter_bar.missing_pages()
+    assert not H.find(w.filter_bar, names.fmt_scope_btn("iddq")).isEnabled()
+
+
+@pytest.mark.contract("C-038", "C-089")
+def test_c038_c089_clearing_in_a_page_scope_only_drops_it_from_that_scope(win, qapp):
+    """在 logic 范围里把一个信号清零 → **该范围**的 .sv 不再有它，Topout 范围那份一个字节不动。
+
+    v1 `test_logic_subview_edit_and_export` 验的是「子视图里清零 → 子视图导出不含它」；
+    v2 把子视图换成了范围，`test_c236_c237_switch_table_isolates_edits` 只验了**换表**的桶隔离，
+    **同一张表里各范围之间**的编辑隔离没人验 —— 串了的话在 logic 视图里做的清零会把
+    Topout 那份交付物也挖掉一块，而两处界面都不会提示。
+    """
+    w = win
+    _load_win(w)
+    top_before, _ = w.state.provider("topout").render_sv(
+        None, "min", 256, False, w.state.compute_edited("topout"))
+    assert ("`ENV_RF.%s==" % LOGIC_SIG) in top_before
+
+    _set_scope(w, "logic")
+    _click_row(w, LOGIC_SIG)
+    tp = w.truth_panel
+    assert tp.model.columnCount() > 0
+    base, _ = w.state.provider("logic").render_sv(
+        None, "min", 256, False, w.state.compute_edited("logic"))
+    assert "assert (" in base and ("`ENV_RF.%s==" % LOGIC_SIG) in base
+
+    # ① 真点工具条「清零…」（确认框由 auto_dialogs 答「是」）
+    H.click(H.find(tp, names.TRUTH_BTN_CLEAR))
+    qapp.processEvents()
+    assert tp.model.columnCount() == 0
+    after, _ = w.state.provider("logic").render_sv(
+        None, "min", 256, False, w.state.compute_edited("logic"))
+    assert ("`ENV_RF.%s==" % LOGIC_SIG) not in after
+    assert after != base
+
+    # ② Topout 那一份一个字节没变（范围之间的编辑不串）
+    top_after, _ = w.state.provider("topout").render_sv(
+        None, "min", 256, False, w.state.compute_edited("topout"))
+    assert top_after == top_before, "logic 范围里的清零把 Topout 那份产物也改了"
+    assert "topout" not in w.filter_bar.missing_pages()
+    assert LOGIC_SIG in w.list_panel.visible_names()
