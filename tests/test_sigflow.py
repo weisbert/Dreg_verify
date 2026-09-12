@@ -335,9 +335,17 @@ def test_level_shift_rename_block(btlp):
     """d_en_refbuf_ls：源 d_en_refbuf 经 level_shift 到顶层口 d_en_refbuf_ls →
     图上一个 RENAME 块（左源名、右顶层口名）。"""
     r = _analyze(*btlp, name="d_en_refbuf_ls", want_graph=True)
-    rn = next(n for n in r.graph.nodes if n.kind == "RENAME")
+    g = r.graph
+    rn = next(n for n in g.nodes if n.kind == "RENAME")
     assert rn.meta["source"] == "d_en_refbuf" and rn.meta["probe"] == "d_en_refbuf_ls"
     assert "→" in rn.sub
+    # M3：进框线 = 改名【前】的源网，出框线 = 顶层口名。改动点 A 用的 sig.rtl_base 在有 _ls_name
+    # 时直接返回顶层口名，照抄会把两级画成同一根网 → 改名块两边同名、白画。
+    ein = next(e for e in g.edges if e.dst == rn.id)
+    eout = next(e for e in g.edges if e.src == rn.id)
+    assert ein.net == "d_en_refbuf", ein.net
+    assert eout.net == "d_en_refbuf_ls", eout.net
+    assert ein.net != eout.net
 
 
 def test_untrusted_leaves_marked(wl):

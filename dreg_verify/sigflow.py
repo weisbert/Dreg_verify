@@ -248,7 +248,11 @@ class _Builder:
         n = self.g.add_node("RENAME", label, sub="%s → %s" % (src, top),
                             ports=[{"name": "A", "side": "left", "label": ""}],
                             meta={"source": src, "probe": top})
-        self._link(inner.id, n, "A")
+        # ⭐ M3：进框的那根线是【改名前】的源网，不是顶层口名。改动点 A 用的是 sig.rtl_base，而
+        # rtl_base 在有 _ls_name 时直接返回顶层口名（d_en_refbuf → d_en_refbuf_ls），照抄就会把
+        # 改名【前后两级】画成同一根网 —— 改名块两边写着同一个名字，这块也就白画了。
+        # 只在这条边上覆盖 net（不 re-emit inner：inner 可能是被 CSE 共用的叶子，改它会串味）。
+        self._link(inner.id, n, "A", net=src)
         self._emit(n, net=top, width=self.res.out_width)
         return n
 
