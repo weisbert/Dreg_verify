@@ -72,6 +72,79 @@ def test_last_excel_roundtrip(tmp_path):
     assert session.load_last_excel(p) == "d:/x/mirror_btlp_dreg.xlsx"
 
 
+@pytest.mark.contract("C-003", "C-228")
+def test_c003_c228_recent_excels_mru():
+    """N4（冲突⑥）：空态「最近打开」要多条 → settings 新键 recent_excels，last_excel 照写。
+
+    上限 5 / 置顶去重 / ts 是 ISO / 信号数在分析完成时补写 / 缺键时用 last_excel 造单条。"""
+    store = {}
+    io = {"load": lambda: dict(store), "save": lambda d: store.clear() or store.update(d)}
+
+    assert session.recent_excels(load=io["load"]) == []                  # 两个键都没有 → 空
+    store["last_excel"] = "d:/old/mirror_wl_dreg.xlsx"                   # 只有旧的顶层键（旧版本存的）
+    fallback = session.recent_excels(load=io["load"])
+    assert fallback == [{"path": "d:/old/mirror_wl_dreg.xlsx", "ts": "", "n_signals": 0}]
+
+    session.push_recent_excel("d:/a/mirror_btlp_dreg.xlsx", **io)
+    assert store["last_excel"] == "d:/a/mirror_btlp_dreg.xlsx"           # 顶层键照写（回退旧版本仍能恢复）
+    one = session.recent_excels(load=io["load"])[0]
+    assert one["path"] == "d:/a/mirror_btlp_dreg.xlsx" and one["n_signals"] == 0
+    import datetime
+    datetime.datetime.fromisoformat(one["ts"])                           # ts 是可解析的 ISO 串
+
+    session.push_recent_excel("d:/b/mirror_wl_dreg.xlsx", n_signals=21, **io)
+    assert [it["path"] for it in session.recent_excels(load=io["load"])] == \
+        ["d:/b/mirror_wl_dreg.xlsx", "d:/a/mirror_btlp_dreg.xlsx"]       # 最新的置顶
+
+    # 分析完成补写信号数（载表那一刻还不知道几个信号）
+    assert session.update_recent_count("d:/a/mirror_btlp_dreg.xlsx", 9, **io) is True
+    assert session.recent_excels(load=io["load"])[1]["n_signals"] == 9
+    assert session.update_recent_count("d:/查无此表.xlsx", 3, **io) is False    # 不凭空造条目
+
+    # 再开一次 a → 置顶且【保留】上次记下的信号数（n_signals 不传 = 别清零）
+    session.push_recent_excel("D:\\A\\mirror_btlp_dreg.xlsx", **io)      # 大小写/分隔符不同 = 同一张表
+    items = session.recent_excels(load=io["load"])
+    assert len(items) == 2 and items[0]["n_signals"] == 9
+
+    for i in range(6):                                                   # 上限 5：最老的挤出去
+        session.push_recent_excel("d:/m/mirror_%d.xlsx" % i, **io)
+    items = session.recent_excels(load=io["load"])
+    assert len(items) == 5
+    assert [it["path"] for it in items] == ["d:/m/mirror_%d.xlsx" % i for i in (5, 4, 3, 2, 1)]
+
+    store[session.RECENT_KEY] = ["垃圾", {"no_path": 1}, {"path": "d:/ok.xlsx", "n_signals": "x"}]
+    assert session.recent_excels(load=io["load"]) == \
+        [{"path": "d:/ok.xlsx", "ts": "", "n_signals": 0}]               # 脏数据只丢不抛
+
+
+@pytest.mark.contract("C-198")
+def test_c198_last_export_per_kind():
+    """N5（冲突⑦）：导出中心「上次导出到哪」= settings 新键 last_export，6 种交付物各一格。"""
+    store = {}
+    io = {"load": lambda: dict(store), "save": lambda d: store.clear() or store.update(d)}
+
+    for kind in session.EXPORT_KINDS:
+        assert session.last_export(kind, load=io["load"]) is None        # 没导过 → 界面写「从未导出」
+
+    for kind in session.EXPORT_KINDS:                                    # 6 格互不干扰
+        session.record_last_export(kind, "d:/out/%s.bin" % kind, **io)
+    assert set(store[session.LAST_EXPORT_KEY]) == set(session.EXPORT_KINDS)
+    for kind in session.EXPORT_KINDS:
+        got = session.last_export(kind, load=io["load"])
+        assert got["path"] == "d:/out/%s.bin" % kind
+        import datetime
+        datetime.datetime.fromisoformat(got["ts"])
+
+    session.record_last_export("sv", "d:/out2/mirror_wl_dreg.sv", **io)  # 同 kind 覆盖，别的不动
+    assert session.last_export("sv", load=io["load"])["path"] == "d:/out2/mirror_wl_dreg.sv"
+    assert session.last_export("nets", load=io["load"])["path"] == "d:/out/nets.bin"
+
+    assert session.record_last_export("sv", "   ", **io) is None         # 空路径不写
+    assert session.last_export("sv", load=io["load"])["path"] == "d:/out2/mirror_wl_dreg.sv"
+    store[session.LAST_EXPORT_KEY] = "不是 dict"
+    assert session.last_export("sv", load=io["load"]) is None            # 脏数据只丢不抛
+
+
 def test_save_path_map_sets_and_clears():
     """按 Excel 路径分桶的诊断配置：非空写入、空值删本表条目（不误伤别的表）。"""
     store = {}

@@ -70,6 +70,125 @@ def save_last_excel(excel, path=None):
     save_settings(d, path)
 
 
+# ── N4：最近打开的 Excel（MRU）── settings["recent_excels"]，顶层 last_excel 键继续照写 ──
+# 冲突⑥：空态要画「最近打开」多条（路径 + 时间 + 信号数），last_excel 只有一个字符串键给不了。
+# last_excel 不动（同事的旧文件、回退旧版本都靠它），recent_excels 是叠加层；缺键时由 last_excel 造单条。
+RECENT_KEY = "recent_excels"
+RECENT_MAX = 5                      # 与 ui/theme.RECENT_MAX 同值（session 不 import ui，见依赖方向）
+
+
+def _now_iso():
+    """当前时间 ISO 串（秒精度）——recent_excels / last_export 的 ts 统一走它。"""
+    import datetime
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _same_path(a, b):
+    """两个路径是否指同一张表（Windows 大小写/分隔符无关）。去重与计数回写都按它比。"""
+    def _n(p):
+        return os.path.normcase(os.path.normpath(str(p or "")))
+    return _n(a) == _n(b) and bool(str(a or "").strip())
+
+
+def _clean_recent(raw):
+    """settings 里读回的 recent_excels → 规整成 [{"path","ts","n_signals"}]（脏数据一律丢，绝不抛）。"""
+    out = []
+    for it in (raw if isinstance(raw, list) else []):
+        if not isinstance(it, dict):
+            continue
+        p = str(it.get("path") or "").strip()
+        if not p:
+            continue
+        n = it.get("n_signals")
+        out.append({"path": p, "ts": str(it.get("ts") or ""),
+                    "n_signals": int(n) if isinstance(n, int) else 0})
+    return out
+
+
+def recent_excels(load=None):
+    """最近打开的表（新→旧，≤RECENT_MAX 条）：[{"path","ts","n_signals"}]。
+
+    没有 recent_excels 键（旧版本存的配置 / 同事机器）→ 用顶层 last_excel 造**单条**兜底
+    （ts 空、信号数 0），空态照样能画出那一行；两个键都没有 → []。"""
+    st = (load or load_settings)()
+    items = _clean_recent(st.get(RECENT_KEY))
+    if items:
+        return items[:RECENT_MAX]
+    last = str(st.get("last_excel") or "").strip()
+    return [{"path": last, "ts": "", "n_signals": 0}] if last else []
+
+
+def push_recent_excel(path, n_signals=None, load=None, save=None):
+    """载表成功 → 写一条 MRU（置顶、按路径去重、上限 RECENT_MAX），顺带把 last_excel 照写。
+
+    n_signals=None：这一步只知道打开了哪张表、还不知道几个信号（清单要分析完才有数）——
+    保留该表上次记下的信号数，等分析完成再由 update_recent_count 补写（冲突⑥裁决）。
+    返回写完后的列表。"""
+    st = (load or load_settings)()
+    items = _clean_recent(st.get(RECENT_KEY))
+    p = str(path or "").strip()
+    if not p:
+        return items[:RECENT_MAX]
+    prev = next((it for it in items if _same_path(it["path"], p)), None)
+    n = int(n_signals) if isinstance(n_signals, int) else (prev["n_signals"] if prev else 0)
+    items = [it for it in items if not _same_path(it["path"], p)]
+    items.insert(0, {"path": p, "ts": _now_iso(), "n_signals": n})
+    items = items[:RECENT_MAX]
+    st[RECENT_KEY] = items
+    st["last_excel"] = p                      # 顶层键照写：旧版本/回退路径仍能恢复上次的表
+    (save or save_settings)(st)
+    return items
+
+
+def update_recent_count(path, n, load=None, save=None):
+    """分析完成 → 给这张表的 MRU 条目补上信号数（条目不存在就不写，不凭空造一条）。
+    返回是否真的补上了。"""
+    st = (load or load_settings)()
+    items = _clean_recent(st.get(RECENT_KEY))
+    hit = False
+    for it in items:
+        if _same_path(it["path"], path):
+            it["n_signals"] = int(n)
+            hit = True
+    if hit:
+        st[RECENT_KEY] = items
+        (save or save_settings)(st)
+    return hit
+
+
+# ── N5：上次导出到哪 ── settings["last_export"][kind] = {"path","ts"}，6 种交付物各一格 ──
+# 冲突⑦：导出中心有一整列「上次导出到哪」（`…\wr_rf_tc.sv　今天 14:22` / `从未导出`），
+# 后端此前完全没有持久化。红区最常见的问题正是「我到底导没导过 nets.txt」。
+LAST_EXPORT_KEY = "last_export"
+EXPORT_KINDS = ("sv", "report", "fortest", "nets", "claims", "config")   # 与 ui/contracts.EXPORT_KINDS 同值
+
+
+def last_export(kind, load=None):
+    """该交付物上次导出到哪 → {"path","ts"}；没导过/脏数据 → None（界面显示「从未导出」）。"""
+    st = (load or load_settings)()
+    seg = st.get(LAST_EXPORT_KEY)
+    it = seg.get(str(kind)) if isinstance(seg, dict) else None
+    if not isinstance(it, dict):
+        return None
+    p = str(it.get("path") or "").strip()
+    return {"path": p, "ts": str(it.get("ts") or "")} if p else None
+
+
+def record_last_export(kind, path, load=None, save=None):
+    """导出成功 → 记下这一格（同 kind 覆盖，别的 kind 不动）。返回记下的条目（路径为空 → None 不写）。"""
+    p = str(path or "").strip()
+    if not p:
+        return None
+    st = (load or load_settings)()
+    seg = st.get(LAST_EXPORT_KEY)
+    seg = dict(seg) if isinstance(seg, dict) else {}
+    item = {"path": p, "ts": _now_iso()}
+    seg[str(kind)] = item
+    st[LAST_EXPORT_KEY] = seg
+    (save or save_settings)(st)
+    return item
+
+
 def save_path_map(key, excel_path, value, load=None, save=None, skip_under_pytest=False):
     """把【按 Excel 路径分桶】的配置段写进 settings：settings[key][excel_path] = value。
     value 为空 → 删掉这张表的条目(= 清除配置)。探针前缀/强制force/RTL 补充三套共用。
