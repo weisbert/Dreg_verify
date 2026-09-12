@@ -547,6 +547,11 @@ def test_c302_legacy_import_only_logic_register_names_mux(qapp, monkeypatch):
     assert MUX_SIG in skipped and "c:A" in skipped[MUX_SIG] and "d:0" in skipped[MUX_SIG]
     assert GHOST in skipped and skipped[GHOST] == D.PENDING_TERMS["DIAG_LEGACY_SKIP_UNKNOWN"]
 
+    # 快照的 legacy 两格要真分类（`legacy_bucket_counts` 不给 kind_of 时会把 register 也算进 logic）
+    snap = D.make_snapshot(st)
+    assert snap.legacy_counts["edits"] == 2 and snap.legacy_counts["mux"] == 1
+    assert snap.legacy_counts["logic"] + snap.legacy_counts["register"] == 2
+
     # 弹窗：不迁的名字 + 原因在**前**，能迁的清单在后（C-270 的形状）
     dlg = editor(D.LegacyImportDialog, st)
     prev = H.find(dlg, N.DIAG_LEGACY_PREVIEW, QtWidgets.QLabel)
@@ -677,7 +682,8 @@ def test_diag_snapshot_counts_missing_prefix_and_legacy(qapp):
                for r in IT.input_rows(st.analyze(m["name"]) or {})
                if r.get("needs_prefix"))
     assert snap.n_prefix_missing == hand
-    assert snap.legacy_counts == P.legacy_bucket_counts(st.loaded_path)
+    assert snap.legacy_counts == P.legacy_bucket_counts(
+        st.loaded_path, kind_of=lambda nm: (st.resolve_root(nm) or {}).get("kind"))
     # 第 3 步结果框用的就是这两个数
     d = drawer(st)
     assert H.find(d, N.DIAG_STEP3_BOX, QtWidgets.QLabel).text() == \

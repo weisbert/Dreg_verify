@@ -203,7 +203,11 @@ def make_snapshot(state):
     if state is not None:
         n_missing = _scan_inputs(state)[0]
         try:
-            legacy = P.legacy_bucket_counts(getattr(state, "loaded_path", "") or "")
+            # `kind_of` 一定要给：legacy `edits` 段里没有 kind 字段，不查当前表就分不出
+            # logic 根还是直连寄存器根 —— 不给的话两格会全算在 logic 上（它的 docstring 明写）。
+            legacy = P.legacy_bucket_counts(
+                getattr(state, "loaded_path", "") or "",
+                kind_of=lambda nm: (state.resolve_root(nm) or {}).get("kind"))
         except Exception:                   # noqa: BLE001  旧桶坏了不连累抽屉
             legacy = {}
     return C.DiagnosticsSnapshot(
