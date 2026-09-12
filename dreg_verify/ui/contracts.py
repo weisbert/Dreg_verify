@@ -264,7 +264,11 @@ class WorkbenchStateProto(Protocol):
     def drop_edit(self, name: str, view_id: Optional[str] = None) -> None: ...
     def mux_data(self, view_id: Optional[str] = None) -> Dict[str, dict]: ...
     def analyze(self, name: str, view_id: Optional[str] = None, want_graph: bool = False) -> Optional[dict]:
-        """provider.analyze + 本信号生效档（CoverageState.mode_for）+ mux_data；缓存按 (view, name, 指纹)。"""
+        """provider.analyze + 本信号生效档（CoverageState.mode_for）+ mux_data；缓存按 (view, name, 指纹)。
+
+        ⚠ `want_graph=False` 的语义是「**我不需要为此多算一张图**」，不是「保证 an['graph'] 是
+        None」：同一个信号、同一份指纹上已经算过带图的那份时，实现可以直接把它还给你（超集）。
+        —— 详情区四件里只有电路图要图，不这样就是一次点选跑两遍引擎（C2-int）。"""
         ...
     def compute_edited(self, view_id: Optional[str] = None) -> dict:
         """edits.compute_edited(edits, mux_data) → 喂 exports.render_sv 的 edited。"""

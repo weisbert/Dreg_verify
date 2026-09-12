@@ -28,7 +28,7 @@ from PySide6 import QtWidgets                                      # noqa: E402
 
 from dreg_verify import edits as ED                                # noqa: E402
 from dreg_verify import inputs_table as IT                         # noqa: E402
-from dreg_verify.ui import names, persist as P, state as ST, terms, theme   # noqa: E402
+from dreg_verify.ui import names, persist as P, state as ST, terms          # noqa: E402
 from dreg_verify.ui.detail_header import DetailHeader                       # noqa: E402
 
 import ui_fakes as F                                               # noqa: E402
