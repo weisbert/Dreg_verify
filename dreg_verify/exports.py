@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 from . import expr as E
 from . import generator
+from . import inputs_table as IT
 from . import sv_writer as W
 
 # ═════════════════════════ 一、导出选项（.sv）：一套默认值 + 一套 settings 键 ═════════════════════════
@@ -594,17 +595,10 @@ def export_claims(source, path, excel, naming_model=None, only=None, mode="min",
 
 
 # ═════════════════════════ 十、单信号真值表 CSV ═════════════════════════
-def drive_strings(vec, bindings, used_vars):
-    """一条向量的 force / RF_WRITE 驱动文本（供 CSV 展示）。算不出来 → 两个空串，不炸。"""
-    if vec is None:
-        return "", ""
-    try:
-        forces, writes, _unres = W.compute_drives(vec, bindings, used_vars)
-    except Exception:  # noqa: BLE001
-        return "", ""
-    fs = "; ".join("%s=%s" % (f["wire"], f["hex"]) for f in forces)
-    ws = "; ".join("%s=%s" % (w["addr"], w["hex"]) for w in writes)
-    return fs, ws
+# §7-6 驱动串单口径：本模块原先自己有一份逐字节相同的 drive_strings 实现，与
+# inputs_table.drive_pair 并存 —— 两份实现同一件事就是等着漂（改一处忘另一处 = 同一条向量
+# 在 CSV 与输入表里印出两种驱动文本）。现在**指向同一个函数对象**，名字保留给老调用点/测试。
+drive_strings = IT.drive_pair
 
 
 def drive_context(an):

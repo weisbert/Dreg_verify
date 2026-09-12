@@ -370,6 +370,14 @@ def test_drive_strings_never_raises():
     assert X.drive_strings(object(), {}, []) == ("", "")   # 垃圾向量也只返回空串，不炸
 
 
+@pytest.mark.contract("C-057")
+def test_c057_drive_pair_single_source():
+    """§7-6：驱动串只许有一个口径。exports.drive_strings 就是 inputs_table.drive_pair
+    【同一个函数对象】——两份实现同一件事必漂（改一处忘另一处 = CSV 与输入表印出两种驱动文本）。"""
+    from dreg_verify import inputs_table as IT
+    assert X.drive_strings is IT.drive_pair
+
+
 def test_drive_context_picks_mux_expansion():
     an = {"kind": "mux", "expansion": {"bindings": {"c:0": 1}, "used_vars": ["c:0"]},
           "node": None, "bindings": {}}
