@@ -172,7 +172,32 @@ def expand(sig, wb, resolver, _depth=0, _stack=None, chain_out=None):
         else:
             _emit_leaf(letter, b)
 
-    return _substitute(node, mapping), leaves
+    out = _substitute(node, mapping)
+    _tag_origin(out, net=getattr(sig, "rtl_base", None) or sig.out_base, kind="logic",
+                width=sig.out_width, row=getattr(sig, "row", None))
+    return out, leaves
+
+
+def _tag_origin(node, net, kind, width, row=None, group=None):
+    """⭐ additive 来源标签（改动点 A，2026-09-12 信号流图数据层）：给【本层展开返回的子树根】挂上
+    它在 Excel/RTL 里的真实网名与来源，供 sigflow.build_graph 把 cone 代入后被抹掉的中间层 net 名标回去。
+
+    为什么挂在 AST 上：_substitute 是按【引用】把子树嵌进父 AST 的（cone.py:_substitute），
+    属性活得过上层代入；expr.py 的 AST 类没有 __slots__（只有 Token 有），可以挂任意属性。
+    byte-safe：全仓对 AST 无 deepcopy/pickle，下游（vectors/forms/sv_writer/gui）一律 isinstance +
+    结构字段访问，多几个属性不进任何输出 → Topout .sv 逐字节不变（byte_gate 6 sha 已验）。
+    永不抛：拿不到属性就静默跳过（图少一个标注，绝不连累主流程）。
+    """
+    try:
+        node.origin_net = net
+        node.origin_kind = kind
+        node.origin_width = width
+        if row is not None:
+            node.origin_row = row
+        if group is not None:
+            node.origin_group = group
+    except Exception:      # noqa: BLE001 —— 打标绝不连累展开主流程
+        pass
 
 
 # ───────────────────────────── 内部 ─────────────────────────────

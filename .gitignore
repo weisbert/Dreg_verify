@@ -48,6 +48,8 @@ refactor_notes/
 # 测试截图产物(每次跑生成,不入库)
 tests/subview_*.png
 tests/topout_view.png
+# 信号流门级图 SVG 产物(test_sigflow.py 每次跑重生成,供人打开看;含真实信号名的场合别提交)
+tests/_sigflow_out/
 scratchpad/
 
 # Claude Code 本地设置(含机器专属绝对路径的 memory hook，勿push)

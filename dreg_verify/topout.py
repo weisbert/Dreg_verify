@@ -398,6 +398,9 @@ class TopoutResult:
         self.status = "ok"               # ok / skip / unresolved / error
         self.note = root.note
         self.issues = []                 # 解析/展开问题
+        # 信号流门级图（sigflow.Graph 或 None）。默认 None——只有 analyze_signal(want_graph=True)
+        # 才建（建图要多走一遍 AST/mux 结构，不能拖慢 build/report 的批量路径）。改动点 C。
+        self.graph = None
 
     @property
     def owner(self):
@@ -524,10 +527,26 @@ def _prepend_gate_chain(res, root, inner_ref):
     res.chain.insert(0, _gate_chain_entry(top, res.dft_gate[0].base, inner_ref, res.dft_gate[1]))
 
 
+def _attach_graph(wb, resolver, res, root):
+    """改动点 C：want_graph 时挂信号流门级图（dreg_verify.sigflow.build_graph）。
+
+    永不抛、永不改 status——建图失败只贴一条 ⚠ issue。图纯属【显示】，不进 .sv/向量/账目，
+    绝不能因为画不出图就把一个本来 ok 的信号判成 error。sigflow 惰性 import（不拖慢冷启动）。
+    """
+    if res.status != "ok":
+        return
+    try:
+        from . import sigflow            # 惰性 import：只有真要图时才加载
+        res.graph = sigflow.build_graph(wb, resolver, res, root)
+    except Exception as ex:   # noqa: BLE001 —— 图失败绝不连累验证/产物
+        res.issues.append("⚠ 信号流图构建失败(不影响验证与产物): %r" % ex)
+
+
 def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
-                   exhaustive=False, want_vectors=True, mux_data=None):
+                   exhaustive=False, want_vectors=True, mux_data=None, want_graph=False):
     """分析一个 Topout 信号：解析根 → 建 cone/真值表。返回 TopoutResult（永不抛，问题进 .issues/.status）。
-    mux_data：mux 根的【数据值手填】{物理基名(小写): int}（B2/N8），喂 make_mux_vectors data_overrides。"""
+    mux_data：mux 根的【数据值手填】{物理基名(小写): int}（B2/N8），喂 make_mux_vectors data_overrides。
+    want_graph：额外建【信号流门级图】挂到 res.graph（改动点 C，默认 False = 旧行为逐字节不变）。"""
     if root is None:
         root = resolve_root(wb, topo.name)
     res = TopoutResult(topo, root)
@@ -569,6 +588,8 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
         except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛，意外异常记账成 error 不连累整批
             res.status = "error"
             res.issues.append("分析异常: %r" % ex)
+        if want_graph:
+            _attach_graph(wb, resolver, res, root)     # 改动点 C（logic 根）
         return res
 
     if root.kind == REGISTER:
@@ -619,6 +640,8 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
         except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛
             res.status = "error"
             res.issues.append("分析异常: %r" % ex)
+        if want_graph:
+            _attach_graph(wb, resolver, res, root)     # 改动点 C（直连寄存器根）
         return res
 
     if root.kind == MUX:
@@ -656,6 +679,8 @@ def analyze_signal(wb, resolver, topo, root=None, mode="min", max_tests=256,
         except Exception as ex:   # noqa: BLE001 —— 护栏3：永不抛
             res.status = "error"
             res.issues.append("分析异常: %r" % ex)
+        if want_graph:
+            _attach_graph(wb, resolver, res, root)     # 改动点 C（mux 根，走结构路线）
         return res
 
     res.status = "error"

@@ -1000,10 +1000,18 @@ def expand_signal(wb, resolver, sig, chain_out=None, fallback_notes=None):
     node = E.parse(sig.expr)
     bindings = resolver.resolve_signal_inputs(sig)
     internal = cone.find_internal_inputs(node, bindings, resolver)
+
+    def _tag(n):
+        """⭐ additive 来源标签（改动点 A′，见 cone._tag_origin）：非 cone 路径（BTLP 全部信号、
+        cone 回退路径）的根 AST 也要挂本行输出网名，否则 sigflow 画出来的图连顶层网名都没有。
+        cone 路径的根已被 cone.expand 打过同样的标，这里重打是幂等的。"""
+        cone._tag_origin(n, net=getattr(sig, "rtl_base", None) or sig.out_base, kind="logic",
+                         width=sig.out_width, row=getattr(sig, "row", None))
+        return n
     if internal:
         try:
             node2, bindings2 = cone.expand(sig, wb, resolver, chain_out=chain_out)
-            return node2, bindings2, True
+            return _tag(node2), bindings2, True
         except cone.ConeError:
             # cone 成环/超深 → 回退为 force 基名（for_test 那招）：内部输入若基名在 tmm/regmap
             # 有真实寄存器（如 linectrl_band_sel 撞名 RO 寄存器 d61），改直接 force 顶层基名网，
@@ -1012,7 +1020,7 @@ def expand_signal(wb, resolver, sig, chain_out=None, fallback_notes=None):
             if fb is not None:
                 if chain_out is not None:
                     del chain_out[:]      # cone 半途成环可能已写入残缺展开链 → 回退非 cone，清掉
-                return node, fb, False
+                return _tag(node), fb, False
             # mux 跨界展开失败(环/超深，R38) → 回退非展开：mux 输出当叶子 force 衔接网(=force 模式/今天)，
             # 不让整信号崩。仅当确有 mux 输出内部输入时走这条；否则维持原 raise(纯 logic 兜不住)。
             # 用 _is_mux_out_binding：配了探针前缀的 mux 输出 found_in 是 'prefixed-wire' 而非 'mux-output'，
@@ -1022,9 +1030,9 @@ def expand_signal(wb, resolver, sig, chain_out=None, fallback_notes=None):
                     del chain_out[:]
                 if fallback_notes is not None:
                     fallback_notes.append("%s: mux 跨界展开失败(环/超深)，回退 force 衔接网" % sig.out_name)
-                return node, bindings, False
+                return _tag(node), bindings, False
             raise
-    return node, bindings, False
+    return _tag(node), bindings, False
 
 
 def _cone_force_fallback(resolver, sig, node, bindings, internal_letters, notes=None):
