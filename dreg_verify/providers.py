@@ -19,9 +19,13 @@ cfg 要提供什么（`ui/contracts.ConfigSourceProto`，v2 的 `WorkbenchState`
 本模块【不】import PySide6、不 import gui：
   · gui.py 里那两个 provider **一字不动**（它们随 legacy 门面在 C5 一起退役），
     `tests/test_providers.py` 的等价性测试是这次搬家的证明。
-  · 引擎侧分批落地中的新形参（C0-a 的 block_suffix / progress / should_cancel / lite /
-    skeleton），用 `_accepts` 探一下再传：给引擎一个它还不认识的参数 = TypeError 炸在
-    分析或导出中途，那是最难查的一类失败。C0-a 合并后这些条件自然恒真。
+  · C0-b 期间引擎侧的新形参（block_suffix / progress / should_cancel / lite / skeleton）
+    还在分批落地，本层用签名探测有选择地传；**C0-a 合并后全部条件恒真，已于 C0-d 删除
+    （`_accepts` / `_opt` / `_skeleton_fallback`），一律直接传参** —— 探测留着只会让
+    「引擎少了个形参」这种真错误变成静默忽略，那比 TypeError 难查得多。
+  · 唯一的例外写在 `PageProvider.analyze` 上：`pageviews.analyze_page_signal` 至今没有
+    mux_data / want_graph 两个形参（C0-a 只给 topout 加了），所以那两个参数在页视图这边
+    不往下传，见该方法的注释。
 
 ⚠ 锁的粒度：本层是**每次引擎调用**一把锁（架构 §2.2 想要的是 view_models 里**逐信号**的粒度，
   好让主线程在信号之间插进来点当前信号）。逐信号粒度要引擎的循环自己配合（analyze_all 的
@@ -29,7 +33,6 @@ cfg 要提供什么（`ui/contracts.ConfigSourceProto`，v2 的 `WorkbenchState`
 """
 
 import contextlib
-import inspect
 
 from . import analysis_norm as AN
 from . import edits as ED
@@ -47,28 +50,6 @@ PAGE_KIND_LABEL = {"logic": "logic", "mux": "mux"}
 TOPOUT_TITLE = "要验信号 = Topout 页 B 列（顶层真名，cone 展到源寄存器，断言贴真名）"
 TOPOUT_EMPTY_HINT = ("⚠ 当前 Excel 没有 Topout 页（B 列要验信号清单为空）。可切到其它视图(logic/mux/dft)"
                      "或『排查(旧)』。")
-
-
-def _accepts(fn, name):
-    """fn 收不收得住这个关键字参数（收 **kwargs 也算）。拿不到签名一律当「收不住」。"""
-    if fn is None:
-        return False
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):  # noqa: BLE001
-        return False
-    for p in sig.parameters.values():
-        if p.kind is inspect.Parameter.VAR_KEYWORD:
-            return True
-        if p.name == name and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                         inspect.Parameter.KEYWORD_ONLY):
-            return True
-    return False
-
-
-def _opt(fn, **kw):
-    """把 fn 收得住的那些关键字挑出来（值为 None/省略语义的不筛，调用方自己决定传不传）。"""
-    return {k: v for k, v in kw.items() if _accepts(fn, k)}
 
 
 class _BaseProvider(object):
@@ -165,59 +146,24 @@ class TopoutProvider(_BaseProvider):
         """**便宜**清单（只 resolve_root，不出向量）：载入 200+ 信号时先让清单可点，
         用例数/真值表等后台 worker 逐信号回填（C-276）。每行 status="pending"。"""
         from . import topout as T
-        fn = getattr(T, "topout_skeleton_models", None)
         with self._engine(), self._supplemented():
-            if fn is not None:                    # C0-a 的实现（合并后走这条）
-                return fn(self.wb, probe_prefixes=self._pp(), force_overrides=self._fo(),
-                          **_opt(fn, logic_overrides=self._lo()))
-            return self._skeleton_fallback()
-
-    def _skeleton_fallback(self):
-        """引擎侧还没有 topout_skeleton_models 时的等价兜底（键集与 C0-a 规格一致）。"""
-        from . import topout as T
-        wb = self.wb
-        out = []
-        try:
-            logic_idx, mux_idx = T.build_index(wb)
-        except Exception:  # noqa: BLE001  索引都建不起来 → 给空清单，别让窗口开不出来
-            return out
-        pp = self._pp()
-        for topo in (getattr(wb, "topout", None) or []):
-            try:
-                root = T.resolve_root(wb, topo.name, logic_idx, mux_idx)
-            except Exception:  # noqa: BLE001  单信号解析失败不连累整批
-                root = None
-            kind = getattr(root, "kind", T.UNRESOLVED) if root is not None else T.UNRESOLVED
-            pnet = topo.name
-            if root is not None:
-                if getattr(root, "renamed", False) and getattr(root, "probe_name", ""):
-                    pnet = root.probe_name
-                elif kind in (T.LOGIC, T.MUX) and getattr(root, "obj", None) is not None:
-                    pnet = getattr(root.obj, "rtl_base", None) or topo.name
-            out.append({
-                "name": topo.name,
-                "disp": "%s%s" % (topo.name, T._topout_slice_suffix(topo, getattr(topo, "width", 1))),
-                "owner": topo.owner, "width": getattr(topo, "width", 1),
-                "kind": kind, "status": "pending", "status_detail": "pending",
-                "note": "", "issues": [], "n_vectors": None,
-                "form": "", "form_label": "",
-                "probe_net": pnet, "prefix": T._probe_prefix_for_name(pp, pnet),
-                "assert_id": "", "matched_name": getattr(root, "matched_name", "") if root else "",
-            })
-        return out
+            return T.topout_skeleton_models(self.wb, probe_prefixes=self._pp(),
+                                            force_overrides=self._fo(),
+                                            logic_overrides=self._lo())
 
     def view_models(self, mode, max_tests, exhaustive, sig_cov=None, form_cov=None,
                     progress=None, should_cancel=None, lite=False):
-        """整表视图模型。progress/should_cancel/lite 是 v2 后台分析用的（C0-a 在 topout 里落地）；
-        引擎还没有这几个形参时忽略它们 —— 行为 = 一趟跑完，与旧门面逐键相同。"""
+        """整表视图模型。progress/should_cancel/lite 是 v2 后台分析用的（C0-a 在 topout 里落地）：
+        progress(done,total,name,lite_model) 每信号一次；should_cancel() True 则在**下一个信号
+        之前**停、已分析的照常返回（部分列表）；lite=True 跳过全表联表（清单不要 chain/inputs/tests）。
+        三个都不传 = 旧行为，与旧门面逐键相同。"""
         from . import topout as T
         with self._engine(), self._supplemented():
             return T.topout_view_models(
                 self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                 probe_prefixes=self._pp(), force_overrides=self._fo(),
-                sig_cov=sig_cov, form_cov=form_cov,
-                **_opt(T.topout_view_models, progress=progress, should_cancel=should_cancel,
-                       lite=lite, include_risky=self._risky()))
+                sig_cov=sig_cov, form_cov=form_cov, include_risky=self._risky(),
+                progress=progress, should_cancel=should_cancel, lite=lite)
 
     # ── 单信号 ──
     def analyze(self, name, mode, max_tests, exhaustive, mux_data=None, want_graph=False):
@@ -231,8 +177,7 @@ class TopoutProvider(_BaseProvider):
             res = T.analyze_signal(self.wb, R.Resolver(self.wb, wire_prefixes=self._pp(),
                                                        force_overrides=self._fo()), topo,
                                    mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                                   mux_data=mux_data,
-                                   **_opt(T.analyze_signal, want_graph=want_graph))
+                                   mux_data=mux_data, want_graph=want_graph)
             an = AN.norm_topout_result(res, self.wb)   # 传 wb → 输入按 for_test 行序
         return self._fill_probe_prefix(an, T._topout_probe_net(res))
 
@@ -248,8 +193,7 @@ class TopoutProvider(_BaseProvider):
                 comments=comments, sv_summary=sv_summary, owner_in_msg=owner_in_msg,
                 only=only, edit_overrides=eo, probe_prefixes=self._pp(),
                 force_overrides=self._fo(), scope=scope, sig_cov=sig_cov, form_cov=form_cov,
-                **_opt(T.render_topout_sv, block_suffix=block_suffix,
-                       include_risky=self._risky()))
+                include_risky=self._risky(), block_suffix=block_suffix)
 
     def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None, form_cov=None):
         from . import topout as T
@@ -257,8 +201,7 @@ class TopoutProvider(_BaseProvider):
             return T.topout_report(
                 self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                 probe_prefixes=self._pp(), force_overrides=self._fo(), only=only,
-                sig_cov=sig_cov, form_cov=form_cov,
-                **_opt(T.topout_report, include_risky=self._risky()))
+                sig_cov=sig_cov, form_cov=form_cov, include_risky=self._risky())
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         """回填 for_test（含 mux 表）。返回写出的组数——exports 拿它报「回填 N 组」。"""
@@ -333,11 +276,16 @@ class PageProvider(_BaseProvider):
             return P.page_view_models(
                 self.wb, self.page, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                 probe_prefixes=self._pp(), force_overrides=self._fo(),
-                **_opt(P.page_view_models, progress=progress, should_cancel=should_cancel,
-                       include_risky=self._risky()))
+                include_risky=self._risky(), progress=progress, should_cancel=should_cancel)
 
     # ── 单信号 ──
     def analyze(self, name, mode, max_tests, exhaustive, mux_data=None, want_graph=False):
+        """页本地单信号 → an（与 Topout 同形）。
+
+        ⚠ mux_data / want_graph **到此为止**：`pageviews.analyze_page_signal` 至今没有这两个
+        形参（C0-a 只给 topout 的 analyze_signal 加了 want_graph，mux 数据手填也只有 topout
+        那条路）。接口保留是为了与 ProviderProto 同签名，页视图的『数据值手填』与『信号流图』
+        要等引擎侧补上才有——**不在这里靠签名探测假装支持**，那只会让缺形参变成静默无效。"""
         from . import pageviews as P
         with self._engine():
             sig = next((s for s in P.page_signals(self.wb, self.page) if s.out_name == name), None)
@@ -345,8 +293,7 @@ class PageProvider(_BaseProvider):
                 return None
             res = P.analyze_page_signal(
                 self.wb, P._page_resolver(self.wb, self._pp(), self._fo()), sig, self.page,
-                mode=mode, max_tests=max_tests, exhaustive=exhaustive,
-                **_opt(P.analyze_page_signal, mux_data=mux_data, want_graph=want_graph))
+                mode=mode, max_tests=max_tests, exhaustive=exhaustive)
             an = AN.norm_page_result(res, self.wb)     # 传 wb → 输入按 for_test 行序
         return self._fill_probe_prefix(an, getattr(res.sig, "rtl_base", None) or res.name)
 
@@ -361,7 +308,7 @@ class PageProvider(_BaseProvider):
                 edit_overrides=ED.page_edit_overrides(edited), only=only, comments=comments,
                 sv_summary=sv_summary, owner_in_msg=owner_in_msg, probe_prefixes=self._pp(),
                 scope=scope, force_overrides=self._fo(),
-                **_opt(P.build_page_sv, block_suffix=block_suffix, include_risky=self._risky()))
+                include_risky=self._risky(), block_suffix=block_suffix)
 
     def render_report(self, mode, max_tests, exhaustive, only=None, sig_cov=None, form_cov=None):
         from . import pageviews as P
@@ -369,7 +316,7 @@ class PageProvider(_BaseProvider):
             return P.page_report(
                 self.wb, self.page, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                 probe_prefixes=self._pp(), only=only, force_overrides=self._fo(),
-                **_opt(P.page_report, include_risky=self._risky()))
+                include_risky=self._risky())
 
     def fortest(self, src, out, mode, max_tests, exhaustive, only=None):
         """回填 for_test（含 mux 表）。page_fortest 不回组数 → 返回 None，exports 就不报组数。"""
@@ -378,5 +325,4 @@ class PageProvider(_BaseProvider):
             return P.page_fortest(
                 self.wb, self.page, src, out, mode=mode, max_tests=max_tests,
                 exhaustive=exhaustive, probe_prefixes=self._pp(), only=only,
-                force_overrides=self._fo(),
-                **_opt(P.page_fortest, include_risky=self._risky()))
+                force_overrides=self._fo(), include_risky=self._risky())

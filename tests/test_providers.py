@@ -475,8 +475,7 @@ def test_provider_reads_force_signals_under_either_name(btlp):
 
 
 def test_provider_passes_include_risky_where_the_engine_takes_it(btlp):
-    """C-217：include_risky 从 cfg 一路透传到引擎。引擎侧分批落地——接得住的就传，
-    接不住的（topout 那几个入口由 C0-a 加）忽略，绝不拿它去炸一次导出。"""
+    """C-217：include_risky 从 cfg 一路透传到引擎（C0-d 起五个入口全直传，不再探签名）。"""
     from dreg_verify import providers as PV
     from dreg_verify import pageviews as PP
     seen = {}
@@ -497,37 +496,68 @@ def test_provider_passes_include_risky_where_the_engine_takes_it(btlp):
         PP.build_page_sv = real
 
 
-def test_provider_forwards_new_engine_params_only_when_they_exist(btlp):
-    """C0-a 的新形参（progress / should_cancel / lite / block_suffix / skeleton）分批落地：
-    provider 用签名探一下再传。**合并 C0-a 后主控应把这些条件去掉、改成直接传。**"""
+@pytest.mark.contract("C-276")
+def test_provider_forwards_the_new_engine_params_directly(btlp):
+    """C0-a 合并后 provider **直接**把 progress / should_cancel / lite / skeleton 传给引擎
+    ——过渡期那套签名探测（`_accepts` / `_opt` / `_skeleton_fallback`）已在 C0-d 删掉。
+
+    这里钉的不再是「传了没炸」，而是「真的接上了」：取消要真停、progress 要真回调、
+    lite 要真给出同一批 LITE_MODEL_KEYS、骨架要真走引擎那个函数。"""
     from dreg_verify import providers as PV
     from dreg_verify import topout as T
+    from dreg_verify.ui import contracts as C
     prov = PV.TopoutProvider(_Cfg(btlp))
+    full = prov.view_models("min", 64, False)
+    assert len(full) >= 4
 
+    # ① should_cancel 在【下一个信号之前】生效 → 返回**部分**列表；progress 每信号回调一次
     ticks = []
-    got = prov.view_models("min", 64, False, progress=lambda *a: ticks.append(a),
-                           should_cancel=lambda: True, lite=True)
-    assert got == prov.view_models("min", 64, False)     # 引擎没这几个参 → 忽略，行为不变
-    assert bool(ticks) == PV._accepts(T.topout_view_models, "progress")
+    done = {"n": 0}
 
-    # 页视图这边已经有 progress/should_cancel（C0-b 自己加的）→ 必须真的接上
+    def _tick(d, _t, _name, _m):
+        done["n"] = d
+        ticks.append((d, _t, _name, _m))
+
+    part = prov.view_models("min", 64, False, progress=_tick,
+                            should_cancel=lambda: done["n"] >= 2)
+    assert len(ticks) == 2 and [d for d, _t, _n, _m in ticks] == [1, 2]
+    assert all(t == len(full) for _d, t, _n, _m in ticks)
+    assert [m["name"] for m in part] == [m["name"] for m in full[:2]]   # 已分析的照常返回
+    # 一上来就取消 → 空列表（部分列表的极端情形），绝不静默跑完整表
+    assert prov.view_models("min", 64, False, should_cancel=lambda: True) == []
+
+    # ② lite=True 跳过全表联表，但 LITE_MODEL_KEYS 这一套键必须与 full 逐键相等
+    lite = prov.view_models("min", 64, False, lite=True)
+    assert len(lite) == len(full)
+    for lm, fm in zip(lite, full):
+        for k in C.LITE_MODEL_KEYS:
+            assert lm[k] == fm[k], (lm["name"], k)
+    assert all("chain" not in m and "tests" not in m for m in lite)     # 联表那几键确实没跑
+
+    # ③ skeleton 走引擎的 topout_skeleton_models（本层不再留等价兜底实现）
+    seen = {}
+    real = T.topout_skeleton_models
+
+    def _spy(wb, **kw):
+        seen.update(kw)
+        return real(wb, **kw)
+
+    T.topout_skeleton_models = _spy
+    try:
+        sk = prov.skeleton_models()
+    finally:
+        T.topout_skeleton_models = real
+    assert seen and set(seen) == {"probe_prefixes", "force_overrides", "logic_overrides"}
+    assert [m["name"] for m in sk] == [m["name"] for m in full]
+
+    # ④ 页视图：progress/should_cancel 同样直传（页引擎没有 lite，本层也不假装有）
     pticks = []
     PV.PageProvider(_Cfg(btlp), "logic").view_models(
         "min", 64, False, progress=lambda *a: pticks.append(a))
     assert len(pticks) == len(P.page_signals(btlp, "logic")) > 0
+    assert PV.PageProvider(_Cfg(btlp), "logic").view_models(
+        "min", 64, False, should_cancel=lambda: True) == []
 
-    # skeleton：引擎有 topout_skeleton_models 就走它，没有走本层等价兜底
-    assert PV._accepts(T.analyze_signal, "want_graph")    # want_graph 早就有，不需要条件
-    an = prov.analyze(prov.skeleton_models()[0]["name"], "min", 64, False, want_graph=True)
-    assert an is not None
-
-    # _accepts 的边界：收 **kwargs 算收得住；位置参数/取不到签名算收不住
-    def _kw(**kw):
-        pass
-
-    def _pos(a, b):
-        pass
-
-    assert PV._accepts(_kw, "随便什么") is True
-    assert PV._accepts(_pos, "a") is True and PV._accepts(_pos, "c") is False
-    assert PV._accepts(None, "x") is False and PV._accepts(len, "x") is False
+    # ⑤ want_graph 直传 analyze_signal（Topout 那条路）
+    an = prov.analyze(sk[0]["name"], "min", 64, False, want_graph=True)
+    assert an is not None and "graph" in an

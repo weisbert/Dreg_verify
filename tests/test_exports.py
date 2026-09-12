@@ -38,7 +38,10 @@ def mirror_wb(mirror):
 
 
 class _FakeTopoutProvider:
-    """gui._TopoutProvider 的最小替身（只要 render_sv/view_id）——本文件不许起 Qt。"""
+    """providers.TopoutProvider 的最小替身（只要 render_sv/view_id）——本文件不许起 Qt。
+
+    签名照 `ui/contracts.ProviderProto.render_sv` 抄，**block_suffix 在内**：C0-d 起编排层
+    直接传这个形参（不再探签名），接不住的对象就是不满足 ProviderProto。"""
 
     view_id = "topout"
 
@@ -46,10 +49,12 @@ class _FakeTopoutProvider:
         self.wb = wb
 
     def render_sv(self, only, mode, max_tests, exhaustive, edited, comments=False,
-                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None, form_cov=None):
+                  sv_summary=False, owner_in_msg=False, scope="all", sig_cov=None, form_cov=None,
+                  block_suffix=""):
         return T.render_topout_sv(self.wb, mode=mode, max_tests=max_tests, exhaustive=exhaustive,
                                   comments=comments, sv_summary=sv_summary,
-                                  owner_in_msg=owner_in_msg, only=only, scope=scope)
+                                  owner_in_msg=owner_in_msg, only=only, scope=scope,
+                                  block_suffix=block_suffix)
 
 
 # ───────────── ① Qt-free ─────────────
@@ -219,14 +224,9 @@ def test_c169_c170_export_sv_split_two_files(mirror_wb, tmp_path):
     neg_text = open(neg.path, encoding="utf-8").read()
     assert pos_text != neg_text
 
-    # C-170 汇总块后缀：provider（→引擎）接得住 block_suffix 时必须真的加上。
-    # 旧门面的 provider 没这个形参（C5 随 legacy 退役）——那种情况下只断言「没炸、没乱加」。
-    if X._accepts_kw(prov.render_sv, "block_suffix"):
-        assert (W.SUMMARY_BLOCK + "_pos") in pos_text
-        assert (W.SUMMARY_BLOCK + "_neg") in neg_text
-    else:
-        assert (W.SUMMARY_BLOCK + "_pos") not in pos_text          # 接不住就别偷偷改名
-        assert W.SUMMARY_BLOCK in pos_text
+    # C-170 汇总块后缀：C0-d 起直接传给 provider（不再探签名），两份产物必须各带各的后缀
+    assert (W.SUMMARY_BLOCK + "_pos") in pos_text and (W.SUMMARY_BLOCK + "_neg") not in pos_text
+    assert (W.SUMMARY_BLOCK + "_neg") in neg_text and (W.SUMMARY_BLOCK + "_pos") not in neg_text
 
     # 认得 block_suffix 的 provider（页本地）：两份产物的命名块必须不同名
     # （⚠ 页本地『仅负向』产物的**内容**另有一处既有缺陷，见 pageviews.build_page_sv 的 scope 分支——
@@ -256,6 +256,14 @@ def test_render_sv_without_options_keeps_provider_defaults(mirror_wb):
     X.render_sv(_P(), only=None, mode="min", max_tests=8, exhaustive=False, edited=None,
                 options={"comments": True})
     assert seen["comments"] is True and seen["scope"] == "all"
+    # block_suffix 只有分文件导出会给：没给（或空串）就不传，普通导出的调用签名逐字不变
+    assert "block_suffix" not in seen
+    X.render_sv(_P(), only=None, mode="min", max_tests=8, exhaustive=False, edited=None,
+                options={"block_suffix": ""})
+    assert "block_suffix" not in seen
+    X.render_sv(_P(), only=None, mode="min", max_tests=8, exhaustive=False, edited=None,
+                options={"block_suffix": "_neg"})
+    assert seen["block_suffix"] == "_neg"
 
 
 def test_write_text_translates_oserror(tmp_path):

@@ -19,7 +19,6 @@ GUI 的「导出中心」骨架（GUI v2 执行计划 Phase A4d / Design prompt 
 
 import contextlib
 import csv
-import inspect
 import io
 import json
 import os
@@ -329,27 +328,6 @@ def read_json(path):
 
 
 # ═════════════════════════ 五、.sv ═════════════════════════
-def _accepts_kw(fn, name):
-    """fn 收不收得住这个关键字参数（收 **kwargs 也算）。拿不到签名一律当「收不住」。
-
-    用途只有一个：新形参在引擎侧分批落地期间，编排层对**两种版本的 provider/引擎**都要能跑
-    （给了它不认识的参数 = TypeError 炸在导出中途，那是最难查的一类失败）。"""
-    if fn is None:
-        return False
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):      # noqa: BLE001  C 实现/内建取不到签名
-        return False
-    for p in sig.parameters.values():
-        if p.kind is inspect.Parameter.VAR_KEYWORD:
-            return True
-        if p.name == name and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                         inspect.Parameter.KEYWORD_ONLY):
-            return True
-    return False
-
-
-
 def render_sv(provider, only=None, mode="min", max_tests=256, exhaustive=False, edited=None,
               options=None, sig_cov=None, form_cov=None):
     """渲染 .sv（不落盘）——预览与导出走同一条路径（所见即所得）。返回 (text, build)。
@@ -363,10 +341,11 @@ def render_sv(provider, only=None, mode="min", max_tests=256, exhaustive=False, 
         kw = {"comments": o["comments"], "sv_summary": o["sv_summary"],
               "owner_in_msg": o["owner_in_msg"], "scope": o["scope"]}
         # block_suffix（C-170）只有 export_sv_split 会传，且不进 EXPORT_OPTION_DEFAULTS/KEYS
-        # ——它是「这一次导出」的事，不是要记盘的界面偏好。provider 认不认得由它自己说了算
-        # （旧门面的两个 provider 没这个形参；C5 随 legacy 退役），故非空且接得住才传。
+        # ——它是「这一次导出」的事，不是要记盘的界面偏好。空串 = 不加后缀，就不必打扰
+        # provider（预览与普通导出这一路的调用签名逐字不变）；非空才传，provider 必须收得住
+        # （`ui/contracts.ProviderProto.render_sv` 已把 block_suffix 写进接口）。
         bs = str(o.get("block_suffix") or "")
-        if bs and _accepts_kw(getattr(provider, "render_sv", None), "block_suffix"):
+        if bs:
             kw["block_suffix"] = bs
     return provider.render_sv(only, mode, max_tests, exhaustive, edited,
                               sig_cov=sig_cov, form_cov=form_cov, **kw)
