@@ -372,21 +372,27 @@ def test_c111_mux_user_data_matches_edits(btlp):
     data_r = next(r for r, e in enumerate(ei) if e["mux_data_base"])
     key = ei[data_r]["key"]
 
-    # 参照物：拿引擎在一份独立拷贝上算一遍
+    # 参照物：拿引擎在一份独立拷贝上算一遍（model 把 edits.set_mux_user_data 的三步拆开了，
+    # 为的是 redo/undo 走同一条路 —— 拆完还等不等价，只能这样逐字段对）
     ref = ED.cols_from_vectors(an, ei)
     ref_col = ED.copy_cols(ref, [0])[0]
-    ED.set_mux_user_data(an, ref_col, key, ei[data_r]["width"], "0b0101")
+    new_txt = "0b0101"
+    ED.set_mux_user_data(an, ref_col, key, ei[data_r]["width"], new_txt)
+    assert ref_col["vals"][key] != ref[0]["vals"][key], "挑的新值跟原值一样，这条等于没验"
 
-    assert m.set_mux_user_data(at, key, "0b0101") is True
+    before_others = [c["vals"][key] for c in m.cols()]
+    assert m.set_mux_user_data(at, key, new_txt) is True
     got = m.cols()[at]
     assert got["vals"][key] == ref_col["vals"][key]
     assert got["auto"] == ref_col["auto"], "auto_out 没按路由 case 的数据源重算"
     assert got["vec"].assignments[key] == ref_col["vec"].assignments[key]
-    # 只改本列：别的列一个字不动
-    assert m.cols()[0]["vals"][key] != got["vals"][key] or ref[0]["vals"][key] == got["vals"][key]
+    # 只改本列：别的列一个字不动（C-111 与 C-110 整表同步的分界就在这一条）
+    assert [c["vals"][key] for c in m.cols()][:at] == before_others[:at]
     assert m.undo_stack().count() == 2                # duplicate + 这次改值，各一步
     m.undo_stack().undo()
-    assert m.cols()[at]["vals"][key] != got["vals"][key] or True
+    assert m.cols()[at]["vals"][key] == before_others[at]
+    assert m.cols()[at]["vec"].assignments[key] == before_others[at]
+    m.undo_stack().redo()
 
     # C-110 整表同步这一波不实现，但方法名必须在，且自动生成列的数据格写入不许静默落半个
     with pytest.raises(NotImplementedError):
