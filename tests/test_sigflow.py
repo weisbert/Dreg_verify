@@ -731,6 +731,52 @@ def test_attach_report_svgs_is_crash_proof(wl, monkeypatch):
     assert not any("sigflow_svg" in t for t in rep["tables"])
 
 
+def test_net_labels_fit_in_the_column_gap(wl):
+    """m1①：net 名写在源框右缘的列缝里。缝宽固定 74px 只放得下 13 个字符，而真实网名动辄 25+
+    → 尾巴被下一列的框盖住，「配上各线 net 名称」这个核心需求当场废掉一半。
+    缝宽要按本缝里最长的名字算，截断的也必须有 <title> 兜全名。"""
+    import re
+    r = _analyze(*wl, name="d_wl_rf_tx_epa_2g_mixer_en", want_graph=True)
+    svg = SF.render_svg(r.graph)
+    # 所有 9px 的 net 文字都必须带 <title> 全名
+    for m in re.finditer(r'<text [^>]*font-size="9"[^>]*>(.*?)</text>', svg, re.S):
+        assert m.group(1).startswith("<title>"), m.group(1)[:60]
+    # 32 字符的长网名确实完整画出来了（缝加宽了），没被截成省略号
+    shown = [m.group(2) for m in
+             re.finditer(r'<text [^>]*font-size="9"[^>]*><title>(.*?)</title>(.*?)</text>', svg)]
+    assert "d_wl_rf_linectrl_freq_sel_to_mux[1:0]" in shown, shown
+    assert not any(s.endswith("…") for s in shown), [s for s in shown if s.endswith("…")]
+    # 位段不能补两遍（抽头出来的网名本身已带 [1:0]）
+    assert "[1:0][1:0]" not in svg
+    assert _svg_valid(svg)[0]
+
+
+def test_mux_port_labels_do_not_overlap_title(btlp):
+    """m1②：MUX 框内的 case 标签(y≈y0+15) 以前必然压在主标(y0+14)/副标(y0+31)上，
+    两行字叠成一团。修完端口区从框顶让出一条 header 带，第一个 case 标签必须在副标下面。"""
+    r = _analyze(*btlp, name="d_bt_lp_lna_itrim", want_graph=True)
+    g = r.graph
+    mux = next(n for n in g.nodes if n.kind == "MUXN")
+    w, h = SF._box_size(mux)
+    head = SF._head_h(mux)
+    assert head >= 32, "带文字端口的框必须给主标+副标让位"
+    left = [p for p in mux.ports if p["side"] == "left"]
+    ys = [SF._left_port_y(mux, 0, h, i, len(left)) for i in range(len(left))]
+    assert ys[0] > 31 + 3, "第一个端口标签仍压在副标上: y=%.1f" % ys[0]
+    assert all(b - a >= 12 for a, b in zip(ys, ys[1:])), "端口标签之间挤在一起"
+    assert ys[-1] < h, "端口标签跑出框外"
+    # 带文字端口但没有副标的框（MUX2 的 1/0）也要给主标让位，只是少留一行
+    plain = next(n for n in g.nodes if n.kind == "MUX2" and not n.sub)
+    assert SF._head_h(plain) == 22
+    ph = SF._box_size(plain)[1]
+    pleft = [p for p in plain.ports if p["side"] == "left"]
+    assert SF._left_port_y(plain, 0, ph, 0, len(pleft)) > 17 + 3
+    # 端口没有文字的门（AND/OR）不留 header，图不白白变高
+    andn = next(n for n in _graph_of_ast(E.Binary("&", E.Var("A"), E.Var("B"))).nodes
+                if n.kind == "AND")
+    assert SF._head_h(andn) == 0
+
+
 def test_empty_graph_renders():
     """没有可画结构时也要给出一张能解析的空图（不能吐半截 SVG 让 GUI 崩）。"""
     svg = SF.render_svg(SF.Graph("空信号"))

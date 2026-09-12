@@ -803,7 +803,9 @@ _FONT = "Consolas,Menlo,'DejaVu Sans Mono',monospace"
 _SANS = "'Segoe UI',Arial,'Noto Sans CJK SC','Microsoft YaHei',sans-serif"
 
 _CH = 6.6          # 等宽字体 11px 的字符宽度估计
-_HGAP = 74         # 列间距（折点走这段缝隙）
+_CH9 = 5.4         # 同上，9px（net 名用这一号字）
+_HGAP = 74         # 列间距下限（折点 + net 名都写在这段缝隙里）
+_HGAP_MAX = 230    # 列间距上限：再长的 net 名就截断 + <title> 兜全名，别把画布拉爆
 _VGAP = 18
 _PORT_H = 15       # MUX 每个数据口占的高度
 
@@ -821,16 +823,33 @@ def _disp_w(s):
     return n
 
 
+def _head_h(node):
+    """框顶给主标/副标留的高度。**只有左侧端口带文字时才需要让位**（m1②）：否则 MUX 的
+    case 标签(y≈y0+15) 必然压在主标(y0+14)/副标(y0+27)上，两行字叠成一团谁都读不出。
+    端口没文字的门（AND/OR/NOT 的输入）不留，免得图白白变高。"""
+    if not any(p["side"] == "left" and p["label"] for p in node.ports):
+        return 0
+    return 36 if node.sub else 22          # 主标基线 y0+17、副标 y0+31，各留 ~5px 下缘
+
+
+def _left_band(node, y0, h):
+    """左侧端口可用的竖直区间 [top, bottom]（锚点与端口文字共用同一份，绝不各算各的）。"""
+    return y0 + _head_h(node), y0 + h
+
+
+def _left_port_y(node, y0, h, i, n):
+    top, bot = _left_band(node, y0, h)
+    return top + (bot - top) * (i + 0.5) / max(n, 1)
+
+
 def _box_size(node):
     labw = max(_disp_w(node.label), _disp_w(node.sub))
-    for p in node.ports:
-        if p["side"] == "left" and p["label"]:
-            labw = max(labw, _disp_w(node.label) + _disp_w(p["label"]) + 2)
-    w = max(96, int(labw * _CH) + 22)
+    plabw = max([_disp_w(p["label"]) for p in node.ports if p["side"] == "left"] or [0])
+    w = max(96, int(max(labw, plabw) * _CH) + 22)
     nleft = len([p for p in node.ports if p["side"] == "left"])
     h = 40 if node.sub else 30
-    if nleft > 2:
-        h = max(h, 16 + nleft * _PORT_H)
+    if nleft:
+        h = max(h, _head_h(node) + nleft * _PORT_H + 6)
     if node.kind == "TOPOUT":
         w = max(w, 120)
     return w, h
@@ -912,11 +931,23 @@ def render_svg(graph, title=None):
 
     # ④ 坐标：列宽 = 该列最宽的框；列内自上而下堆叠
     colw = {r: max((size[i][0] for i in cols.get(r, [])), default=0) for r in range(maxr + 1)}
+    # ⭐ m1①：列缝宽度按【本缝里要写的最长 net 名】算。net 名画在源框右缘、就写在这条缝里，
+    # 固定 74px 只放得下 13 个字符，而真实网名动辄 25+ → 尾巴被下一列的框盖住，「配上各线
+    # net 名称」这个核心需求当场废掉一半。上限 _HGAP_MAX 兜住，避免超长名把画布拉爆。
+    gap_need = {}
+    for e in graph.edges:
+        if not e.net:
+            continue
+        txt = e.net + (("[%d:0]" % (e.width - 1)) if (e.width or 1) > 1 else "")
+        r = rank[e.src]
+        gap_need[r] = max(gap_need.get(r, 0), _disp_w(txt) + (2 if not e.trusted else 0))
+    gapw = {r: int(max(_HGAP, min(_HGAP_MAX, gap_need.get(r, 0) * _CH9 + 16)))
+            for r in range(maxr + 1)}
     xs, x = {}, 24
     for r in range(maxr + 1):
         xs[r] = x
-        x += colw[r] + _HGAP
-    total_w = x - _HGAP + 24 + 24
+        x += colw[r] + gapw[r]
+    total_w = x - gapw.get(maxr, _HGAP) + 24 + 24
 
     pos = {}
     ytop = 46
@@ -960,8 +991,8 @@ def render_svg(graph, title=None):
             i = top.index(port)
             return (x0 + w * (i + 1.0) / (len(top) + 1.0), y0, "top")
         if port in left:
-            i = left.index(port)
-            return (x0, y0 + h * (i + 1.0) / (len(left) + 1.0), "left")
+            # 与框内端口文字共用 _left_port_y（顶部给主标/副标让位，见 _head_h）
+            return (x0, _left_port_y(n, y0, h, left.index(port), len(left)), "left")
         return (x0, y0 + h / 2.0, "left")
 
     out = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" '
@@ -1006,16 +1037,20 @@ def render_svg(graph, title=None):
         else:
             out.append('<polygon points="%.0f,%.0f %.0f,%.0f %.0f,%.0f" fill="%s"/>'
                        % (px, py, px - 7, py - 3.2, px - 7, py + 3.2, color))
-        # net 名 + 位宽
+        # net 名 + 位宽：写在源框右缘的那条列缝里，按缝宽截断，<title> 兜全名（m1①）
         lbl = e.net or ""
         if lbl:
-            if (e.width or 1) > 1:
+            # 网名本身已带位段（抽头出来的 a[1:0]）时不要再补一遍位宽，否则出 a[1:0][1:0]
+            if (e.width or 1) > 1 and not lbl.endswith("]"):
                 lbl += "[%d:0]" % (e.width - 1)
             if not e.trusted:
                 lbl += " ※"
-            out.append('<text x="%.0f" y="%.0f" font-size="9" fill="%s" data-net="%s">%s</text>'
+            room = gapw.get(rank[e.src], _HGAP) - 10
+            shown = _clip9(lbl, room)
+            out.append('<text x="%.0f" y="%.0f" font-size="9" fill="%s" data-net="%s">'
+                       '<title>%s</title>%s</text>'
                        % (x1 + 5, pts[0][1] - 4, "#b45309" if not e.trusted else _NETC,
-                          _esc(e.net or ""), _esc(lbl)))
+                          _esc(e.net or ""), _esc(lbl), _esc(shown)))
         # 支路标签（MUXN 的 case 值等）画在目标口外侧；与框内的端口标重复时不再画一遍（去噪）
         dstn = idx.get(e.dst)
         dup = dstn is not None and any(p["name"] == e.dst_port and p["label"] == e.label
@@ -1038,8 +1073,11 @@ def render_svg(graph, title=None):
         out.append('<rect x="%d" y="%d" width="%d" height="%d" rx="5" fill="%s" stroke="%s" '
                    'stroke-width="1.2"%s/>' % (x0, y0, w, h, fill, stroke, dash))
         tc = "#ffffff" if n.kind == "TOPOUT" else "#0f172a"
-        out.append('<text x="%d" y="%d" font-size="11" fill="%s">%s</text>'
-                   % (x0 + 8, y0 + (17 if n.sub else h / 2 + 4), tc, _esc(_clip(n.label, w))))
+        # 有 sub 或有带文字的端口 → 主标钉在框顶那条 header 带里（否则居中的主标会插在
+        # 端口标签中间，两行字叠一起，m1②）；两者都没有才居中
+        main_y = y0 + 17 if (n.sub or _head_h(n)) else y0 + h / 2 + 4
+        out.append('<text x="%d" y="%.0f" font-size="11" fill="%s">%s</text>'
+                   % (x0 + 8, main_y, tc, _esc(_clip(n.label, w))))
         if n.sub:
             out.append('<text x="%d" y="%d" font-size="8.5" fill="%s">%s</text>'
                        % (x0 + 8, y0 + 31, "#cbd5e1" if n.kind == "TOPOUT" else "#64748b",
@@ -1047,14 +1085,16 @@ def render_svg(graph, title=None):
         if n.meta.get("bubble"):
             out.append('<circle cx="%d" cy="%.0f" r="3.4" fill="#ffffff" stroke="%s"/>'
                        % (x0 + w + 3, y0 + h / 2.0, stroke))
-        # 端口标（MUX 数据口的 case 标签画在框内左侧）
+        # 端口标（MUX 数据口的 case 标签画在框内左侧）——与锚点共用 _left_port_y，
+        # 顶部已由 _head_h 给主标/副标让出一条，不会再叠在一起（m1②）
         left = [p for p in n.ports if p["side"] == "left"]
         for i, p in enumerate(left):
             if not p["label"]:
                 continue
-            py = y0 + h * (i + 1.0) / (len(left) + 1.0)
-            out.append('<text x="%d" y="%.0f" font-size="8" fill="#475569">%s</text>'
-                       % (x0 + 5, py + 3, _esc(_clip(p["label"], w - 10))))
+            py = _left_port_y(n, y0, h, i, len(left))
+            out.append('<text x="%d" y="%.0f" font-size="8" fill="#475569">'
+                       '<title>%s</title>%s</text>'
+                       % (x0 + 6, py + 3, _esc(p["label"]), _esc(_clip(p["label"], w - 12))))
         if untrusted and n.meta.get("tip"):
             out.append('<text x="%d" y="%d" font-size="8" fill="#b45309">※ %s</text>'
                        % (x0, y0 + h + 10, _esc(n.meta["tip"])))
@@ -1063,8 +1103,16 @@ def render_svg(graph, title=None):
     return "\n".join(out)
 
 
+def _clip9(s, roomw):
+    """9px 小字按【可用像素宽】截断（net 名写在列缝里，缝有多宽就写多少）。"""
+    return _clip_to(s, max(4, int(roomw / _CH9)))
+
+
 def _clip(s, boxw):
-    lim = max(4, int((boxw - 14) / _CH))
+    return _clip_to(s, max(4, int((boxw - 14) / _CH)))
+
+
+def _clip_to(s, lim):
     s = str(s)
     if _disp_w(s) <= lim:
         return s
