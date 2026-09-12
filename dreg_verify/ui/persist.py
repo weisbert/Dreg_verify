@@ -50,8 +50,9 @@ _EDITS_DEFAULT = EDITS_PATH
 #: 一个 Excel 桶里 legacy（『排查(旧)』门面）写的九段 —— v2 **不读不删**（C-235），写时逐字节保留
 LEGACY_SEGMENTS = ("edits", "neg_only", "mux_expected", "mux_neg", "mux_data",
                    "mux_dropped", "mux_cleared", "mux_user_vecs", "signals_checked")
-#: v2 自己管的两段（C-234）
-V2_SEGMENTS = ("view_edits", "view_checks")
+#: v2 自己管的三段（C-234；`view_mux_data` 是 R2-01 加的，形状同 legacy 的 `mux_data`
+#: 段但多一层 view_id：`{view_id: {信号名low: {物理基名low: int}}}`）
+V2_SEGMENTS = ("view_edits", "view_checks", "view_mux_data")
 
 #: settings 里 v2 新增的两个键（清单列设置 / 筛选预设），其余键名一律沿用 A3 §3.1 的旧名
 PRESETS_KEY = contracts.SETTINGS_PRESETS
@@ -232,10 +233,11 @@ def write_edits_bucket(excel_path, patch):
     v2 只认识自己那几格，整桶重建 = 把上面两类静默抹掉。手填期望没了、而且没有任何报错，
     这类丢失要等到下次导出时才被发现——所以写入一律是「先读旧桶，再只覆盖自己那几格」。
 
-    patch 形状（两段都可选，按 **view_id 逐格**合并）：
-        {"view_edits":  {view_id: 序列化子桶（空 dict = 这个范围没有编辑）},
-         "view_checks": {view_id: [勾选名] 或 None（None = 全勾 = 默认态）}}
-    **patch 里没提到的 view_id 一格都不动**。两段都空了就把段删掉；整个桶空了就把桶删掉
+    patch 形状（三段都可选，按 **view_id 逐格**合并）：
+        {"view_edits":    {view_id: 序列化子桶（空 dict = 这个范围没有编辑）},
+         "view_checks":   {view_id: [勾选名] 或 None（None = 全勾 = 默认态）},
+         "view_mux_data": {view_id: {信号名low: {物理基名low: int}}（R2-01）}}
+    **patch 里没提到的 view_id 一格都不动**。段空了就把段删掉；整个桶空了就把桶删掉
     （与 v1 `_persist_edits` 的「啥都没有 → 桶也删掉」同语义）。
 
     ⚠ 删这一格的判据是 `None` 或**空 dict**，不是「假值」：`view_checks` 的 `[]` 是

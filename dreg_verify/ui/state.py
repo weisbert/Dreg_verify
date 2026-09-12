@@ -491,8 +491,23 @@ class WorkbenchState(QtCore.QObject):
         self.persist_edits()
 
     def mux_data(self, view_id=None):
-        """mux 数据值手填 `{信号名低: {"src","name","data"}}`——**会话档，刻意不落盘**。"""
+        """mux 数据值手填 `{信号名低: {"src","name","data"}}`。
+
+        **R2-01 起随 `view_edits` 一起落盘**（edits 桶的 `view_mux_data` 段）。此前是会话档：
+        重开工具后屏幕上那一格手填的数据值还在（它进了 `view_edits` 的 `vals`），可 `.sv` 里
+        这个信号**整块消失**——生成器拿不到 `mux_data`，自动互异分配与冻结的列对不上号，
+        整条信号被判成「向量全被丢弃」。屏幕说有、产物里没有，而且没有任何一处报错。
+        """
         return self._mux_data.setdefault(self._vid(view_id), {})
+
+    def mux_data_touched(self, view_id=None):
+        """mux 数据值手填改过了 → 认领这个范围并落盘（R2-01）。
+
+        真值表面板改完 `mux_data()` 里那一格就调一次。列集跟着重出时 `colsChanged`
+        本来也会带出一次 `put_edit`，但「改完数据值恰好列集没变」那一趟不能指望它。"""
+        vid = self._vid(view_id)
+        self._owned.add(vid)
+        return self.persist_edits()
 
     def compute_edited(self, view_id=None):
         """编辑状态 → 喂 `exports.render_sv` / 报告 的 `edited`。"""
@@ -694,14 +709,19 @@ class WorkbenchState(QtCore.QObject):
             return False
         if not self.loaded_path or not self._owned:
             return False
-        ve, vc = {}, {}
+        ve, vc, vm = {}, {}, {}
         for vid in sorted(self._owned):
             ve[vid] = ED.serialize_view_edits(self._edits[vid])
             ch = self._checks.get(vid)
             # C-243：全勾（None）= 默认态 → 写 None，`write_edits_bucket` 会把这一格删掉
             vc[vid] = None if ch is None else [m["name"] for m in self.models(vid)
                                                if str(m["name"]).lower() in ch]
-        return persist.write_edits_bucket(self.loaded_path, {"view_edits": ve, "view_checks": vc})
+            # R2-01：mux 数据值手填也是劳动成果，legacy 桶的 `mux_data` 段形状 + 一层 view_id
+            vm[vid] = {low: dict(ent.get("data") or {})
+                       for low, ent in (self._mux_data.get(vid) or {}).items()
+                       if ent.get("data")}
+        return persist.write_edits_bucket(self.loaded_path, {"view_edits": ve, "view_checks": vc,
+                                                             "view_mux_data": vm})
 
     def _restore_edits_for(self, vid):
         """清单一有名字就按本表桶还原编辑与勾选（C-234 / C-237 / C-238 / C-239 / C-240 / C-241）。
@@ -715,20 +735,64 @@ class WorkbenchState(QtCore.QObject):
         self._owned.add(vid)
         ve = ((self._bucket.get("view_edits") or {}).get(vid)) or {}
         vc = ((self._bucket.get("view_checks") or {}).get(vid))
+        vmd = ((self._bucket.get("view_mux_data") or {}).get(vid)) or {}
+        models = self._models[vid]
+        real_of = {str(m["name"]).lower(): str(m["name"]) for m in models}
+        # ① R2-01：mux 数据值**先**喂进会话档 —— `analyze` 的缓存键含它，顺序反了
+        #    `restore_cols` 拿到的是「没有手填数据值」的那份 an，恢复出来的列与产物对不上。
+        md_missing = self._restore_mux_data(vid, vmd, real_of)
         if ve:
-            models = self._models[vid]
-            have = {str(m["name"]).lower() for m in models}
+            have = set(real_of)
             missing = [n for n in ve if str(n).lower() not in have]
             self._edits[vid] = ED.restore_view_edits(ve, models, lambda real: self.analyze(real, vid))
             self._sync_negs(vid)
             bad = sum(max(0, len((ve.get(low) or {}).get("cols") or []) - len(ed.get("cols") or []))
                       for low, ed in self._edits[vid].items())
-            self._report_restore(len(self._edits[vid]), missing, bad)
+            self._report_restore(len(self._edits[vid]), missing + md_missing, bad)
+        elif md_missing:
+            self._report_restore(0, md_missing, 0)
+        # ② 回填 mux 数据值那条记录的 src_out_name / 显示名（`compute_edited` 造 data-only
+        #    记录要它们）；分析不出来的整条丢掉，免得拿着空 src 去喂生成器。
+        self._bind_mux_data(vid, real_of)
         if vc is not None:
             want = {str(n).lower() for n in vc}
             self._checks[vid] = {str(m["name"]).lower() for m in self._models[vid]
                                  if str(m["name"]).lower() in want}
             self.checksChanged.emit(vid)
+
+    def _restore_mux_data(self, vid, vmd, real_of):
+        """存盘的 mux 数据值 → 会话档（R2-01）。返回当前表里对不上号的信号名（并进恢复报告）。
+
+        坏数值逐条跳过（C-240 同口径，走 `edits.coerce_int_map`）——每次载表都跑，绝不能崩。"""
+        for low, data in (vmd or {}).items():
+            clean, _bad = ED.coerce_int_map(data if isinstance(data, dict) else {}, lower=True)
+            if not clean:
+                continue
+            real = real_of.get(str(low).lower())
+            if real is None:
+                continue                        # 名字不在当前表 → 交给下面统一点名
+            self._mux_data[vid][str(low).lower()] = {"src": "", "name": real, "data": clean}
+        have = set(real_of)
+        return [n for n in (vmd or {}) if str(n).lower() not in have]
+
+    def _bind_mux_data(self, vid, real_of):
+        """给恢复出来的 mux 数据值补上 `src` / `name`（R2-01）。
+
+        `compute_edited` 给「只手填了数据值、没别的编辑」的信号补一条 data-only 记录，
+        那条记录的 `src_out_name` 只能从 an 拿。分析不出来 / 已经不是 mux 了 → 整条丢掉
+        （留着就是拿空 src 去喂生成器，落不到任何信号上）。返回丢掉的名字。"""
+        lost = []
+        for low in list(self._mux_data.get(vid) or {}):
+            ed = self._edits[vid].get(low)
+            an = ed.get("an") if ed else self.analyze(real_of.get(low, low), vid)
+            if not an or an.get("editable") != "mux":
+                self._mux_data[vid].pop(low, None)
+                lost.append(real_of.get(low, low))
+                continue
+            ent = self._mux_data[vid][low]
+            ent["src"] = str(an["src_out_name"]).lower()
+            ent["name"] = str(an["name"])
+        return lost
 
     def _report_restore(self, n, missing, bad):
         """恢复结果落状态栏：先点名、再计数（C-270 / I-20）。"""

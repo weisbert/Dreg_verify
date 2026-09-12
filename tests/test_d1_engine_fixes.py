@@ -250,6 +250,100 @@ def test_r2_02_old_edits_file_without_assign_still_loads(qapp, wl):
     assert len(back2[nm.lower()]["cols"]) == len(cols)
 
 
+# ═══════════════ R2-01：mux 数据值手填要落盘（C-110 / C-112）═══════════════
+def _data_row(an):
+    """这个 mux 信号的第一条【数据角色】输入行（可手填的那种）。"""
+    for e in e_inputs_from_an(an):
+        if e.get("mux_data_base"):
+            return e
+    return None
+
+
+def _fill_mux_data(st, name, text, vid=VID):
+    """走 `edits.set_mux_data_value`（= 面板 reanalyzer 的唯一写入口）填一格数据值。"""
+    an = st.analyze(name, vid)
+    e = _data_row(an)
+    assert e is not None, "%s 没有可手填的数据行" % name
+    ED.set_mux_data_value(st.mux_data(vid), name.lower(), str(an["src_out_name"]).lower(),
+                          str(an["name"]), e["mux_data_base"], int(e["width"]), text)
+    st.mux_data_touched(vid)
+    return e
+
+
+@pytest.mark.contract("C-110", "C-112")
+def test_r2_01_mux_data_survives_reopen(qapp, iso, wl):
+    """R2-01：mux 数据值手填后关工具重开，`.sv` 里这一块不许消失。
+
+    用户看到的：手填的数据值重开后屏幕上**还在**（它进了 `view_edits` 的 `vals`），
+    edits 文件里也还在，可导出的 .sv 里这个信号**整块没了** —— 生成器拿不到 `mux_data`，
+    自动互异分配与冻结下来的列对不上号，整条信号被判成「向量全被丢弃」。
+    屏幕说有、产物里没有，而且没有任何一处报错。
+    """
+    st = loaded(wl)
+    nm = next((n for n in mux_signals(st) if _data_row(st.analyze(n)) is not None), None)
+    assert nm, "这张镜像没有可手填数据值的 mux 信号"
+
+    _fill_mux_data(st, nm, "5")
+    an2 = st.analyze(nm)
+    st.put_edit(nm, rec_of(st, nm, ED.cols_from_vectors(an2, e_inputs_from_an(an2))))
+    live_sv = sv_of(st, nm, st.compute_edited())
+    assert nm in live_sv, "手填数据值之后本会话的 .sv 里就没有这个信号了（夹具挑错了）"
+
+    # 重开：新建一个 WorkbenchState 走同一条载表 → 恢复的路
+    st2 = loaded(wl)
+    relo_sv = sv_of(st2, nm, st2.compute_edited())
+    assert nm in relo_sv, "重开后 .sv 里这个信号整块消失了"
+    assert live_sv == relo_sv, "重开前后 .sv 不一样"
+    assert st2.mux_data(VID).get(nm.lower(), {}).get("data"), "重开后 mux 数据值没恢复"
+    assert st2.mux_data(VID)[nm.lower()]["src"], "恢复出来的记录没有 src_out_name"
+    # 盘上确实存下来了（段名 + 形状 = legacy 的 mux_data 多一层 view_id）
+    assert P.load_edits_bucket(str(wl))["view_mux_data"][VID][nm.lower()], "mux 数据值没落盘"
+
+
+@pytest.mark.contract("C-110")
+def test_r2_01_mux_data_only_signal_needs_no_edit_record(qapp, iso, wl):
+    """R2-01：**只**手填了数据值、真值表一格没改的信号，重开后也要照样进 .sv。
+
+    这条走的是 `compute_edited` 的 data-only 分支（`edits` 里根本没有这个信号），
+    恢复时得靠 `_bind_mux_data` 从 an 捞回 `src_out_name`，否则那条记录喂不到任何信号上。
+    """
+    st = loaded(wl)
+    nm = next((n for n in mux_signals(st) if _data_row(st.analyze(n)) is not None), None)
+    _fill_mux_data(st, nm, "7")
+    assert not st.edits(VID), "这一趟不该有任何真值表编辑（那就走不到 data-only 分支）"
+    live_sv = sv_of(st, nm, st.compute_edited())
+
+    st2 = loaded(wl)
+    ent = st2.mux_data(VID).get(nm.lower())
+    assert ent and ent["data"], "重开后 data-only 的手填数据值没恢复"
+    assert ent["src"] == str(st2.analyze(nm)["src_out_name"]).lower()
+    assert sv_of(st2, nm, st2.compute_edited()) == live_sv
+
+
+@pytest.mark.contract("C-235", "C-300")
+def test_r2_01_mux_data_segment_does_not_touch_legacy(qapp, iso, wl):
+    """R2-01：新段 `view_mux_data` 走的还是桶合并 —— legacy 九段与别的 view_id 一个字节不动。"""
+    legacy = {"edits": {"d_old": []}, "mux_data": {"d_old_mux": {"d_old_base": 3}},
+              "signals_checked": ["d_old"]}
+    P.write_edits_bucket(str(wl), {})
+    allb = P.load_edits_all()
+    allb.setdefault(str(wl), {}).update(legacy)
+    allb[str(wl)].setdefault("view_edits", {})["logic"] = {"d_x": {"kind": "logic",
+                                                                  "src_out_name": "d_x",
+                                                                  "name": "d_x",
+                                                                  "renamed": False, "cols": []}}
+    P.save_edits_all(allb)
+    frozen = json.dumps({k: allb[str(wl)][k] for k in legacy}, sort_keys=True, ensure_ascii=False)
+
+    st = loaded(wl)
+    nm = next((n for n in mux_signals(st) if _data_row(st.analyze(n)) is not None), None)
+    _fill_mux_data(st, nm, "6")
+    now = P.load_edits_bucket(str(wl))
+    assert json.dumps({k: now[k] for k in legacy}, sort_keys=True, ensure_ascii=False) == frozen
+    assert now["view_edits"]["logic"]["d_x"]["name"] == "d_x", "别的 view_id 子桶被动了"
+    assert now["view_mux_data"][VID][nm.lower()]
+
+
 # ═══════════════ R2-03：手编列标号（C-091 / C-139）═══════════════
 @pytest.mark.contract("C-091", "C-139")
 def test_r2_03_user_column_label_same_in_header_and_sv(qapp, btlp, wl):

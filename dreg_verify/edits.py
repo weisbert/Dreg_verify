@@ -41,6 +41,8 @@ view_id ∈ {"topout", "logic", "mux", "dft", "iddq"}：
 存盘只留【可重算字段 + 用户意图】：auto 只作兜底，恢复时 logic 列一律按当前表/覆盖度重算
 （防改表后陈旧假绿），mux 列据 vals + case_index 重建 TestVector。
 bucket["view_checks"] = {view_id: [信号名]}——仅"取消过部分勾选"的视图才写（全勾=默认=不写桶）。
+bucket["view_mux_data"] = {view_id: {信号名low: {物理基名low: int}}}——mux 数据值手填（R2-01；
+形状 = legacy 的 `mux_data` 段多一层 view_id）。恢复顺序：**先**喂 analyze(mux_data=…) 再 restore_cols。
 
 ────────────── legacy（『排查(旧)』MainWindow）桶格式：只记录，不迁移/不读/不删 ──────────────
 同一个 bucket 里还躺着旧门面 MainWindow._persist_edits 写的这些键（v2 默认策略=原样保留、

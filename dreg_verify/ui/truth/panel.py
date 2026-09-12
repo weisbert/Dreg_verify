@@ -1041,6 +1041,8 @@ class TruthPanel(QtWidgets.QWidget):
                                   str(base_low or "").lower(), int(width or 1), text)
         except ValueError:                   # model 已经校验过；真走到这儿只说明位宽对不上
             return None
+        if hasattr(st, "mux_data_touched"):  # R2-01：数据值手填也要落盘
+            st.mux_data_touched()
         new_an = st.analyze(name)
         if new_an is not None:
             self._an = new_an
